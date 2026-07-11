@@ -230,10 +230,9 @@ function connect() {
   const ws = new WebSocket(config.WEBSOCKET_URL);
 
   ws.on("open", () => {
-    log("Connected. Subscribing to new token + trade streams...");
+    log("Connected. Subscribing to new token creation stream...");
     stats.connectionStatus = "connected";
     ws.send(JSON.stringify({ method: "subscribeNewToken" }));
-    ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: ["all"] }));
     log(`Bot is live in ${config.DEMO_MODE ? "DEMO (paper trading)" : "REAL"} mode.`);
   });
 
@@ -255,7 +254,13 @@ function connect() {
       entry.symbol = msg.symbol || entry.symbol;
       if (msg.marketCapSol != null) entry.lastMarketCapSol = Number(msg.marketCapSol);
       stats.newTokensSeen += 1;
-      log(`New token: ${entry.symbol || entry.name || mint} (${mint})`);
+
+      // Subscribe to live trades for THIS specific token now that we know its
+      // mint address. This is required — PumpPortal has no "subscribe to
+      // every trade platform-wide" option, only per-token subscriptions.
+      ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+
+      log(`New token: ${entry.symbol || entry.name || mint} (${mint}) - subscribed to its trades`);
       pushEvent({
         type: "new_token",
         mint,
@@ -307,6 +312,26 @@ function connect() {
   ws.on("error", (err) => {
     log("WebSocket error:", err.message);
   });
+
+  // Periodically drop tokens that have gone quiet (no trades for a while)
+  // and have no open/held position, so we don't stay subscribed to every
+  // dead token forever.
+  const cleanupInterval = setInterval(() => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const staleCutoff = nowSec - 30 * 60; // 30 minutes of silence = stale
+    for (const [mint, entry] of tokenActivity.entries()) {
+      const pos = openPositions.get(mint);
+      const hasActivePosition = pos && pos.state !== "closed";
+      const lastTradeTime = entry.trades.length ? entry.trades[entry.trades.length - 1].time : entry.lastAlertTime;
+      const isStale = lastTradeTime < staleCutoff && entry.lastAlertTime < staleCutoff;
+      if (isStale && !hasActivePosition) {
+        ws.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
+        tokenActivity.delete(mint);
+      }
+    }
+  }, 5 * 60 * 1000); // run every 5 minutes
+
+  ws.on("close", () => clearInterval(cleanupInterval));
 }
 
 // ------------------------------------------------------------
