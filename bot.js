@@ -279,6 +279,13 @@ function connect() {
       });
       stats.tradesProcessed += 1;
 
+      // Trade payloads sometimes carry name/symbol even for tokens created
+      // before this bot connected (so we never saw their "create" event).
+      // Grab it here too so older tokens still display with a real ticker
+      // instead of just a raw mint address.
+      if (msg.name && !entry.name) entry.name = msg.name;
+      if (msg.symbol && !entry.symbol) entry.symbol = msg.symbol;
+
       if (msg.marketCapSol != null) {
         entry.lastMarketCapSol = Number(msg.marketCapSol);
       }
