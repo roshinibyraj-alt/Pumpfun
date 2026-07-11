@@ -1,0 +1,16 @@
+{
+  "name": "pumpfun-demo-bot",
+  "version": "1.0.0",
+  "description": "Paper-trading (demo mode) bot that watches pump.fun trending signals and simulates buys. No real funds, no real wallet.",
+  "main": "bot.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
