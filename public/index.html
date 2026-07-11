@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>pump.fun Demo Bot Dashboard</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --card: #14171f;
+    --border: #232833;
+    --text: #e6e9ef;
+    --muted: #8b93a3;
+    --green: #35d68a;
+    --blue: #5b9dff;
+    --yellow: #f0c453;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-left: 8px;
+  }
+  .badge.demo { background: rgba(53,214,138,0.15); color: var(--green); }
+  .badge.live { background: rgba(240,196,83,0.15); color: var(--yellow); }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .stat-card .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .stat-card .value { font-size: 22px; font-weight: 700; }
+  .stat-card .value.status-connected { color: var(--green); }
+  .stat-card .value.status-other { color: var(--yellow); }
+  .config-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 24px;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .config-box b { color: var(--text); }
+  .config-box .row { display: inline-block; margin-right: 20px; margin-bottom: 4px; }
+  .section-title { font-size: 14px; color: var(--muted); margin: 20px 0 10px 0; text-transform: uppercase; letter-spacing: 0.05em; }
+  .event {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--muted);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .event.new_token { border-left-color: var(--blue); }
+  .event.simulated_buy { border-left-color: var(--green); }
+  .event-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .event-title { font-weight: 700; font-size: 14px; }
+  .event.simulated_buy .event-title { color: var(--green); }
+  .event.new_token .event-title { color: var(--blue); }
+  .event-time { color: var(--muted); font-size: 11px; }
+  .event-detail { color: var(--muted); }
+  .event-detail a { color: var(--blue); text-decoration: none; }
+  .event-detail a:hover { text-decoration: underline; }
+  .empty-state { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>pump.fun Demo Bot <span id="mode-badge" class="badge demo">DEMO MODE</span></h1>
+  <div class="subtitle">No real funds are used. This dashboard refreshes automatically every 3 seconds.</div>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="label">Connection</div>
+      <div class="value" id="stat-connection">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">New Tokens Seen</div>
+      <div class="value" id="stat-newtokens">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Simulated Buys</div>
+      <div class="value" id="stat-buys">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Trades Processed</div>
+      <div class="value" id="stat-trades">—</div>
+    </div>
+  </div>
+
+  <div class="config-box" id="config-box">Loading settings…</div>
+
+  <div class="section-title">Live Activity</div>
+  <div id="events"></div>
+
+  <script>
+    async function refresh() {
+      try {
+        const res = await fetch('/api/state');
+        const data = await res.json();
+
+        const connEl = document.getElementById('stat-connection');
+        connEl.textContent = data.stats.connectionStatus;
+        connEl.className = 'value ' + (data.stats.connectionStatus === 'connected' ? 'status-connected' : 'status-other');
+
+        document.getElementById('stat-newtokens').textContent = data.stats.newTokensSeen;
+        document.getElementById('stat-buys').textContent = data.stats.simulatedBuys;
+        document.getElementById('stat-trades').textContent = data.stats.tradesProcessed;
+
+        const modeBadge = document.getElementById('mode-badge');
+        modeBadge.textContent = data.config.DEMO_MODE ? 'DEMO MODE — no real funds' : 'LIVE MODE';
+        modeBadge.className = 'badge ' + (data.config.DEMO_MODE ? 'demo' : 'live');
+
+        const c = data.config;
+        document.getElementById('config-box').innerHTML =
+          '<span class="row"><b>Window:</b> ' + c.WINDOW_SECONDS + 's</span>' +
+          '<span class="row"><b>Min trades:</b> ' + c.MIN_TRADES_IN_WINDOW + '</span>' +
+          '<span class="row"><b>Min unique buyers:</b> ' + c.MIN_UNIQUE_BUYERS_IN_WINDOW + '</span>' +
+          '<span class="row"><b>Min SOL volume:</b> ' + c.MIN_SOL_VOLUME_IN_WINDOW + '</span>' +
+          '<span class="row"><b>Cooldown:</b> ' + c.COOLDOWN_SECONDS + 's</span>' +
+          '<span class="row"><b>Fake buy size:</b> ' + c.FAKE_BUY_SIZE_SOL + ' SOL</span>';
+
+        const eventsEl = document.getElementById('events');
+        if (!data.events.length) {
+          eventsEl.innerHTML = '<div class="empty-state">No activity yet. Waiting for pump.fun data…</div>';
+          return;
+        }
+
+        eventsEl.innerHTML = data.events.map(function(e) {
+          const time = new Date(e.time).toLocaleTimeString();
+          if (e.type === 'simulated_buy') {
+            return '<div class="event simulated_buy">' +
+              '<div class="event-header"><span class="event-title">🟢 SIMULATED BUY — ' + (e.symbol || e.name || e.mint) + '</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">' + e.tradeCount + ' trades · ' + e.uniqueBuyers + ' unique buyers · ' + e.solVolume + ' SOL volume · fake spend ' + e.fakeSpendSol + ' SOL<br>' +
+              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
+              '</div>';
+          }
+          return '<div class="event new_token">' +
+            '<div class="event-header"><span class="event-title">🆕 New Token — ' + (e.symbol || e.name || e.mint) + '</span><span class="event-time">' + time + '</span></div>' +
+            '<div class="event-detail"><a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
+            '</div>';
+        }).join('');
+      } catch (err) {
+        console.error('Dashboard refresh failed', err);
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>
