@@ -82,6 +82,30 @@
   .event-detail { color: var(--muted); }
   .event-detail a { color: var(--blue); text-decoration: none; }
   .event-detail a:hover { text-decoration: underline; }
+  .value.pnl-positive { color: var(--green); }
+  .value.pnl-negative { color: #ff6b6b; }
+  .position-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .position-card .pname { font-weight: 700; }
+  .position-card .pstate {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    margin-left: 8px;
+  }
+  .pstate.open { background: rgba(91,157,255,0.15); color: var(--blue); }
+  .pstate.half_sold { background: rgba(240,196,83,0.15); color: var(--yellow); }
+  .pstate.closed { background: rgba(139,147,163,0.15); color: var(--muted); }
+  .position-card .pmultiple { color: var(--muted); font-size: 12px; }
   .empty-state { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
 </style>
 </head>
@@ -93,6 +117,18 @@
     <div class="stat-card">
       <div class="label">Connection</div>
       <div class="value" id="stat-connection">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Demo Balance</div>
+      <div class="value" id="stat-balance">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Realized P/L</div>
+      <div class="value" id="stat-pnl">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Open Positions</div>
+      <div class="value" id="stat-openpos">—</div>
     </div>
     <div class="stat-card">
       <div class="label">New Tokens Seen</div>
@@ -110,6 +146,9 @@
 
   <div class="config-box" id="config-box">Loading settings…</div>
 
+  <div class="section-title">Open &amp; Recent Positions</div>
+  <div id="positions"></div>
+
   <div class="section-title">Live Activity</div>
   <div id="events"></div>
 
@@ -126,6 +165,15 @@
         document.getElementById('stat-newtokens').textContent = data.stats.newTokensSeen;
         document.getElementById('stat-buys').textContent = data.stats.simulatedBuys;
         document.getElementById('stat-trades').textContent = data.stats.tradesProcessed;
+        document.getElementById('stat-balance').textContent = data.stats.balanceSol.toFixed(3) + ' SOL';
+
+        const pnlEl = document.getElementById('stat-pnl');
+        const pnl = data.stats.realizedPnlSol;
+        pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(4) + ' SOL';
+        pnlEl.className = 'value ' + (pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
+
+        const openCount = data.positions.filter(function(p) { return p.state !== 'closed'; }).length;
+        document.getElementById('stat-openpos').textContent = openCount;
 
         const modeBadge = document.getElementById('mode-badge');
         modeBadge.textContent = data.config.DEMO_MODE ? 'DEMO MODE — no real funds' : 'LIVE MODE';
@@ -133,12 +181,29 @@
 
         const c = data.config;
         document.getElementById('config-box').innerHTML =
+          '<span class="row"><b>Buy size:</b> ' + c.FAKE_BUY_SIZE_SOL + ' SOL</span>' +
           '<span class="row"><b>Window:</b> ' + c.WINDOW_SECONDS + 's</span>' +
           '<span class="row"><b>Min trades:</b> ' + c.MIN_TRADES_IN_WINDOW + '</span>' +
           '<span class="row"><b>Min unique buyers:</b> ' + c.MIN_UNIQUE_BUYERS_IN_WINDOW + '</span>' +
           '<span class="row"><b>Min SOL volume:</b> ' + c.MIN_SOL_VOLUME_IN_WINDOW + '</span>' +
           '<span class="row"><b>Cooldown:</b> ' + c.COOLDOWN_SECONDS + 's</span>' +
-          '<span class="row"><b>Fake buy size:</b> ' + c.FAKE_BUY_SIZE_SOL + ' SOL</span>';
+          '<span class="row"><b>TP1:</b> sell 50% at ' + c.TP1_MULTIPLIER + 'x</span>' +
+          '<span class="row"><b>Trailing stop:</b> ' + Math.round(c.TRAILING_STOP_PCT * 100) + '% from peak</span>' +
+          '<span class="row"><b>Stop loss:</b> ' + c.STOP_LOSS_MULTIPLIER + 'x</span>';
+
+        const positionsEl = document.getElementById('positions');
+        if (!data.positions.length) {
+          positionsEl.innerHTML = '<div class="empty-state">No positions yet.</div>';
+        } else {
+          positionsEl.innerHTML = data.positions.map(function(p) {
+            const mult = p.currentMultiple != null ? p.currentMultiple + 'x' : '—';
+            return '<div class="position-card">' +
+              '<div><span class="pname">' + (p.symbol || p.name || p.mint) + '</span>' +
+              '<span class="pstate ' + p.state + '">' + p.state.replace('_',' ') + '</span></div>' +
+              '<div class="pmultiple">current: ' + mult + ' · peak: ' + p.highWaterMultiple + 'x · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></div>' +
+              '</div>';
+          }).join('');
+        }
 
         const eventsEl = document.getElementById('events');
         if (!data.events.length) {
@@ -148,15 +213,44 @@
 
         eventsEl.innerHTML = data.events.map(function(e) {
           const time = new Date(e.time).toLocaleTimeString();
+          const coinLabel = e.symbol || e.name || e.mint;
+
           if (e.type === 'simulated_buy') {
             return '<div class="event simulated_buy">' +
-              '<div class="event-header"><span class="event-title">🟢 SIMULATED BUY — ' + (e.symbol || e.name || e.mint) + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">' + e.tradeCount + ' trades · ' + e.uniqueBuyers + ' unique buyers · ' + e.solVolume + ' SOL volume · fake spend ' + e.fakeSpendSol + ' SOL<br>' +
+              '<div class="event-header"><span class="event-title">🟢 BUY — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">' + e.tradeCount + ' trades · ' + e.uniqueBuyers + ' unique buyers · ' + e.solVolume + ' SOL volume · spent ' + e.fakeSpendSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
               '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
               '</div>';
           }
+          if (e.type === 'tp1_hit') {
+            return '<div class="event simulated_buy">' +
+              '<div class="event-header"><span class="event-title">💰 TP1 HIT — ' + coinLabel + ' (sold ' + e.soldFractionPct + '% at ' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
+              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
+              '</div>';
+          }
+          if (e.type === 'trailing_stop_exit') {
+            return '<div class="event" style="border-left-color: var(--yellow);">' +
+              '<div class="event-header"><span class="event-title" style="color: var(--yellow);">📉 TRAILING STOP — ' + coinLabel + ' (sold ' + e.soldFractionPct + '% at ' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
+              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
+              '</div>';
+          }
+          if (e.type === 'stop_loss') {
+            return '<div class="event" style="border-left-color: #ff6b6b;">' +
+              '<div class="event-header"><span class="event-title" style="color: #ff6b6b;">🛑 STOP LOSS — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
+              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
+              '</div>';
+          }
+          if (e.type === 'skipped_low_balance') {
+            return '<div class="event" style="border-left-color: var(--muted);">' +
+              '<div class="event-header"><span class="event-title" style="color: var(--muted);">⏸ SKIPPED (low balance) — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">balance was ' + e.balanceSol + ' SOL</div>' +
+              '</div>';
+          }
           return '<div class="event new_token">' +
-            '<div class="event-header"><span class="event-title">🆕 New Token — ' + (e.symbol || e.name || e.mint) + '</span><span class="event-time">' + time + '</span></div>' +
+            '<div class="event-header"><span class="event-title">🆕 New Token — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
             '<div class="event-detail"><a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
             '</div>';
         }).join('');
