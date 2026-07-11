@@ -30,4 +30,7 @@ module.exports = {
 
   // PumpPortal public data WebSocket. Free tier, no API key needed for new-token + public trade stream.
   WEBSOCKET_URL: "wss://pumpportal.fun/api/data",
+
+  // How many recent events (new tokens + simulated buys) to keep for the dashboard.
+  MAX_DASHBOARD_EVENTS: 200,
 };
