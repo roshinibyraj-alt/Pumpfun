@@ -54,6 +54,38 @@
   .stat-card .value.status-other { color: var(--yellow); }
   .value.pnl-positive { color: var(--green); }
   .value.pnl-negative { color: var(--red); }
+  .add-token-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 20px;
+    display: flex;
+    gap: 8px;
+  }
+  .add-token-box input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .add-token-box button {
+    background: var(--green);
+    color: #0b0d12;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-weight: 700;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .add-token-box button:disabled { opacity: 0.5; cursor: default; }
+  .add-token-msg { font-size: 12px; margin-top: 8px; }
+  .add-token-msg.error { color: var(--red); }
+  .add-token-msg.success { color: var(--green); }
   .config-box {
     background: var(--card);
     border: 1px solid var(--border);
@@ -75,12 +107,10 @@
     margin-bottom: 8px;
     font-size: 13px;
   }
-  .event.new_token { border-left-color: var(--blue); }
   .event.simulated_buy { border-left-color: var(--green); }
   .event-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
   .event-title { font-weight: 700; font-size: 14px; }
   .event.simulated_buy .event-title { color: var(--green); }
-  .event.new_token .event-title { color: var(--blue); }
   .event-time { color: var(--muted); font-size: 11px; }
   .event-detail { color: var(--muted); }
   .event-detail a { color: var(--blue); text-decoration: none; }
@@ -95,18 +125,36 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 10px;
   }
   .position-card .pname { font-weight: 700; }
   .position-card .pmultiple { color: var(--muted); font-size: 12px; }
   .slope-up { color: var(--green); }
   .slope-down { color: var(--red); }
   .slope-flat { color: var(--muted); }
+  .remove-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .remove-btn:hover { border-color: var(--red); color: var(--red); }
   .empty-state { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
 </style>
 </head>
 <body>
   <h1>pump.fun Demo Bot <span id="mode-badge" class="badge demo">DEMO MODE</span></h1>
-  <div class="subtitle">Strategy: buy at the bottom of each token's trend channel, sell at the top. No real funds are used. Refreshes every 3 seconds.</div>
+  <div class="subtitle">Manual tokens only — no automatic scanning. Buy at channel bottom, sell at channel top. No real funds are used.</div>
+
+  <div class="add-token-box">
+    <input id="add-token-input" type="text" placeholder="Paste a pump.fun token mint address..." />
+    <button id="add-token-btn" onclick="addToken()">Add & Track</button>
+  </div>
+  <div id="add-token-msg" class="add-token-msg"></div>
 
   <div class="stats-grid">
     <div class="stat-card">
@@ -126,12 +174,8 @@
       <div class="value" id="stat-openpos">—</div>
     </div>
     <div class="stat-card">
-      <div class="label">Tracking Channels</div>
-      <div class="value" id="stat-tracking">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">New Tokens Seen</div>
-      <div class="value" id="stat-newtokens">—</div>
+      <div class="label">Tracked Tokens</div>
+      <div class="value" id="stat-tracked">—</div>
     </div>
     <div class="stat-card">
       <div class="label">Trades Processed</div>
@@ -141,8 +185,8 @@
 
   <div class="config-box" id="config-box">Loading settings…</div>
 
-  <div class="section-title">Tracking (waiting for channel-bottom touch)</div>
-  <div id="tracking"></div>
+  <div class="section-title">Tracked Tokens (waiting for channel-bottom touch)</div>
+  <div id="tracked"></div>
 
   <div class="section-title">Open Positions</div>
   <div id="positions"></div>
@@ -151,6 +195,51 @@
   <div id="events"></div>
 
   <script>
+    async function addToken() {
+      const input = document.getElementById('add-token-input');
+      const btn = document.getElementById('add-token-btn');
+      const msgEl = document.getElementById('add-token-msg');
+      const mint = input.value.trim();
+      if (!mint) return;
+
+      btn.disabled = true;
+      msgEl.textContent = '';
+      try {
+        const res = await fetch('/api/add-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mint })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          msgEl.textContent = 'Added — building its channel now (needs a few minutes of price history).';
+          msgEl.className = 'add-token-msg success';
+          input.value = '';
+        } else {
+          msgEl.textContent = data.error || 'Failed to add token.';
+          msgEl.className = 'add-token-msg error';
+        }
+      } catch (err) {
+        msgEl.textContent = 'Request failed. Try again.';
+        msgEl.className = 'add-token-msg error';
+      }
+      btn.disabled = false;
+      refresh();
+    }
+
+    async function removeToken(mint) {
+      try {
+        await fetch('/api/remove-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mint })
+        });
+      } catch (err) {
+        console.error('Remove failed', err);
+      }
+      refresh();
+    }
+
     async function refresh() {
       try {
         const res = await fetch('/api/state');
@@ -160,7 +249,6 @@
         connEl.textContent = data.stats.connectionStatus;
         connEl.className = 'value ' + (data.stats.connectionStatus === 'connected' ? 'status-connected' : 'status-other');
 
-        document.getElementById('stat-newtokens').textContent = data.stats.newTokensSeen;
         document.getElementById('stat-trades').textContent = data.stats.tradesProcessed;
         document.getElementById('stat-balance').textContent = data.stats.balanceSol.toFixed(3) + ' SOL';
 
@@ -170,7 +258,7 @@
         pnlEl.className = 'value ' + (pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
 
         document.getElementById('stat-openpos').textContent = data.positions.length;
-        document.getElementById('stat-tracking').textContent = data.tracking.length;
+        document.getElementById('stat-tracked').textContent = data.tracked.length + data.positions.length;
 
         const modeBadge = document.getElementById('mode-badge');
         modeBadge.textContent = data.config.DEMO_MODE ? 'DEMO MODE — no real funds' : 'LIVE MODE';
@@ -179,28 +267,31 @@
         const c = data.config;
         document.getElementById('config-box').innerHTML =
           '<span class="row"><b>Buy size:</b> ' + c.FAKE_BUY_SIZE_SOL + ' SOL</span>' +
-          '<span class="row"><b>Token age window:</b> ' + Math.round(c.MIN_TOKEN_AGE_SECONDS/60) + 'min – ' + Math.round(c.MAX_TOKEN_AGE_SECONDS/3600) + 'hr</span>' +
           '<span class="row"><b>Channel width:</b> ' + c.CHANNEL_WIDTH_STDDEV + ' stddev</span>' +
           '<span class="row"><b>Min candles:</b> ' + c.MIN_CANDLES_FOR_CHANNEL + ' (1min each)</span>' +
           '<span class="row"><b>Uptrend only:</b> ' + (c.REQUIRE_NON_NEGATIVE_SLOPE ? 'yes' : 'no') + '</span>' +
-          '<span class="row"><b>Activity window:</b> ' + c.WINDOW_SECONDS + 's</span>' +
-          '<span class="row"><b>Min trades:</b> ' + c.MIN_TRADES_IN_WINDOW + '</span>' +
-          '<span class="row"><b>Min unique buyers:</b> ' + c.MIN_UNIQUE_BUYERS_IN_WINDOW + '</span>' +
-          '<span class="row"><b>Min SOL volume:</b> ' + c.MIN_SOL_VOLUME_IN_WINDOW + '</span>' +
           '<span class="row"><b>Cooldown:</b> ' + c.COOLDOWN_SECONDS + 's</span>' +
-          '<span class="row"><b>Safety stop:</b> ' + (c.SAFETY_STOP_LOSS_MULTIPLIER != null ? c.SAFETY_STOP_LOSS_MULTIPLIER + 'x (backstop only)' : 'disabled') + '</span>';
+          '<span class="row"><b>Safety stop:</b> ' + (c.SAFETY_STOP_LOSS_MULTIPLIER != null ? c.SAFETY_STOP_LOSS_MULTIPLIER + 'x (backstop only)' : 'disabled') + '</span>' +
+          '<span class="row"><b>Max tracked:</b> ' + c.MAX_TRACKED_TOKENS + '</span>';
 
-        const trackingEl = document.getElementById('tracking');
-        if (!data.tracking.length) {
-          trackingEl.innerHTML = '<div class="empty-state">No tokens currently being tracked for a channel touch.</div>';
+        const trackedEl = document.getElementById('tracked');
+        if (!data.tracked.length) {
+          trackedEl.innerHTML = '<div class="empty-state">No tokens tracked yet. Paste a mint address above to add one.</div>';
         } else {
-          trackingEl.innerHTML = data.tracking.map(function(t) {
-            const slopeClass = 'slope-' + t.slope;
-            const slopeArrow = t.slope === 'up' ? '↗' : t.slope === 'down' ? '↘' : '→';
+          trackedEl.innerHTML = data.tracked.map(function(t) {
+            const label = t.symbol || t.name || t.mint;
+            let detail;
+            if (!t.channelReady) {
+              detail = 'building history: ' + t.candleCount + '/' + t.candlesNeeded + ' minutes';
+            } else {
+              const slopeClass = 'slope-' + t.slope;
+              const slopeArrow = t.slope === 'up' ? '↗' : t.slope === 'down' ? '↘' : '→';
+              detail = '<span class="' + slopeClass + '">' + slopeArrow + ' ' + t.slope + '</span> · ' + t.pctFromBottom + '% up from channel bottom';
+            }
             return '<div class="position-card">' +
-              '<div><span class="pname">' + (t.symbol || t.name || t.mint) + '</span> ' +
-              '<span class="' + slopeClass + '">' + slopeArrow + ' ' + t.slope + '</span></div>' +
-              '<div class="pmultiple">' + t.pctFromBottom + '% up from channel bottom · <a href="' + t.link + '" target="_blank" style="color:var(--blue)">view</a></div>' +
+              '<div><span class="pname">' + label + '</span><br>' +
+              '<span class="pmultiple">' + detail + ' · <a href="' + t.link + '" target="_blank" style="color:var(--blue)">view</a></span></div>' +
+              '<button class="remove-btn" onclick="removeToken(\'' + t.mint + '\')">Remove</button>' +
               '</div>';
           }).join('');
         }
@@ -212,15 +303,16 @@
           positionsEl.innerHTML = data.positions.map(function(p) {
             const mult = p.currentMultiple != null ? p.currentMultiple + 'x' : '—';
             return '<div class="position-card">' +
-              '<div><span class="pname">' + (p.symbol || p.name || p.mint) + '</span></div>' +
-              '<div class="pmultiple">current: ' + mult + ' · entry channel [' + p.entryChannelBottom.toFixed(4) + ' – ' + p.entryChannelTop.toFixed(4) + '] · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></div>' +
+              '<div><span class="pname">' + (p.symbol || p.name || p.mint) + '</span><br>' +
+              '<span class="pmultiple">current: ' + mult + ' · entry channel [' + p.entryChannelBottom.toFixed(4) + ' – ' + p.entryChannelTop.toFixed(4) + '] · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></span></div>' +
+              '<button class="remove-btn" onclick="removeToken(\'' + p.mint + '\')">Remove</button>' +
               '</div>';
           }).join('');
         }
 
         const eventsEl = document.getElementById('events');
         if (!data.events.length) {
-          eventsEl.innerHTML = '<div class="empty-state">No activity yet. Waiting for pump.fun data…</div>';
+          eventsEl.innerHTML = '<div class="empty-state">No activity yet.</div>';
           return;
         }
 
@@ -228,38 +320,45 @@
           const time = new Date(e.time).toLocaleTimeString();
           const coinLabel = e.symbol || e.name || e.mint;
 
+          if (e.type === 'token_added') {
+            return '<div class="event" style="border-left-color: var(--blue);">' +
+              '<div class="event-header"><span class="event-title" style="color: var(--blue);">➕ ADDED — ' + e.mint + '</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail"><a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
+          }
+          if (e.type === 'token_removed') {
+            return '<div class="event" style="border-left-color: var(--muted);">' +
+              '<div class="event-header"><span class="event-title" style="color: var(--muted);">➖ REMOVED — ' + e.mint + '</span><span class="event-time">' + time + '</span></div>' +
+              '</div>';
+          }
           if (e.type === 'simulated_buy') {
             return '<div class="event simulated_buy">' +
               '<div class="event-header"><span class="event-title">🟢 BUY @ BOTTOM — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">' + e.tradeCount + ' trades · ' + e.uniqueBuyers + ' unique buyers · ' + e.solVolume + ' SOL volume · spent ' + e.fakeSpendSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
-              'channel [' + e.channelBottom.toFixed(4) + ' – ' + e.channelTop.toFixed(4) + ']<br>' +
-              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
-              '</div>';
+              '<div class="event-detail">spent ' + e.fakeSpendSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL · channel [' + e.channelBottom.toFixed(4) + ' – ' + e.channelTop.toFixed(4) + ']<br>' +
+              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
           }
           if (e.type === 'channel_top_exit') {
             return '<div class="event simulated_buy">' +
               '<div class="event-header"><span class="event-title">💰 SELL @ TOP — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL · bot will keep watching this token<br>' +
-              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
-              '</div>';
+              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL · still tracking this token<br>' +
+              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
           }
           if (e.type === 'safety_stop_loss') {
             return '<div class="event" style="border-left-color: var(--red);">' +
               '<div class="event-header"><span class="event-title" style="color: var(--red);">🛑 SAFETY STOP — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
               '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
-              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
-              '</div>';
+              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
+          }
+          if (e.type === 'manual_removal_exit') {
+            return '<div class="event" style="border-left-color: var(--yellow);">' +
+              '<div class="event-header"><span class="event-title" style="color: var(--yellow);">⏏ CLOSED ON REMOVE — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL</div></div>';
           }
           if (e.type === 'skipped_low_balance') {
             return '<div class="event" style="border-left-color: var(--muted);">' +
               '<div class="event-header"><span class="event-title" style="color: var(--muted);">⏸ SKIPPED (low balance) — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">balance was ' + e.balanceSol + ' SOL</div>' +
-              '</div>';
+              '<div class="event-detail">balance was ' + e.balanceSol + ' SOL</div></div>';
           }
-          return '<div class="event new_token">' +
-            '<div class="event-header"><span class="event-title">🆕 New Token — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-            '<div class="event-detail"><a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
-            '</div>';
+          return '';
         }).join('');
       } catch (err) {
         console.error('Dashboard refresh failed', err);
