@@ -22,6 +22,10 @@ const tokenActivity = new Map();
 // One entry per token mint address WITH AN ACTIVE OR CLOSED SIMULATED POSITION.
 const openPositions = new Map();
 
+// Tokens that have gone "trending" and are being watched for a pullback
+// before buying (buy-the-dip strategy). mint -> { peakMarketCapSol, addedAtSec }
+const hotWatchlist = new Map();
+
 // Rolling list of events shown on the dashboard (newest first).
 const dashboardEvents = [];
 
@@ -83,6 +87,9 @@ function scoreAndMaybeBuy(mint, entry, nowSec) {
   const ageSeconds = nowSec - entry.createdAtSec;
   if (ageSeconds < config.MIN_TOKEN_AGE_SECONDS || ageSeconds > config.MAX_TOKEN_AGE_SECONDS) return;
 
+  const secondsSinceLastAlert = nowSec - entry.lastAlertTime;
+  if (secondsSinceLastAlert < config.COOLDOWN_SECONDS) return; // still cooling down
+
   const trades = entry.trades;
   const tradeCount = trades.length;
   const uniqueBuyers = new Set(trades.map((t) => t.buyer)).size;
@@ -91,17 +98,54 @@ function scoreAndMaybeBuy(mint, entry, nowSec) {
   const minTrades = config.TEST_MODE ? config.TEST_MIN_TRADES_IN_WINDOW : config.MIN_TRADES_IN_WINDOW;
   const minBuyers = config.TEST_MODE ? config.TEST_MIN_UNIQUE_BUYERS_IN_WINDOW : config.MIN_UNIQUE_BUYERS_IN_WINDOW;
   const minVolume = config.TEST_MODE ? config.TEST_MIN_SOL_VOLUME_IN_WINDOW : config.MIN_SOL_VOLUME_IN_WINDOW;
+  const isHotNow = tradeCount >= minTrades && uniqueBuyers >= minBuyers && solVolume >= minVolume;
 
-  const meetsThreshold = tradeCount >= minTrades && uniqueBuyers >= minBuyers && solVolume >= minVolume;
+  const watch = hotWatchlist.get(mint);
+  const label = entry.symbol || entry.name || mint;
 
-  if (!meetsThreshold) return;
+  // Not on the watchlist yet: only add it once it actually qualifies as trending.
+  if (!watch) {
+    if (isHotNow && entry.lastMarketCapSol != null) {
+      hotWatchlist.set(mint, { peakMarketCapSol: entry.lastMarketCapSol, addedAtSec: nowSec });
+      log(`WATCHLIST: ${label} is trending (${tradeCount} trades/${uniqueBuyers} buyers) - waiting for a dip before buying`);
+      pushEvent({
+        type: "watchlisted",
+        mint,
+        name: entry.name,
+        symbol: entry.symbol,
+        tradeCount,
+        uniqueBuyers,
+        solVolume: Number(solVolume.toFixed(3)),
+        link: `https://pump.fun/${mint}`,
+      });
+    }
+    return;
+  }
 
-  const secondsSinceLastAlert = nowSec - entry.lastAlertTime;
-  if (secondsSinceLastAlert < config.COOLDOWN_SECONDS) return; // still cooling down
+  // Already on the watchlist: keep tracking its peak, expire if it never dips,
+  // otherwise buy once it has pulled back enough from that peak.
+  if (entry.lastMarketCapSol != null && entry.lastMarketCapSol > watch.peakMarketCapSol) {
+    watch.peakMarketCapSol = entry.lastMarketCapSol;
+  }
 
-  entry.lastAlertTime = nowSec;
+  if (nowSec - watch.addedAtSec > config.WATCHLIST_MAX_WAIT_SECONDS) {
+    hotWatchlist.delete(mint);
+    log(`WATCHLIST: ${label} never pulled back within the wait window - dropping it`);
+    return;
+  }
 
-  simulateBuy(mint, entry, nowSec, { tradeCount, uniqueBuyers, solVolume });
+  if (entry.lastMarketCapSol == null || watch.peakMarketCapSol <= 0) return;
+
+  const dipMultipleFromPeak = entry.lastMarketCapSol / watch.peakMarketCapSol;
+  const dippedEnough = dipMultipleFromPeak <= 1 - config.DIP_BUY_PCT;
+  const stillActive = tradeCount >= config.MIN_WATCH_ACTIVITY_TRADES;
+
+  if (dippedEnough && stillActive) {
+    hotWatchlist.delete(mint);
+    entry.lastAlertTime = nowSec;
+    log(`DIP CONFIRMED: ${label} pulled back to ${dipMultipleFromPeak.toFixed(2)}x its recent peak - buying`);
+    simulateBuy(mint, entry, nowSec, { tradeCount, uniqueBuyers, solVolume });
+  }
 }
 
 // ------------------------------------------------------------
@@ -347,6 +391,7 @@ function connect() {
       if (isStale && !hasActivePosition) {
         ws.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
         tokenActivity.delete(mint);
+        hotWatchlist.delete(mint);
       }
     }
   }, 5 * 60 * 1000); // run every 5 minutes
@@ -413,6 +458,21 @@ app.get("/api/state", (req, res) => {
   // Show open/half_sold positions first, most recently entered first.
   positions.sort((a, b) => (a.state === "closed") - (b.state === "closed"));
 
+  const watchlist = [];
+  for (const [mint, w] of hotWatchlist.entries()) {
+    const entry = tokenActivity.get(mint);
+    const currentMarketCapSol = entry ? entry.lastMarketCapSol : null;
+    const dipMultiple = currentMarketCapSol != null && w.peakMarketCapSol ? currentMarketCapSol / w.peakMarketCapSol : null;
+    watchlist.push({
+      mint,
+      name: entry ? entry.name : null,
+      symbol: entry ? entry.symbol : null,
+      dipMultiple: dipMultiple != null ? Number(dipMultiple.toFixed(3)) : null,
+      waitingSeconds: Math.floor(Date.now() / 1000) - w.addedAtSec,
+      link: `https://pump.fun/${mint}`,
+    });
+  }
+
   res.json({
     config: {
       DEMO_MODE: config.DEMO_MODE,
@@ -424,12 +484,15 @@ app.get("/api/state", (req, res) => {
       COOLDOWN_SECONDS: config.COOLDOWN_SECONDS,
       MIN_TOKEN_AGE_SECONDS: config.MIN_TOKEN_AGE_SECONDS,
       MAX_TOKEN_AGE_SECONDS: config.MAX_TOKEN_AGE_SECONDS,
+      DIP_BUY_PCT: config.DIP_BUY_PCT,
+      WATCHLIST_MAX_WAIT_SECONDS: config.WATCHLIST_MAX_WAIT_SECONDS,
       TP1_MULTIPLIER: config.TP1_MULTIPLIER,
       TRAILING_STOP_PCT: config.TRAILING_STOP_PCT,
       STOP_LOSS_MULTIPLIER: config.STOP_LOSS_MULTIPLIER,
     },
     stats,
     positions,
+    watchlist,
     events: dashboardEvents,
   });
 });
