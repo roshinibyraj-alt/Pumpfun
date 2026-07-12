@@ -7,6 +7,30 @@ even makes sense before you risk anything.
 
 ---
 
+## Step 0 — Required: get a PumpPortal API key (do this first)
+
+Token-creation events are free with no key. But the actual **trade data**
+(needed to detect anything "trending" and trigger a simulated buy) requires
+a PumpPortal API key tied to a wallet funded with a small amount of real SOL:
+
+1. Go to https://pumpportal.fun and create a free account.
+2. Generate an API key from your dashboard.
+3. Send **0.02 SOL** (a few dollars) to the wallet linked to that key. This
+   money is NOT used to buy any coins — it only covers PumpPortal's tiny
+   metering fee for streaming trade data (0.01 SOL per 10,000 messages,
+   which is pennies per day). The bot still never touches this wallet to
+   place trades.
+4. In Railway, go to your service → **Variables** tab → add a new variable:
+   - Name: `PUMPPORTAL_API_KEY`
+   - Value: (paste your key)
+5. Railway will automatically redeploy with the key available.
+
+Without this, the dashboard and logs will show tokens being discovered, but
+"Trades Processed" will stay at 0 forever and no buy will ever trigger — this
+is a PumpPortal requirement, not a bug in the bot.
+
+---
+
 ## Step 1 — Put this code on GitHub
 
 1. Go to https://github.com and log in.
