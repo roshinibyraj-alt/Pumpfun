@@ -17,14 +17,24 @@ module.exports = {
   FAKE_BUY_SIZE_SOL: 0.1,
 
   // ---------------- MANUAL-ONLY MODE ----------------
-  // There is no automatic scanning or discovery of new tokens anymore. The
-  // bot only trades tokens you explicitly add via the dashboard. This also
-  // means it only ever holds a live PumpPortal trade subscription (and only
-  // pays PumpPortal's message-metering fee) for tokens you've chosen.
+  // There is no automatic scanning or discovery of new tokens. The bot only
+  // trades tokens you explicitly add via the dashboard.
 
   // Once a token triggers a simulated buy, don't trigger another buy on the
   // SAME token again for at least this many seconds after a sell.
   COOLDOWN_SECONDS: 120,
+
+  // ---------------- PRICE DATA SOURCE: DexScreener ----------------
+  // Free public REST API, no key required, no wallet, no metering cost.
+  // The bot polls current price for every tracked token on this interval
+  // and builds its own 1-minute candles from those snapshots — same idea
+  // as before, just pulled instead of pushed, and free instead of paid.
+
+  // How often (seconds) to poll DexScreener for all tracked tokens' prices.
+  // All tracked tokens are fetched in a single request each poll (up to 30
+  // addresses per call), so this stays well within DexScreener's public
+  // rate limit (300 requests/minute) even at a short interval.
+  DEXSCREENER_POLL_INTERVAL_SECONDS: 30,
 
   // ---------------- CHANNEL (TREND LINE) STRATEGY ----------------
   // The bot builds a real 1-minute trend line (a linear regression channel)
@@ -34,12 +44,11 @@ module.exports = {
   // bottom-line touch.
 
   // How many 1-minute candles of history are required before the bot trusts
-  // the channel enough to trade it. 10 = needs 10 minutes of price history
-  // after you add the token.
+  // the channel enough to trade it. 10 = needs about 10 minutes after you
+  // add the token (roughly 20 polls at the default 30s interval).
   MIN_CANDLES_FOR_CHANNEL: 10,
 
-  // How many 1-minute candles to keep in memory per token (older ones are
-  // dropped). 60 = up to 1 hour of history feeds the channel calculation.
+  // How many 1-minute candles to keep in memory per token.
   MAX_CANDLES_STORED: 60,
 
   // How wide the channel is, measured in standard deviations of price around
@@ -47,42 +56,26 @@ module.exports = {
   CHANNEL_WIDTH_STDDEV: 1.5,
 
   // If true, the bot will NOT buy a "bottom line touch" when the channel's
-  // overall trend is pointed downward — this avoids buying every dip in a
-  // coin that's simply crashing (a falling knife), and instead only buys
-  // dips within a flat-to-upward channel.
+  // overall trend is pointed downward — avoids buying every dip in a coin
+  // that's simply crashing, and only buys dips within a flat-to-upward channel.
   REQUIRE_NON_NEGATIVE_SLOPE: true,
 
   // ---------------- SAFETY BACKSTOP (not a trading signal) ----------------
-  // This is deliberately NOT part of the buy/sell strategy above — it's a
-  // last-resort circuit breaker in case a token is in true freefall (where
-  // the channel's bottom line would otherwise just keep sliding down with
-  // it, causing repeated buys into a coin heading toward zero). If a
+  // A last-resort circuit breaker in case a token is in true freefall. If a
   // position falls to this multiple of its entry price, exit immediately
   // regardless of where the channel is. 0.5 = cut losses at -50%.
   // Set to null to disable this safety net entirely.
   SAFETY_STOP_LOSS_MULTIPLIER: 0.5,
 
-  // PumpPortal public data WebSocket.
-  WEBSOCKET_URL: "wss://pumpportal.fun/api/data",
-
-  // PumpPortal API key, required for subscribeTokenTrade (trade data) to
-  // actually deliver events. Set this in Railway as an environment variable
-  // named PUMPPORTAL_API_KEY — never hardcode it here. Requires a wallet
-  // funded with a small amount of real SOL, metered per message volume —
-  // now only spent on tokens you manually add, not on platform-wide scanning.
-  PUMPPORTAL_API_KEY: process.env.PUMPPORTAL_API_KEY || "",
-
-  // Known non-memecoin mints to always refuse to add, even manually — these
-  // are real stablecoins/wrapped SOL, not meme tokens, and trading logic
-  // built for meme-coin volatility doesn't make sense applied to them.
+  // Known non-memecoin mints to always refuse to add — real stablecoins/
+  // wrapped SOL, not meme tokens.
   EXCLUDED_MINTS: [
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
     "So11111111111111111111111111111111111111112", // Wrapped SOL
   ],
 
-  // Safety valve: max number of tokens you can manually track at once
-  // (keeps PumpPortal message-metering costs predictable).
+  // Safety valve: max number of tokens you can manually track at once.
   MAX_TRACKED_TOKENS: 30,
 
   // How many recent events to keep for the dashboard.
