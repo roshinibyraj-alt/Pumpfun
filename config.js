@@ -34,6 +34,26 @@ module.exports = {
   // just had one late flicker of activity. 36000 seconds = 10 hours.
   MAX_TOKEN_AGE_SECONDS: 36000,
 
+  // ---------------- BUY-THE-DIP STRATEGY ----------------
+  // Instead of buying the instant a token crosses the trending thresholds
+  // (which means buying into strength/a spike), the bot puts it on a
+  // watchlist first and waits for a pullback from its peak before buying.
+  // "Sell at the top" is already handled by TP1 + the trailing stop below.
+
+  // How far (%) a token must pull back from its peak (since it was first
+  // flagged trending) before the bot buys. 0.15 = wait for a 15% dip.
+  DIP_BUY_PCT: 0.15,
+
+  // If a trending token never pulls back within this many seconds, drop it
+  // from the watchlist instead of waiting forever or chasing it higher.
+  // 1800 = 30 minutes.
+  WATCHLIST_MAX_WAIT_SECONDS: 1800,
+
+  // Minimum trades still happening in the window at the moment of the dip,
+  // just to confirm the token isn't simply dead (a "dip" to zero activity
+  // isn't a real buy signal).
+  MIN_WATCH_ACTIVITY_TRADES: 2,
+
   // Time window (in seconds) the bot looks back over when scoring a token as "trending".
   WINDOW_SECONDS: 60,
 
