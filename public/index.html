@@ -131,6 +131,10 @@
       <div class="value" id="stat-openpos">—</div>
     </div>
     <div class="stat-card">
+      <div class="label">Watching for Dip</div>
+      <div class="value" id="stat-watchlist">—</div>
+    </div>
+    <div class="stat-card">
       <div class="label">New Tokens Seen</div>
       <div class="value" id="stat-newtokens">—</div>
     </div>
@@ -145,6 +149,9 @@
   </div>
 
   <div class="config-box" id="config-box">Loading settings…</div>
+
+  <div class="section-title">Watching for a Dip</div>
+  <div id="watchlist"></div>
 
   <div class="section-title">Open &amp; Recent Positions</div>
   <div id="positions"></div>
@@ -174,6 +181,7 @@
 
         const openCount = data.positions.filter(function(p) { return p.state !== 'closed'; }).length;
         document.getElementById('stat-openpos').textContent = openCount;
+        document.getElementById('stat-watchlist').textContent = data.watchlist.length;
 
         const modeBadge = document.getElementById('mode-badge');
         modeBadge.textContent = data.config.DEMO_MODE ? 'DEMO MODE — no real funds' : 'LIVE MODE';
@@ -183,6 +191,7 @@
         document.getElementById('config-box').innerHTML =
           '<span class="row"><b>Buy size:</b> ' + c.FAKE_BUY_SIZE_SOL + ' SOL</span>' +
           '<span class="row"><b>Token age window:</b> ' + Math.round(c.MIN_TOKEN_AGE_SECONDS/60) + 'min – ' + Math.round(c.MAX_TOKEN_AGE_SECONDS/3600) + 'hr</span>' +
+          '<span class="row"><b>Dip required:</b> ' + Math.round(c.DIP_BUY_PCT*100) + '% from peak</span>' +
           '<span class="row"><b>Window:</b> ' + c.WINDOW_SECONDS + 's</span>' +
           '<span class="row"><b>Min trades:</b> ' + c.MIN_TRADES_IN_WINDOW + '</span>' +
           '<span class="row"><b>Min unique buyers:</b> ' + c.MIN_UNIQUE_BUYERS_IN_WINDOW + '</span>' +
@@ -191,6 +200,21 @@
           '<span class="row"><b>TP1:</b> sell 50% at ' + c.TP1_MULTIPLIER + 'x</span>' +
           '<span class="row"><b>Trailing stop:</b> ' + Math.round(c.TRAILING_STOP_PCT * 100) + '% from peak</span>' +
           '<span class="row"><b>Stop loss:</b> ' + c.STOP_LOSS_MULTIPLIER + 'x</span>';
+
+        const watchlistEl = document.getElementById('watchlist');
+        if (!data.watchlist.length) {
+          watchlistEl.innerHTML = '<div class="empty-state">Nothing on the watchlist right now.</div>';
+        } else {
+          watchlistEl.innerHTML = data.watchlist.map(function(w) {
+            const dip = w.dipMultiple != null ? (100 - Math.round(w.dipMultiple * 100)) + '% down from peak' : '—';
+            const mins = Math.floor(w.waitingSeconds / 60);
+            return '<div class="position-card">' +
+              '<div><span class="pname">' + (w.symbol || w.name || w.mint) + '</span>' +
+              '<span class="pstate open">watching</span></div>' +
+              '<div class="pmultiple">' + dip + ' · waiting ' + mins + 'm · <a href="' + w.link + '" target="_blank" style="color:var(--blue)">view</a></div>' +
+              '</div>';
+          }).join('');
+        }
 
         const positionsEl = document.getElementById('positions');
         if (!data.positions.length) {
@@ -216,6 +240,13 @@
           const time = new Date(e.time).toLocaleTimeString();
           const coinLabel = e.symbol || e.name || e.mint;
 
+          if (e.type === 'watchlisted') {
+            return '<div class="event" style="border-left-color: var(--blue);">' +
+              '<div class="event-header"><span class="event-title" style="color: var(--blue);">👀 WATCHING — ' + coinLabel + ' (trending, waiting for dip)</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">' + e.tradeCount + ' trades · ' + e.uniqueBuyers + ' unique buyers · ' + e.solVolume + ' SOL volume<br>' +
+              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
+              '</div>';
+          }
           if (e.type === 'simulated_buy') {
             return '<div class="event simulated_buy">' +
               '<div class="event-header"><span class="event-title">🟢 BUY — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
