@@ -281,8 +281,10 @@
           trackedEl.innerHTML = data.tracked.map(function(t) {
             const label = t.symbol || t.name || t.mint;
             let detail;
-            if (!t.channelReady) {
-              detail = 'building history: ' + t.candleCount + '/' + t.candlesNeeded + ' minutes';
+            if (t.tradesReceived === 0) {
+              detail = '<span class="slope-down">⚠ no trade data received yet</span>';
+            } else if (!t.channelReady) {
+              detail = t.tradesReceived + ' trades received · building history: ' + t.candleCount + '/' + t.candlesNeeded + ' minutes';
             } else {
               const slopeClass = 'slope-' + t.slope;
               const slopeArrow = t.slope === 'up' ? '↗' : t.slope === 'down' ? '↘' : '→';
