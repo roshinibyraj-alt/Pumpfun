@@ -16,6 +16,12 @@ module.exports = {
   // How much fake SOL the bot "spends" per simulated buy (just for logging/tracking, not real).
   FAKE_BUY_SIZE_SOL: 0.1,
 
+  // ---------------- TEST MODE ----------------
+  // Set this to true temporarily to confirm the buy logic actually fires at
+  // all, using much looser thresholds. Once you've seen a few simulated buys
+  // happen, set it back to false to use your real thresholds below.
+  TEST_MODE: true,
+
   // Time window (in seconds) the bot looks back over when scoring a token as "trending".
   WINDOW_SECONDS: 60,
 
@@ -27,6 +33,12 @@ module.exports = {
 
   // Minimum total SOL volume traded within WINDOW_SECONDS.
   MIN_SOL_VOLUME_IN_WINDOW: 5,
+
+  // Loosened versions used only while TEST_MODE is true, just to prove the
+  // pipeline (data -> scoring -> buy -> position management) works end to end.
+  TEST_MIN_TRADES_IN_WINDOW: 4,
+  TEST_MIN_UNIQUE_BUYERS_IN_WINDOW: 2,
+  TEST_MIN_SOL_VOLUME_IN_WINDOW: 0.5,
 
   // Once a token triggers a simulated buy, don't trigger again for this many seconds
   // (stops the bot from spamming the same coin over and over).
@@ -56,6 +68,14 @@ module.exports = {
 
   // PumpPortal public data WebSocket. Free tier, no API key needed for new-token + public trade stream.
   WEBSOCKET_URL: "wss://pumpportal.fun/api/data",
+
+  // PumpPortal API key, required specifically for subscribeTokenTrade (trade
+  // data) to actually deliver events. Set this in Railway as an environment
+  // variable named PUMPPORTAL_API_KEY — never hardcode it here.
+  // subscribeNewToken (token creation events) works fine without a key;
+  // subscribeTokenTrade (trade data) requires a key tied to a wallet funded
+  // with at least 0.02 SOL, metered at 0.01 SOL per 10,000 events.
+  PUMPPORTAL_API_KEY: process.env.PUMPPORTAL_API_KEY || "",
 
   // How many recent events (new tokens + simulated buys) to keep for the dashboard.
   MAX_DASHBOARD_EVENTS: 200,
