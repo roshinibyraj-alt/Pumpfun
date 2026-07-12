@@ -53,6 +53,24 @@ function pushEvent(event) {
 }
 
 // ------------------------------------------------------------
+// Robust price extraction — PumpPortal doesn't always include
+// marketCapSol on every trade payload; fall back to computing an
+// equivalent price proxy from bonding-curve reserves if needed.
+// ------------------------------------------------------------
+function extractPriceSol(msg) {
+  if (msg.marketCapSol != null) return Number(msg.marketCapSol);
+  if (msg.market_cap_sol != null) return Number(msg.market_cap_sol);
+  const vSol = msg.vSolInBondingCurve;
+  const vTokens = msg.vTokensInBondingCurve;
+  if (vSol != null && vTokens != null && Number(vTokens) > 0) {
+    // Not literally market cap, but a consistent price-proxy ratio that
+    // moves the same way — fine for building a channel from.
+    return (Number(vSol) / Number(vTokens)) * 1_000_000; // scaled for readable numbers
+  }
+  return null;
+}
+
+// ------------------------------------------------------------
 // 1-minute candle building
 // ------------------------------------------------------------
 function updateCandle(entry, price, nowSec) {
@@ -364,9 +382,14 @@ function connect() {
     if (msg.name && !entry.name) entry.name = msg.name;
     if (msg.symbol && !entry.symbol) entry.symbol = msg.symbol;
 
-    if (msg.marketCapSol != null) {
-      entry.lastMarketCapSol = Number(msg.marketCapSol);
-      updateCandle(entry, entry.lastMarketCapSol, nowSec);
+    const price = extractPriceSol(msg);
+    if (price != null) {
+      entry.lastMarketCapSol = price;
+      updateCandle(entry, price, nowSec);
+    } else if (entry.trades.length === 1) {
+      // First trade ever received for this token and we still couldn't
+      // find a usable price field - log once so this is diagnosable.
+      log(`WARNING: received a trade for ${mint} but couldn't extract a price from it. Payload keys: ${Object.keys(msg).join(", ")}`);
     }
 
     checkOpenPosition(mint, entry);
@@ -386,15 +409,29 @@ function connect() {
 
   // Heartbeat: every 60 seconds, print a one-line summary of every manually
   // tracked token so you can see channel status without opening the dashboard.
+  // Also self-heals: if a token has received ZERO trades since being added
+  // (e.g. the subscribe call landed in a brief disconnect window and was
+  // silently dropped), resend its subscription rather than waiting for the
+  // next full reconnect.
   const heartbeatInterval = setInterval(() => {
     log(
       `HEARTBEAT: ${stats.tradesProcessed} total trades processed | ${tokenActivity.size} manually tracked token(s) | ${openPositions.size} open position(s)`
     );
     for (const [mint, entry] of tokenActivity.entries()) {
       const label = entry.symbol || entry.name || mint;
+
+      if (entry.trades.length === 0) {
+        const secondsSinceAdded = Math.floor(Date.now() / 1000) - entry.addedAtSec;
+        log(`  ${label}: NO TRADES RECEIVED YET (added ${secondsSinceAdded}s ago) - resending subscription`);
+        if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
+          liveSocket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+        }
+        continue;
+      }
+
       const channel = computeChannel(entry);
       if (!channel) {
-        log(`  ${label}: building history (${entry.candles.length + (entry.currentCandle ? 1 : 0)}/${config.MIN_CANDLES_FOR_CHANNEL} candles)`);
+        log(`  ${label}: ${entry.trades.length} trades received | building history (${entry.candles.length + (entry.currentCandle ? 1 : 0)}/${config.MIN_CANDLES_FOR_CHANNEL} candles)`);
       } else {
         const pos = openPositions.get(mint);
         const status = pos ? "HOLDING" : "watching";
@@ -453,6 +490,7 @@ app.get("/api/state", (req, res) => {
       channelReady: !!channel,
       candleCount,
       candlesNeeded: config.MIN_CANDLES_FOR_CHANNEL,
+      tradesReceived: entry.trades.length,
       pctFromBottom,
       slope,
       link: `https://pump.fun/${mint}`,
