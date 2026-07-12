@@ -1,39 +1,37 @@
 // ============================================================
-// pump.fun DEMO bot — MANUAL TOKENS ONLY
+// pump.fun DEMO bot — MANUAL TOKENS ONLY, price via DexScreener
 // - No automatic scanning or discovery of new tokens.
 // - You add tokens by mint address via the dashboard.
-// - For each token you add, the bot builds a rolling 1-minute
-//   candle series and fits a linear regression channel (a real
-//   trend line with top/bottom bands) from recent price history.
-// - Buys the full 0.10 SOL position when price touches the
-//   BOTTOM of the channel, sells the full position when price
-//   touches the TOP, then keeps watching for the next bottom touch.
+// - Price data comes from DexScreener's free public REST API —
+//   no key, no wallet, no metering cost. The bot polls it on an
+//   interval and builds its own 1-minute candles from the results.
+// - For each token, fits a linear regression channel (a real trend
+//   line with top/bottom bands) from recent price history.
+// - Buys the full 0.10 SOL position when price touches the BOTTOM
+//   of the channel, sells the full position when price touches the
+//   TOP, then keeps watching for the next bottom touch.
 // - DEMO_MODE = true means: no real money, no real wallet, ever.
-// - Serves a live dashboard so you can add/remove tokens and watch
-//   everything happen, no coding needed.
 // ============================================================
 
-const WebSocket = require("ws");
 const express = require("express");
 const path = require("path");
 const config = require("./config.js");
 
 // One entry per MANUALLY ADDED token mint address.
-// { trades, name, symbol, lastMarketCapSol, addedAtSec, candles, currentCandle, lastAlertTime }
+// { name, symbol, lastPriceSol, lastUpdatedSec, addedAtSec, candles, currentCandle, lastAlertTime }
 const tokenActivity = new Map();
 
 // One entry per token mint address with an OPEN simulated position.
 const openPositions = new Map();
 
-let liveSocket = null;
-
 const dashboardEvents = [];
 
 const stats = {
   startedAt: new Date().toISOString(),
-  connectionStatus: "connecting",
+  lastPollStatus: "not yet polled",
+  lastPollAt: null,
   simulatedBuys: 0,
-  tradesProcessed: 0,
+  pricePollsCompleted: 0,
   startingBalanceSol: config.STARTING_BALANCE_SOL,
   balanceSol: config.STARTING_BALANCE_SOL,
   totalSpentSol: 0,
@@ -50,24 +48,6 @@ function pushEvent(event) {
   if (dashboardEvents.length > config.MAX_DASHBOARD_EVENTS) {
     dashboardEvents.length = config.MAX_DASHBOARD_EVENTS;
   }
-}
-
-// ------------------------------------------------------------
-// Robust price extraction — PumpPortal doesn't always include
-// marketCapSol on every trade payload; fall back to computing an
-// equivalent price proxy from bonding-curve reserves if needed.
-// ------------------------------------------------------------
-function extractPriceSol(msg) {
-  if (msg.marketCapSol != null) return Number(msg.marketCapSol);
-  if (msg.market_cap_sol != null) return Number(msg.market_cap_sol);
-  const vSol = msg.vSolInBondingCurve;
-  const vTokens = msg.vTokensInBondingCurve;
-  if (vSol != null && vTokens != null && Number(vTokens) > 0) {
-    // Not literally market cap, but a consistent price-proxy ratio that
-    // moves the same way — fine for building a channel from.
-    return (Number(vSol) / Number(vTokens)) * 1_000_000; // scaled for readable numbers
-  }
-  return null;
 }
 
 // ------------------------------------------------------------
@@ -136,19 +116,19 @@ function computeChannel(entry) {
 // Entry signal: buy when price touches the bottom of the channel
 // ------------------------------------------------------------
 function scoreAndMaybeBuy(mint, entry, nowSec) {
-  if (openPositions.has(mint)) return; // already holding
+  if (openPositions.has(mint)) return;
 
   const secondsSinceLastAlert = nowSec - entry.lastAlertTime;
   if (secondsSinceLastAlert < config.COOLDOWN_SECONDS) return;
 
   const channel = computeChannel(entry);
-  if (!channel) return; // not enough 1-minute candle history yet
+  if (!channel) return;
 
-  if (config.REQUIRE_NON_NEGATIVE_SLOPE && channel.slope < 0) return; // avoid a falling knife
+  if (config.REQUIRE_NON_NEGATIVE_SLOPE && channel.slope < 0) return;
 
-  if (entry.lastMarketCapSol == null) return;
+  if (entry.lastPriceSol == null) return;
 
-  if (entry.lastMarketCapSol <= channel.bottom) {
+  if (entry.lastPriceSol <= channel.bottom) {
     entry.lastAlertTime = nowSec;
     simulateBuy(mint, entry, nowSec, channel);
   }
@@ -167,13 +147,7 @@ function simulateBuy(mint, entry, nowSec, channel) {
 
   if (stats.balanceSol < config.FAKE_BUY_SIZE_SOL) {
     log(`SKIPPED (out of demo balance): ${label} - balance is ${stats.balanceSol.toFixed(3)} SOL`);
-    pushEvent({
-      type: "skipped_low_balance",
-      mint,
-      name: entry.name,
-      symbol: entry.symbol,
-      balanceSol: Number(stats.balanceSol.toFixed(3)),
-    });
+    pushEvent({ type: "skipped_low_balance", mint, name: entry.name, symbol: entry.symbol, balanceSol: Number(stats.balanceSol.toFixed(3)) });
     return;
   }
 
@@ -184,7 +158,7 @@ function simulateBuy(mint, entry, nowSec, channel) {
   openPositions.set(mint, {
     symbol: entry.symbol,
     name: entry.name,
-    entryMarketCapSol: entry.lastMarketCapSol,
+    entryPriceSol: entry.lastPriceSol,
     originalSolIn: config.FAKE_BUY_SIZE_SOL,
     entryChannelBottom: channel.bottom,
     entryChannelTop: channel.top,
@@ -192,9 +166,9 @@ function simulateBuy(mint, entry, nowSec, channel) {
   });
 
   log(
-    `BUY (channel bottom): ${label} (${mint}) - price ${entry.lastMarketCapSol.toFixed(4)} vs channel [${channel.bottom.toFixed(
-      4
-    )} - ${channel.top.toFixed(4)}] - spent ${config.FAKE_BUY_SIZE_SOL} SOL - balance now ${stats.balanceSol} SOL`
+    `BUY (channel bottom): ${label} (${mint}) - price ${entry.lastPriceSol} vs channel [${channel.bottom.toFixed(8)} - ${channel.top.toFixed(
+      8
+    )}] - spent ${config.FAKE_BUY_SIZE_SOL} SOL - balance now ${stats.balanceSol} SOL`
   );
 
   pushEvent({
@@ -204,8 +178,8 @@ function simulateBuy(mint, entry, nowSec, channel) {
     symbol: entry.symbol,
     fakeSpendSol: config.FAKE_BUY_SIZE_SOL,
     balanceAfterSol: stats.balanceSol,
-    channelBottom: Number(channel.bottom.toFixed(6)),
-    channelTop: Number(channel.top.toFixed(6)),
+    channelBottom: channel.bottom,
+    channelTop: channel.top,
     link: `https://pump.fun/${mint}`,
   });
 }
@@ -222,9 +196,9 @@ function sellPosition(pos, currentMultiple, reasonType, mint, entry) {
 
   const label = entry.symbol || entry.name || mint;
   log(
-    `${reasonType.toUpperCase()}: ${label} sold 100% at ${currentMultiple.toFixed(2)}x - realized ${solOut.toFixed(
-      4
-    )} SOL (pnl ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} SOL) - balance ${stats.balanceSol} SOL`
+    `${reasonType.toUpperCase()}: ${label} sold 100% at ${currentMultiple.toFixed(2)}x - realized ${solOut.toFixed(4)} SOL (pnl ${
+      pnl >= 0 ? "+" : ""
+    }${pnl.toFixed(4)} SOL) - balance ${stats.balanceSol} SOL`
   );
 
   pushEvent({
@@ -248,9 +222,9 @@ function sellPosition(pos, currentMultiple, reasonType, mint, entry) {
 function checkOpenPosition(mint, entry) {
   const pos = openPositions.get(mint);
   if (!pos) return;
-  if (entry.lastMarketCapSol == null || !pos.entryMarketCapSol) return;
+  if (entry.lastPriceSol == null || !pos.entryPriceSol) return;
 
-  const currentMultiple = entry.lastMarketCapSol / pos.entryMarketCapSol;
+  const currentMultiple = entry.lastPriceSol / pos.entryPriceSol;
 
   if (config.SAFETY_STOP_LOSS_MULTIPLIER != null && currentMultiple <= config.SAFETY_STOP_LOSS_MULTIPLIER) {
     sellPosition(pos, currentMultiple, "safety_stop_loss", mint, entry);
@@ -260,7 +234,7 @@ function checkOpenPosition(mint, entry) {
   const channel = computeChannel(entry);
   if (!channel) return;
 
-  if (entry.lastMarketCapSol >= channel.top) {
+  if (entry.lastPriceSol >= channel.top) {
     sellPosition(pos, currentMultiple, "channel_top_exit", mint, entry);
   }
 }
@@ -282,22 +256,22 @@ function addToken(mint) {
 
   const nowSec = Math.floor(Date.now() / 1000);
   tokenActivity.set(mint, {
-    trades: [],
-    lastAlertTime: 0,
     name: null,
     symbol: null,
-    lastMarketCapSol: null,
+    lastPriceSol: null,
+    lastUpdatedSec: null,
     addedAtSec: nowSec,
+    lastAlertTime: 0,
     candles: [],
     currentCandle: null,
   });
 
-  if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
-    liveSocket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
-  }
-
-  log(`MANUALLY ADDED: ${mint} - now building its 1-minute channel (needs ${config.MIN_CANDLES_FOR_CHANNEL}+ minutes of data)`);
+  log(`MANUALLY ADDED: ${mint} - fetching price from DexScreener (needs ~${config.MIN_CANDLES_FOR_CHANNEL} minutes of history before it can trade)`);
   pushEvent({ type: "token_added", mint, link: `https://pump.fun/${mint}` });
+
+  // Kick off an immediate poll just for this token so it doesn't wait for the next cycle.
+  pollTokens([mint]).catch((err) => log("Immediate poll for new token failed:", err.message));
+
   return { ok: true };
 }
 
@@ -306,14 +280,11 @@ function removeToken(mint) {
 
   const entry = tokenActivity.get(mint);
   const pos = openPositions.get(mint);
-  if (pos && entry.lastMarketCapSol != null) {
-    const currentMultiple = entry.lastMarketCapSol / pos.entryMarketCapSol;
+  if (pos && entry.lastPriceSol != null) {
+    const currentMultiple = entry.lastPriceSol / pos.entryPriceSol;
     sellPosition(pos, currentMultiple, "manual_removal_exit", mint, entry);
   }
 
-  if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
-    liveSocket.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
-  }
   tokenActivity.delete(mint);
   log(`REMOVED: ${mint}`);
   pushEvent({ type: "token_removed", mint, link: `https://pump.fun/${mint}` });
@@ -321,130 +292,111 @@ function removeToken(mint) {
 }
 
 // ------------------------------------------------------------
-// WebSocket feed
+// DexScreener polling
 // ------------------------------------------------------------
-function connect() {
-  const url = config.PUMPPORTAL_API_KEY
-    ? `${config.WEBSOCKET_URL}?api-key=${config.PUMPPORTAL_API_KEY}`
-    : config.WEBSOCKET_URL;
+function chunk(array, size) {
+  const out = [];
+  for (let i = 0; i < array.length; i += size) out.push(array.slice(i, i + size));
+  return out;
+}
 
-  if (!config.PUMPPORTAL_API_KEY) {
-    log(
-      "WARNING: No PUMPPORTAL_API_KEY set. Trade data will NOT arrive for any token you add " +
-        "without a key tied to a wallet funded with at least 0.02 SOL. See README for setup steps."
-    );
-  }
+async function pollTokens(mints) {
+  if (mints.length === 0) return;
 
-  log(`Connecting to ${config.WEBSOCKET_URL} ...`);
-  stats.connectionStatus = "connecting";
-  const ws = new WebSocket(url);
-  liveSocket = ws;
-
-  ws.on("open", () => {
-    log("Connected.");
-    stats.connectionStatus = "connected";
-
-    // Resubscribe to every manually tracked token after a reconnect.
-    const mints = Array.from(tokenActivity.keys());
-    if (mints.length > 0) {
-      ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: mints }));
-      log(`Resubscribed to ${mints.length} manually tracked token(s).`);
-    }
-
-    log(`Bot is live in ${config.DEMO_MODE ? "DEMO (paper trading)" : "REAL"} mode. Manual tokens only.`);
-  });
-
-  ws.on("message", (raw) => {
-    let msg;
+  for (const batch of chunk(mints, 30)) {
+    const url = `https://api.dexscreener.com/tokens/v1/solana/${batch.join(",")}`;
+    let res;
     try {
-      msg = JSON.parse(raw.toString());
-    } catch (e) {
-      return;
+      res = await fetch(url);
+    } catch (err) {
+      stats.lastPollStatus = `network error: ${err.message}`;
+      log(`DexScreener poll failed (network): ${err.message}`);
+      continue;
     }
 
-    if (msg.txType !== "buy" && msg.txType !== "sell" && msg.method !== "pumpFunTradeSubscribe") return;
+    if (!res.ok) {
+      stats.lastPollStatus = `HTTP ${res.status}`;
+      log(`DexScreener poll failed: HTTP ${res.status}`);
+      continue;
+    }
 
-    const mint = msg.mint;
-    if (!mint) return;
-    const entry = tokenActivity.get(mint);
-    if (!entry) return; // not a token we manually added - ignore
+    let data;
+    try {
+      data = await res.json();
+    } catch (err) {
+      stats.lastPollStatus = "bad JSON response";
+      continue;
+    }
+
+    const pairs = Array.isArray(data) ? data : Array.isArray(data.pairs) ? data.pairs : [];
+
+    // For each mint, pick the pair with the highest USD liquidity (its most active market).
+    const bestPairByMint = new Map();
+    for (const pair of pairs) {
+      const baseAddr = pair.baseToken && pair.baseToken.address;
+      if (!baseAddr || !tokenActivity.has(baseAddr)) continue;
+      const liquidity = (pair.liquidity && pair.liquidity.usd) || 0;
+      const existing = bestPairByMint.get(baseAddr);
+      if (!existing || liquidity > existing._liquidity) {
+        bestPairByMint.set(baseAddr, { ...pair, _liquidity: liquidity });
+      }
+    }
 
     const nowSec = Math.floor(Date.now() / 1000);
+    for (const mint of batch) {
+      const entry = tokenActivity.get(mint);
+      if (!entry) continue;
+      const pair = bestPairByMint.get(mint);
+      if (!pair) continue; // no pair found yet for this token on DexScreener
 
-    entry.trades.push({
-      time: nowSec,
-      solAmount: Number(msg.solAmount || msg.sol_amount || 0),
-      buyer: msg.traderPublicKey || msg.trader || msg.buyer || "unknown",
-      isBuy: msg.txType === "buy",
-    });
-    stats.tradesProcessed += 1;
+      if (pair.baseToken.name && !entry.name) entry.name = pair.baseToken.name;
+      if (pair.baseToken.symbol && !entry.symbol) entry.symbol = pair.baseToken.symbol;
 
-    if (msg.name && !entry.name) entry.name = msg.name;
-    if (msg.symbol && !entry.symbol) entry.symbol = msg.symbol;
+      const price = parseFloat(pair.priceNative);
+      if (!Number.isFinite(price)) continue;
 
-    const price = extractPriceSol(msg);
-    if (price != null) {
-      entry.lastMarketCapSol = price;
+      entry.lastPriceSol = price;
+      entry.lastUpdatedSec = nowSec;
       updateCandle(entry, price, nowSec);
-    } else if (entry.trades.length === 1) {
-      // First trade ever received for this token and we still couldn't
-      // find a usable price field - log once so this is diagnosable.
-      log(`WARNING: received a trade for ${mint} but couldn't extract a price from it. Payload keys: ${Object.keys(msg).join(", ")}`);
+
+      checkOpenPosition(mint, entry);
+      scoreAndMaybeBuy(mint, entry, nowSec);
     }
 
-    checkOpenPosition(mint, entry);
-    scoreAndMaybeBuy(mint, entry, nowSec);
-  });
+    stats.lastPollStatus = "ok";
+  }
 
-  ws.on("close", () => {
-    stats.connectionStatus = "disconnected - reconnecting";
-    liveSocket = null;
-    log("Disconnected. Reconnecting in 5 seconds...");
-    setTimeout(connect, 5000);
-  });
+  stats.pricePollsCompleted += 1;
+  stats.lastPollAt = new Date().toISOString();
+}
 
-  ws.on("error", (err) => {
-    log("WebSocket error:", err.message);
-  });
+function startPolling() {
+  const intervalMs = config.DEXSCREENER_POLL_INTERVAL_SECONDS * 1000;
+  setInterval(() => {
+    const mints = Array.from(tokenActivity.keys());
+    if (mints.length === 0) return;
+    pollTokens(mints).catch((err) => log("Poll cycle failed:", err.message));
+  }, intervalMs);
 
-  // Heartbeat: every 60 seconds, print a one-line summary of every manually
-  // tracked token so you can see channel status without opening the dashboard.
-  // Also self-heals: if a token has received ZERO trades since being added
-  // (e.g. the subscribe call landed in a brief disconnect window and was
-  // silently dropped), resend its subscription rather than waiting for the
-  // next full reconnect.
-  const heartbeatInterval = setInterval(() => {
-    log(
-      `HEARTBEAT: ${stats.tradesProcessed} total trades processed | ${tokenActivity.size} manually tracked token(s) | ${openPositions.size} open position(s)`
-    );
+  // Heartbeat every 60s summarizing tracked tokens.
+  setInterval(() => {
+    log(`HEARTBEAT: ${tokenActivity.size} tracked token(s) | ${openPositions.size} open position(s) | last poll: ${stats.lastPollStatus}`);
     for (const [mint, entry] of tokenActivity.entries()) {
       const label = entry.symbol || entry.name || mint;
-
-      if (entry.trades.length === 0) {
-        const secondsSinceAdded = Math.floor(Date.now() / 1000) - entry.addedAtSec;
-        log(`  ${label}: NO TRADES RECEIVED YET (added ${secondsSinceAdded}s ago) - resending subscription`);
-        if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
-          liveSocket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
-        }
+      if (entry.lastPriceSol == null) {
+        log(`  ${label}: no price data yet`);
         continue;
       }
-
       const channel = computeChannel(entry);
       if (!channel) {
-        log(`  ${label}: ${entry.trades.length} trades received | building history (${entry.candles.length + (entry.currentCandle ? 1 : 0)}/${config.MIN_CANDLES_FOR_CHANNEL} candles)`);
+        log(`  ${label}: price ${entry.lastPriceSol} | building history (${entry.candles.length + (entry.currentCandle ? 1 : 0)}/${config.MIN_CANDLES_FOR_CHANNEL} candles)`);
       } else {
         const pos = openPositions.get(mint);
         const status = pos ? "HOLDING" : "watching";
-        log(
-          `  ${label}: ${status} | price ${entry.lastMarketCapSol != null ? entry.lastMarketCapSol.toFixed(4) : "?"} | channel [${channel.bottom.toFixed(
-            4
-          )} - ${channel.top.toFixed(4)}] | slope ${channel.slope > 0 ? "up" : channel.slope < 0 ? "down" : "flat"}`
-        );
+        log(`  ${label}: ${status} | price ${entry.lastPriceSol} | channel [${channel.bottom.toFixed(8)} - ${channel.top.toFixed(8)}] | slope ${channel.slope > 0 ? "up" : channel.slope < 0 ? "down" : "flat"}`);
       }
     }
   }, 60 * 1000);
-
-  ws.on("close", () => clearInterval(heartbeatInterval));
 }
 
 // ------------------------------------------------------------
@@ -458,39 +410,40 @@ app.get("/api/state", (req, res) => {
   const positions = [];
   for (const [mint, pos] of openPositions.entries()) {
     const entry = tokenActivity.get(mint);
-    const currentMarketCapSol = entry ? entry.lastMarketCapSol : null;
-    const currentMultiple =
-      currentMarketCapSol != null && pos.entryMarketCapSol ? currentMarketCapSol / pos.entryMarketCapSol : null;
+    const currentPriceSol = entry ? entry.lastPriceSol : null;
+    const currentMultiple = currentPriceSol != null && pos.entryPriceSol ? currentPriceSol / pos.entryPriceSol : null;
     positions.push({
       mint,
       name: pos.name,
       symbol: pos.symbol,
       currentMultiple: currentMultiple != null ? Number(currentMultiple.toFixed(3)) : null,
-      entryChannelBottom: Number(pos.entryChannelBottom.toFixed(6)),
-      entryChannelTop: Number(pos.entryChannelTop.toFixed(6)),
+      entryChannelBottom: pos.entryChannelBottom,
+      entryChannelTop: pos.entryChannelTop,
       link: `https://pump.fun/${mint}`,
     });
   }
 
   const tracked = [];
+  const nowSec = Math.floor(Date.now() / 1000);
   for (const [mint, entry] of tokenActivity.entries()) {
-    if (openPositions.has(mint)) continue; // shown in positions instead
+    if (openPositions.has(mint)) continue;
     const channel = computeChannel(entry);
     const candleCount = entry.candles.length + (entry.currentCandle ? 1 : 0);
     let pctFromBottom = null;
     let slope = null;
-    if (channel && entry.lastMarketCapSol != null) {
-      pctFromBottom = Number((((entry.lastMarketCapSol - channel.bottom) / (channel.top - channel.bottom)) * 100).toFixed(1));
+    if (channel && entry.lastPriceSol != null) {
+      pctFromBottom = Number((((entry.lastPriceSol - channel.bottom) / (channel.top - channel.bottom)) * 100).toFixed(1));
       slope = channel.slope > 0 ? "up" : channel.slope < 0 ? "down" : "flat";
     }
     tracked.push({
       mint,
       name: entry.name,
       symbol: entry.symbol,
+      hasPrice: entry.lastPriceSol != null,
+      secondsSinceUpdate: entry.lastUpdatedSec != null ? nowSec - entry.lastUpdatedSec : null,
       channelReady: !!channel,
       candleCount,
       candlesNeeded: config.MIN_CANDLES_FOR_CHANNEL,
-      tradesReceived: entry.trades.length,
       pctFromBottom,
       slope,
       link: `https://pump.fun/${mint}`,
@@ -507,6 +460,7 @@ app.get("/api/state", (req, res) => {
       COOLDOWN_SECONDS: config.COOLDOWN_SECONDS,
       SAFETY_STOP_LOSS_MULTIPLIER: config.SAFETY_STOP_LOSS_MULTIPLIER,
       MAX_TRACKED_TOKENS: config.MAX_TRACKED_TOKENS,
+      DEXSCREENER_POLL_INTERVAL_SECONDS: config.DEXSCREENER_POLL_INTERVAL_SECONDS,
     },
     stats,
     positions,
@@ -516,15 +470,13 @@ app.get("/api/state", (req, res) => {
 });
 
 app.post("/api/add-token", (req, res) => {
-  const mint = (req.body && req.body.mint || "").trim();
-  const result = addToken(mint);
-  res.json(result);
+  const mint = ((req.body && req.body.mint) || "").trim();
+  res.json(addToken(mint));
 });
 
 app.post("/api/remove-token", (req, res) => {
-  const mint = (req.body && req.body.mint || "").trim();
-  const result = removeToken(mint);
-  res.json(result);
+  const mint = ((req.body && req.body.mint) || "").trim();
+  res.json(removeToken(mint));
 });
 
 const PORT = process.env.PORT || 3000;
@@ -532,8 +484,8 @@ app.listen(PORT, () => {
   log(`Dashboard server listening on port ${PORT}`);
 });
 
-log("=== pump.fun DEMO bot starting (MANUAL TOKENS ONLY) ===");
+log("=== pump.fun DEMO bot starting (MANUAL TOKENS ONLY, price via DexScreener) ===");
 log(`DEMO_MODE = ${config.DEMO_MODE} (true = safe, no real money is ever used)`);
 log(`Starting demo balance: ${config.STARTING_BALANCE_SOL} SOL`);
-log("No automatic scanning. Add tokens via the dashboard to start trading them.");
-connect();
+log("No API key required. No automatic scanning. Add tokens via the dashboard to start trading them.");
+startPolling();
