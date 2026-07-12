@@ -182,6 +182,7 @@
         const c = data.config;
         document.getElementById('config-box').innerHTML =
           '<span class="row"><b>Buy size:</b> ' + c.FAKE_BUY_SIZE_SOL + ' SOL</span>' +
+          '<span class="row"><b>Token age window:</b> ' + Math.round(c.MIN_TOKEN_AGE_SECONDS/60) + 'min – ' + Math.round(c.MAX_TOKEN_AGE_SECONDS/3600) + 'hr</span>' +
           '<span class="row"><b>Window:</b> ' + c.WINDOW_SECONDS + 's</span>' +
           '<span class="row"><b>Min trades:</b> ' + c.MIN_TRADES_IN_WINDOW + '</span>' +
           '<span class="row"><b>Min unique buyers:</b> ' + c.MIN_UNIQUE_BUYERS_IN_WINDOW + '</span>' +
