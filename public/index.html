@@ -14,6 +14,7 @@
     --green: #35d68a;
     --blue: #5b9dff;
     --yellow: #f0c453;
+    --red: #ff6b6b;
   }
   * { box-sizing: border-box; }
   body {
@@ -51,6 +52,8 @@
   .stat-card .value { font-size: 22px; font-weight: 700; }
   .stat-card .value.status-connected { color: var(--green); }
   .stat-card .value.status-other { color: var(--yellow); }
+  .value.pnl-positive { color: var(--green); }
+  .value.pnl-negative { color: var(--red); }
   .config-box {
     background: var(--card);
     border: 1px solid var(--border);
@@ -82,8 +85,6 @@
   .event-detail { color: var(--muted); }
   .event-detail a { color: var(--blue); text-decoration: none; }
   .event-detail a:hover { text-decoration: underline; }
-  .value.pnl-positive { color: var(--green); }
-  .value.pnl-negative { color: #ff6b6b; }
   .position-card {
     background: var(--card);
     border: 1px solid var(--border);
@@ -96,22 +97,16 @@
     align-items: center;
   }
   .position-card .pname { font-weight: 700; }
-  .position-card .pstate {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 999px;
-    margin-left: 8px;
-  }
-  .pstate.open { background: rgba(91,157,255,0.15); color: var(--blue); }
-  .pstate.half_sold { background: rgba(240,196,83,0.15); color: var(--yellow); }
-  .pstate.closed { background: rgba(139,147,163,0.15); color: var(--muted); }
   .position-card .pmultiple { color: var(--muted); font-size: 12px; }
+  .slope-up { color: var(--green); }
+  .slope-down { color: var(--red); }
+  .slope-flat { color: var(--muted); }
   .empty-state { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
 </style>
 </head>
 <body>
   <h1>pump.fun Demo Bot <span id="mode-badge" class="badge demo">DEMO MODE</span></h1>
-  <div class="subtitle">No real funds are used. This dashboard refreshes automatically every 3 seconds.</div>
+  <div class="subtitle">Strategy: buy at the bottom of each token's trend channel, sell at the top. No real funds are used. Refreshes every 3 seconds.</div>
 
   <div class="stats-grid">
     <div class="stat-card">
@@ -131,16 +126,12 @@
       <div class="value" id="stat-openpos">—</div>
     </div>
     <div class="stat-card">
-      <div class="label">Watching for Dip</div>
-      <div class="value" id="stat-watchlist">—</div>
+      <div class="label">Tracking Channels</div>
+      <div class="value" id="stat-tracking">—</div>
     </div>
     <div class="stat-card">
       <div class="label">New Tokens Seen</div>
       <div class="value" id="stat-newtokens">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Simulated Buys</div>
-      <div class="value" id="stat-buys">—</div>
     </div>
     <div class="stat-card">
       <div class="label">Trades Processed</div>
@@ -150,10 +141,10 @@
 
   <div class="config-box" id="config-box">Loading settings…</div>
 
-  <div class="section-title">Watching for a Dip</div>
-  <div id="watchlist"></div>
+  <div class="section-title">Tracking (waiting for channel-bottom touch)</div>
+  <div id="tracking"></div>
 
-  <div class="section-title">Open &amp; Recent Positions</div>
+  <div class="section-title">Open Positions</div>
   <div id="positions"></div>
 
   <div class="section-title">Live Activity</div>
@@ -170,7 +161,6 @@
         connEl.className = 'value ' + (data.stats.connectionStatus === 'connected' ? 'status-connected' : 'status-other');
 
         document.getElementById('stat-newtokens').textContent = data.stats.newTokensSeen;
-        document.getElementById('stat-buys').textContent = data.stats.simulatedBuys;
         document.getElementById('stat-trades').textContent = data.stats.tradesProcessed;
         document.getElementById('stat-balance').textContent = data.stats.balanceSol.toFixed(3) + ' SOL';
 
@@ -179,9 +169,8 @@
         pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(4) + ' SOL';
         pnlEl.className = 'value ' + (pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
 
-        const openCount = data.positions.filter(function(p) { return p.state !== 'closed'; }).length;
-        document.getElementById('stat-openpos').textContent = openCount;
-        document.getElementById('stat-watchlist').textContent = data.watchlist.length;
+        document.getElementById('stat-openpos').textContent = data.positions.length;
+        document.getElementById('stat-tracking').textContent = data.tracking.length;
 
         const modeBadge = document.getElementById('mode-badge');
         modeBadge.textContent = data.config.DEMO_MODE ? 'DEMO MODE — no real funds' : 'LIVE MODE';
@@ -191,41 +180,40 @@
         document.getElementById('config-box').innerHTML =
           '<span class="row"><b>Buy size:</b> ' + c.FAKE_BUY_SIZE_SOL + ' SOL</span>' +
           '<span class="row"><b>Token age window:</b> ' + Math.round(c.MIN_TOKEN_AGE_SECONDS/60) + 'min – ' + Math.round(c.MAX_TOKEN_AGE_SECONDS/3600) + 'hr</span>' +
-          '<span class="row"><b>Dip required:</b> ' + Math.round(c.DIP_BUY_PCT*100) + '% from peak</span>' +
-          '<span class="row"><b>Window:</b> ' + c.WINDOW_SECONDS + 's</span>' +
+          '<span class="row"><b>Channel width:</b> ' + c.CHANNEL_WIDTH_STDDEV + ' stddev</span>' +
+          '<span class="row"><b>Min candles:</b> ' + c.MIN_CANDLES_FOR_CHANNEL + ' (1min each)</span>' +
+          '<span class="row"><b>Uptrend only:</b> ' + (c.REQUIRE_NON_NEGATIVE_SLOPE ? 'yes' : 'no') + '</span>' +
+          '<span class="row"><b>Activity window:</b> ' + c.WINDOW_SECONDS + 's</span>' +
           '<span class="row"><b>Min trades:</b> ' + c.MIN_TRADES_IN_WINDOW + '</span>' +
           '<span class="row"><b>Min unique buyers:</b> ' + c.MIN_UNIQUE_BUYERS_IN_WINDOW + '</span>' +
           '<span class="row"><b>Min SOL volume:</b> ' + c.MIN_SOL_VOLUME_IN_WINDOW + '</span>' +
           '<span class="row"><b>Cooldown:</b> ' + c.COOLDOWN_SECONDS + 's</span>' +
-          '<span class="row"><b>TP1:</b> sell 50% at ' + c.TP1_MULTIPLIER + 'x</span>' +
-          '<span class="row"><b>Trailing stop:</b> ' + Math.round(c.TRAILING_STOP_PCT * 100) + '% from peak</span>' +
-          '<span class="row"><b>Stop loss:</b> ' + c.STOP_LOSS_MULTIPLIER + 'x</span>';
+          '<span class="row"><b>Safety stop:</b> ' + (c.SAFETY_STOP_LOSS_MULTIPLIER != null ? c.SAFETY_STOP_LOSS_MULTIPLIER + 'x (backstop only)' : 'disabled') + '</span>';
 
-        const watchlistEl = document.getElementById('watchlist');
-        if (!data.watchlist.length) {
-          watchlistEl.innerHTML = '<div class="empty-state">Nothing on the watchlist right now.</div>';
+        const trackingEl = document.getElementById('tracking');
+        if (!data.tracking.length) {
+          trackingEl.innerHTML = '<div class="empty-state">No tokens currently being tracked for a channel touch.</div>';
         } else {
-          watchlistEl.innerHTML = data.watchlist.map(function(w) {
-            const dip = w.dipMultiple != null ? (100 - Math.round(w.dipMultiple * 100)) + '% down from peak' : '—';
-            const mins = Math.floor(w.waitingSeconds / 60);
+          trackingEl.innerHTML = data.tracking.map(function(t) {
+            const slopeClass = 'slope-' + t.slope;
+            const slopeArrow = t.slope === 'up' ? '↗' : t.slope === 'down' ? '↘' : '→';
             return '<div class="position-card">' +
-              '<div><span class="pname">' + (w.symbol || w.name || w.mint) + '</span>' +
-              '<span class="pstate open">watching</span></div>' +
-              '<div class="pmultiple">' + dip + ' · waiting ' + mins + 'm · <a href="' + w.link + '" target="_blank" style="color:var(--blue)">view</a></div>' +
+              '<div><span class="pname">' + (t.symbol || t.name || t.mint) + '</span> ' +
+              '<span class="' + slopeClass + '">' + slopeArrow + ' ' + t.slope + '</span></div>' +
+              '<div class="pmultiple">' + t.pctFromBottom + '% up from channel bottom · <a href="' + t.link + '" target="_blank" style="color:var(--blue)">view</a></div>' +
               '</div>';
           }).join('');
         }
 
         const positionsEl = document.getElementById('positions');
         if (!data.positions.length) {
-          positionsEl.innerHTML = '<div class="empty-state">No positions yet.</div>';
+          positionsEl.innerHTML = '<div class="empty-state">No open positions right now.</div>';
         } else {
           positionsEl.innerHTML = data.positions.map(function(p) {
             const mult = p.currentMultiple != null ? p.currentMultiple + 'x' : '—';
             return '<div class="position-card">' +
-              '<div><span class="pname">' + (p.symbol || p.name || p.mint) + '</span>' +
-              '<span class="pstate ' + p.state + '">' + p.state.replace('_',' ') + '</span></div>' +
-              '<div class="pmultiple">current: ' + mult + ' · peak: ' + p.highWaterMultiple + 'x · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></div>' +
+              '<div><span class="pname">' + (p.symbol || p.name || p.mint) + '</span></div>' +
+              '<div class="pmultiple">current: ' + mult + ' · entry channel [' + p.entryChannelBottom.toFixed(4) + ' – ' + p.entryChannelTop.toFixed(4) + '] · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></div>' +
               '</div>';
           }).join('');
         }
@@ -240,37 +228,24 @@
           const time = new Date(e.time).toLocaleTimeString();
           const coinLabel = e.symbol || e.name || e.mint;
 
-          if (e.type === 'watchlisted') {
-            return '<div class="event" style="border-left-color: var(--blue);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--blue);">👀 WATCHING — ' + coinLabel + ' (trending, waiting for dip)</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">' + e.tradeCount + ' trades · ' + e.uniqueBuyers + ' unique buyers · ' + e.solVolume + ' SOL volume<br>' +
-              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
-              '</div>';
-          }
           if (e.type === 'simulated_buy') {
             return '<div class="event simulated_buy">' +
-              '<div class="event-header"><span class="event-title">🟢 BUY — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-header"><span class="event-title">🟢 BUY @ BOTTOM — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
               '<div class="event-detail">' + e.tradeCount + ' trades · ' + e.uniqueBuyers + ' unique buyers · ' + e.solVolume + ' SOL volume · spent ' + e.fakeSpendSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
+              'channel [' + e.channelBottom.toFixed(4) + ' – ' + e.channelTop.toFixed(4) + ']<br>' +
               '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
               '</div>';
           }
-          if (e.type === 'tp1_hit') {
+          if (e.type === 'channel_top_exit') {
             return '<div class="event simulated_buy">' +
-              '<div class="event-header"><span class="event-title">💰 TP1 HIT — ' + coinLabel + ' (sold ' + e.soldFractionPct + '% at ' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
+              '<div class="event-header"><span class="event-title">💰 SELL @ TOP — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL · bot will keep watching this token<br>' +
               '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
               '</div>';
           }
-          if (e.type === 'trailing_stop_exit') {
-            return '<div class="event" style="border-left-color: var(--yellow);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--yellow);">📉 TRAILING STOP — ' + coinLabel + ' (sold ' + e.soldFractionPct + '% at ' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
-              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
-              '</div>';
-          }
-          if (e.type === 'stop_loss') {
-            return '<div class="event" style="border-left-color: #ff6b6b;">' +
-              '<div class="event-header"><span class="event-title" style="color: #ff6b6b;">🛑 STOP LOSS — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
+          if (e.type === 'safety_stop_loss') {
+            return '<div class="event" style="border-left-color: var(--red);">' +
+              '<div class="event-header"><span class="event-title" style="color: var(--red);">🛑 SAFETY STOP — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
               '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
               '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div>' +
               '</div>';
