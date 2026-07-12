@@ -17,9 +17,9 @@ module.exports = {
   FAKE_BUY_SIZE_SOL: 0.1,
 
   // ---------------- TEST MODE ----------------
-  // Set this to true temporarily to confirm the buy logic actually fires at
-  // all, using much looser thresholds. Once you've seen a few simulated buys
-  // happen, set it back to false to use your real thresholds below.
+  // Set this to true temporarily to confirm the pipeline fires at all, using
+  // much looser activity thresholds for the initial "is this token alive"
+  // check. It does NOT loosen the channel logic itself.
   TEST_MODE: false,
 
   // ---------------- TOKEN AGE FILTER ----------------
@@ -34,25 +34,36 @@ module.exports = {
   // just had one late flicker of activity. 36000 seconds = 10 hours.
   MAX_TOKEN_AGE_SECONDS: 36000,
 
-  // ---------------- BUY-THE-DIP STRATEGY ----------------
-  // Instead of buying the instant a token crosses the trending thresholds
-  // (which means buying into strength/a spike), the bot puts it on a
-  // watchlist first and waits for a pullback from its peak before buying.
-  // "Sell at the top" is already handled by TP1 + the trailing stop below.
+  // ---------------- CHANNEL (TREND LINE) STRATEGY ----------------
+  // Instead of a fixed take-profit or trailing stop, the bot builds a real
+  // 1-minute trend line (a linear regression channel) per token from its
+  // recent price history. It buys when price touches the BOTTOM of that
+  // channel and sells the full position when price touches the TOP.
+  // After a sell, the bot keeps watching that same token for the next
+  // bottom-line touch — it doesn't blacklist it.
 
-  // How far (%) a token must pull back from its peak (since it was first
-  // flagged trending) before the bot buys. 0.15 = wait for a 15% dip.
-  DIP_BUY_PCT: 0.15,
+  // How many 1-minute candles of history are required before the bot trusts
+  // the channel enough to trade it. 10 = needs 10 minutes of price history.
+  MIN_CANDLES_FOR_CHANNEL: 10,
 
-  // If a trending token never pulls back within this many seconds, drop it
-  // from the watchlist instead of waiting forever or chasing it higher.
-  // 1800 = 30 minutes.
-  WATCHLIST_MAX_WAIT_SECONDS: 1800,
+  // How many 1-minute candles to keep in memory per token (older ones are
+  // dropped). 60 = up to 1 hour of history feeds the channel calculation.
+  MAX_CANDLES_STORED: 60,
 
-  // Minimum trades still happening in the window at the moment of the dip,
-  // just to confirm the token isn't simply dead (a "dip" to zero activity
-  // isn't a real buy signal).
-  MIN_WATCH_ACTIVITY_TRADES: 2,
+  // How wide the channel is, measured in standard deviations of price around
+  // the trend line. Higher = wider channel = fewer but more extreme touches.
+  CHANNEL_WIDTH_STDDEV: 1.5,
+
+  // If true, the bot will NOT buy a "bottom line touch" when the channel's
+  // overall trend is pointed downward — this avoids buying every dip in a
+  // coin that's simply crashing (a falling knife), and instead only buys
+  // dips within a flat-to-upward channel.
+  REQUIRE_NON_NEGATIVE_SLOPE: true,
+
+  // ---------------- ACTIVITY FILTER (still required before channel trading) ----------------
+  // A token still has to prove it's actually alive/trending before the bot
+  // will even start trading its channel — this prevents building a "trend
+  // line" on a token nobody is trading.
 
   // Time window (in seconds) the bot looks back over when scoring a token as "trending".
   WINDOW_SECONDS: 60,
@@ -67,36 +78,25 @@ module.exports = {
   MIN_SOL_VOLUME_IN_WINDOW: 5,
 
   // Loosened versions used only while TEST_MODE is true, just to prove the
-  // pipeline (data -> scoring -> buy -> position management) works end to end.
+  // pipeline (data -> activity check -> channel -> buy) works end to end.
   TEST_MIN_TRADES_IN_WINDOW: 4,
   TEST_MIN_UNIQUE_BUYERS_IN_WINDOW: 2,
   TEST_MIN_SOL_VOLUME_IN_WINDOW: 0.5,
 
-  // Once a token triggers a simulated buy, don't trigger again for this many seconds
-  // (stops the bot from spamming the same coin over and over).
-  COOLDOWN_SECONDS: 300,
+  // Once a token triggers a simulated buy, don't trigger another buy for at
+  // least this many seconds — but it CAN trigger again on the same token
+  // after that (channel trading is designed to repeat on the same coin).
+  COOLDOWN_SECONDS: 120,
 
-  // ---------------- EXIT STRATEGY ----------------
-  // These control how the bot manages a position AFTER it "buys". Approach:
-  // 1) Take profit on half the position once it doubles, to pull your original
-  //    capital back out. 2) Let the remaining half ride with a trailing stop,
-  //    so a real mooner keeps running but a reversal locks in the gain.
-  // 3) If it never even doubles and instead craters, cut losses early.
-
-  // Multiple of entry price at which the bot sells 50% of the position.
-  // 2.0 = sell half once the position is up 100% (doubled). That 50% sale at
-  // 2x returns exactly your original SOL spent — the rest is now "free roll".
-  TP1_MULTIPLIER: 2.0,
-
-  // After TP1 triggers, the bot tracks the highest multiple reached and sells
-  // the remaining half if price falls back this % from that peak.
-  // 0.3 = sell if it drops 30% from its post-TP1 high.
-  TRAILING_STOP_PCT: 0.3,
-
-  // If the position never reaches TP1_MULTIPLIER and instead falls to this
-  // multiple of entry, exit the full position to cut losses.
-  // 0.5 = cut losses if it drops 50% before ever doubling.
-  STOP_LOSS_MULTIPLIER: 0.5,
+  // ---------------- SAFETY BACKSTOP (not a trading signal) ----------------
+  // This is deliberately NOT part of the buy/sell strategy above — it's a
+  // last-resort circuit breaker in case a token is in true freefall (where
+  // the channel's bottom line would otherwise just keep sliding down with
+  // it, causing repeated buys into a coin heading toward zero). If a
+  // position falls to this multiple of its entry price, exit immediately
+  // regardless of where the channel is. 0.5 = cut losses at -50%.
+  // Set to null to disable this safety net entirely.
+  SAFETY_STOP_LOSS_MULTIPLIER: 0.5,
 
   // PumpPortal public data WebSocket. Free tier, no API key needed for new-token + public trade stream.
   WEBSOCKET_URL: "wss://pumpportal.fun/api/data",
