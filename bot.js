@@ -1,16 +1,16 @@
 // ============================================================
-// pump.fun DEMO trending bot + live web dashboard
-// - Connects to a live pump.fun data feed (PumpPortal)
-// - Watches every new token + every trade
-// - Builds a rolling 1-minute candle series per token and fits a
-//   linear regression channel (a real trend line with top/bottom
-//   bands) from recent price history
-// - Buys when price touches the BOTTOM of the channel, sells the
-//   full position when price touches the TOP, then keeps watching
-//   the same token for the next bottom touch
-// - DEMO_MODE = true means: no real money, no real wallet, ever
-// - Serves a live dashboard at your Railway URL so you can watch
-//   everything in a browser, no coding needed.
+// pump.fun DEMO bot — MANUAL TOKENS ONLY
+// - No automatic scanning or discovery of new tokens.
+// - You add tokens by mint address via the dashboard.
+// - For each token you add, the bot builds a rolling 1-minute
+//   candle series and fits a linear regression channel (a real
+//   trend line with top/bottom bands) from recent price history.
+// - Buys the full 0.10 SOL position when price touches the
+//   BOTTOM of the channel, sells the full position when price
+//   touches the TOP, then keeps watching for the next bottom touch.
+// - DEMO_MODE = true means: no real money, no real wallet, ever.
+// - Serves a live dashboard so you can add/remove tokens and watch
+//   everything happen, no coding needed.
 // ============================================================
 
 const WebSocket = require("ws");
@@ -18,21 +18,20 @@ const express = require("express");
 const path = require("path");
 const config = require("./config.js");
 
-// One entry per token mint address: recent trades, candles, price proxy.
+// One entry per MANUALLY ADDED token mint address.
+// { trades, name, symbol, lastMarketCapSol, addedAtSec, candles, currentCandle, lastAlertTime }
 const tokenActivity = new Map();
 
 // One entry per token mint address with an OPEN simulated position.
-// Closed positions are removed from here (not kept), so a token is free
-// to trigger a fresh buy again the moment it next touches the channel bottom.
 const openPositions = new Map();
 
-// Rolling list of events shown on the dashboard (newest first).
+let liveSocket = null;
+
 const dashboardEvents = [];
 
 const stats = {
   startedAt: new Date().toISOString(),
   connectionStatus: "connecting",
-  newTokensSeen: 0,
   simulatedBuys: 0,
   tradesProcessed: 0,
   startingBalanceSol: config.STARTING_BALANCE_SOL,
@@ -51,27 +50,6 @@ function pushEvent(event) {
   if (dashboardEvents.length > config.MAX_DASHBOARD_EVENTS) {
     dashboardEvents.length = config.MAX_DASHBOARD_EVENTS;
   }
-}
-
-function getOrCreateToken(mint) {
-  if (!tokenActivity.has(mint)) {
-    tokenActivity.set(mint, {
-      trades: [],
-      lastAlertTime: 0,
-      name: null,
-      symbol: null,
-      lastMarketCapSol: null,
-      createdAtSec: null,
-      candles: [], // closed 1-minute candles: { bucket, open, high, low, close }
-      currentCandle: null, // the candle still being built
-    });
-  }
-  return tokenActivity.get(mint);
-}
-
-function pruneOldTrades(entry, nowSec) {
-  const cutoff = nowSec - config.WINDOW_SECONDS;
-  entry.trades = entry.trades.filter((t) => t.time >= cutoff);
 }
 
 // ------------------------------------------------------------
@@ -140,31 +118,10 @@ function computeChannel(entry) {
 // Entry signal: buy when price touches the bottom of the channel
 // ------------------------------------------------------------
 function scoreAndMaybeBuy(mint, entry, nowSec) {
-  pruneOldTrades(entry, nowSec);
-
-  // Don't stack a second position on a coin we're already holding.
-  const existing = openPositions.get(mint);
-  if (existing) return;
-
-  // Core "don't snipe" rule: skip tokens outside the acceptable age window.
-  if (entry.createdAtSec == null) return;
-  const ageSeconds = nowSec - entry.createdAtSec;
-  if (ageSeconds < config.MIN_TOKEN_AGE_SECONDS || ageSeconds > config.MAX_TOKEN_AGE_SECONDS) return;
+  if (openPositions.has(mint)) return; // already holding
 
   const secondsSinceLastAlert = nowSec - entry.lastAlertTime;
   if (secondsSinceLastAlert < config.COOLDOWN_SECONDS) return;
-
-  // Baseline "is this token actually alive" check, before ever trusting a channel on it.
-  const trades = entry.trades;
-  const tradeCount = trades.length;
-  const uniqueBuyers = new Set(trades.map((t) => t.buyer)).size;
-  const solVolume = trades.reduce((sum, t) => sum + t.solAmount, 0);
-
-  const minTrades = config.TEST_MODE ? config.TEST_MIN_TRADES_IN_WINDOW : config.MIN_TRADES_IN_WINDOW;
-  const minBuyers = config.TEST_MODE ? config.TEST_MIN_UNIQUE_BUYERS_IN_WINDOW : config.MIN_UNIQUE_BUYERS_IN_WINDOW;
-  const minVolume = config.TEST_MODE ? config.TEST_MIN_SOL_VOLUME_IN_WINDOW : config.MIN_SOL_VOLUME_IN_WINDOW;
-  const isActiveEnough = tradeCount >= minTrades && uniqueBuyers >= minBuyers && solVolume >= minVolume;
-  if (!isActiveEnough) return;
 
   const channel = computeChannel(entry);
   if (!channel) return; // not enough 1-minute candle history yet
@@ -175,14 +132,14 @@ function scoreAndMaybeBuy(mint, entry, nowSec) {
 
   if (entry.lastMarketCapSol <= channel.bottom) {
     entry.lastAlertTime = nowSec;
-    simulateBuy(mint, entry, nowSec, { tradeCount, uniqueBuyers, solVolume, channel });
+    simulateBuy(mint, entry, nowSec, channel);
   }
 }
 
 // ------------------------------------------------------------
 // Open a simulated position
 // ------------------------------------------------------------
-function simulateBuy(mint, entry, nowSec, tstats) {
+function simulateBuy(mint, entry, nowSec, channel) {
   const label = entry.symbol || entry.name || mint;
 
   if (!config.DEMO_MODE) {
@@ -211,15 +168,15 @@ function simulateBuy(mint, entry, nowSec, tstats) {
     name: entry.name,
     entryMarketCapSol: entry.lastMarketCapSol,
     originalSolIn: config.FAKE_BUY_SIZE_SOL,
-    entryChannelBottom: tstats.channel.bottom,
-    entryChannelTop: tstats.channel.top,
+    entryChannelBottom: channel.bottom,
+    entryChannelTop: channel.top,
     entryTime: nowSec,
   });
 
   log(
-    `BUY (channel bottom): ${label} (${mint}) - price ${entry.lastMarketCapSol.toFixed(4)} vs channel [${tstats.channel.bottom.toFixed(
+    `BUY (channel bottom): ${label} (${mint}) - price ${entry.lastMarketCapSol.toFixed(4)} vs channel [${channel.bottom.toFixed(
       4
-    )} - ${tstats.channel.top.toFixed(4)}] - spent ${config.FAKE_BUY_SIZE_SOL} SOL - balance now ${stats.balanceSol} SOL`
+    )} - ${channel.top.toFixed(4)}] - spent ${config.FAKE_BUY_SIZE_SOL} SOL - balance now ${stats.balanceSol} SOL`
   );
 
   pushEvent({
@@ -229,11 +186,8 @@ function simulateBuy(mint, entry, nowSec, tstats) {
     symbol: entry.symbol,
     fakeSpendSol: config.FAKE_BUY_SIZE_SOL,
     balanceAfterSol: stats.balanceSol,
-    channelBottom: Number(tstats.channel.bottom.toFixed(6)),
-    channelTop: Number(tstats.channel.top.toFixed(6)),
-    tradeCount: tstats.tradeCount,
-    uniqueBuyers: tstats.uniqueBuyers,
-    solVolume: Number(tstats.solVolume.toFixed(3)),
+    channelBottom: Number(channel.bottom.toFixed(6)),
+    channelTop: Number(channel.top.toFixed(6)),
     link: `https://pump.fun/${mint}`,
   });
 }
@@ -267,9 +221,6 @@ function sellPosition(pos, currentMultiple, reasonType, mint, entry) {
     link: `https://pump.fun/${mint}`,
   });
 
-  // Remove the position entirely (not just mark closed) so this token is
-  // immediately free to trigger another buy the next time it touches the
-  // channel bottom.
   openPositions.delete(mint);
 }
 
@@ -283,8 +234,6 @@ function checkOpenPosition(mint, entry) {
 
   const currentMultiple = entry.lastMarketCapSol / pos.entryMarketCapSol;
 
-  // Safety backstop first: exit regardless of the channel if things have
-  // truly collapsed. This is NOT a trading signal, just a circuit breaker.
   if (config.SAFETY_STOP_LOSS_MULTIPLIER != null && currentMultiple <= config.SAFETY_STOP_LOSS_MULTIPLIER) {
     sellPosition(pos, currentMultiple, "safety_stop_loss", mint, entry);
     return;
@@ -299,6 +248,61 @@ function checkOpenPosition(mint, entry) {
 }
 
 // ------------------------------------------------------------
+// Manual token add/remove
+// ------------------------------------------------------------
+function isValidMintFormat(mint) {
+  return typeof mint === "string" && mint.length >= 32 && mint.length <= 44 && /^[1-9A-HJ-NP-Za-km-z]+$/.test(mint);
+}
+
+function addToken(mint) {
+  if (!isValidMintFormat(mint)) return { ok: false, error: "That doesn't look like a valid Solana mint address." };
+  if (config.EXCLUDED_MINTS.includes(mint)) return { ok: false, error: "That's a known stablecoin/SOL mint, not a meme token." };
+  if (tokenActivity.has(mint)) return { ok: false, error: "Already tracking that token." };
+  if (tokenActivity.size >= config.MAX_TRACKED_TOKENS) {
+    return { ok: false, error: `Max of ${config.MAX_TRACKED_TOKENS} tracked tokens reached. Remove one first.` };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  tokenActivity.set(mint, {
+    trades: [],
+    lastAlertTime: 0,
+    name: null,
+    symbol: null,
+    lastMarketCapSol: null,
+    addedAtSec: nowSec,
+    candles: [],
+    currentCandle: null,
+  });
+
+  if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
+    liveSocket.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+  }
+
+  log(`MANUALLY ADDED: ${mint} - now building its 1-minute channel (needs ${config.MIN_CANDLES_FOR_CHANNEL}+ minutes of data)`);
+  pushEvent({ type: "token_added", mint, link: `https://pump.fun/${mint}` });
+  return { ok: true };
+}
+
+function removeToken(mint) {
+  if (!tokenActivity.has(mint)) return { ok: false, error: "Not currently tracking that token." };
+
+  const entry = tokenActivity.get(mint);
+  const pos = openPositions.get(mint);
+  if (pos && entry.lastMarketCapSol != null) {
+    const currentMultiple = entry.lastMarketCapSol / pos.entryMarketCapSol;
+    sellPosition(pos, currentMultiple, "manual_removal_exit", mint, entry);
+  }
+
+  if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
+    liveSocket.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
+  }
+  tokenActivity.delete(mint);
+  log(`REMOVED: ${mint}`);
+  pushEvent({ type: "token_removed", mint, link: `https://pump.fun/${mint}` });
+  return { ok: true };
+}
+
+// ------------------------------------------------------------
 // WebSocket feed
 // ------------------------------------------------------------
 function connect() {
@@ -308,21 +312,28 @@ function connect() {
 
   if (!config.PUMPPORTAL_API_KEY) {
     log(
-      "WARNING: No PUMPPORTAL_API_KEY set. Token-creation events will still work, " +
-        "but trade data (needed to trigger any buy) will NOT arrive without a key " +
-        "tied to a wallet funded with at least 0.02 SOL. See README for setup steps."
+      "WARNING: No PUMPPORTAL_API_KEY set. Trade data will NOT arrive for any token you add " +
+        "without a key tied to a wallet funded with at least 0.02 SOL. See README for setup steps."
     );
   }
 
   log(`Connecting to ${config.WEBSOCKET_URL} ...`);
   stats.connectionStatus = "connecting";
   const ws = new WebSocket(url);
+  liveSocket = ws;
 
   ws.on("open", () => {
-    log("Connected. Subscribing to new token creation stream...");
+    log("Connected.");
     stats.connectionStatus = "connected";
-    ws.send(JSON.stringify({ method: "subscribeNewToken" }));
-    log(`Bot is live in ${config.DEMO_MODE ? "DEMO (paper trading)" : "REAL"} mode.`);
+
+    // Resubscribe to every manually tracked token after a reconnect.
+    const mints = Array.from(tokenActivity.keys());
+    if (mints.length > 0) {
+      ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: mints }));
+      log(`Resubscribed to ${mints.length} manually tracked token(s).`);
+    }
+
+    log(`Bot is live in ${config.DEMO_MODE ? "DEMO (paper trading)" : "REAL"} mode. Manual tokens only.`);
   });
 
   ws.on("message", (raw) => {
@@ -333,70 +344,38 @@ function connect() {
       return;
     }
 
+    if (msg.txType !== "buy" && msg.txType !== "sell" && msg.method !== "pumpFunTradeSubscribe") return;
+
+    const mint = msg.mint;
+    if (!mint) return;
+    const entry = tokenActivity.get(mint);
+    if (!entry) return; // not a token we manually added - ignore
+
     const nowSec = Math.floor(Date.now() / 1000);
 
-    if (msg.txType === "create" || msg.event_type === "create_coin") {
-      const mint = msg.mint;
-      if (!mint || config.EXCLUDED_MINTS.includes(mint)) return;
-      const entry = getOrCreateToken(mint);
-      entry.name = msg.name || entry.name;
-      entry.symbol = msg.symbol || entry.symbol;
-      entry.createdAtSec = nowSec;
-      if (msg.marketCapSol != null) {
-        entry.lastMarketCapSol = Number(msg.marketCapSol);
-        updateCandle(entry, entry.lastMarketCapSol, nowSec);
-      }
-      stats.newTokensSeen += 1;
+    entry.trades.push({
+      time: nowSec,
+      solAmount: Number(msg.solAmount || msg.sol_amount || 0),
+      buyer: msg.traderPublicKey || msg.trader || msg.buyer || "unknown",
+      isBuy: msg.txType === "buy",
+    });
+    stats.tradesProcessed += 1;
 
-      // Subscribe to live trades for THIS specific token now that we know its
-      // mint address. This is required — PumpPortal has no "subscribe to
-      // every trade platform-wide" option, only per-token subscriptions.
-      ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+    if (msg.name && !entry.name) entry.name = msg.name;
+    if (msg.symbol && !entry.symbol) entry.symbol = msg.symbol;
 
-      log(`New token: ${entry.symbol || entry.name || mint} (${mint}) - subscribed to its trades`);
-      pushEvent({
-        type: "new_token",
-        mint,
-        name: entry.name,
-        symbol: entry.symbol,
-        link: `https://pump.fun/${mint}`,
-      });
-      return;
+    if (msg.marketCapSol != null) {
+      entry.lastMarketCapSol = Number(msg.marketCapSol);
+      updateCandle(entry, entry.lastMarketCapSol, nowSec);
     }
 
-    if (msg.txType === "buy" || msg.txType === "sell" || msg.method === "pumpFunTradeSubscribe") {
-      const mint = msg.mint;
-      if (!mint || config.EXCLUDED_MINTS.includes(mint)) return;
-      const entry = getOrCreateToken(mint);
-
-      entry.trades.push({
-        time: nowSec,
-        solAmount: Number(msg.solAmount || msg.sol_amount || 0),
-        buyer: msg.traderPublicKey || msg.trader || msg.buyer || "unknown",
-        isBuy: msg.txType === "buy",
-      });
-      stats.tradesProcessed += 1;
-
-      // Trade payloads sometimes carry name/symbol even for tokens created
-      // before this bot connected (so we never saw their "create" event).
-      if (msg.name && !entry.name) entry.name = msg.name;
-      if (msg.symbol && !entry.symbol) entry.symbol = msg.symbol;
-
-      if (msg.marketCapSol != null) {
-        entry.lastMarketCapSol = Number(msg.marketCapSol);
-        updateCandle(entry, entry.lastMarketCapSol, nowSec);
-      }
-
-      // Manage any existing position on every price update (channel-top exit
-      // or safety stop), then check whether this trade creates a fresh
-      // bottom-of-channel buy signal.
-      checkOpenPosition(mint, entry);
-      scoreAndMaybeBuy(mint, entry, nowSec);
-    }
+    checkOpenPosition(mint, entry);
+    scoreAndMaybeBuy(mint, entry, nowSec);
   });
 
   ws.on("close", () => {
     stats.connectionStatus = "disconnected - reconnecting";
+    liveSocket = null;
     log("Disconnected. Reconnecting in 5 seconds...");
     setTimeout(connect, 5000);
   });
@@ -405,60 +384,26 @@ function connect() {
     log("WebSocket error:", err.message);
   });
 
-  // Periodically drop tokens that have gone quiet (no trades for a while)
-  // and have no open position, so we don't stay subscribed to every dead
-  // token forever.
-  const cleanupInterval = setInterval(() => {
-    const nowSec = Math.floor(Date.now() / 1000);
-    const staleCutoff = nowSec - 30 * 60; // 30 minutes of silence = stale
-    for (const [mint, entry] of tokenActivity.entries()) {
-      const hasActivePosition = openPositions.has(mint);
-      const lastTradeTime = entry.trades.length ? entry.trades[entry.trades.length - 1].time : entry.lastAlertTime;
-      const isStale = lastTradeTime < staleCutoff && entry.lastAlertTime < staleCutoff;
-      if (isStale && !hasActivePosition) {
-        ws.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
-        tokenActivity.delete(mint);
-      }
-    }
-  }, 5 * 60 * 1000);
-
-  ws.on("close", () => clearInterval(cleanupInterval));
-
-  // Heartbeat: every 60 seconds, print a one-line summary + the most active
-  // tracked tokens right now, so you can SEE whether trade data is flowing
-  // in without waiting blindly for a buy to happen.
+  // Heartbeat: every 60 seconds, print a one-line summary of every manually
+  // tracked token so you can see channel status without opening the dashboard.
   const heartbeatInterval = setInterval(() => {
-    const nowSec = Math.floor(Date.now() / 1000);
-    const ranked = [];
-    for (const [mint, entry] of tokenActivity.entries()) {
-      pruneOldTrades(entry, nowSec);
-      if (entry.trades.length === 0) continue;
-      const channel = computeChannel(entry);
-      ranked.push({
-        label: entry.symbol || entry.name || mint,
-        trades: entry.trades.length,
-        buyers: new Set(entry.trades.map((t) => t.buyer)).size,
-        volume: entry.trades.reduce((s, t) => s + t.solAmount, 0),
-        channelReady: !!channel,
-      });
-    }
-    ranked.sort((a, b) => b.trades - a.trades);
-
     log(
-      `HEARTBEAT: ${stats.tradesProcessed} total trades processed | ${tokenActivity.size} tokens tracked | ${ranked.length} with recent activity | ${openPositions.size} open positions`
+      `HEARTBEAT: ${stats.tradesProcessed} total trades processed | ${tokenActivity.size} manually tracked token(s) | ${openPositions.size} open position(s)`
     );
-    if (ranked.length === 0) {
-      log(
-        "HEARTBEAT: no tokens have any trade data yet. If this persists, trade subscription isn't delivering data (check API key)."
-      );
-    } else {
-      ranked.slice(0, 5).forEach((r) => {
+    for (const [mint, entry] of tokenActivity.entries()) {
+      const label = entry.symbol || entry.name || mint;
+      const channel = computeChannel(entry);
+      if (!channel) {
+        log(`  ${label}: building history (${entry.candles.length + (entry.currentCandle ? 1 : 0)}/${config.MIN_CANDLES_FOR_CHANNEL} candles)`);
+      } else {
+        const pos = openPositions.get(mint);
+        const status = pos ? "HOLDING" : "watching";
         log(
-          `  ${r.label}: ${r.trades} trades / ${r.buyers} buyers / ${r.volume.toFixed(2)} SOL in window / channel ${
-            r.channelReady ? "ready" : "still building"
-          }`
+          `  ${label}: ${status} | price ${entry.lastMarketCapSol != null ? entry.lastMarketCapSol.toFixed(4) : "?"} | channel [${channel.bottom.toFixed(
+            4
+          )} - ${channel.top.toFixed(4)}] | slope ${channel.slope > 0 ? "up" : channel.slope < 0 ? "down" : "flat"}`
         );
-      });
+      }
     }
   }, 60 * 1000);
 
@@ -470,6 +415,7 @@ function connect() {
 // ------------------------------------------------------------
 const app = express();
 app.use(express.static(path.join(__dirname, "public")));
+app.use(express.json());
 
 app.get("/api/state", (req, res) => {
   const positions = [];
@@ -489,51 +435,58 @@ app.get("/api/state", (req, res) => {
     });
   }
 
-  // Tokens currently being tracked for a channel-bottom touch (active, aging
-  // requirement met, channel computed, no open position yet).
-  const tracking = [];
-  const nowSec = Math.floor(Date.now() / 1000);
+  const tracked = [];
   for (const [mint, entry] of tokenActivity.entries()) {
-    if (openPositions.has(mint)) continue;
-    if (entry.createdAtSec == null) continue;
-    const ageSeconds = nowSec - entry.createdAtSec;
-    if (ageSeconds < config.MIN_TOKEN_AGE_SECONDS || ageSeconds > config.MAX_TOKEN_AGE_SECONDS) continue;
+    if (openPositions.has(mint)) continue; // shown in positions instead
     const channel = computeChannel(entry);
-    if (!channel) continue;
-    if (entry.lastMarketCapSol == null) continue;
-    const pctFromBottom = ((entry.lastMarketCapSol - channel.bottom) / (channel.top - channel.bottom)) * 100;
-    tracking.push({
+    const candleCount = entry.candles.length + (entry.currentCandle ? 1 : 0);
+    let pctFromBottom = null;
+    let slope = null;
+    if (channel && entry.lastMarketCapSol != null) {
+      pctFromBottom = Number((((entry.lastMarketCapSol - channel.bottom) / (channel.top - channel.bottom)) * 100).toFixed(1));
+      slope = channel.slope > 0 ? "up" : channel.slope < 0 ? "down" : "flat";
+    }
+    tracked.push({
       mint,
       name: entry.name,
       symbol: entry.symbol,
-      slope: channel.slope > 0 ? "up" : channel.slope < 0 ? "down" : "flat",
-      pctFromBottom: Number(pctFromBottom.toFixed(1)),
+      channelReady: !!channel,
+      candleCount,
+      candlesNeeded: config.MIN_CANDLES_FOR_CHANNEL,
+      pctFromBottom,
+      slope,
       link: `https://pump.fun/${mint}`,
     });
   }
-  tracking.sort((a, b) => a.pctFromBottom - b.pctFromBottom);
 
   res.json({
     config: {
       DEMO_MODE: config.DEMO_MODE,
       FAKE_BUY_SIZE_SOL: config.FAKE_BUY_SIZE_SOL,
-      MIN_TOKEN_AGE_SECONDS: config.MIN_TOKEN_AGE_SECONDS,
-      MAX_TOKEN_AGE_SECONDS: config.MAX_TOKEN_AGE_SECONDS,
       CHANNEL_WIDTH_STDDEV: config.CHANNEL_WIDTH_STDDEV,
       MIN_CANDLES_FOR_CHANNEL: config.MIN_CANDLES_FOR_CHANNEL,
       REQUIRE_NON_NEGATIVE_SLOPE: config.REQUIRE_NON_NEGATIVE_SLOPE,
-      WINDOW_SECONDS: config.WINDOW_SECONDS,
-      MIN_TRADES_IN_WINDOW: config.MIN_TRADES_IN_WINDOW,
-      MIN_UNIQUE_BUYERS_IN_WINDOW: config.MIN_UNIQUE_BUYERS_IN_WINDOW,
-      MIN_SOL_VOLUME_IN_WINDOW: config.MIN_SOL_VOLUME_IN_WINDOW,
       COOLDOWN_SECONDS: config.COOLDOWN_SECONDS,
       SAFETY_STOP_LOSS_MULTIPLIER: config.SAFETY_STOP_LOSS_MULTIPLIER,
+      MAX_TRACKED_TOKENS: config.MAX_TRACKED_TOKENS,
     },
     stats,
     positions,
-    tracking,
+    tracked,
     events: dashboardEvents,
   });
+});
+
+app.post("/api/add-token", (req, res) => {
+  const mint = (req.body && req.body.mint || "").trim();
+  const result = addToken(mint);
+  res.json(result);
+});
+
+app.post("/api/remove-token", (req, res) => {
+  const mint = (req.body && req.body.mint || "").trim();
+  const result = removeToken(mint);
+  res.json(result);
 });
 
 const PORT = process.env.PORT || 3000;
@@ -541,8 +494,8 @@ app.listen(PORT, () => {
   log(`Dashboard server listening on port ${PORT}`);
 });
 
-log("=== pump.fun DEMO trending bot starting ===");
+log("=== pump.fun DEMO bot starting (MANUAL TOKENS ONLY) ===");
 log(`DEMO_MODE = ${config.DEMO_MODE} (true = safe, no real money is ever used)`);
 log(`Starting demo balance: ${config.STARTING_BALANCE_SOL} SOL`);
-log(`Strategy: buy at channel bottom, sell at channel top (${config.CHANNEL_WIDTH_STDDEV} stddev, ${config.MIN_CANDLES_FOR_CHANNEL}+ candles required)`);
+log("No automatic scanning. Add tokens via the dashboard to start trading them.");
 connect();
