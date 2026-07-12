@@ -57,6 +57,7 @@ function getOrCreateToken(mint) {
       name: null,
       symbol: null,
       lastMarketCapSol: null,
+      createdAtSec: null,
     });
   }
   return tokenActivity.get(mint);
@@ -76,6 +77,11 @@ function scoreAndMaybeBuy(mint, entry, nowSec) {
   // Don't stack a second position on a coin we're already holding.
   const existing = openPositions.get(mint);
   if (existing && existing.state !== "closed") return;
+
+  // Core "don't snipe" rule: skip tokens outside the acceptable age window.
+  if (entry.createdAtSec == null) return; // never saw its creation, can't judge age
+  const ageSeconds = nowSec - entry.createdAtSec;
+  if (ageSeconds < config.MIN_TOKEN_AGE_SECONDS || ageSeconds > config.MAX_TOKEN_AGE_SECONDS) return;
 
   const trades = entry.trades;
   const tradeCount = trades.length;
@@ -261,10 +267,11 @@ function connect() {
 
     if (msg.txType === "create" || msg.event_type === "create_coin") {
       const mint = msg.mint;
-      if (!mint) return;
+      if (!mint || config.EXCLUDED_MINTS.includes(mint)) return;
       const entry = getOrCreateToken(mint);
       entry.name = msg.name || entry.name;
       entry.symbol = msg.symbol || entry.symbol;
+      entry.createdAtSec = nowSec;
       if (msg.marketCapSol != null) entry.lastMarketCapSol = Number(msg.marketCapSol);
       stats.newTokensSeen += 1;
 
@@ -286,7 +293,7 @@ function connect() {
 
     if (msg.txType === "buy" || msg.txType === "sell" || msg.method === "pumpFunTradeSubscribe") {
       const mint = msg.mint;
-      if (!mint) return;
+      if (!mint || config.EXCLUDED_MINTS.includes(mint)) return;
       const entry = getOrCreateToken(mint);
 
       entry.trades.push({
@@ -415,6 +422,8 @@ app.get("/api/state", (req, res) => {
       MIN_UNIQUE_BUYERS_IN_WINDOW: config.MIN_UNIQUE_BUYERS_IN_WINDOW,
       MIN_SOL_VOLUME_IN_WINDOW: config.MIN_SOL_VOLUME_IN_WINDOW,
       COOLDOWN_SECONDS: config.COOLDOWN_SECONDS,
+      MIN_TOKEN_AGE_SECONDS: config.MIN_TOKEN_AGE_SECONDS,
+      MAX_TOKEN_AGE_SECONDS: config.MAX_TOKEN_AGE_SECONDS,
       TP1_MULTIPLIER: config.TP1_MULTIPLIER,
       TRAILING_STOP_PCT: config.TRAILING_STOP_PCT,
       STOP_LOSS_MULTIPLIER: config.STOP_LOSS_MULTIPLIER,
