@@ -27,8 +27,8 @@ module.exports = {
   // it has survived at least this long since launch. Brand-new pump.fun
   // tokens are mostly bot-driven noise or straight rugs in their first
   // minutes — waiting lets you see if real organic interest shows up instead.
-  // 600 seconds = 10 minutes.
-  MIN_TOKEN_AGE_SECONDS: 600,
+  // 7200 seconds = 2 hours.
+  MIN_TOKEN_AGE_SECONDS: 7200,
 
   // Upper bound so the bot isn't chasing a token that's basically dead and
   // just had one late flicker of activity. 36000 seconds = 10 hours.
