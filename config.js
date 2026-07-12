@@ -20,7 +20,19 @@ module.exports = {
   // Set this to true temporarily to confirm the buy logic actually fires at
   // all, using much looser thresholds. Once you've seen a few simulated buys
   // happen, set it back to false to use your real thresholds below.
-  TEST_MODE: true,
+  TEST_MODE: false,
+
+  // ---------------- TOKEN AGE FILTER ----------------
+  // This is the core "don't snipe" rule: only consider a token for a buy if
+  // it has survived at least this long since launch. Brand-new pump.fun
+  // tokens are mostly bot-driven noise or straight rugs in their first
+  // minutes — waiting lets you see if real organic interest shows up instead.
+  // 600 seconds = 10 minutes.
+  MIN_TOKEN_AGE_SECONDS: 600,
+
+  // Upper bound so the bot isn't chasing a token that's basically dead and
+  // just had one late flicker of activity. 36000 seconds = 10 hours.
+  MAX_TOKEN_AGE_SECONDS: 36000,
 
   // Time window (in seconds) the bot looks back over when scoring a token as "trending".
   WINDOW_SECONDS: 60,
@@ -76,6 +88,16 @@ module.exports = {
   // subscribeTokenTrade (trade data) requires a key tied to a wallet funded
   // with at least 0.02 SOL, metered at 0.01 SOL per 10,000 events.
   PUMPPORTAL_API_KEY: process.env.PUMPPORTAL_API_KEY || "",
+
+  // Known non-memecoin mints to always ignore, even if a trade message
+  // references them. Guards against edge cases where a migrated token's
+  // trade payload (e.g. PumpSwap swaps against a stablecoin) gets misread
+  // and the quote currency ends up looking like "the token" being traded.
+  EXCLUDED_MINTS: [
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+    "So11111111111111111111111111111111111111112", // Wrapped SOL
+  ],
 
   // How many recent events (new tokens + simulated buys) to keep for the dashboard.
   MAX_DASHBOARD_EVENTS: 200,
