@@ -158,7 +158,7 @@
 
   <div class="stats-grid">
     <div class="stat-card">
-      <div class="label">Connection</div>
+      <div class="label">Last Price Poll</div>
       <div class="value" id="stat-connection">—</div>
     </div>
     <div class="stat-card">
@@ -178,7 +178,7 @@
       <div class="value" id="stat-tracked">—</div>
     </div>
     <div class="stat-card">
-      <div class="label">Trades Processed</div>
+      <div class="label">Price Polls Completed</div>
       <div class="value" id="stat-trades">—</div>
     </div>
   </div>
@@ -246,10 +246,10 @@
         const data = await res.json();
 
         const connEl = document.getElementById('stat-connection');
-        connEl.textContent = data.stats.connectionStatus;
-        connEl.className = 'value ' + (data.stats.connectionStatus === 'connected' ? 'status-connected' : 'status-other');
+        connEl.textContent = data.stats.lastPollStatus;
+        connEl.className = 'value ' + (data.stats.lastPollStatus === 'ok' ? 'status-connected' : 'status-other');
 
-        document.getElementById('stat-trades').textContent = data.stats.tradesProcessed;
+        document.getElementById('stat-trades').textContent = data.stats.pricePollsCompleted;
         document.getElementById('stat-balance').textContent = data.stats.balanceSol.toFixed(3) + ' SOL';
 
         const pnlEl = document.getElementById('stat-pnl');
@@ -266,6 +266,8 @@
 
         const c = data.config;
         document.getElementById('config-box').innerHTML =
+          '<span class="row"><b>Price source:</b> DexScreener (free, no key)</span>' +
+          '<span class="row"><b>Poll interval:</b> ' + c.DEXSCREENER_POLL_INTERVAL_SECONDS + 's</span>' +
           '<span class="row"><b>Buy size:</b> ' + c.FAKE_BUY_SIZE_SOL + ' SOL</span>' +
           '<span class="row"><b>Channel width:</b> ' + c.CHANNEL_WIDTH_STDDEV + ' stddev</span>' +
           '<span class="row"><b>Min candles:</b> ' + c.MIN_CANDLES_FOR_CHANNEL + ' (1min each)</span>' +
@@ -281,10 +283,10 @@
           trackedEl.innerHTML = data.tracked.map(function(t) {
             const label = t.symbol || t.name || t.mint;
             let detail;
-            if (t.tradesReceived === 0) {
-              detail = '<span class="slope-down">⚠ no trade data received yet</span>';
+            if (!t.hasPrice) {
+              detail = '<span class="slope-down">⚠ no price data from DexScreener yet — this token may not have a pair indexed, or needs a moment</span>';
             } else if (!t.channelReady) {
-              detail = t.tradesReceived + ' trades received · building history: ' + t.candleCount + '/' + t.candlesNeeded + ' minutes';
+              detail = 'updated ' + t.secondsSinceUpdate + 's ago · building history: ' + t.candleCount + '/' + t.candlesNeeded + ' minutes';
             } else {
               const slopeClass = 'slope-' + t.slope;
               const slopeArrow = t.slope === 'up' ? '↗' : t.slope === 'down' ? '↘' : '→';
@@ -306,7 +308,7 @@
             const mult = p.currentMultiple != null ? p.currentMultiple + 'x' : '—';
             return '<div class="position-card">' +
               '<div><span class="pname">' + (p.symbol || p.name || p.mint) + '</span><br>' +
-              '<span class="pmultiple">current: ' + mult + ' · entry channel [' + p.entryChannelBottom.toFixed(4) + ' – ' + p.entryChannelTop.toFixed(4) + '] · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></span></div>' +
+              '<span class="pmultiple">current: ' + mult + ' · entry channel [' + p.entryChannelBottom.toFixed(9) + ' – ' + p.entryChannelTop.toFixed(9) + '] · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></span></div>' +
               '<button class="remove-btn" onclick="removeToken(\'' + p.mint + '\')">Remove</button>' +
               '</div>';
           }).join('');
@@ -335,7 +337,7 @@
           if (e.type === 'simulated_buy') {
             return '<div class="event simulated_buy">' +
               '<div class="event-header"><span class="event-title">🟢 BUY @ BOTTOM — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">spent ' + e.fakeSpendSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL · channel [' + e.channelBottom.toFixed(4) + ' – ' + e.channelTop.toFixed(4) + ']<br>' +
+              '<div class="event-detail">spent ' + e.fakeSpendSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL · channel [' + e.channelBottom.toFixed(9) + ' – ' + e.channelTop.toFixed(9) + ']<br>' +
               '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
           }
           if (e.type === 'channel_top_exit') {
