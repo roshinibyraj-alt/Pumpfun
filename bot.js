@@ -2,11 +2,13 @@
 // pump.fun DEMO trending bot + live web dashboard
 // - Connects to a live pump.fun data feed (PumpPortal)
 // - Watches every new token + every trade
-// - Scores tokens against the rules in config.js
-// - When a token crosses the thresholds, it SIMULATES a buy
-//   (DEMO_MODE = true means: no real money, no real wallet, ever)
-// - Manages each simulated position with a take-profit +
-//   trailing-stop + stop-loss exit strategy (see config.js)
+// - Builds a rolling 1-minute candle series per token and fits a
+//   linear regression channel (a real trend line with top/bottom
+//   bands) from recent price history
+// - Buys when price touches the BOTTOM of the channel, sells the
+//   full position when price touches the TOP, then keeps watching
+//   the same token for the next bottom touch
+// - DEMO_MODE = true means: no real money, no real wallet, ever
 // - Serves a live dashboard at your Railway URL so you can watch
 //   everything in a browser, no coding needed.
 // ============================================================
@@ -16,15 +18,13 @@ const express = require("express");
 const path = require("path");
 const config = require("./config.js");
 
-// One entry per token mint address: recent trades + rolling market-cap price proxy.
+// One entry per token mint address: recent trades, candles, price proxy.
 const tokenActivity = new Map();
 
-// One entry per token mint address WITH AN ACTIVE OR CLOSED SIMULATED POSITION.
+// One entry per token mint address with an OPEN simulated position.
+// Closed positions are removed from here (not kept), so a token is free
+// to trigger a fresh buy again the moment it next touches the channel bottom.
 const openPositions = new Map();
-
-// Tokens that have gone "trending" and are being watched for a pullback
-// before buying (buy-the-dip strategy). mint -> { peakMarketCapSol, addedAtSec }
-const hotWatchlist = new Map();
 
 // Rolling list of events shown on the dashboard (newest first).
 const dashboardEvents = [];
@@ -62,6 +62,8 @@ function getOrCreateToken(mint) {
       symbol: null,
       lastMarketCapSol: null,
       createdAtSec: null,
+      candles: [], // closed 1-minute candles: { bucket, open, high, low, close }
+      currentCandle: null, // the candle still being built
     });
   }
   return tokenActivity.get(mint);
@@ -73,23 +75,86 @@ function pruneOldTrades(entry, nowSec) {
 }
 
 // ------------------------------------------------------------
-// Entry signal: decide whether to open a new simulated position
+// 1-minute candle building
+// ------------------------------------------------------------
+function updateCandle(entry, price, nowSec) {
+  const bucket = Math.floor(nowSec / 60);
+  if (!entry.currentCandle || entry.currentCandle.bucket !== bucket) {
+    if (entry.currentCandle) {
+      entry.candles.push(entry.currentCandle);
+      if (entry.candles.length > config.MAX_CANDLES_STORED) {
+        entry.candles.shift();
+      }
+    }
+    entry.currentCandle = { bucket, open: price, high: price, low: price, close: price };
+  } else {
+    if (price > entry.currentCandle.high) entry.currentCandle.high = price;
+    if (price < entry.currentCandle.low) entry.currentCandle.low = price;
+    entry.currentCandle.close = price;
+  }
+}
+
+// ------------------------------------------------------------
+// Linear regression channel (the "trend line" with top/bottom bands)
+// ------------------------------------------------------------
+function computeChannel(entry) {
+  const closes = entry.candles.map((c) => c.close);
+  if (entry.currentCandle) closes.push(entry.currentCandle.close);
+
+  const n = closes.length;
+  if (n < config.MIN_CANDLES_FOR_CHANNEL) return null;
+
+  let sumX = 0,
+    sumY = 0,
+    sumXY = 0,
+    sumXX = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += i;
+    sumY += closes[i];
+    sumXY += i * closes[i];
+    sumXX += i * i;
+  }
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return null;
+
+  const slope = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+
+  let sumSqResid = 0;
+  for (let i = 0; i < n; i++) {
+    const yhat = slope * i + intercept;
+    const resid = closes[i] - yhat;
+    sumSqResid += resid * resid;
+  }
+  const stddev = Math.sqrt(sumSqResid / n);
+
+  const latestX = n - 1;
+  const trendValue = slope * latestX + intercept;
+  const bottom = trendValue - config.CHANNEL_WIDTH_STDDEV * stddev;
+  const top = trendValue + config.CHANNEL_WIDTH_STDDEV * stddev;
+
+  return { slope, trendValue, bottom, top, stddev, candleCount: n };
+}
+
+// ------------------------------------------------------------
+// Entry signal: buy when price touches the bottom of the channel
 // ------------------------------------------------------------
 function scoreAndMaybeBuy(mint, entry, nowSec) {
   pruneOldTrades(entry, nowSec);
 
   // Don't stack a second position on a coin we're already holding.
   const existing = openPositions.get(mint);
-  if (existing && existing.state !== "closed") return;
+  if (existing) return;
 
   // Core "don't snipe" rule: skip tokens outside the acceptable age window.
-  if (entry.createdAtSec == null) return; // never saw its creation, can't judge age
+  if (entry.createdAtSec == null) return;
   const ageSeconds = nowSec - entry.createdAtSec;
   if (ageSeconds < config.MIN_TOKEN_AGE_SECONDS || ageSeconds > config.MAX_TOKEN_AGE_SECONDS) return;
 
   const secondsSinceLastAlert = nowSec - entry.lastAlertTime;
-  if (secondsSinceLastAlert < config.COOLDOWN_SECONDS) return; // still cooling down
+  if (secondsSinceLastAlert < config.COOLDOWN_SECONDS) return;
 
+  // Baseline "is this token actually alive" check, before ever trusting a channel on it.
   const trades = entry.trades;
   const tradeCount = trades.length;
   const uniqueBuyers = new Set(trades.map((t) => t.buyer)).size;
@@ -98,53 +163,19 @@ function scoreAndMaybeBuy(mint, entry, nowSec) {
   const minTrades = config.TEST_MODE ? config.TEST_MIN_TRADES_IN_WINDOW : config.MIN_TRADES_IN_WINDOW;
   const minBuyers = config.TEST_MODE ? config.TEST_MIN_UNIQUE_BUYERS_IN_WINDOW : config.MIN_UNIQUE_BUYERS_IN_WINDOW;
   const minVolume = config.TEST_MODE ? config.TEST_MIN_SOL_VOLUME_IN_WINDOW : config.MIN_SOL_VOLUME_IN_WINDOW;
-  const isHotNow = tradeCount >= minTrades && uniqueBuyers >= minBuyers && solVolume >= minVolume;
+  const isActiveEnough = tradeCount >= minTrades && uniqueBuyers >= minBuyers && solVolume >= minVolume;
+  if (!isActiveEnough) return;
 
-  const watch = hotWatchlist.get(mint);
-  const label = entry.symbol || entry.name || mint;
+  const channel = computeChannel(entry);
+  if (!channel) return; // not enough 1-minute candle history yet
 
-  // Not on the watchlist yet: only add it once it actually qualifies as trending.
-  if (!watch) {
-    if (isHotNow && entry.lastMarketCapSol != null) {
-      hotWatchlist.set(mint, { peakMarketCapSol: entry.lastMarketCapSol, addedAtSec: nowSec });
-      log(`WATCHLIST: ${label} is trending (${tradeCount} trades/${uniqueBuyers} buyers) - waiting for a dip before buying`);
-      pushEvent({
-        type: "watchlisted",
-        mint,
-        name: entry.name,
-        symbol: entry.symbol,
-        tradeCount,
-        uniqueBuyers,
-        solVolume: Number(solVolume.toFixed(3)),
-        link: `https://pump.fun/${mint}`,
-      });
-    }
-    return;
-  }
+  if (config.REQUIRE_NON_NEGATIVE_SLOPE && channel.slope < 0) return; // avoid a falling knife
 
-  // Already on the watchlist: keep tracking its peak, expire if it never dips,
-  // otherwise buy once it has pulled back enough from that peak.
-  if (entry.lastMarketCapSol != null && entry.lastMarketCapSol > watch.peakMarketCapSol) {
-    watch.peakMarketCapSol = entry.lastMarketCapSol;
-  }
+  if (entry.lastMarketCapSol == null) return;
 
-  if (nowSec - watch.addedAtSec > config.WATCHLIST_MAX_WAIT_SECONDS) {
-    hotWatchlist.delete(mint);
-    log(`WATCHLIST: ${label} never pulled back within the wait window - dropping it`);
-    return;
-  }
-
-  if (entry.lastMarketCapSol == null || watch.peakMarketCapSol <= 0) return;
-
-  const dipMultipleFromPeak = entry.lastMarketCapSol / watch.peakMarketCapSol;
-  const dippedEnough = dipMultipleFromPeak <= 1 - config.DIP_BUY_PCT;
-  const stillActive = tradeCount >= config.MIN_WATCH_ACTIVITY_TRADES;
-
-  if (dippedEnough && stillActive) {
-    hotWatchlist.delete(mint);
+  if (entry.lastMarketCapSol <= channel.bottom) {
     entry.lastAlertTime = nowSec;
-    log(`DIP CONFIRMED: ${label} pulled back to ${dipMultipleFromPeak.toFixed(2)}x its recent peak - buying`);
-    simulateBuy(mint, entry, nowSec, { tradeCount, uniqueBuyers, solVolume });
+    simulateBuy(mint, entry, nowSec, { tradeCount, uniqueBuyers, solVolume, channel });
   }
 }
 
@@ -156,11 +187,6 @@ function simulateBuy(mint, entry, nowSec, tstats) {
 
   if (!config.DEMO_MODE) {
     log("DEMO_MODE is false but real-buy logic is not implemented. Doing nothing.");
-    return;
-  }
-
-  if (entry.lastMarketCapSol == null) {
-    log(`SKIPPED (no price data yet): ${label}`);
     return;
   }
 
@@ -185,14 +211,17 @@ function simulateBuy(mint, entry, nowSec, tstats) {
     name: entry.name,
     entryMarketCapSol: entry.lastMarketCapSol,
     originalSolIn: config.FAKE_BUY_SIZE_SOL,
-    costBasisRemaining: config.FAKE_BUY_SIZE_SOL,
-    tokensFractionRemaining: 1,
-    state: "open", // open -> half_sold -> closed
-    highWaterMultiple: 1,
+    entryChannelBottom: tstats.channel.bottom,
+    entryChannelTop: tstats.channel.top,
     entryTime: nowSec,
   });
 
-  log(`SIMULATED BUY: ${label} (${mint}) - spent ${config.FAKE_BUY_SIZE_SOL} SOL - balance now ${stats.balanceSol} SOL`);
+  log(
+    `BUY (channel bottom): ${label} (${mint}) - price ${entry.lastMarketCapSol.toFixed(4)} vs channel [${tstats.channel.bottom.toFixed(
+      4
+    )} - ${tstats.channel.top.toFixed(4)}] - spent ${config.FAKE_BUY_SIZE_SOL} SOL - balance now ${stats.balanceSol} SOL`
+  );
+
   pushEvent({
     type: "simulated_buy",
     mint,
@@ -200,6 +229,8 @@ function simulateBuy(mint, entry, nowSec, tstats) {
     symbol: entry.symbol,
     fakeSpendSol: config.FAKE_BUY_SIZE_SOL,
     balanceAfterSol: stats.balanceSol,
+    channelBottom: Number(tstats.channel.bottom.toFixed(6)),
+    channelTop: Number(tstats.channel.top.toFixed(6)),
     tradeCount: tstats.tradeCount,
     uniqueBuyers: tstats.uniqueBuyers,
     solVolume: Number(tstats.solVolume.toFixed(3)),
@@ -208,25 +239,20 @@ function simulateBuy(mint, entry, nowSec, tstats) {
 }
 
 // ------------------------------------------------------------
-// Sell some fraction of a position, realize simulated P/L
+// Sell the full position, realize simulated P/L
 // ------------------------------------------------------------
-function sellFraction(pos, fraction, currentMultiple, reasonType, mint, entry) {
-  const costBasisSold = pos.originalSolIn * fraction;
-  const solOut = pos.originalSolIn * fraction * currentMultiple;
-  const pnl = solOut - costBasisSold;
+function sellPosition(pos, currentMultiple, reasonType, mint, entry) {
+  const solOut = pos.originalSolIn * currentMultiple;
+  const pnl = solOut - pos.originalSolIn;
 
   stats.balanceSol = Number((stats.balanceSol + solOut).toFixed(6));
   stats.realizedPnlSol = Number((stats.realizedPnlSol + pnl).toFixed(6));
-  pos.tokensFractionRemaining = Number((pos.tokensFractionRemaining - fraction).toFixed(6));
-  pos.costBasisRemaining = Number((pos.costBasisRemaining - costBasisSold).toFixed(6));
 
   const label = entry.symbol || entry.name || mint;
   log(
-    `${reasonType.toUpperCase()}: ${label} sold ${(fraction * 100).toFixed(0)}% at ${currentMultiple.toFixed(
-      2
-    )}x - realized ${solOut.toFixed(4)} SOL (pnl ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} SOL) - balance ${
-      stats.balanceSol
-    } SOL`
+    `${reasonType.toUpperCase()}: ${label} sold 100% at ${currentMultiple.toFixed(2)}x - realized ${solOut.toFixed(
+      4
+    )} SOL (pnl ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} SOL) - balance ${stats.balanceSol} SOL`
   );
 
   pushEvent({
@@ -235,40 +261,40 @@ function sellFraction(pos, fraction, currentMultiple, reasonType, mint, entry) {
     name: entry.name,
     symbol: entry.symbol,
     multiple: Number(currentMultiple.toFixed(3)),
-    soldFractionPct: Math.round(fraction * 100),
     solOut: Number(solOut.toFixed(4)),
     pnlSol: Number(pnl.toFixed(4)),
     balanceAfterSol: stats.balanceSol,
     link: `https://pump.fun/${mint}`,
   });
+
+  // Remove the position entirely (not just mark closed) so this token is
+  // immediately free to trigger another buy the next time it touches the
+  // channel bottom.
+  openPositions.delete(mint);
 }
 
 // ------------------------------------------------------------
-// Manage an existing simulated position: TP1 / trailing stop / stop loss
+// Manage an existing simulated position: channel-top exit, or safety stop
 // ------------------------------------------------------------
 function checkOpenPosition(mint, entry) {
   const pos = openPositions.get(mint);
-  if (!pos || pos.state === "closed") return;
+  if (!pos) return;
   if (entry.lastMarketCapSol == null || !pos.entryMarketCapSol) return;
 
   const currentMultiple = entry.lastMarketCapSol / pos.entryMarketCapSol;
 
-  if (pos.state === "open") {
-    if (currentMultiple >= config.TP1_MULTIPLIER) {
-      sellFraction(pos, 0.5, currentMultiple, "tp1_hit", mint, entry);
-      pos.state = "half_sold";
-      pos.highWaterMultiple = currentMultiple;
-    } else if (currentMultiple <= config.STOP_LOSS_MULTIPLIER) {
-      sellFraction(pos, pos.tokensFractionRemaining, currentMultiple, "stop_loss", mint, entry);
-      pos.state = "closed";
-    }
-  } else if (pos.state === "half_sold") {
-    if (currentMultiple > pos.highWaterMultiple) pos.highWaterMultiple = currentMultiple;
-    const trailingLevel = pos.highWaterMultiple * (1 - config.TRAILING_STOP_PCT);
-    if (currentMultiple <= trailingLevel) {
-      sellFraction(pos, pos.tokensFractionRemaining, currentMultiple, "trailing_stop_exit", mint, entry);
-      pos.state = "closed";
-    }
+  // Safety backstop first: exit regardless of the channel if things have
+  // truly collapsed. This is NOT a trading signal, just a circuit breaker.
+  if (config.SAFETY_STOP_LOSS_MULTIPLIER != null && currentMultiple <= config.SAFETY_STOP_LOSS_MULTIPLIER) {
+    sellPosition(pos, currentMultiple, "safety_stop_loss", mint, entry);
+    return;
+  }
+
+  const channel = computeChannel(entry);
+  if (!channel) return;
+
+  if (entry.lastMarketCapSol >= channel.top) {
+    sellPosition(pos, currentMultiple, "channel_top_exit", mint, entry);
   }
 }
 
@@ -316,7 +342,10 @@ function connect() {
       entry.name = msg.name || entry.name;
       entry.symbol = msg.symbol || entry.symbol;
       entry.createdAtSec = nowSec;
-      if (msg.marketCapSol != null) entry.lastMarketCapSol = Number(msg.marketCapSol);
+      if (msg.marketCapSol != null) {
+        entry.lastMarketCapSol = Number(msg.marketCapSol);
+        updateCandle(entry, entry.lastMarketCapSol, nowSec);
+      }
       stats.newTokensSeen += 1;
 
       // Subscribe to live trades for THIS specific token now that we know its
@@ -350,19 +379,18 @@ function connect() {
 
       // Trade payloads sometimes carry name/symbol even for tokens created
       // before this bot connected (so we never saw their "create" event).
-      // Grab it here too so older tokens still display with a real ticker
-      // instead of just a raw mint address.
       if (msg.name && !entry.name) entry.name = msg.name;
       if (msg.symbol && !entry.symbol) entry.symbol = msg.symbol;
 
       if (msg.marketCapSol != null) {
         entry.lastMarketCapSol = Number(msg.marketCapSol);
+        updateCandle(entry, entry.lastMarketCapSol, nowSec);
       }
 
-      // Manage any existing position on every price update, regardless of window.
+      // Manage any existing position on every price update (channel-top exit
+      // or safety stop), then check whether this trade creates a fresh
+      // bottom-of-channel buy signal.
       checkOpenPosition(mint, entry);
-
-      // Then check whether this trade pushes the token over the entry threshold.
       scoreAndMaybeBuy(mint, entry, nowSec);
     }
   });
@@ -378,23 +406,21 @@ function connect() {
   });
 
   // Periodically drop tokens that have gone quiet (no trades for a while)
-  // and have no open/held position, so we don't stay subscribed to every
-  // dead token forever.
+  // and have no open position, so we don't stay subscribed to every dead
+  // token forever.
   const cleanupInterval = setInterval(() => {
     const nowSec = Math.floor(Date.now() / 1000);
     const staleCutoff = nowSec - 30 * 60; // 30 minutes of silence = stale
     for (const [mint, entry] of tokenActivity.entries()) {
-      const pos = openPositions.get(mint);
-      const hasActivePosition = pos && pos.state !== "closed";
+      const hasActivePosition = openPositions.has(mint);
       const lastTradeTime = entry.trades.length ? entry.trades[entry.trades.length - 1].time : entry.lastAlertTime;
       const isStale = lastTradeTime < staleCutoff && entry.lastAlertTime < staleCutoff;
       if (isStale && !hasActivePosition) {
         ws.send(JSON.stringify({ method: "unsubscribeTokenTrade", keys: [mint] }));
         tokenActivity.delete(mint);
-        hotWatchlist.delete(mint);
       }
     }
-  }, 5 * 60 * 1000); // run every 5 minutes
+  }, 5 * 60 * 1000);
 
   ws.on("close", () => clearInterval(cleanupInterval));
 
@@ -407,23 +433,31 @@ function connect() {
     for (const [mint, entry] of tokenActivity.entries()) {
       pruneOldTrades(entry, nowSec);
       if (entry.trades.length === 0) continue;
+      const channel = computeChannel(entry);
       ranked.push({
         label: entry.symbol || entry.name || mint,
         trades: entry.trades.length,
         buyers: new Set(entry.trades.map((t) => t.buyer)).size,
         volume: entry.trades.reduce((s, t) => s + t.solAmount, 0),
+        channelReady: !!channel,
       });
     }
     ranked.sort((a, b) => b.trades - a.trades);
 
     log(
-      `HEARTBEAT: ${stats.tradesProcessed} total trades processed | ${tokenActivity.size} tokens tracked | ${ranked.length} with recent activity`
+      `HEARTBEAT: ${stats.tradesProcessed} total trades processed | ${tokenActivity.size} tokens tracked | ${ranked.length} with recent activity | ${openPositions.size} open positions`
     );
     if (ranked.length === 0) {
-      log("HEARTBEAT: no tokens have any trade data yet. If this persists, trade subscription isn't delivering data (check API key).");
+      log(
+        "HEARTBEAT: no tokens have any trade data yet. If this persists, trade subscription isn't delivering data (check API key)."
+      );
     } else {
       ranked.slice(0, 5).forEach((r) => {
-        log(`  ${r.label}: ${r.trades} trades / ${r.buyers} buyers / ${r.volume.toFixed(2)} SOL in window`);
+        log(
+          `  ${r.label}: ${r.trades} trades / ${r.buyers} buyers / ${r.volume.toFixed(2)} SOL in window / channel ${
+            r.channelReady ? "ready" : "still building"
+          }`
+        );
       });
     }
   }, 60 * 1000);
@@ -448,51 +482,56 @@ app.get("/api/state", (req, res) => {
       mint,
       name: pos.name,
       symbol: pos.symbol,
-      state: pos.state,
-      tokensFractionRemaining: pos.tokensFractionRemaining,
       currentMultiple: currentMultiple != null ? Number(currentMultiple.toFixed(3)) : null,
-      highWaterMultiple: Number(pos.highWaterMultiple.toFixed(3)),
+      entryChannelBottom: Number(pos.entryChannelBottom.toFixed(6)),
+      entryChannelTop: Number(pos.entryChannelTop.toFixed(6)),
       link: `https://pump.fun/${mint}`,
     });
   }
-  // Show open/half_sold positions first, most recently entered first.
-  positions.sort((a, b) => (a.state === "closed") - (b.state === "closed"));
 
-  const watchlist = [];
-  for (const [mint, w] of hotWatchlist.entries()) {
-    const entry = tokenActivity.get(mint);
-    const currentMarketCapSol = entry ? entry.lastMarketCapSol : null;
-    const dipMultiple = currentMarketCapSol != null && w.peakMarketCapSol ? currentMarketCapSol / w.peakMarketCapSol : null;
-    watchlist.push({
+  // Tokens currently being tracked for a channel-bottom touch (active, aging
+  // requirement met, channel computed, no open position yet).
+  const tracking = [];
+  const nowSec = Math.floor(Date.now() / 1000);
+  for (const [mint, entry] of tokenActivity.entries()) {
+    if (openPositions.has(mint)) continue;
+    if (entry.createdAtSec == null) continue;
+    const ageSeconds = nowSec - entry.createdAtSec;
+    if (ageSeconds < config.MIN_TOKEN_AGE_SECONDS || ageSeconds > config.MAX_TOKEN_AGE_SECONDS) continue;
+    const channel = computeChannel(entry);
+    if (!channel) continue;
+    if (entry.lastMarketCapSol == null) continue;
+    const pctFromBottom = ((entry.lastMarketCapSol - channel.bottom) / (channel.top - channel.bottom)) * 100;
+    tracking.push({
       mint,
-      name: entry ? entry.name : null,
-      symbol: entry ? entry.symbol : null,
-      dipMultiple: dipMultiple != null ? Number(dipMultiple.toFixed(3)) : null,
-      waitingSeconds: Math.floor(Date.now() / 1000) - w.addedAtSec,
+      name: entry.name,
+      symbol: entry.symbol,
+      slope: channel.slope > 0 ? "up" : channel.slope < 0 ? "down" : "flat",
+      pctFromBottom: Number(pctFromBottom.toFixed(1)),
       link: `https://pump.fun/${mint}`,
     });
   }
+  tracking.sort((a, b) => a.pctFromBottom - b.pctFromBottom);
 
   res.json({
     config: {
       DEMO_MODE: config.DEMO_MODE,
       FAKE_BUY_SIZE_SOL: config.FAKE_BUY_SIZE_SOL,
+      MIN_TOKEN_AGE_SECONDS: config.MIN_TOKEN_AGE_SECONDS,
+      MAX_TOKEN_AGE_SECONDS: config.MAX_TOKEN_AGE_SECONDS,
+      CHANNEL_WIDTH_STDDEV: config.CHANNEL_WIDTH_STDDEV,
+      MIN_CANDLES_FOR_CHANNEL: config.MIN_CANDLES_FOR_CHANNEL,
+      REQUIRE_NON_NEGATIVE_SLOPE: config.REQUIRE_NON_NEGATIVE_SLOPE,
       WINDOW_SECONDS: config.WINDOW_SECONDS,
       MIN_TRADES_IN_WINDOW: config.MIN_TRADES_IN_WINDOW,
       MIN_UNIQUE_BUYERS_IN_WINDOW: config.MIN_UNIQUE_BUYERS_IN_WINDOW,
       MIN_SOL_VOLUME_IN_WINDOW: config.MIN_SOL_VOLUME_IN_WINDOW,
       COOLDOWN_SECONDS: config.COOLDOWN_SECONDS,
-      MIN_TOKEN_AGE_SECONDS: config.MIN_TOKEN_AGE_SECONDS,
-      MAX_TOKEN_AGE_SECONDS: config.MAX_TOKEN_AGE_SECONDS,
-      DIP_BUY_PCT: config.DIP_BUY_PCT,
-      WATCHLIST_MAX_WAIT_SECONDS: config.WATCHLIST_MAX_WAIT_SECONDS,
-      TP1_MULTIPLIER: config.TP1_MULTIPLIER,
-      TRAILING_STOP_PCT: config.TRAILING_STOP_PCT,
-      STOP_LOSS_MULTIPLIER: config.STOP_LOSS_MULTIPLIER,
+      SAFETY_STOP_LOSS_MULTIPLIER: config.SAFETY_STOP_LOSS_MULTIPLIER,
     },
     stats,
     positions,
-    watchlist,
+    tracking,
     events: dashboardEvents,
   });
 });
@@ -505,4 +544,5 @@ app.listen(PORT, () => {
 log("=== pump.fun DEMO trending bot starting ===");
 log(`DEMO_MODE = ${config.DEMO_MODE} (true = safe, no real money is ever used)`);
 log(`Starting demo balance: ${config.STARTING_BALANCE_SOL} SOL`);
+log(`Strategy: buy at channel bottom, sell at channel top (${config.CHANNEL_WIDTH_STDDEV} stddev, ${config.MIN_CANDLES_FOR_CHANNEL}+ candles required)`);
 connect();
