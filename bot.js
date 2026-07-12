@@ -82,10 +82,11 @@ function scoreAndMaybeBuy(mint, entry, nowSec) {
   const uniqueBuyers = new Set(trades.map((t) => t.buyer)).size;
   const solVolume = trades.reduce((sum, t) => sum + t.solAmount, 0);
 
-  const meetsThreshold =
-    tradeCount >= config.MIN_TRADES_IN_WINDOW &&
-    uniqueBuyers >= config.MIN_UNIQUE_BUYERS_IN_WINDOW &&
-    solVolume >= config.MIN_SOL_VOLUME_IN_WINDOW;
+  const minTrades = config.TEST_MODE ? config.TEST_MIN_TRADES_IN_WINDOW : config.MIN_TRADES_IN_WINDOW;
+  const minBuyers = config.TEST_MODE ? config.TEST_MIN_UNIQUE_BUYERS_IN_WINDOW : config.MIN_UNIQUE_BUYERS_IN_WINDOW;
+  const minVolume = config.TEST_MODE ? config.TEST_MIN_SOL_VOLUME_IN_WINDOW : config.MIN_SOL_VOLUME_IN_WINDOW;
+
+  const meetsThreshold = tradeCount >= minTrades && uniqueBuyers >= minBuyers && solVolume >= minVolume;
 
   if (!meetsThreshold) return;
 
@@ -225,9 +226,21 @@ function checkOpenPosition(mint, entry) {
 // WebSocket feed
 // ------------------------------------------------------------
 function connect() {
+  const url = config.PUMPPORTAL_API_KEY
+    ? `${config.WEBSOCKET_URL}?api-key=${config.PUMPPORTAL_API_KEY}`
+    : config.WEBSOCKET_URL;
+
+  if (!config.PUMPPORTAL_API_KEY) {
+    log(
+      "WARNING: No PUMPPORTAL_API_KEY set. Token-creation events will still work, " +
+        "but trade data (needed to trigger any buy) will NOT arrive without a key " +
+        "tied to a wallet funded with at least 0.02 SOL. See README for setup steps."
+    );
+  }
+
   log(`Connecting to ${config.WEBSOCKET_URL} ...`);
   stats.connectionStatus = "connecting";
-  const ws = new WebSocket(config.WEBSOCKET_URL);
+  const ws = new WebSocket(url);
 
   ws.on("open", () => {
     log("Connected. Subscribing to new token creation stream...");
@@ -332,6 +345,38 @@ function connect() {
   }, 5 * 60 * 1000); // run every 5 minutes
 
   ws.on("close", () => clearInterval(cleanupInterval));
+
+  // Heartbeat: every 60 seconds, print a one-line summary + the most active
+  // tracked tokens right now, so you can SEE whether trade data is flowing
+  // in without waiting blindly for a buy to happen.
+  const heartbeatInterval = setInterval(() => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const ranked = [];
+    for (const [mint, entry] of tokenActivity.entries()) {
+      pruneOldTrades(entry, nowSec);
+      if (entry.trades.length === 0) continue;
+      ranked.push({
+        label: entry.symbol || entry.name || mint,
+        trades: entry.trades.length,
+        buyers: new Set(entry.trades.map((t) => t.buyer)).size,
+        volume: entry.trades.reduce((s, t) => s + t.solAmount, 0),
+      });
+    }
+    ranked.sort((a, b) => b.trades - a.trades);
+
+    log(
+      `HEARTBEAT: ${stats.tradesProcessed} total trades processed | ${tokenActivity.size} tokens tracked | ${ranked.length} with recent activity`
+    );
+    if (ranked.length === 0) {
+      log("HEARTBEAT: no tokens have any trade data yet. If this persists, trade subscription isn't delivering data (check API key).");
+    } else {
+      ranked.slice(0, 5).forEach((r) => {
+        log(`  ${r.label}: ${r.trades} trades / ${r.buyers} buyers / ${r.volume.toFixed(2)} SOL in window`);
+      });
+    }
+  }, 60 * 1000);
+
+  ws.on("close", () => clearInterval(heartbeatInterval));
 }
 
 // ------------------------------------------------------------
