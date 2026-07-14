@@ -129,9 +129,15 @@
   }
   .position-card .pname { font-weight: 700; }
   .position-card .pmultiple { color: var(--muted); font-size: 12px; }
-  .slope-up { color: var(--green); }
-  .slope-down { color: var(--red); }
-  .slope-flat { color: var(--muted); }
+  .level-badge {
+    display: inline-block;
+    background: rgba(91,157,255,0.15);
+    color: var(--blue);
+    border-radius: 6px;
+    padding: 1px 6px;
+    font-size: 11px;
+    margin-left: 6px;
+  }
   .remove-btn {
     background: transparent;
     border: 1px solid var(--border);
@@ -148,11 +154,11 @@
 </head>
 <body>
   <h1>pump.fun Demo Bot <span id="mode-badge" class="badge demo">DEMO MODE</span></h1>
-  <div class="subtitle">Manual tokens only — no automatic scanning. Buy at channel bottom, sell at channel top. No real funds are used.</div>
+  <div class="subtitle">Martingale strategy: buy on add, double down on drops from average entry, take profit on the bounce. No real funds are used.</div>
 
   <div class="add-token-box">
     <input id="add-token-input" type="text" placeholder="Paste a pump.fun token mint address..." />
-    <button id="add-token-btn" onclick="addToken()">Add & Track</button>
+    <button id="add-token-btn" onclick="addToken()">Add & Trade</button>
   </div>
   <div id="add-token-msg" class="add-token-msg"></div>
 
@@ -177,15 +183,11 @@
       <div class="label">Tracked Tokens</div>
       <div class="value" id="stat-tracked">—</div>
     </div>
-    <div class="stat-card">
-      <div class="label">Price Polls Completed</div>
-      <div class="value" id="stat-trades">—</div>
-    </div>
   </div>
 
   <div class="config-box" id="config-box">Loading settings…</div>
 
-  <div class="section-title">Tracked Tokens (waiting for channel-bottom touch)</div>
+  <div class="section-title">Waiting for Initial Buy / No Price Yet</div>
   <div id="tracked"></div>
 
   <div class="section-title">Open Positions</div>
@@ -212,7 +214,7 @@
         });
         const data = await res.json();
         if (data.ok) {
-          msgEl.textContent = 'Added — building its channel now (needs a few minutes of price history).';
+          msgEl.textContent = 'Added — will buy the instant a price is available.';
           msgEl.className = 'add-token-msg success';
           input.value = '';
         } else {
@@ -240,6 +242,11 @@
       refresh();
     }
 
+    function fmtPrice(p) {
+      if (p == null) return '—';
+      return p.toPrecision(6);
+    }
+
     async function refresh() {
       try {
         const res = await fetch('/api/state');
@@ -249,7 +256,6 @@
         connEl.textContent = data.stats.lastPollStatus;
         connEl.className = 'value ' + (data.stats.lastPollStatus === 'ok' ? 'status-connected' : 'status-other');
 
-        document.getElementById('stat-trades').textContent = data.stats.pricePollsCompleted;
         document.getElementById('stat-balance').textContent = data.stats.balanceSol.toFixed(3) + ' SOL';
 
         const pnlEl = document.getElementById('stat-pnl');
@@ -268,29 +274,26 @@
         document.getElementById('config-box').innerHTML =
           '<span class="row"><b>Price source:</b> DexScreener (free, no key)</span>' +
           '<span class="row"><b>Poll interval:</b> ' + c.DEXSCREENER_POLL_INTERVAL_SECONDS + 's</span>' +
-          '<span class="row"><b>Buy size:</b> ' + c.FAKE_BUY_SIZE_SOL + ' SOL</span>' +
-          '<span class="row"><b>Channel width:</b> ' + c.CHANNEL_WIDTH_STDDEV + ' stddev</span>' +
-          '<span class="row"><b>Min candles:</b> ' + c.MIN_CANDLES_FOR_CHANNEL + ' (1min each)</span>' +
-          '<span class="row"><b>Uptrend only:</b> ' + (c.REQUIRE_NON_NEGATIVE_SLOPE ? 'yes' : 'no') + '</span>' +
-          '<span class="row"><b>Cooldown:</b> ' + c.COOLDOWN_SECONDS + 's</span>' +
-          '<span class="row"><b>Safety stop:</b> ' + (c.SAFETY_STOP_LOSS_MULTIPLIER != null ? c.SAFETY_STOP_LOSS_MULTIPLIER + 'x (backstop only)' : 'disabled') + '</span>' +
-          '<span class="row"><b>Max tracked:</b> ' + c.MAX_TRACKED_TOKENS + '</span>';
+          '<span class="row"><b>Base buy:</b> ' + c.BASE_BUY_SIZE_SOL + ' SOL</span>' +
+          '<span class="row"><b>Double down at:</b> -' + Math.round(c.DROP_TRIGGER_PCT*100) + '% from avg entry</span>' +
+          '<span class="row"><b>Multiplier:</b> ' + c.MARTINGALE_MULTIPLIER + 'x</span>' +
+          '<span class="row"><b>Take profit at:</b> +' + Math.round(c.TP_PCT*100) + '% from avg entry</span>' +
+          '<span class="row"><b>Max levels:</b> ' + c.MAX_MARTINGALE_LEVELS + '</span>' +
+          '<span class="row"><b>Restart after TP:</b> ' + (c.RESTART_AFTER_TP ? 'yes' : 'no') + '</span>';
 
         const trackedEl = document.getElementById('tracked');
         if (!data.tracked.length) {
-          trackedEl.innerHTML = '<div class="empty-state">No tokens tracked yet. Paste a mint address above to add one.</div>';
+          trackedEl.innerHTML = '<div class="empty-state">Nothing waiting — every tracked token either has an open position or hasn\\'t been added yet.</div>';
         } else {
           trackedEl.innerHTML = data.tracked.map(function(t) {
             const label = t.symbol || t.name || t.mint;
             let detail;
             if (!t.hasPrice) {
-              detail = '<span class="slope-down">⚠ no price data from DexScreener yet — this token may not have a pair indexed, or needs a moment</span>';
-            } else if (!t.channelReady) {
-              detail = 'updated ' + t.secondsSinceUpdate + 's ago · building history: ' + t.candleCount + '/' + t.candlesNeeded + ' minutes';
+              detail = '<span style="color:var(--red)">⚠ no price data from DexScreener yet</span>';
+            } else if (t.awaitingInitialBuy) {
+              detail = 'price ' + fmtPrice(null) + ' — buy pending next poll tick';
             } else {
-              const slopeClass = 'slope-' + t.slope;
-              const slopeArrow = t.slope === 'up' ? '↗' : t.slope === 'down' ? '↘' : '→';
-              detail = '<span class="' + slopeClass + '">' + slopeArrow + ' ' + t.slope + '</span> · ' + t.pctFromBottom + '% up from channel bottom';
+              detail = 'updated ' + t.secondsSinceUpdate + 's ago';
             }
             return '<div class="position-card">' +
               '<div><span class="pname">' + label + '</span><br>' +
@@ -305,10 +308,12 @@
           positionsEl.innerHTML = '<div class="empty-state">No open positions right now.</div>';
         } else {
           positionsEl.innerHTML = data.positions.map(function(p) {
-            const mult = p.currentMultiple != null ? p.currentMultiple + 'x' : '—';
+            const pnlClass = p.unrealizedPnlSol >= 0 ? 'pnl-positive' : 'pnl-negative';
             return '<div class="position-card">' +
-              '<div><span class="pname">' + (p.symbol || p.name || p.mint) + '</span><br>' +
-              '<span class="pmultiple">current: ' + mult + ' · entry channel [' + p.entryChannelBottom.toFixed(9) + ' – ' + p.entryChannelTop.toFixed(9) + '] · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></span></div>' +
+              '<div><span class="pname">' + (p.symbol || p.name || p.mint) + '</span>' +
+              '<span class="level-badge">level ' + p.currentLevel + '/' + p.maxLevels + '</span><br>' +
+              '<span class="pmultiple">price ' + fmtPrice(p.currentPriceSol) + ' · avg entry ' + fmtPrice(p.averageEntryPrice) + ' · invested ' + p.totalSolIn.toFixed(3) + ' SOL<br>' +
+              'next dip buy at ' + fmtPrice(p.nextDropTrigger) + ' · TP at ' + fmtPrice(p.tpTrigger) + ' · unrealized <span class="' + pnlClass + '">' + (p.unrealizedPnlSol >= 0 ? '+' : '') + p.unrealizedPnlSol + ' SOL</span> · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></span></div>' +
               '<button class="remove-btn" onclick="removeToken(\'' + p.mint + '\')">Remove</button>' +
               '</div>';
           }).join('');
@@ -334,33 +339,33 @@
               '<div class="event-header"><span class="event-title" style="color: var(--muted);">➖ REMOVED — ' + e.mint + '</span><span class="event-time">' + time + '</span></div>' +
               '</div>';
           }
-          if (e.type === 'simulated_buy') {
+          if (e.type === 'initial_buy') {
             return '<div class="event simulated_buy">' +
-              '<div class="event-header"><span class="event-title">🟢 BUY @ BOTTOM — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">spent ' + e.fakeSpendSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL · channel [' + e.channelBottom.toFixed(9) + ' – ' + e.channelTop.toFixed(9) + ']<br>' +
+              '<div class="event-header"><span class="event-title">🟢 INITIAL BUY — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">bought ' + e.buySizeSol + ' SOL at ' + fmtPrice(e.priceSol) + ' · balance ' + e.balanceAfterSol + ' SOL<br>' +
               '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
           }
-          if (e.type === 'channel_top_exit') {
-            return '<div class="event simulated_buy">' +
-              '<div class="event-header"><span class="event-title">💰 SELL @ TOP — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL · still tracking this token<br>' +
+          if (e.type === 'double_down') {
+            return '<div class="event" style="border-left-color: var(--yellow);">' +
+              '<div class="event-header"><span class="event-title" style="color: var(--yellow);">🔻 DOUBLE DOWN (level ' + e.level + ') — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">bought ' + e.buySizeSol + ' SOL at ' + fmtPrice(e.priceSol) + ' · new avg entry ' + fmtPrice(e.averageEntryPrice) + ' · balance ' + e.balanceAfterSol + ' SOL<br>' +
               '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
           }
-          if (e.type === 'safety_stop_loss') {
-            return '<div class="event" style="border-left-color: var(--red);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--red);">🛑 SAFETY STOP — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
+          if (e.type === 'take_profit') {
+            return '<div class="event simulated_buy">' +
+              '<div class="event-header"><span class="event-title">💰 TAKE PROFIT — ' + coinLabel + ' (' + e.levels + ' level(s))</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">invested ' + e.totalSolIn + ' SOL · realized ' + e.solOut + ' SOL · pnl +' + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
               '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
           }
           if (e.type === 'manual_removal_exit') {
             return '<div class="event" style="border-left-color: var(--yellow);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--yellow);">⏏ CLOSED ON REMOVE — ' + coinLabel + ' (' + e.multiple + 'x)</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-header"><span class="event-title" style="color: var(--yellow);">⏏ CLOSED ON REMOVE — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
               '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL</div></div>';
           }
           if (e.type === 'skipped_low_balance') {
-            return '<div class="event" style="border-left-color: var(--muted);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--muted);">⏸ SKIPPED (low balance) — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">balance was ' + e.balanceSol + ' SOL</div></div>';
+            return '<div class="event" style="border-left-color: var(--red);">' +
+              '<div class="event-header"><span class="event-title" style="color: var(--red);">⏸ SKIPPED (low balance) — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
+              '<div class="event-detail">needed ' + e.neededSol + ' SOL, balance was ' + e.balanceSol + ' SOL</div></div>';
           }
           return '';
         }).join('');
