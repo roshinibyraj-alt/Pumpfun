@@ -283,7 +283,7 @@
 
         const trackedEl = document.getElementById('tracked');
         if (!data.tracked.length) {
-          trackedEl.innerHTML = '<div class="empty-state">Nothing waiting — every tracked token either has an open position or hasn\\'t been added yet.</div>';
+          trackedEl.innerHTML = '<div class="empty-state">Nothing waiting — every tracked token either has an open position or has not been added yet.</div>';
         } else {
           trackedEl.innerHTML = data.tracked.map(function(t) {
             const label = t.symbol || t.name || t.mint;
