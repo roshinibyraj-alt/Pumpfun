@@ -1,15 +1,17 @@
 // ============================================================
-// pump.fun DEMO bot — MANUAL TOKENS ONLY, price via DexScreener
-// - No automatic scanning or discovery of new tokens.
-// - You add tokens by mint address via the dashboard.
-// - Price data comes from DexScreener's free public REST API —
-//   no key, no wallet, no metering cost. The bot polls it on an
-//   interval and builds its own 1-minute candles from the results.
-// - For each token, fits a linear regression channel (a real trend
-//   line with top/bottom bands) from recent price history.
-// - Buys the full 0.10 SOL position when price touches the BOTTOM
-//   of the channel, sells the full position when price touches the
-//   TOP, then keeps watching for the next bottom touch.
+// pump.fun DEMO bot — MANUAL TOKENS ONLY, Martingale strategy
+// - No automatic scanning. You add tokens by mint address via the dashboard.
+// - Price data comes from DexScreener's free public REST API — no key,
+//   no wallet, no metering cost. Polled on an interval.
+// - STRATEGY (Martingale):
+//   1. Buy immediately when a token is added (BASE_BUY_SIZE_SOL).
+//   2. Every time price falls DROP_TRIGGER_PCT below the CURRENT average
+//      entry price, buy again at MARTINGALE_MULTIPLIER x the previous
+//      buy size. This pulls the average entry price down.
+//   3. Take profit: sell the ENTIRE position when price is TP_PCT above
+//      the current average entry price.
+//   4. After taking profit, start a fresh cycle on the same token
+//      (if RESTART_AFTER_TP is true).
 // - DEMO_MODE = true means: no real money, no real wallet, ever.
 // ============================================================
 
@@ -18,11 +20,15 @@ const path = require("path");
 const config = require("./config.js");
 
 // One entry per MANUALLY ADDED token mint address.
-// { name, symbol, lastPriceSol, lastUpdatedSec, addedAtSec, candles, currentCandle, lastAlertTime }
+// { name, symbol, lastPriceSol, lastUpdatedSec, addedAtSec }
 const tokenActivity = new Map();
 
-// One entry per token mint address with an OPEN simulated position.
+// One entry per token mint address with an OPEN Martingale position.
+// { levels: [{priceSol, solIn}], totalSolIn, sumTokensProxy, averageEntryPrice, currentLevel, lastActionSec }
 const openPositions = new Map();
+
+// Tokens waiting for their very first buy (set right after being added).
+const pendingInitialBuy = new Set();
 
 const dashboardEvents = [];
 
@@ -51,162 +57,110 @@ function pushEvent(event) {
 }
 
 // ------------------------------------------------------------
-// 1-minute candle building
+// Martingale position math
 // ------------------------------------------------------------
-function updateCandle(entry, price, nowSec) {
-  const bucket = Math.floor(nowSec / 60);
-  if (!entry.currentCandle || entry.currentCandle.bucket !== bucket) {
-    if (entry.currentCandle) {
-      entry.candles.push(entry.currentCandle);
-      if (entry.candles.length > config.MAX_CANDLES_STORED) {
-        entry.candles.shift();
-      }
-    }
-    entry.currentCandle = { bucket, open: price, high: price, low: price, close: price };
-  } else {
-    if (price > entry.currentCandle.high) entry.currentCandle.high = price;
-    if (price < entry.currentCandle.low) entry.currentCandle.low = price;
-    entry.currentCandle.close = price;
-  }
+// averageEntryPrice = totalSolIn / sumTokensProxy, where each buy
+// contributes tokensProxy = solIn / priceAtBuy. This is the correct
+// SOL-weighted average price across buys of different sizes at
+// different prices (equivalent to a real average cost basis).
+
+function nextBuySizeSol(position) {
+  if (!position) return config.BASE_BUY_SIZE_SOL;
+  return config.BASE_BUY_SIZE_SOL * Math.pow(config.MARTINGALE_MULTIPLIER, position.currentLevel);
+}
+
+function currentPositionValueSol(position, currentPriceSol) {
+  return position.sumTokensProxy * currentPriceSol;
 }
 
 // ------------------------------------------------------------
-// Linear regression channel (the "trend line" with top/bottom bands)
+// Execute a buy (either the initial one or a double-down)
 // ------------------------------------------------------------
-function computeChannel(entry) {
-  const closes = entry.candles.map((c) => c.close);
-  if (entry.currentCandle) closes.push(entry.currentCandle.close);
-
-  const n = closes.length;
-  if (n < config.MIN_CANDLES_FOR_CHANNEL) return null;
-
-  let sumX = 0,
-    sumY = 0,
-    sumXY = 0,
-    sumXX = 0;
-  for (let i = 0; i < n; i++) {
-    sumX += i;
-    sumY += closes[i];
-    sumXY += i * closes[i];
-    sumXX += i * i;
-  }
-  const denom = n * sumXX - sumX * sumX;
-  if (denom === 0) return null;
-
-  const slope = (n * sumXY - sumX * sumY) / denom;
-  const intercept = (sumY - slope * sumX) / n;
-
-  let sumSqResid = 0;
-  for (let i = 0; i < n; i++) {
-    const yhat = slope * i + intercept;
-    const resid = closes[i] - yhat;
-    sumSqResid += resid * resid;
-  }
-  const stddev = Math.sqrt(sumSqResid / n);
-
-  const latestX = n - 1;
-  const trendValue = slope * latestX + intercept;
-  const bottom = trendValue - config.CHANNEL_WIDTH_STDDEV * stddev;
-  const top = trendValue + config.CHANNEL_WIDTH_STDDEV * stddev;
-
-  return { slope, trendValue, bottom, top, stddev, candleCount: n };
-}
-
-// ------------------------------------------------------------
-// Entry signal: buy when price touches the bottom of the channel
-// ------------------------------------------------------------
-function scoreAndMaybeBuy(mint, entry, nowSec) {
-  if (openPositions.has(mint)) return;
-
-  const secondsSinceLastAlert = nowSec - entry.lastAlertTime;
-  if (secondsSinceLastAlert < config.COOLDOWN_SECONDS) return;
-
-  const channel = computeChannel(entry);
-  if (!channel) return;
-
-  if (config.REQUIRE_NON_NEGATIVE_SLOPE && channel.slope < 0) return;
-
-  if (entry.lastPriceSol == null) return;
-
-  if (entry.lastPriceSol <= channel.bottom) {
-    entry.lastAlertTime = nowSec;
-    simulateBuy(mint, entry, nowSec, channel);
-  }
-}
-
-// ------------------------------------------------------------
-// Open a simulated position
-// ------------------------------------------------------------
-function simulateBuy(mint, entry, nowSec, channel) {
+function executeBuy(mint, entry, nowSec, isInitial) {
   const label = entry.symbol || entry.name || mint;
+  let position = openPositions.get(mint);
+  const buySizeSol = isInitial ? config.BASE_BUY_SIZE_SOL : nextBuySizeSol(position);
 
   if (!config.DEMO_MODE) {
     log("DEMO_MODE is false but real-buy logic is not implemented. Doing nothing.");
     return;
   }
 
-  if (stats.balanceSol < config.FAKE_BUY_SIZE_SOL) {
-    log(`SKIPPED (out of demo balance): ${label} - balance is ${stats.balanceSol.toFixed(3)} SOL`);
-    pushEvent({ type: "skipped_low_balance", mint, name: entry.name, symbol: entry.symbol, balanceSol: Number(stats.balanceSol.toFixed(3)) });
+  if (stats.balanceSol < buySizeSol) {
+    log(`SKIPPED (out of demo balance): ${label} needed ${buySizeSol} SOL, balance is ${stats.balanceSol.toFixed(3)} SOL`);
+    pushEvent({ type: "skipped_low_balance", mint, name: entry.name, symbol: entry.symbol, balanceSol: Number(stats.balanceSol.toFixed(3)), neededSol: buySizeSol });
     return;
   }
 
+  const priceSol = entry.lastPriceSol;
+  const tokensProxy = buySizeSol / priceSol;
+
   stats.simulatedBuys += 1;
-  stats.balanceSol = Number((stats.balanceSol - config.FAKE_BUY_SIZE_SOL).toFixed(6));
-  stats.totalSpentSol = Number((stats.totalSpentSol + config.FAKE_BUY_SIZE_SOL).toFixed(6));
+  stats.balanceSol = Number((stats.balanceSol - buySizeSol).toFixed(6));
+  stats.totalSpentSol = Number((stats.totalSpentSol + buySizeSol).toFixed(6));
 
-  openPositions.set(mint, {
-    symbol: entry.symbol,
-    name: entry.name,
-    entryPriceSol: entry.lastPriceSol,
-    originalSolIn: config.FAKE_BUY_SIZE_SOL,
-    entryChannelBottom: channel.bottom,
-    entryChannelTop: channel.top,
-    entryTime: nowSec,
-  });
+  if (!position) {
+    position = {
+      levels: [],
+      totalSolIn: 0,
+      sumTokensProxy: 0,
+      averageEntryPrice: null,
+      currentLevel: 0,
+      lastActionSec: 0,
+    };
+    openPositions.set(mint, position);
+  }
 
+  position.levels.push({ priceSol, solIn: buySizeSol });
+  position.totalSolIn = Number((position.totalSolIn + buySizeSol).toFixed(6));
+  position.sumTokensProxy += tokensProxy;
+  position.averageEntryPrice = position.totalSolIn / position.sumTokensProxy;
+  position.currentLevel += 1;
+  position.lastActionSec = nowSec;
+
+  const levelLabel = isInitial ? "INITIAL BUY" : `DOUBLE DOWN (level ${position.currentLevel})`;
   log(
-    `BUY (channel bottom): ${label} (${mint}) - price ${entry.lastPriceSol} vs channel [${channel.bottom.toFixed(8)} - ${channel.top.toFixed(
-      8
-    )}] - spent ${config.FAKE_BUY_SIZE_SOL} SOL - balance now ${stats.balanceSol} SOL`
+    `${levelLabel}: ${label} (${mint}) - bought ${buySizeSol} SOL at ${priceSol} - new average entry ${position.averageEntryPrice} - balance ${stats.balanceSol} SOL`
   );
 
   pushEvent({
-    type: "simulated_buy",
+    type: isInitial ? "initial_buy" : "double_down",
     mint,
     name: entry.name,
     symbol: entry.symbol,
-    fakeSpendSol: config.FAKE_BUY_SIZE_SOL,
+    buySizeSol,
+    priceSol,
+    averageEntryPrice: position.averageEntryPrice,
+    level: position.currentLevel,
     balanceAfterSol: stats.balanceSol,
-    channelBottom: channel.bottom,
-    channelTop: channel.top,
     link: `https://pump.fun/${mint}`,
   });
 }
 
 // ------------------------------------------------------------
-// Sell the full position, realize simulated P/L
+// Take profit: sell the entire position
 // ------------------------------------------------------------
-function sellPosition(pos, currentMultiple, reasonType, mint, entry) {
-  const solOut = pos.originalSolIn * currentMultiple;
-  const pnl = solOut - pos.originalSolIn;
+function takeProfit(mint, entry, position, currentPriceSol) {
+  const solOut = currentPositionValueSol(position, currentPriceSol);
+  const pnl = solOut - position.totalSolIn;
 
   stats.balanceSol = Number((stats.balanceSol + solOut).toFixed(6));
   stats.realizedPnlSol = Number((stats.realizedPnlSol + pnl).toFixed(6));
 
   const label = entry.symbol || entry.name || mint;
   log(
-    `${reasonType.toUpperCase()}: ${label} sold 100% at ${currentMultiple.toFixed(2)}x - realized ${solOut.toFixed(4)} SOL (pnl ${
-      pnl >= 0 ? "+" : ""
-    }${pnl.toFixed(4)} SOL) - balance ${stats.balanceSol} SOL`
+    `TAKE PROFIT: ${label} sold entire position (${position.currentLevel} level(s), ${position.totalSolIn} SOL in) at ${currentPriceSol} - realized ${solOut.toFixed(
+      4
+    )} SOL (pnl +${pnl.toFixed(4)} SOL) - balance ${stats.balanceSol} SOL`
   );
 
   pushEvent({
-    type: reasonType,
+    type: "take_profit",
     mint,
     name: entry.name,
     symbol: entry.symbol,
-    multiple: Number(currentMultiple.toFixed(3)),
+    levels: position.currentLevel,
+    totalSolIn: position.totalSolIn,
     solOut: Number(solOut.toFixed(4)),
     pnlSol: Number(pnl.toFixed(4)),
     balanceAfterSol: stats.balanceSol,
@@ -214,28 +168,42 @@ function sellPosition(pos, currentMultiple, reasonType, mint, entry) {
   });
 
   openPositions.delete(mint);
+
+  if (config.RESTART_AFTER_TP) {
+    pendingInitialBuy.add(mint);
+    log(`${label}: restarting a fresh Martingale cycle on the same token.`);
+  }
 }
 
 // ------------------------------------------------------------
-// Manage an existing simulated position: channel-top exit, or safety stop
+// Called on every price update for a tracked token
 // ------------------------------------------------------------
-function checkOpenPosition(mint, entry) {
-  const pos = openPositions.get(mint);
-  if (!pos) return;
-  if (entry.lastPriceSol == null || !pos.entryPriceSol) return;
+function evaluateToken(mint, entry, nowSec) {
+  if (entry.lastPriceSol == null) return;
 
-  const currentMultiple = entry.lastPriceSol / pos.entryPriceSol;
-
-  if (config.SAFETY_STOP_LOSS_MULTIPLIER != null && currentMultiple <= config.SAFETY_STOP_LOSS_MULTIPLIER) {
-    sellPosition(pos, currentMultiple, "safety_stop_loss", mint, entry);
+  if (pendingInitialBuy.has(mint) && !openPositions.has(mint)) {
+    pendingInitialBuy.delete(mint);
+    executeBuy(mint, entry, nowSec, true);
     return;
   }
 
-  const channel = computeChannel(entry);
-  if (!channel) return;
+  const position = openPositions.get(mint);
+  if (!position) return;
 
-  if (entry.lastPriceSol >= channel.top) {
-    sellPosition(pos, currentMultiple, "channel_top_exit", mint, entry);
+  const currentPrice = entry.lastPriceSol;
+  const avg = position.averageEntryPrice;
+
+  // Take profit check first.
+  if (currentPrice >= avg * (1 + config.TP_PCT)) {
+    takeProfit(mint, entry, position, currentPrice);
+    return;
+  }
+
+  // Double-down check.
+  if (position.currentLevel >= config.MAX_MARTINGALE_LEVELS) return; // capped, just hold and wait for TP
+  const dropTriggerPrice = avg * (1 - config.DROP_TRIGGER_PCT);
+  if (currentPrice <= dropTriggerPrice) {
+    executeBuy(mint, entry, nowSec, false);
   }
 }
 
@@ -261,15 +229,12 @@ function addToken(mint) {
     lastPriceSol: null,
     lastUpdatedSec: null,
     addedAtSec: nowSec,
-    lastAlertTime: 0,
-    candles: [],
-    currentCandle: null,
   });
+  pendingInitialBuy.add(mint);
 
-  log(`MANUALLY ADDED: ${mint} - fetching price from DexScreener (needs ~${config.MIN_CANDLES_FOR_CHANNEL} minutes of history before it can trade)`);
+  log(`MANUALLY ADDED: ${mint} - will buy immediately once a price is available from DexScreener`);
   pushEvent({ type: "token_added", mint, link: `https://pump.fun/${mint}` });
 
-  // Kick off an immediate poll just for this token so it doesn't wait for the next cycle.
   pollTokens([mint]).catch((err) => log("Immediate poll for new token failed:", err.message));
 
   return { ok: true };
@@ -279,12 +244,26 @@ function removeToken(mint) {
   if (!tokenActivity.has(mint)) return { ok: false, error: "Not currently tracking that token." };
 
   const entry = tokenActivity.get(mint);
-  const pos = openPositions.get(mint);
-  if (pos && entry.lastPriceSol != null) {
-    const currentMultiple = entry.lastPriceSol / pos.entryPriceSol;
-    sellPosition(pos, currentMultiple, "manual_removal_exit", mint, entry);
+  const position = openPositions.get(mint);
+  if (position && entry.lastPriceSol != null) {
+    const solOut = currentPositionValueSol(position, entry.lastPriceSol);
+    const pnl = solOut - position.totalSolIn;
+    stats.balanceSol = Number((stats.balanceSol + solOut).toFixed(6));
+    stats.realizedPnlSol = Number((stats.realizedPnlSol + pnl).toFixed(6));
+    log(`REMOVED (position closed): ${mint} sold at ${entry.lastPriceSol} - realized ${solOut.toFixed(4)} SOL (pnl ${pnl >= 0 ? "+" : ""}${pnl.toFixed(4)} SOL)`);
+    pushEvent({
+      type: "manual_removal_exit",
+      mint,
+      name: entry.name,
+      symbol: entry.symbol,
+      solOut: Number(solOut.toFixed(4)),
+      pnlSol: Number(pnl.toFixed(4)),
+      balanceAfterSol: stats.balanceSol,
+    });
   }
 
+  openPositions.delete(mint);
+  pendingInitialBuy.delete(mint);
   tokenActivity.delete(mint);
   log(`REMOVED: ${mint}`);
   pushEvent({ type: "token_removed", mint, link: `https://pump.fun/${mint}` });
@@ -330,7 +309,6 @@ async function pollTokens(mints) {
 
     const pairs = Array.isArray(data) ? data : Array.isArray(data.pairs) ? data.pairs : [];
 
-    // For each mint, pick the pair with the highest USD liquidity (its most active market).
     const bestPairByMint = new Map();
     for (const pair of pairs) {
       const baseAddr = pair.baseToken && pair.baseToken.address;
@@ -347,7 +325,7 @@ async function pollTokens(mints) {
       const entry = tokenActivity.get(mint);
       if (!entry) continue;
       const pair = bestPairByMint.get(mint);
-      if (!pair) continue; // no pair found yet for this token on DexScreener
+      if (!pair) continue;
 
       if (pair.baseToken.name && !entry.name) entry.name = pair.baseToken.name;
       if (pair.baseToken.symbol && !entry.symbol) entry.symbol = pair.baseToken.symbol;
@@ -357,10 +335,8 @@ async function pollTokens(mints) {
 
       entry.lastPriceSol = price;
       entry.lastUpdatedSec = nowSec;
-      updateCandle(entry, price, nowSec);
 
-      checkOpenPosition(mint, entry);
-      scoreAndMaybeBuy(mint, entry, nowSec);
+      evaluateToken(mint, entry, nowSec);
     }
 
     stats.lastPollStatus = "ok";
@@ -378,7 +354,6 @@ function startPolling() {
     pollTokens(mints).catch((err) => log("Poll cycle failed:", err.message));
   }, intervalMs);
 
-  // Heartbeat every 60s summarizing tracked tokens.
   setInterval(() => {
     log(`HEARTBEAT: ${tokenActivity.size} tracked token(s) | ${openPositions.size} open position(s) | last poll: ${stats.lastPollStatus}`);
     for (const [mint, entry] of tokenActivity.entries()) {
@@ -387,13 +362,17 @@ function startPolling() {
         log(`  ${label}: no price data yet`);
         continue;
       }
-      const channel = computeChannel(entry);
-      if (!channel) {
-        log(`  ${label}: price ${entry.lastPriceSol} | building history (${entry.candles.length + (entry.currentCandle ? 1 : 0)}/${config.MIN_CANDLES_FOR_CHANNEL} candles)`);
+      const position = openPositions.get(mint);
+      if (!position) {
+        log(`  ${label}: no open position (waiting for initial buy) | price ${entry.lastPriceSol}`);
       } else {
-        const pos = openPositions.get(mint);
-        const status = pos ? "HOLDING" : "watching";
-        log(`  ${label}: ${status} | price ${entry.lastPriceSol} | channel [${channel.bottom.toFixed(8)} - ${channel.top.toFixed(8)}] | slope ${channel.slope > 0 ? "up" : channel.slope < 0 ? "down" : "flat"}`);
+        const dropTrigger = position.averageEntryPrice * (1 - config.DROP_TRIGGER_PCT);
+        const tpTrigger = position.averageEntryPrice * (1 + config.TP_PCT);
+        log(
+          `  ${label}: level ${position.currentLevel}/${config.MAX_MARTINGALE_LEVELS} | price ${entry.lastPriceSol} | avg entry ${position.averageEntryPrice.toFixed(
+            10
+          )} | next dip buy at ${dropTrigger.toFixed(10)} | TP at ${tpTrigger.toFixed(10)} | invested ${position.totalSolIn} SOL`
+        );
       }
     }
   }, 60 * 1000);
@@ -408,17 +387,23 @@ app.use(express.json());
 
 app.get("/api/state", (req, res) => {
   const positions = [];
-  for (const [mint, pos] of openPositions.entries()) {
+  for (const [mint, position] of openPositions.entries()) {
     const entry = tokenActivity.get(mint);
     const currentPriceSol = entry ? entry.lastPriceSol : null;
-    const currentMultiple = currentPriceSol != null && pos.entryPriceSol ? currentPriceSol / pos.entryPriceSol : null;
+    const currentValueSol = currentPriceSol != null ? currentPositionValueSol(position, currentPriceSol) : null;
+    const unrealizedPnl = currentValueSol != null ? currentValueSol - position.totalSolIn : null;
     positions.push({
       mint,
-      name: pos.name,
-      symbol: pos.symbol,
-      currentMultiple: currentMultiple != null ? Number(currentMultiple.toFixed(3)) : null,
-      entryChannelBottom: pos.entryChannelBottom,
-      entryChannelTop: pos.entryChannelTop,
+      name: position.levels.length ? entry.name : null,
+      symbol: entry ? entry.symbol : null,
+      currentPriceSol,
+      averageEntryPrice: position.averageEntryPrice,
+      totalSolIn: position.totalSolIn,
+      currentLevel: position.currentLevel,
+      maxLevels: config.MAX_MARTINGALE_LEVELS,
+      nextDropTrigger: position.averageEntryPrice * (1 - config.DROP_TRIGGER_PCT),
+      tpTrigger: position.averageEntryPrice * (1 + config.TP_PCT),
+      unrealizedPnlSol: unrealizedPnl != null ? Number(unrealizedPnl.toFixed(4)) : null,
       link: `https://pump.fun/${mint}`,
     });
   }
@@ -427,25 +412,13 @@ app.get("/api/state", (req, res) => {
   const nowSec = Math.floor(Date.now() / 1000);
   for (const [mint, entry] of tokenActivity.entries()) {
     if (openPositions.has(mint)) continue;
-    const channel = computeChannel(entry);
-    const candleCount = entry.candles.length + (entry.currentCandle ? 1 : 0);
-    let pctFromBottom = null;
-    let slope = null;
-    if (channel && entry.lastPriceSol != null) {
-      pctFromBottom = Number((((entry.lastPriceSol - channel.bottom) / (channel.top - channel.bottom)) * 100).toFixed(1));
-      slope = channel.slope > 0 ? "up" : channel.slope < 0 ? "down" : "flat";
-    }
     tracked.push({
       mint,
       name: entry.name,
       symbol: entry.symbol,
       hasPrice: entry.lastPriceSol != null,
       secondsSinceUpdate: entry.lastUpdatedSec != null ? nowSec - entry.lastUpdatedSec : null,
-      channelReady: !!channel,
-      candleCount,
-      candlesNeeded: config.MIN_CANDLES_FOR_CHANNEL,
-      pctFromBottom,
-      slope,
+      awaitingInitialBuy: pendingInitialBuy.has(mint),
       link: `https://pump.fun/${mint}`,
     });
   }
@@ -453,12 +426,12 @@ app.get("/api/state", (req, res) => {
   res.json({
     config: {
       DEMO_MODE: config.DEMO_MODE,
-      FAKE_BUY_SIZE_SOL: config.FAKE_BUY_SIZE_SOL,
-      CHANNEL_WIDTH_STDDEV: config.CHANNEL_WIDTH_STDDEV,
-      MIN_CANDLES_FOR_CHANNEL: config.MIN_CANDLES_FOR_CHANNEL,
-      REQUIRE_NON_NEGATIVE_SLOPE: config.REQUIRE_NON_NEGATIVE_SLOPE,
-      COOLDOWN_SECONDS: config.COOLDOWN_SECONDS,
-      SAFETY_STOP_LOSS_MULTIPLIER: config.SAFETY_STOP_LOSS_MULTIPLIER,
+      BASE_BUY_SIZE_SOL: config.BASE_BUY_SIZE_SOL,
+      DROP_TRIGGER_PCT: config.DROP_TRIGGER_PCT,
+      MARTINGALE_MULTIPLIER: config.MARTINGALE_MULTIPLIER,
+      TP_PCT: config.TP_PCT,
+      MAX_MARTINGALE_LEVELS: config.MAX_MARTINGALE_LEVELS,
+      RESTART_AFTER_TP: config.RESTART_AFTER_TP,
       MAX_TRACKED_TOKENS: config.MAX_TRACKED_TOKENS,
       DEXSCREENER_POLL_INTERVAL_SECONDS: config.DEXSCREENER_POLL_INTERVAL_SECONDS,
     },
@@ -484,8 +457,8 @@ app.listen(PORT, () => {
   log(`Dashboard server listening on port ${PORT}`);
 });
 
-log("=== pump.fun DEMO bot starting (MANUAL TOKENS ONLY, price via DexScreener) ===");
+log("=== pump.fun DEMO bot starting (MANUAL TOKENS ONLY, Martingale strategy) ===");
 log(`DEMO_MODE = ${config.DEMO_MODE} (true = safe, no real money is ever used)`);
 log(`Starting demo balance: ${config.STARTING_BALANCE_SOL} SOL`);
-log("No API key required. No automatic scanning. Add tokens via the dashboard to start trading them.");
+log(`Strategy: buy ${config.BASE_BUY_SIZE_SOL} SOL initially, double down ${config.MARTINGALE_MULTIPLIER}x every ${Math.round(config.DROP_TRIGGER_PCT*100)}% drop from average entry, TP at +${Math.round(config.TP_PCT*100)}% from average entry, max ${config.MAX_MARTINGALE_LEVELS} levels.`);
 startPolling();
