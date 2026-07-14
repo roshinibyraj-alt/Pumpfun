@@ -6,69 +6,57 @@
 
 module.exports = {
   // DEMO_MODE: true  = bot only PRETENDS to buy and logs it. No money moves. ALWAYS keep this true for now.
-  // DEMO_MODE: false = bot would place real buys (NOT implemented in this version on purpose).
   DEMO_MODE: true,
 
-  // Starting paper-trading balance in SOL. Purely a number in memory — not connected
-  // to any real wallet. Every simulated buy subtracts FAKE_BUY_SIZE_SOL from this.
+  // Starting paper-trading balance in SOL. Purely a number in memory.
   STARTING_BALANCE_SOL: 5,
 
-  // How much fake SOL the bot "spends" per simulated buy (just for logging/tracking, not real).
-  FAKE_BUY_SIZE_SOL: 0.1,
+  // ---------------- MARTINGALE STRATEGY ----------------
+  // 1. Buy immediately when you add a token (BASE_BUY_SIZE_SOL).
+  // 2. Every time price falls DROP_TRIGGER_PCT below the CURRENT average
+  //    entry price (which moves as you add), buy again at
+  //    MARTINGALE_MULTIPLIER times the previous buy size. This pulls the
+  //    average entry price down each time.
+  // 3. Take profit: sell the ENTIRE position when price is TP_PCT above
+  //    the current average entry price.
+  // 4. After taking profit, start a fresh cycle on the same token
+  //    (see RESTART_AFTER_TP).
 
-  // ---------------- MANUAL-ONLY MODE ----------------
-  // There is no automatic scanning or discovery of new tokens. The bot only
-  // trades tokens you explicitly add via the dashboard.
+  // Size of the very first buy on a token, in SOL.
+  BASE_BUY_SIZE_SOL: 0.1,
 
-  // Once a token triggers a simulated buy, don't trigger another buy on the
-  // SAME token again for at least this many seconds after a sell.
-  COOLDOWN_SECONDS: 120,
+  // How far (%) price must fall below the current average entry price to
+  // trigger the next double-down buy. 0.5 = 50% down.
+  DROP_TRIGGER_PCT: 0.5,
+
+  // Multiplier applied to the previous buy size each time it doubles down.
+  // 2 = classic Martingale (0.1 -> 0.2 -> 0.4 -> 0.8 -> 1.6 SOL ...).
+  MARTINGALE_MULTIPLIER: 2,
+
+  // How far (%) price must rise above the current average entry price to
+  // trigger a full take-profit exit. 1.0 = 100% up (average entry doubles).
+  TP_PCT: 1.0,
+
+  // Safety cap: maximum number of times the bot will double down on a
+  // single token before it just holds and waits (won't add further levels,
+  // but will still exit on TP if price recovers). This is NOT part of your
+  // requested strategy — it's a risk cap I added since uncapped doubling
+  // can exceed your balance fast. Set to a very high number to effectively
+  // disable it if you want pure, uncapped Martingale.
+  // Example cost if all levels hit at BASE=0.1, MULTIPLIER=2:
+  // level 1: 0.1, 2: 0.2, 3: 0.4, 4: 0.8, 5: 1.6 SOL (3.1 SOL total invested)
+  MAX_MARTINGALE_LEVELS: 5,
+
+  // After a take-profit exit, immediately start a new cycle (fresh initial
+  // buy) on the same token. Set to false to just stop and hold cash after
+  // a TP, requiring you to manually re-add the token to trade it again.
+  RESTART_AFTER_TP: true,
 
   // ---------------- PRICE DATA SOURCE: DexScreener ----------------
   // Free public REST API, no key required, no wallet, no metering cost.
-  // The bot polls current price for every tracked token on this interval
-  // and builds its own 1-minute candles from those snapshots — same idea
-  // as before, just pulled instead of pushed, and free instead of paid.
-
-  // How often (seconds) to poll DexScreener for all tracked tokens' prices.
-  // All tracked tokens are fetched in a single request each poll (up to 30
-  // addresses per call), so this stays well within DexScreener's public
-  // rate limit (300 requests/minute) even at a short interval.
   DEXSCREENER_POLL_INTERVAL_SECONDS: 30,
 
-  // ---------------- CHANNEL (TREND LINE) STRATEGY ----------------
-  // The bot builds a real 1-minute trend line (a linear regression channel)
-  // per token from its recent price history, buys when price touches the
-  // BOTTOM of that channel, and sells the full position when price touches
-  // the TOP. After a sell, it keeps watching the same token for the next
-  // bottom-line touch.
-
-  // How many 1-minute candles of history are required before the bot trusts
-  // the channel enough to trade it. 10 = needs about 10 minutes after you
-  // add the token (roughly 20 polls at the default 30s interval).
-  MIN_CANDLES_FOR_CHANNEL: 10,
-
-  // How many 1-minute candles to keep in memory per token.
-  MAX_CANDLES_STORED: 60,
-
-  // How wide the channel is, measured in standard deviations of price around
-  // the trend line. Higher = wider channel = fewer but more extreme touches.
-  CHANNEL_WIDTH_STDDEV: 1.5,
-
-  // If true, the bot will NOT buy a "bottom line touch" when the channel's
-  // overall trend is pointed downward — avoids buying every dip in a coin
-  // that's simply crashing, and only buys dips within a flat-to-upward channel.
-  REQUIRE_NON_NEGATIVE_SLOPE: true,
-
-  // ---------------- SAFETY BACKSTOP (not a trading signal) ----------------
-  // A last-resort circuit breaker in case a token is in true freefall. If a
-  // position falls to this multiple of its entry price, exit immediately
-  // regardless of where the channel is. 0.5 = cut losses at -50%.
-  // Set to null to disable this safety net entirely.
-  SAFETY_STOP_LOSS_MULTIPLIER: 0.5,
-
-  // Known non-memecoin mints to always refuse to add — real stablecoins/
-  // wrapped SOL, not meme tokens.
+  // Known non-memecoin mints to always refuse to add.
   EXCLUDED_MINTS: [
     "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
     "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
