@@ -2,11 +2,6 @@
 // polymarket.js — finds the currently-live BTC/ETH 15-min
 // up/down market and reads its prices, using Polymarket's
 // public, keyless APIs (Gamma for market info, CLOB for prices).
-//
-// NOTE: Polymarket's API has moved around before. If market
-// discovery starts failing, check the logs — the fallback
-// search (below) usually recovers it even if the slug format
-// changes slightly.
 // ============================================================
 
 const GAMMA_BASE = 'https://gamma-api.polymarket.com';
@@ -44,15 +39,22 @@ async function getCurrentUpDownMarket(asset, windowMinutes) {
 }
 
 // clobTokenIds usually comes back as a JSON-encoded string array: '["123","456"]'
-// Order is typically [UP/YES token, DOWN/NO token] but we double check via outcomes[].
+// Order is not guaranteed, so we always verify against outcomes[] rather
+// than assuming — if outcomes is missing, we refuse to guess.
 function parseTokens(market) {
   const tokenIds = JSON.parse(market.clobTokenIds);
-  const outcomes = JSON.parse(market.outcomes || '["Up","Down"]');
+  if (!market.outcomes) {
+    throw new Error('Market has no outcomes field — cannot safely determine Up/Down token order');
+  }
+  const outcomes = JSON.parse(market.outcomes);
   const upIndex = outcomes.findIndex((o) => /up|yes/i.test(o));
-  const downIndex = upIndex === 0 ? 1 : 0;
+  const downIndex = outcomes.findIndex((o) => /down|no/i.test(o));
+  if (upIndex === -1 || downIndex === -1) {
+    throw new Error(`Could not identify Up/Down outcomes from: ${market.outcomes}`);
+  }
   return {
-    upTokenId: tokenIds[upIndex >= 0 ? upIndex : 0],
-    downTokenId: tokenIds[downIndex >= 0 ? downIndex : 1],
+    upTokenId: tokenIds[upIndex],
+    downTokenId: tokenIds[downIndex],
   };
 }
 
