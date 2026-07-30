@@ -3,379 +3,122 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>pump.fun Demo Bot Dashboard</title>
+<title>BTC Fair-Value Bot</title>
 <style>
   :root {
-    --bg: #0b0d12;
-    --card: #14171f;
-    --border: #232833;
-    --text: #e6e9ef;
-    --muted: #8b93a3;
-    --green: #35d68a;
-    --blue: #5b9dff;
-    --yellow: #f0c453;
-    --red: #ff6b6b;
+    --bg: #0b0e14; --panel: #131722; --border: #232838;
+    --text: #e6e9f0; --dim: #8892a6; --green: #26d07c; --red: #f0546a; --accent: #5b8def;
   }
   * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    padding: 24px;
-  }
-  h1 { font-size: 20px; margin: 0 0 4px 0; }
-  .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
-  .badge {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
-    margin-left: 8px;
-  }
-  .badge.demo { background: rgba(53,214,138,0.15); color: var(--green); }
-  .badge.live { background: rgba(240,196,83,0.15); color: var(--yellow); }
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 12px;
-    margin-bottom: 24px;
-  }
-  .stat-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px;
-  }
-  .stat-card .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-  .stat-card .value { font-size: 22px; font-weight: 700; }
-  .stat-card .value.status-connected { color: var(--green); }
-  .stat-card .value.status-other { color: var(--yellow); }
-  .value.pnl-positive { color: var(--green); }
-  .value.pnl-negative { color: var(--red); }
-  .add-token-box {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 16px;
-    margin-bottom: 20px;
-    display: flex;
-    gap: 8px;
-  }
-  .add-token-box input {
-    flex: 1;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 12px;
-    color: var(--text);
-    font-size: 13px;
-  }
-  .add-token-box button {
-    background: var(--green);
-    color: #0b0d12;
-    border: none;
-    border-radius: 8px;
-    padding: 10px 18px;
-    font-weight: 700;
-    font-size: 13px;
-    cursor: pointer;
-  }
-  .add-token-box button:disabled { opacity: 0.5; cursor: default; }
-  .add-token-msg { font-size: 12px; margin-top: 8px; }
-  .add-token-msg.error { color: var(--red); }
-  .add-token-msg.success { color: var(--green); }
-  .config-box {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin-bottom: 24px;
-    font-size: 13px;
-    color: var(--muted);
-  }
-  .config-box b { color: var(--text); }
-  .config-box .row { display: inline-block; margin-right: 20px; margin-bottom: 4px; }
-  .section-title { font-size: 14px; color: var(--muted); margin: 20px 0 10px 0; text-transform: uppercase; letter-spacing: 0.05em; }
-  .event {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--muted);
-    border-radius: 8px;
-    padding: 12px 14px;
-    margin-bottom: 8px;
-    font-size: 13px;
-  }
-  .event.simulated_buy { border-left-color: var(--green); }
-  .event-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
-  .event-title { font-weight: 700; font-size: 14px; }
-  .event.simulated_buy .event-title { color: var(--green); }
-  .event-time { color: var(--muted); font-size: 11px; }
-  .event-detail { color: var(--muted); }
-  .event-detail a { color: var(--blue); text-decoration: none; }
-  .event-detail a:hover { text-decoration: underline; }
-  .position-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 14px;
-    margin-bottom: 8px;
-    font-size: 13px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 10px;
-  }
-  .position-card .pname { font-weight: 700; }
-  .position-card .pmultiple { color: var(--muted); font-size: 12px; }
-  .level-badge {
-    display: inline-block;
-    background: rgba(91,157,255,0.15);
-    color: var(--blue);
-    border-radius: 6px;
-    padding: 1px 6px;
-    font-size: 11px;
-    margin-left: 6px;
-  }
-  .remove-btn {
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--muted);
-    border-radius: 6px;
-    padding: 4px 10px;
-    font-size: 11px;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .remove-btn:hover { border-color: var(--red); color: var(--red); }
-  .empty-state { color: var(--muted); font-size: 13px; padding: 20px; text-align: center; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; padding: 20px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .card .label { color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .card .value { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .green { color: var(--green); } .red { color: var(--red); }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+  section h2 { font-size: 14px; margin: 0 0 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: 500; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .badge.up { background: rgba(38,208,124,0.15); color: var(--green); }
+  .badge.down { background: rgba(240,84,106,0.15); color: var(--red); }
+  .empty { color: var(--dim); font-size: 13px; padding: 10px 0; }
+  .demo-tag { background: rgba(91,141,239,0.15); color: var(--accent); padding: 2px 8px; border-radius: 6px; font-size: 12px; }
 </style>
 </head>
 <body>
-  <h1>pump.fun Demo Bot <span id="mode-badge" class="badge demo">DEMO MODE</span></h1>
-  <div class="subtitle">Martingale strategy: buy on add, double down on drops from average entry, take profit on the bounce. No real funds are used.</div>
+  <h1>BTC Fair-Value Bot <span id="demoTag" class="demo-tag">DEMO</span></h1>
+  <div class="sub">Fair-value drift model vs Polymarket 15-min up/down markets. Auto-refreshes every 10s.</div>
 
-  <div class="add-token-box">
-    <input id="add-token-input" type="text" placeholder="Paste a pump.fun token mint address..." />
-    <button id="add-token-btn" onclick="addToken()">Add & Trade</button>
-  </div>
-  <div id="add-token-msg" class="add-token-msg"></div>
-
-  <div class="stats-grid">
-    <div class="stat-card">
-      <div class="label">Last Price Poll</div>
-      <div class="value" id="stat-connection">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Demo Balance</div>
-      <div class="value" id="stat-balance">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Realized P/L</div>
-      <div class="value" id="stat-pnl">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Open Positions</div>
-      <div class="value" id="stat-openpos">—</div>
-    </div>
-    <div class="stat-card">
-      <div class="label">Tracked Tokens</div>
-      <div class="value" id="stat-tracked">—</div>
-    </div>
+  <div class="grid">
+    <div class="card"><div class="label">Bankroll</div><div class="value" id="bankroll">—</div></div>
+    <div class="card"><div class="label">Total Return</div><div class="value" id="returnPct">—</div></div>
+    <div class="card"><div class="label">Trades</div><div class="value" id="tradeCount">—</div></div>
+    <div class="card"><div class="label">Win Rate</div><div class="value" id="winRate">—</div></div>
   </div>
 
-  <div class="config-box" id="config-box">Loading settings…</div>
+  <section>
+    <h2>Open Position</h2>
+    <div id="openPosition" class="empty">No open position right now.</div>
+  </section>
 
-  <div class="section-title">Waiting for Initial Buy / No Price Yet</div>
-  <div id="tracked"></div>
-
-  <div class="section-title">Open Positions</div>
-  <div id="positions"></div>
-
-  <div class="section-title">Live Activity</div>
-  <div id="events"></div>
+  <section>
+    <h2>Trade Log</h2>
+    <div id="tradeLogWrap"><div class="empty">No trades yet.</div></div>
+  </section>
 
   <script>
-    async function addToken() {
-      const input = document.getElementById('add-token-input');
-      const btn = document.getElementById('add-token-btn');
-      const msgEl = document.getElementById('add-token-msg');
-      const mint = input.value.trim();
-      if (!mint) return;
-
-      btn.disabled = true;
-      msgEl.textContent = '';
-      try {
-        const res = await fetch('/api/add-token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mint })
-        });
-        const data = await res.json();
-        if (data.ok) {
-          msgEl.textContent = 'Added — will buy the instant a price is available.';
-          msgEl.className = 'add-token-msg success';
-          input.value = '';
-        } else {
-          msgEl.textContent = data.error || 'Failed to add token.';
-          msgEl.className = 'add-token-msg error';
-        }
-      } catch (err) {
-        msgEl.textContent = 'Request failed. Try again.';
-        msgEl.className = 'add-token-msg error';
-      }
-      btn.disabled = false;
-      refresh();
-    }
-
-    async function removeToken(mint) {
-      try {
-        await fetch('/api/remove-token', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mint })
-        });
-      } catch (err) {
-        console.error('Remove failed', err);
-      }
-      refresh();
-    }
-
-    function fmtPrice(p) {
-      if (p == null) return '—';
-      return p.toPrecision(6);
-    }
+    function fmt$(n) { return '$' + Number(n).toFixed(2); }
+    function pct(n) { return (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
 
     async function refresh() {
       try {
         const res = await fetch('/api/state');
-        const data = await res.json();
+        const s = await res.json();
 
-        const connEl = document.getElementById('stat-connection');
-        connEl.textContent = data.stats.lastPollStatus;
-        connEl.className = 'value ' + (data.stats.lastPollStatus === 'ok' ? 'status-connected' : 'status-other');
+        document.getElementById('demoTag').textContent = s.config.DEMO_MODE ? 'DEMO' : 'LIVE';
+        document.getElementById('bankroll').textContent = fmt$(s.bankroll);
 
-        document.getElementById('stat-balance').textContent = data.stats.balanceSol.toFixed(3) + ' SOL';
+        const retPct = ((s.bankroll - s.startingBankroll) / s.startingBankroll) * 100;
+        const retEl = document.getElementById('returnPct');
+        retEl.textContent = pct(retPct);
+        retEl.className = 'value ' + (retPct >= 0 ? 'green' : 'red');
 
-        const pnlEl = document.getElementById('stat-pnl');
-        const pnl = data.stats.realizedPnlSol;
-        pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(4) + ' SOL';
-        pnlEl.className = 'value ' + (pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
+        document.getElementById('tradeCount').textContent = s.trades.length;
 
-        document.getElementById('stat-openpos').textContent = data.positions.length;
-        document.getElementById('stat-tracked').textContent = data.tracked.length + data.positions.length;
+        const wins = s.trades.filter(t => t.won).length;
+        document.getElementById('winRate').textContent = s.trades.length
+          ? Math.round((wins / s.trades.length) * 100) + '%'
+          : '—';
 
-        const modeBadge = document.getElementById('mode-badge');
-        modeBadge.textContent = data.config.DEMO_MODE ? 'DEMO MODE — no real funds' : 'LIVE MODE';
-        modeBadge.className = 'badge ' + (data.config.DEMO_MODE ? 'demo' : 'live');
-
-        const c = data.config;
-        document.getElementById('config-box').innerHTML =
-          '<span class="row"><b>Price source:</b> DexScreener (free, no key)</span>' +
-          '<span class="row"><b>Poll interval:</b> ' + c.DEXSCREENER_POLL_INTERVAL_SECONDS + 's</span>' +
-          '<span class="row"><b>Base buy:</b> ' + c.BASE_BUY_SIZE_SOL + ' SOL</span>' +
-          '<span class="row"><b>Double down at:</b> -' + Math.round(c.DROP_TRIGGER_PCT*100) + '% from avg entry</span>' +
-          '<span class="row"><b>Multiplier:</b> ' + c.MARTINGALE_MULTIPLIER + 'x</span>' +
-          '<span class="row"><b>Take profit at:</b> +' + Math.round(c.TP_PCT*100) + '% from avg entry</span>' +
-          '<span class="row"><b>Max levels:</b> ' + c.MAX_MARTINGALE_LEVELS + '</span>' +
-          '<span class="row"><b>Restart after TP:</b> ' + (c.RESTART_AFTER_TP ? 'yes' : 'no') + '</span>';
-
-        const trackedEl = document.getElementById('tracked');
-        if (!data.tracked.length) {
-          trackedEl.innerHTML = '<div class="empty-state">Nothing waiting — every tracked token either has an open position or has not been added yet.</div>';
+        const posEl = document.getElementById('openPosition');
+        if (s.openPosition) {
+          const p = s.openPosition;
+          posEl.innerHTML = `
+            <span class="badge ${p.side.toLowerCase()}">${p.side}</span>
+            &nbsp; stake ${fmt$(p.stake)} @ price ${p.price.toFixed(3)}
+            &nbsp; strike ${p.strike.toFixed(2)}
+            &nbsp; edge ${(p.edge * 100).toFixed(1)}%
+            &nbsp; opened ${new Date(p.openedAt).toLocaleTimeString()}
+          `;
         } else {
-          trackedEl.innerHTML = data.tracked.map(function(t) {
-            const label = t.symbol || t.name || t.mint;
-            let detail;
-            if (!t.hasPrice) {
-              detail = '<span style="color:var(--red)">⚠ no price data from DexScreener yet</span>';
-            } else if (t.awaitingInitialBuy) {
-              detail = 'price ' + fmtPrice(null) + ' — buy pending next poll tick';
-            } else {
-              detail = 'updated ' + t.secondsSinceUpdate + 's ago';
-            }
-            return '<div class="position-card">' +
-              '<div><span class="pname">' + label + '</span><br>' +
-              '<span class="pmultiple">' + detail + ' · <a href="' + t.link + '" target="_blank" style="color:var(--blue)">view</a></span></div>' +
-              '<button class="remove-btn" onclick="removeToken(\'' + t.mint + '\')">Remove</button>' +
-              '</div>';
-          }).join('');
+          posEl.innerHTML = '<div class="empty">No open position right now.</div>';
         }
 
-        const positionsEl = document.getElementById('positions');
-        if (!data.positions.length) {
-          positionsEl.innerHTML = '<div class="empty-state">No open positions right now.</div>';
+        const wrap = document.getElementById('tradeLogWrap');
+        if (s.trades.length === 0) {
+          wrap.innerHTML = '<div class="empty">No trades yet.</div>';
         } else {
-          positionsEl.innerHTML = data.positions.map(function(p) {
-            const pnlClass = p.unrealizedPnlSol >= 0 ? 'pnl-positive' : 'pnl-negative';
-            return '<div class="position-card">' +
-              '<div><span class="pname">' + (p.symbol || p.name || p.mint) + '</span>' +
-              '<span class="level-badge">level ' + p.currentLevel + '/' + p.maxLevels + '</span><br>' +
-              '<span class="pmultiple">price ' + fmtPrice(p.currentPriceSol) + ' · avg entry ' + fmtPrice(p.averageEntryPrice) + ' · invested ' + p.totalSolIn.toFixed(3) + ' SOL<br>' +
-              'next dip buy at ' + fmtPrice(p.nextDropTrigger) + ' · TP at ' + fmtPrice(p.tpTrigger) + ' · unrealized <span class="' + pnlClass + '">' + (p.unrealizedPnlSol >= 0 ? '+' : '') + p.unrealizedPnlSol + ' SOL</span> · <a href="' + p.link + '" target="_blank" style="color:var(--blue)">view</a></span></div>' +
-              '<button class="remove-btn" onclick="removeToken(\'' + p.mint + '\')">Remove</button>' +
-              '</div>';
-          }).join('');
+          const rows = s.trades.slice().reverse().slice(0, 50).map(t => `
+            <tr>
+              <td>${new Date(t.resolvedAt).toLocaleString()}</td>
+              <td><span class="badge ${t.side.toLowerCase()}">${t.side}</span></td>
+              <td>${fmt$(t.stake)}</td>
+              <td>${t.price.toFixed(3)}</td>
+              <td>${(t.edge * 100).toFixed(1)}%</td>
+              <td class="${t.won ? 'green' : 'red'}">${t.won ? 'WIN' : 'LOSS'}</td>
+              <td class="${t.pnl >= 0 ? 'green' : 'red'}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}</td>
+              <td>${fmt$(t.bankrollAfter)}</td>
+            </tr>
+          `).join('');
+          wrap.innerHTML = `
+            <table>
+              <thead><tr><th>Time</th><th>Side</th><th>Stake</th><th>Price</th><th>Edge</th><th>Result</th><th>PnL</th><th>Bankroll</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          `;
         }
-
-        const eventsEl = document.getElementById('events');
-        if (!data.events.length) {
-          eventsEl.innerHTML = '<div class="empty-state">No activity yet.</div>';
-          return;
-        }
-
-        eventsEl.innerHTML = data.events.map(function(e) {
-          const time = new Date(e.time).toLocaleTimeString();
-          const coinLabel = e.symbol || e.name || e.mint;
-
-          if (e.type === 'token_added') {
-            return '<div class="event" style="border-left-color: var(--blue);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--blue);">➕ ADDED — ' + e.mint + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail"><a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
-          }
-          if (e.type === 'token_removed') {
-            return '<div class="event" style="border-left-color: var(--muted);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--muted);">➖ REMOVED — ' + e.mint + '</span><span class="event-time">' + time + '</span></div>' +
-              '</div>';
-          }
-          if (e.type === 'initial_buy') {
-            return '<div class="event simulated_buy">' +
-              '<div class="event-header"><span class="event-title">🟢 INITIAL BUY — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">bought ' + e.buySizeSol + ' SOL at ' + fmtPrice(e.priceSol) + ' · balance ' + e.balanceAfterSol + ' SOL<br>' +
-              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
-          }
-          if (e.type === 'double_down') {
-            return '<div class="event" style="border-left-color: var(--yellow);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--yellow);">🔻 DOUBLE DOWN (level ' + e.level + ') — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">bought ' + e.buySizeSol + ' SOL at ' + fmtPrice(e.priceSol) + ' · new avg entry ' + fmtPrice(e.averageEntryPrice) + ' · balance ' + e.balanceAfterSol + ' SOL<br>' +
-              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
-          }
-          if (e.type === 'take_profit') {
-            return '<div class="event simulated_buy">' +
-              '<div class="event-header"><span class="event-title">💰 TAKE PROFIT — ' + coinLabel + ' (' + e.levels + ' level(s))</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">invested ' + e.totalSolIn + ' SOL · realized ' + e.solOut + ' SOL · pnl +' + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL<br>' +
-              '<a href="' + e.link + '" target="_blank">' + e.link + '</a></div></div>';
-          }
-          if (e.type === 'manual_removal_exit') {
-            return '<div class="event" style="border-left-color: var(--yellow);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--yellow);">⏏ CLOSED ON REMOVE — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">realized ' + e.solOut + ' SOL · pnl ' + (e.pnlSol >= 0 ? '+' : '') + e.pnlSol + ' SOL · balance ' + e.balanceAfterSol + ' SOL</div></div>';
-          }
-          if (e.type === 'skipped_low_balance') {
-            return '<div class="event" style="border-left-color: var(--red);">' +
-              '<div class="event-header"><span class="event-title" style="color: var(--red);">⏸ SKIPPED (low balance) — ' + coinLabel + '</span><span class="event-time">' + time + '</span></div>' +
-              '<div class="event-detail">needed ' + e.neededSol + ' SOL, balance was ' + e.balanceSol + ' SOL</div></div>';
-          }
-          return '';
-        }).join('');
-      } catch (err) {
-        console.error('Dashboard refresh failed', err);
+      } catch (e) {
+        console.error('refresh failed', e);
       }
     }
 
     refresh();
-    setInterval(refresh, 3000);
+    setInterval(refresh, 10000);
   </script>
 </body>
 </html>
