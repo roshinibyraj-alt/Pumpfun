@@ -1,71 +1,42 @@
 // ============================================================
-// SETTINGS — edit these numbers to change how the bot behaves.
-// You do NOT need to understand JavaScript to edit this file.
-// Just change the numbers after the colons.
+// CONFIG — every knob you'd want to tune lives here.
+// Change numbers, restart the bot (Railway redeploys automatically
+// when you push to GitHub), no need to touch other files.
 // ============================================================
 
 module.exports = {
-  // DEMO_MODE: true  = bot only PRETENDS to buy and logs it. No money moves. ALWAYS keep this true for now.
-  DEMO_MODE: true,
+  // ---- Mode ----
+  DEMO_MODE: true, // true = paper trading only, never places real orders
 
-  // Starting paper-trading balance in SOL. Purely a number in memory.
-  STARTING_BALANCE_SOL: 5,
+  // ---- Bankroll / compounding ----
+  STARTING_BANKROLL: 1000, // virtual dollars to start with
 
-  // ---------------- MARTINGALE STRATEGY ----------------
-  // 1. Buy immediately when you add a token (BASE_BUY_SIZE_SOL).
-  // 2. Every time price falls DROP_TRIGGER_PCT below the CURRENT average
-  //    entry price (which moves as you add), buy again at
-  //    MARTINGALE_MULTIPLIER times the previous buy size. This pulls the
-  //    average entry price down each time.
-  // 3. Take profit: sell the ENTIRE position when price is TP_PCT above
-  //    the current average entry price.
-  // 4. After taking profit, start a fresh cycle on the same token
-  //    (see RESTART_AFTER_TP).
+  // ---- Market ----
+  ASSET: 'btc', // 'btc' or 'eth' — must match Polymarket's slug prefix
+  WINDOW_MINUTES: 15, // 15-minute up/down windows
 
-  // Size of the very first buy on a token, in SOL.
-  BASE_BUY_SIZE_SOL: 0.1,
+  // ---- Strategy: fair value model ----
+  VOL_LOOKBACK_MINUTES: 120, // how many 1-min candles to use for realized vol
+  MIN_EDGE_TO_TRADE: 0.06, // model prob vs market price must differ by this much (6%)
 
-  // How far (%) price must fall below the current average entry price to
-  // trigger the next double-down buy. 0.5 = 50% down.
-  DROP_TRIGGER_PCT: 0.5,
+  // Only attempt one entry per window, and only within this time-remaining
+  // band (in seconds). Too early = thin/unstable market. Too late = no room
+  // for the edge to play out and slippage eats it.
+  ENTRY_WINDOW_SECONDS_MIN: 300, // don't enter with less than 5 min left
+  ENTRY_WINDOW_SECONDS_MAX: 720, // don't enter with more than 12 min left
 
-  // Multiplier applied to the previous buy size each time it doubles down.
-  // 2 = classic Martingale (0.1 -> 0.2 -> 0.4 -> 0.8 -> 1.6 SOL ...).
-  MARTINGALE_MULTIPLIER: 2,
+  // ---- Sizing ----
+  KELLY_FRACTION: 0.25, // use 25% of full Kelly — full Kelly is too aggressive
+  MAX_POSITION_PCT_OF_BANKROLL: 0.05, // hard cap: never risk more than 5% on one trade
+  MIN_STAKE_DOLLARS: 5, // don't bother with dust-sized trades
 
-  // How far (%) price must rise above the current average entry price to
-  // trigger a full take-profit exit. 1.0 = 100% up (average entry doubles).
-  TP_PCT: 1.0,
+  // ---- Fees (mirrors your other bots' 0.07 taker assumption) ----
+  TAKER_FEE_RATE: 0.0, // demo mode: set to 0 for now so you see pure model edge.
+  // Flip to 0.07 once you want to see fee-adjusted demo P&L.
 
-  // Safety cap: maximum number of times the bot will double down on a
-  // single token before it just holds and waits (won't add further levels,
-  // but will still exit on TP if price recovers). This is NOT part of your
-  // requested strategy — it's a risk cap I added since uncapped doubling
-  // can exceed your balance fast. Set to a very high number to effectively
-  // disable it if you want pure, uncapped Martingale.
-  // Example cost if all levels hit at BASE=0.1, MULTIPLIER=2:
-  // level 1: 0.1, 2: 0.2, 3: 0.4, 4: 0.8, 5: 1.6 SOL (3.1 SOL total invested)
-  MAX_MARTINGALE_LEVELS: 5,
+  // ---- Loop timing ----
+  POLL_INTERVAL_SECONDS: 20, // how often the bot checks the market
 
-  // After a take-profit exit, immediately start a new cycle (fresh initial
-  // buy) on the same token. Set to false to just stop and hold cash after
-  // a TP, requiring you to manually re-add the token to trade it again.
-  RESTART_AFTER_TP: true,
-
-  // ---------------- PRICE DATA SOURCE: DexScreener ----------------
-  // Free public REST API, no key required, no wallet, no metering cost.
-  DEXSCREENER_POLL_INTERVAL_SECONDS: 30,
-
-  // Known non-memecoin mints to always refuse to add.
-  EXCLUDED_MINTS: [
-    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
-    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
-    "So11111111111111111111111111111111111111112", // Wrapped SOL
-  ],
-
-  // Safety valve: max number of tokens you can manually track at once.
-  MAX_TRACKED_TOKENS: 30,
-
-  // How many recent events to keep for the dashboard.
-  MAX_DASHBOARD_EVENTS: 200,
+  // ---- Files ----
+  STATE_FILE: './state.json',
 };
