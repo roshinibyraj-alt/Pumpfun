@@ -34,6 +34,13 @@ module.exports = {
   TAKER_FEE_RATE: 0.0, // demo mode: set to 0 for now so you see pure model edge.
   // Flip to 0.07 once you want to see fee-adjusted demo P&L.
 
+  // ---- Resolution ----
+  // Polymarket's own token price converges toward $1 for the winning side
+  // and $0 for the losing side as a window resolves. We confirm outcomes
+  // this way instead of guessing from an external price feed.
+  RESOLUTION_WIN_THRESHOLD: 0.90,
+  RESOLUTION_LOSS_THRESHOLD: 0.10,
+
   // ---- Loop timing ----
   POLL_INTERVAL_SECONDS: 20, // how often the bot checks the market
 
