@@ -2,7 +2,7 @@
 // bot.js — the main loop. Every POLL_INTERVAL_SECONDS it:
 //   1. finds the currently-live 15-min up/down market
 //   2. if we have an open position whose window has ended,
-//      resolves it (win/loss) and updates the bankroll
+//      resolves it by checking the token's own price convergence
 //   3. if we have no open position and we're in the entry
 //      window, evaluates the strategy and maybe opens one
 // ============================================================
@@ -22,21 +22,29 @@ async function resolveOpenPosition(state) {
   const nowSec = Math.floor(Date.now() / 1000);
   if (nowSec < pos.windowEnd) return; // window hasn't closed yet
 
-  let finalPrice;
+  // Resolution rule: check the price of the token we actually hold. Once
+  // the window closes, Polymarket's own market converges the winning
+  // side's price toward $1.00 and the losing side's toward $0.00. We wait
+  // for that convergence rather than guessing from an external feed — if
+  // it's still ambiguous (between the thresholds), we just check again
+  // next tick. No fallback, no guessing.
+  let tokenPrice;
   try {
-    finalPrice = await binance.getSpotPrice(config.ASSET);
+    tokenPrice = await polymarket.getMidpoint(pos.tokenId);
   } catch (e) {
-    log('ERROR fetching final price to resolve position:', e.message);
+    log('ERROR fetching token price to resolve position:', e.message);
     return; // try again next tick
   }
 
-  // Approximation of Polymarket's official resolution: compares the
-  // close-of-window price to the recorded strike. Polymarket itself
-  // resolves against a Chainlink price feed, which can differ from
-  // Binance spot by a tiny amount — expect occasional near-strike
-  // resolution mismatches in demo mode.
-  const wentUp = finalPrice > pos.strike;
-  const won = (pos.side === 'UP' && wentUp) || (pos.side === 'DOWN' && !wentUp);
+  let won;
+  if (tokenPrice >= config.RESOLUTION_WIN_THRESHOLD) {
+    won = true;
+  } else if (tokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) {
+    won = false;
+  } else {
+    log(`Window ${pos.windowStart} closed but ${pos.side} token price (${tokenPrice.toFixed(3)}) hasn't converged yet — waiting.`);
+    return; // still settling, check again next tick
+  }
 
   const fee = pos.stake * config.TAKER_FEE_RATE;
   let pnl;
@@ -50,7 +58,7 @@ async function resolveOpenPosition(state) {
   state.bankroll = Math.round((state.bankroll + pnl) * 100) / 100;
   state.trades.push({
     ...pos,
-    finalPrice,
+    finalTokenPrice: tokenPrice,
     won,
     pnl: Math.round(pnl * 100) / 100,
     bankrollAfter: state.bankroll,
@@ -58,7 +66,7 @@ async function resolveOpenPosition(state) {
   });
   state.openPosition = null;
 
-  log(`RESOLVED ${pos.side} | strike ${pos.strike} -> final ${finalPrice} | ${won ? 'WIN' : 'LOSS'} | pnl ${pnl.toFixed(2)} | bankroll ${state.bankroll}`);
+  log(`RESOLVED ${pos.side} | strike ${pos.strike} | token settled at ${tokenPrice.toFixed(3)} | ${won ? 'WIN' : 'LOSS'} | pnl ${pnl.toFixed(2)} | bankroll ${state.bankroll}`);
 }
 
 async function maybeEnterPosition(state) {
@@ -81,8 +89,15 @@ async function maybeEnterPosition(state) {
     return; // not in our entry band yet
   }
 
-  const strike = parseFloat(market.strikePrice || market.startPrice || 0);
   const { upTokenId, downTokenId } = polymarket.parseTokens(market);
+
+  let strikeToUse;
+  try {
+    strikeToUse = await binance.getHistoricalPrice(config.ASSET, windowStart);
+  } catch (e) {
+    log(`WARNING: couldn't get historical strike for window ${windowStart} (${e.message}), skipping this check`);
+    return; // don't fall back to currentPrice — that's the bug we just fixed
+  }
 
   const [currentPrice, sigma, upPrice, downPrice] = await Promise.all([
     binance.getSpotPrice(config.ASSET),
@@ -91,7 +106,6 @@ async function maybeEnterPosition(state) {
     polymarket.getMidpoint(downTokenId),
   ]);
 
-  const strikeToUse = strike > 0 ? strike : currentPrice; // fallback if field missing
   const minutesRemaining = secondsRemaining / 60;
   const modelProbUp = strategy.modelProbabilityUp(currentPrice, strikeToUse, sigma, minutesRemaining);
 
@@ -107,12 +121,30 @@ async function maybeEnterPosition(state) {
     `Checked window ${windowStart} | price ${currentPrice} strike ${strikeToUse} | modelUp ${(modelProbUp * 100).toFixed(1)}% marketUp ${(upPrice * 100).toFixed(1)}% | ${decision ? `TRADE ${decision.side} $${decision.stake}` : 'no edge, pass'}`
   );
 
+  // Save what we saw this tick even if we didn't trade — this is what
+  // lets the dashboard show a live "model vs market" view at all times,
+  // not just when a position is open.
+  state.lastCheck = {
+    timestamp: new Date().toISOString(),
+    windowStart,
+    windowEnd,
+    secondsRemaining,
+    currentPrice,
+    strike: strikeToUse,
+    sigmaPerMinute: sigma,
+    modelProbUp,
+    upPrice,
+    downPrice,
+    tookTrade: !!decision,
+  };
+
   if (!decision) return;
 
   state.openPosition = {
     windowStart,
     windowEnd,
     side: decision.side,
+    tokenId: decision.side === 'UP' ? upTokenId : downTokenId,
     price: decision.price,
     trueProb: decision.trueProb,
     edge: decision.edge,
