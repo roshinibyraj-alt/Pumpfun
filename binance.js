@@ -54,4 +54,29 @@ async function getRealizedVolPerMinute(asset, lookbackMinutes) {
   return Math.sqrt(variance); // sigma per 1-minute step
 }
 
-module.exports = { getSpotPrice, getRealizedVolPerMinute };
+// Historical price at a specific past timestamp — used to independently
+// determine the strike/opening price of a window, since Polymarket's
+// Gamma API does not reliably expose it as a field.
+async function getHistoricalPrice(asset, unixTimestampSeconds) {
+  const product = SYMBOL_MAP[asset];
+  const start = new Date((unixTimestampSeconds - 120) * 1000).toISOString();
+  const end = new Date((unixTimestampSeconds + 120) * 1000).toISOString();
+  const url = `https://api.exchange.coinbase.com/products/${product}/candles?granularity=60&start=${start}&end=${end}`;
+  const res = await fetch(url, { headers: HEADERS });
+  if (!res.ok) throw new Error(`Coinbase historical candles fetch failed: ${res.status}`);
+  const candles = await res.json();
+  if (!Array.isArray(candles) || candles.length === 0) {
+    throw new Error('Coinbase historical candles: no data returned');
+  }
+  // Each candle: [ time, low, high, open, close, volume ]. Find the one
+  // whose start time is closest to the target timestamp, use its open.
+  let closest = candles[0];
+  for (const c of candles) {
+    if (Math.abs(c[0] - unixTimestampSeconds) < Math.abs(closest[0] - unixTimestampSeconds)) {
+      closest = c;
+    }
+  }
+  return closest[3]; // open price
+}
+
+module.exports = { getSpotPrice, getRealizedVolPerMinute, getHistoricalPrice };
