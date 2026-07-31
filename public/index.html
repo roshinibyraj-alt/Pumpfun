@@ -264,27 +264,41 @@
   }
 
   async function refresh() {
+    let s;
     try {
       const res = await fetch('/api/state');
-      const s = await res.json();
+      s = await res.json();
+    } catch (e) {
+      console.error('fetch /api/state failed', e);
+      $('footer').textContent = 'connection issue — retrying…';
+      return;
+    }
 
+    try {
       $('modeTag').textContent = s.config.DEMO_MODE ? 'DEMO' : 'LIVE';
       $('modeTag').className = 'mode' + (s.config.DEMO_MODE ? ' demo' : '');
-
       const price = (s.lastCheck && s.lastCheck.currentPrice) || (s.openPosition && s.openPosition.strike);
       $('livePrice').innerHTML = price ? s.config.ASSET.toUpperCase() + ' <b>$' + Number(price).toLocaleString(undefined,{maximumFractionDigits:0}) + '</b>' : '—';
+    } catch (e) { console.error('header render failed', e); }
 
+    try {
       $('bankroll').textContent = fmt$(s.bankroll);
       const retPct = (s.bankroll - s.startingBankroll) / s.startingBankroll;
       const retEl = $('returnPct');
       retEl.textContent = (retPct >= 0 ? '+' : '') + fmtPct(retPct, 2);
       retEl.className = 'return ' + (retPct >= 0 ? 'pos' : 'neg');
+    } catch (e) { console.error('bankroll render failed', e); }
 
+    try {
       const curve = [s.startingBankroll, ...s.trades.map(t => t.bankrollAfter)];
       buildSparkline(curve);
+    } catch (e) { console.error('sparkline render failed', e); }
 
+    try {
       renderLiveMarket(s.lastCheck, s.openPosition);
+    } catch (e) { console.error('live market render failed', e); }
 
+    try {
       const posCard = $('positionCard');
       if (s.openPosition) {
         posCard.style.display = '';
@@ -298,7 +312,9 @@
       } else {
         posCard.style.display = 'none';
       }
+    } catch (e) { console.error('position card render failed', e); }
 
+    try {
       const trades = s.trades;
       $('tradeCount').textContent = trades.length;
       const wins = trades.filter(t => t.won).length;
@@ -314,7 +330,10 @@
       }
       $('streak').textContent = trades.length ? (streak + (streakType ? 'W' : 'L')) : '—';
       $('streak').style.color = streakType === true ? 'var(--win)' : streakType === false ? 'var(--loss)' : 'var(--text)';
+    } catch (e) { console.error('stats chips render failed', e); }
 
+    try {
+      const trades = s.trades;
       const logEl = $('tradeLog');
       if (trades.length === 0) {
         logEl.innerHTML = '<div class="empty-state">No trades yet — the model is still watching.</div>';
@@ -326,3 +345,18 @@
             '<div class="mid">' +
               '<div class="top"><span class="side-tag ' + t.side.toLowerCase() + '">' + t.side + '</span> ' + fmt$(t.stake) + ' @ ' + t.price.toFixed(3) + '</div>' +
               '<div class="bottom">edge ' + fmtPct(t.edge,1) + ' · settled ' + settled + ' · ' + new Date(t.resolvedAt).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) + '</div>' +
+            '</div>' +
+            '<div class="pnl ' + (t.won ? 'win' : 'loss') + '">' + (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2) + '</div>' +
+          '</div>';
+        }).join('');
+      }
+    } catch (e) { console.error('trade log render failed', e); }
+
+    $('footer').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · polling every 10s';
+  }
+
+  refresh();
+  setInterval(refresh, 10000);
+</script>
+</body>
+</html>
