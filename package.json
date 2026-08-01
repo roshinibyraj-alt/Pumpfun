@@ -1,16 +1,15 @@
 {
-  "name": "pumpfun-demo-bot",
+  "name": "btc-fairvalue-bot",
   "version": "1.0.0",
-  "description": "Paper-trading (demo mode) bot that watches pump.fun trending signals and simulates buys. No real funds, no real wallet.",
-  "main": "bot.js",
-  "type": "commonjs",
+  "description": "Polymarket BTC 15-min up/down paper trading bot using a fair-value drift model",
+  "main": "server.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "express": "^4.19.2"
-  },
-  "engines": {
-    "node": ">=18"
   }
 }
