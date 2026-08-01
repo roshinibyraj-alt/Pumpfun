@@ -1,10 +1,14 @@
 // ============================================================
 // bot.js — the main loop. Every POLL_INTERVAL_SECONDS it:
-//   1. finds the currently-live 15-min up/down market
-//   2. if we have an open position whose window has ended,
-//      resolves it by checking the token's own price convergence
-//   3. if we have no open position and we're in the entry
-//      window, evaluates the strategy and maybe opens one
+//   1. takes a fresh snapshot of the live market — price, strike,
+//      model probability, and both token prices — UNCONDITIONALLY,
+//      whether or not a trade is open or we're near entry. This is
+//      what the dashboard shows as "live."
+//   2. if we have an open position whose window has ended, resolves
+//      it by checking the token's own price convergence
+//   3. if we have no open position and we're in the entry window,
+//      evaluates the strategy against that same snapshot and maybe
+//      opens a trade
 // ============================================================
 
 const config = require('./config');
@@ -15,6 +19,63 @@ const { loadState, saveState } = require('./state');
 
 function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
+}
+
+// Always runs, every tick, regardless of open position or entry timing.
+// This is the single source of truth for "what does the market look like
+// right now" — both for the dashboard and for trade decisions.
+async function takeLiveSnapshot(state) {
+  const found = await polymarket.getCurrentUpDownMarket(config.ASSET, config.WINDOW_MINUTES);
+  if (!found) {
+    log('No live market found for current window yet.');
+    return null;
+  }
+  const { market, windowStart, windowEnd } = found;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const secondsRemaining = windowEnd - nowSec;
+
+  const { upTokenId, downTokenId } = polymarket.parseTokens(market);
+
+  let strikeToUse;
+  try {
+    strikeToUse = await binance.getHistoricalPrice(config.ASSET, windowStart);
+  } catch (e) {
+    log(`WARNING: couldn't get historical strike for window ${windowStart} (${e.message})`);
+    return null; // no fallback — skip this tick's snapshot entirely
+  }
+
+  const [currentPrice, sigmaRaw, upPrice, downPrice] = await Promise.all([
+    binance.getSpotPrice(config.ASSET),
+    binance.getRealizedVolPerMinute(config.ASSET, config.VOL_LOOKBACK_MINUTES),
+    polymarket.getMidpoint(upTokenId),
+    polymarket.getMidpoint(downTokenId),
+  ]);
+
+  const lowVolRegime = sigmaRaw < config.MIN_SIGMA_PER_MINUTE;
+  const sigma = Math.max(sigmaRaw, config.MIN_SIGMA_PER_MINUTE);
+
+  const minutesRemaining = secondsRemaining / 60;
+  const modelProbUp = strategy.modelProbabilityUp(currentPrice, strikeToUse, sigma, minutesRemaining);
+
+  const snapshot = {
+    timestamp: new Date().toISOString(),
+    market, windowStart, windowEnd, secondsRemaining,
+    upTokenId, downTokenId,
+    currentPrice, strike: strikeToUse, sigmaPerMinute: sigma, sigmaRaw, lowVolRegime,
+    modelProbUp, upPrice, downPrice,
+  };
+
+  // This is what makes the dashboard genuinely live: updated every single
+  // tick, independent of whether we're trading or waiting.
+  state.lastCheck = {
+    timestamp: snapshot.timestamp,
+    windowStart, windowEnd, secondsRemaining,
+    currentPrice, strike: strikeToUse, sigmaPerMinute: sigma, lowVolRegime,
+    modelProbUp, upPrice, downPrice,
+    tookTrade: false, // maybeEnterPosition overwrites this to true if it trades
+  };
+
+  return snapshot;
 }
 
 async function resolveOpenPosition(state) {
@@ -47,11 +108,12 @@ async function resolveOpenPosition(state) {
   }
 
   const fee = pos.stake * config.TAKER_FEE_RATE;
-  let pnl;
+  let pnl, grossPayout;
   if (won) {
-    const grossPayout = pos.stake / pos.price; // shares bought * $1 payout
+    grossPayout = pos.stake / pos.price; // shares bought * $1 payout
     pnl = grossPayout - pos.stake - fee;
   } else {
+    grossPayout = 0;
     pnl = -pos.stake - fee;
   }
 
@@ -59,6 +121,8 @@ async function resolveOpenPosition(state) {
   state.trades.push({
     ...pos,
     finalTokenPrice: tokenPrice,
+    grossPayout: Math.round(grossPayout * 100) / 100,
+    fee: Math.round(fee * 100) / 100,
     won,
     pnl: Math.round(pnl * 100) / 100,
     bankrollAfter: state.bankroll,
@@ -69,15 +133,9 @@ async function resolveOpenPosition(state) {
   log(`RESOLVED ${pos.side} | strike ${pos.strike} | token settled at ${tokenPrice.toFixed(3)} | ${won ? 'WIN' : 'LOSS'} | pnl ${pnl.toFixed(2)} | bankroll ${state.bankroll}`);
 }
 
-async function maybeEnterPosition(state) {
-  const found = await polymarket.getCurrentUpDownMarket(config.ASSET, config.WINDOW_MINUTES);
-  if (!found) {
-    log('No live market found for current window yet.');
-    return;
-  }
-  const { market, windowStart, windowEnd } = found;
-  const nowSec = Math.floor(Date.now() / 1000);
-  const secondsRemaining = windowEnd - nowSec;
+async function maybeEnterPosition(state, snapshot) {
+  if (!snapshot) return;
+  const { windowStart, windowEnd, secondsRemaining, upTokenId, downTokenId, upPrice, downPrice, modelProbUp, strike } = snapshot;
 
   // already have a position logged for this exact window? skip.
   if (state.openPosition && state.openPosition.windowStart === windowStart) return;
@@ -86,28 +144,8 @@ async function maybeEnterPosition(state) {
     secondsRemaining > config.ENTRY_WINDOW_SECONDS_MAX ||
     secondsRemaining < config.ENTRY_WINDOW_SECONDS_MIN
   ) {
-    return; // not in our entry band yet
+    return; // not in our entry band yet — snapshot was still recorded for the dashboard
   }
-
-  const { upTokenId, downTokenId } = polymarket.parseTokens(market);
-
-  let strikeToUse;
-  try {
-    strikeToUse = await binance.getHistoricalPrice(config.ASSET, windowStart);
-  } catch (e) {
-    log(`WARNING: couldn't get historical strike for window ${windowStart} (${e.message}), skipping this check`);
-    return; // don't fall back to currentPrice — that's the bug we just fixed
-  }
-
-  const [currentPrice, sigma, upPrice, downPrice] = await Promise.all([
-    binance.getSpotPrice(config.ASSET),
-    binance.getRealizedVolPerMinute(config.ASSET, config.VOL_LOOKBACK_MINUTES),
-    polymarket.getMidpoint(upTokenId),
-    polymarket.getMidpoint(downTokenId),
-  ]);
-
-  const minutesRemaining = secondsRemaining / 60;
-  const modelProbUp = strategy.modelProbabilityUp(currentPrice, strikeToUse, sigma, minutesRemaining);
 
   const decision = strategy.decideTrade({
     bankroll: state.bankroll,
@@ -118,27 +156,12 @@ async function maybeEnterPosition(state) {
   });
 
   log(
-    `Checked window ${windowStart} | price ${currentPrice} strike ${strikeToUse} | modelUp ${(modelProbUp * 100).toFixed(1)}% marketUp ${(upPrice * 100).toFixed(1)}% | ${decision ? `TRADE ${decision.side} $${decision.stake}` : 'no edge, pass'}`
+    `Checked window ${windowStart} | price ${snapshot.currentPrice} strike ${strike} | modelUp ${(modelProbUp * 100).toFixed(1)}% marketUp ${(upPrice * 100).toFixed(1)}% | ${decision ? `TRADE ${decision.side} $${decision.stake}` : 'no edge, pass'}`
   );
 
-  // Save what we saw this tick even if we didn't trade — this is what
-  // lets the dashboard show a live "model vs market" view at all times,
-  // not just when a position is open.
-  state.lastCheck = {
-    timestamp: new Date().toISOString(),
-    windowStart,
-    windowEnd,
-    secondsRemaining,
-    currentPrice,
-    strike: strikeToUse,
-    sigmaPerMinute: sigma,
-    modelProbUp,
-    upPrice,
-    downPrice,
-    tookTrade: !!decision,
-  };
-
   if (!decision) return;
+
+  state.lastCheck.tookTrade = true;
 
   state.openPosition = {
     windowStart,
@@ -149,7 +172,11 @@ async function maybeEnterPosition(state) {
     trueProb: decision.trueProb,
     edge: decision.edge,
     stake: decision.stake,
-    strike: strikeToUse,
+    strike,
+    modelProbUpAtEntry: modelProbUp,
+    upPriceAtEntry: upPrice,
+    downPriceAtEntry: downPrice,
+    lowVolRegime: snapshot.lowVolRegime,
     openedAt: new Date().toISOString(),
   };
 }
@@ -157,11 +184,13 @@ async function maybeEnterPosition(state) {
 async function tick() {
   const state = loadState();
   try {
+    const snapshot = await takeLiveSnapshot(state);
+
     if (state.openPosition) {
       await resolveOpenPosition(state);
     }
     if (!state.openPosition) {
-      await maybeEnterPosition(state);
+      await maybeEnterPosition(state, snapshot);
     }
     state.lastError = null;
   } catch (e) {
