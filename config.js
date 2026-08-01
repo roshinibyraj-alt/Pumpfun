@@ -19,6 +19,15 @@ module.exports = {
   VOL_LOOKBACK_MINUTES: 120, // how many 1-min candles to use for realized vol
   MIN_EDGE_TO_TRADE: 0.06, // model prob vs market price must differ by this much (6%)
 
+  // Weekend / low-liquidity floor: BTC trades 24/7, but weekend volume is
+  // real and realized vol readings can come in artificially low when few
+  // market makers are active. Since the model's confidence scales with
+  // 1/sigma, a falsely-low sigma makes it overconfident on noise right
+  // when it should trust the signal LESS. This floor prevents that —
+  // roughly ~11% annualized vol, well below BTC's typical range, so it
+  // only kicks in during genuinely quiet stretches.
+  MIN_SIGMA_PER_MINUTE: 0.00015,
+
   // Only attempt one entry per window, and only within this time-remaining
   // band (in seconds). Too early = thin/unstable market. Too late = no room
   // for the edge to play out and slippage eats it.
