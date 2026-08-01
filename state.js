@@ -18,6 +18,8 @@ function defaultState() {
     startingBankroll: config.STARTING_BANKROLL,
     openPosition: null, // { windowStart, windowEnd, side, price, stake, strike }
     trades: [], // completed trades, most recent last
+    pendingShadow: null, // shadow observation awaiting resolution
+    shadowStats: null, // running accuracy counters, see bot.js resolveShadow
     lastError: null,
     startedAt: new Date().toISOString(),
   };
