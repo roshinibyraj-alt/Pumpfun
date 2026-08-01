@@ -105,6 +105,14 @@
   .trade .detail-grid .d-item .v { font-family: var(--font-data); font-size: 12px; font-weight: 600; margin-top: 2px; }
 
   footer { text-align: center; color: var(--text-dim); font-size: 11px; margin-top: 20px; font-family: var(--font-data); }
+
+  .shadow-banner { background: rgba(245,166,35,0.1); border: 1px solid rgba(245,166,35,0.35); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; font-size: 12px; color: var(--market); }
+  .shadow-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .shadow-item { text-align: center; }
+  .shadow-item .k { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .shadow-item .v { font-family: var(--font-data); font-size: 20px; font-weight: 700; }
+  .shadow-item .n { font-family: var(--font-data); font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+  .shadow-vs { text-align: center; color: var(--text-dim); font-size: 11px; margin: 10px 0 4px; }
 </style>
 </head>
 <body>
@@ -118,6 +126,10 @@
     <div class="live-price" id="livePrice">— —</div>
   </div>
 
+  <div class="shadow-banner" id="tradingPausedBanner" style="display:none;">
+    ⏸ Real staking is paused — validating the model against the market for free before risking more demo money. See Shadow Validation below.
+  </div>
+
   <div class="hero">
     <div class="label">Bankroll</div>
     <div class="row">
@@ -125,6 +137,16 @@
       <div class="return" id="returnPct">—</div>
     </div>
     <svg class="sparkline" id="sparkline" preserveAspectRatio="none"></svg>
+  </div>
+
+  <div class="card" id="shadowCard" style="display:none;">
+    <div class="card-title"><span>Shadow Validation</span><span class="countdown" id="shadowN">0 windows</span></div>
+    <div class="shadow-grid">
+      <div class="shadow-item"><div class="k">Model Accuracy</div><div class="v" id="shadowModelAcc">—</div><div class="n" id="shadowModelN">—</div></div>
+      <div class="shadow-item"><div class="k">Market Accuracy</div><div class="v" id="shadowMarketAcc">—</div><div class="n" id="shadowMarketN">—</div></div>
+      <div class="shadow-item"><div class="k">Would-Trade Win%</div><div class="v" id="shadowTradeAcc">—</div><div class="n" id="shadowTradeN">—</div></div>
+    </div>
+    <div class="shadow-vs" id="shadowVerdict">Collecting data — need a larger sample before this means anything.</div>
   </div>
 
   <div class="card">
@@ -287,7 +309,43 @@
       $('modeTag').className = 'mode' + (s.config.DEMO_MODE ? ' demo' : '');
       const price = (s.lastCheck && s.lastCheck.currentPrice) || (s.openPosition && s.openPosition.strike);
       $('livePrice').innerHTML = price ? s.config.ASSET.toUpperCase() + ' <b>$' + Number(price).toLocaleString(undefined,{maximumFractionDigits:0}) + '</b>' : '—';
+      $('tradingPausedBanner').style.display = s.config.TRADING_ENABLED === false ? '' : 'none';
     } catch (e) { console.error('header render failed', e); }
+
+    try {
+      const sc = $('shadowCard');
+      if (s.shadowStats && s.shadowStats.totalWindows > 0) {
+        sc.style.display = '';
+        const st = s.shadowStats;
+        $('shadowN').textContent = st.totalWindows + ' windows';
+        $('shadowModelAcc').textContent = Math.round(st.modelCorrect/st.totalWindows*100) + '%';
+        $('shadowModelN').textContent = st.modelCorrect + '/' + st.totalWindows;
+        $('shadowMarketAcc').textContent = Math.round(st.marketCorrect/st.totalWindows*100) + '%';
+        $('shadowMarketN').textContent = st.marketCorrect + '/' + st.totalWindows;
+        $('shadowTradeAcc').textContent = st.wouldTradeCount ? Math.round(st.wouldTradeWins/st.wouldTradeCount*100) + '%' : '—';
+        $('shadowTradeN').textContent = st.wouldTradeCount ? (st.wouldTradeWins + '/' + st.wouldTradeCount) : 'no signals yet';
+
+        const modelAcc = st.modelCorrect/st.totalWindows, marketAcc = st.marketCorrect/st.totalWindows;
+        const tradeAcc = st.wouldTradeCount ? st.wouldTradeWins/st.wouldTradeCount : null;
+        $('shadowModelAcc').style.color = modelAcc >= marketAcc ? 'var(--win)' : 'var(--loss)';
+        $('shadowMarketAcc').style.color = marketAcc > modelAcc ? 'var(--win)' : 'var(--text)';
+        if (tradeAcc !== null) $('shadowTradeAcc').style.color = tradeAcc > 0.5 ? 'var(--win)' : 'var(--loss)';
+
+        let verdict;
+        if (st.totalWindows < 100) {
+          verdict = 'Collecting data — ' + (100 - st.totalWindows) + ' more windows before this is statistically meaningful.';
+        } else if (tradeAcc !== null && tradeAcc > 0.55 && st.wouldTradeCount >= 50) {
+          verdict = 'Would-trade signal is beating the market so far — worth considering re-enabling staking.';
+        } else if (tradeAcc !== null) {
+          verdict = 'Would-trade signal is not beating the market — staking stays paused.';
+        } else {
+          verdict = 'No would-trade signals in this sample yet.';
+        }
+        $('shadowVerdict').textContent = verdict;
+      } else {
+        sc.style.display = 'none';
+      }
+    } catch (e) { console.error('shadow stats render failed', e); }
 
     try {
       $('bankroll').textContent = fmt$(s.bankroll);
