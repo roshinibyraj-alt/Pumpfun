@@ -137,7 +137,8 @@ async function maybeEnterPosition(state, snapshot) {
   if (!snapshot) return;
   const { windowStart, windowEnd, secondsRemaining, upTokenId, downTokenId, upPrice, downPrice, modelProbUp, strike } = snapshot;
 
-  // already have a position logged for this exact window? skip.
+  // already recorded a shadow/real observation for this exact window? skip.
+  if (state.pendingShadow && state.pendingShadow.windowStart === windowStart) return;
   if (state.openPosition && state.openPosition.windowStart === windowStart) return;
 
   if (
@@ -156,10 +157,29 @@ async function maybeEnterPosition(state, snapshot) {
   });
 
   log(
-    `Checked window ${windowStart} | price ${snapshot.currentPrice} strike ${strike} | modelUp ${(modelProbUp * 100).toFixed(1)}% marketUp ${(upPrice * 100).toFixed(1)}% | ${decision ? `TRADE ${decision.side} $${decision.stake}` : 'no edge, pass'}`
+    `Checked window ${windowStart} | price ${snapshot.currentPrice} strike ${strike} | modelUp ${(modelProbUp * 100).toFixed(1)}% marketUp ${(upPrice * 100).toFixed(1)}% | ${decision ? `${config.TRADING_ENABLED ? 'TRADE' : 'WOULD-TRADE (shadow only)'} ${decision.side} $${decision.stake}` : 'no edge, pass'}`
   );
 
+  // SHADOW_MODE: record every window we evaluated, regardless of whether
+  // an edge cleared the threshold, so we can check afterward whether
+  // "model disagrees with market" actually predicts anything — without
+  // staking a cent while we find out.
+  if (config.SHADOW_MODE) {
+    state.pendingShadow = {
+      windowStart, windowEnd,
+      upTokenId, downTokenId,
+      modelProbUp, upPrice, downPrice,
+      marketFavoredSide: upPrice > downPrice ? 'UP' : 'DOWN',
+      modelFavoredSide: modelProbUp > 0.5 ? 'UP' : 'DOWN',
+      wouldTradeSide: decision ? decision.side : null,
+      wouldTradeEdge: decision ? decision.edge : null,
+      lowVolRegime: snapshot.lowVolRegime,
+      capturedAt: new Date().toISOString(),
+    };
+  }
+
   if (!decision) return;
+  if (!config.TRADING_ENABLED) return; // shadow-only: log what we would have done, but don't stake
 
   state.lastCheck.tookTrade = true;
 
@@ -181,18 +201,91 @@ async function maybeEnterPosition(state, snapshot) {
   };
 }
 
+// Resolves the pending shadow observation once its window has closed, by
+// checking real token price convergence — same no-fallback rule as real
+// position resolution. Updates running accuracy counters so we can see,
+// live, whether the model or the market is the better predictor, and
+// specifically whether "would-trade" disagreement calls are actually
+// profitable before ever staking demo money on them again.
+async function resolveShadow(state) {
+  const shadow = state.pendingShadow;
+  if (!shadow) return;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (nowSec < shadow.windowEnd) return;
+
+  let upTokenPrice;
+  try {
+    upTokenPrice = await polymarket.getMidpoint(shadow.upTokenId);
+  } catch (e) {
+    log('ERROR fetching shadow resolution price:', e.message);
+    return;
+  }
+
+  let actualWinner;
+  if (upTokenPrice >= config.RESOLUTION_WIN_THRESHOLD) actualWinner = 'UP';
+  else if (upTokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) actualWinner = 'DOWN';
+  else {
+    log(`Shadow window ${shadow.windowStart} not converged yet (up token ${upTokenPrice.toFixed(3)}) — waiting.`);
+    return;
+  }
+
+  if (!state.shadowStats) {
+    state.shadowStats = {
+      totalWindows: 0,
+      modelCorrect: 0,
+      marketCorrect: 0,
+      disagreementCount: 0,
+      modelCorrectOnDisagreement: 0,
+      wouldTradeCount: 0,
+      wouldTradeWins: 0,
+    };
+  }
+  const stats = state.shadowStats;
+  stats.totalWindows++;
+  if (shadow.modelFavoredSide === actualWinner) stats.modelCorrect++;
+  if (shadow.marketFavoredSide === actualWinner) stats.marketCorrect++;
+  if (shadow.modelFavoredSide !== shadow.marketFavoredSide) {
+    stats.disagreementCount++;
+    if (shadow.modelFavoredSide === actualWinner) stats.modelCorrectOnDisagreement++;
+  }
+  if (shadow.wouldTradeSide) {
+    stats.wouldTradeCount++;
+    if (shadow.wouldTradeSide === actualWinner) stats.wouldTradeWins++;
+  }
+
+  log(`SHADOW RESOLVED window ${shadow.windowStart} | actual ${actualWinner} | model said ${shadow.modelFavoredSide} (${shadow.modelFavoredSide===actualWinner?'correct':'wrong'}) | market said ${shadow.marketFavoredSide} (${shadow.marketFavoredSide===actualWinner?'correct':'wrong'}) | running: model ${stats.modelCorrect}/${stats.totalWindows}, market ${stats.marketCorrect}/${stats.totalWindows}, would-trade ${stats.wouldTradeWins}/${stats.wouldTradeCount}`);
+
+  state.pendingShadow = null;
+}
+
 async function tick() {
   const state = loadState();
-  try {
-    const snapshot = await takeLiveSnapshot(state);
 
+  let snapshot = null;
+  try {
+    snapshot = await takeLiveSnapshot(state);
+  } catch (e) {
+    log('ERROR taking live snapshot:', e.message);
+    state.lastError = e.message;
+  }
+
+  try {
+    if (state.pendingShadow) {
+      await resolveShadow(state);
+    }
+  } catch (e) {
+    log('ERROR resolving shadow:', e.message);
+    state.lastError = e.message;
+  }
+
+  try {
     if (state.openPosition) {
       await resolveOpenPosition(state);
     }
     if (!state.openPosition) {
       await maybeEnterPosition(state, snapshot);
     }
-    state.lastError = null;
+    if (!state.lastError) state.lastError = null;
   } catch (e) {
     log('ERROR in tick:', e.message);
     state.lastError = e.message;
@@ -201,7 +294,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started. Demo mode: ${config.DEMO_MODE}. Starting bankroll: $${config.STARTING_BANKROLL}`);
+  log(`Bot started. Trading enabled: ${config.TRADING_ENABLED} | Shadow mode: ${config.SHADOW_MODE} | Bankroll: $${config.STARTING_BANKROLL}`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_SECONDS * 1000);
 }
