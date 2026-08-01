@@ -15,7 +15,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/state', (req, res) => {
   const state = loadState();
-  res.json({ config: { DEMO_MODE: config.DEMO_MODE, ASSET: config.ASSET }, ...state });
+  res.json({ config: { DEMO_MODE: config.DEMO_MODE, ASSET: config.ASSET, TRADING_ENABLED: config.TRADING_ENABLED, SHADOW_MODE: config.SHADOW_MODE }, ...state });
 });
 
 const PORT = process.env.PORT || 3000;
