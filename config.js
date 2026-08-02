@@ -8,12 +8,31 @@ module.exports = {
   // ---- Mode ----
   DEMO_MODE: true, // true = paper trading only, never places real orders
 
+  // Live results (see the trade log) showed the "fade the market" model
+  // losing badly: on the 29/34 trades where the model disagreed with
+  // Polymarket's own price, the market's favored side was actually right
+  // 79% of the time. That's strong evidence the model has no real edge
+  // over these markets. Real staking is paused here while SHADOW_MODE
+  // collects a much larger, zero-cost sample to check whether that holds
+  // up statistically before risking demo money again.
+  TRADING_ENABLED: false,
+
+  // When true, every window is evaluated and logged (model vs market vs
+  // actual outcome) whether or not TRADING_ENABLED would have staked on
+  // it. This is how we validate the strategy going forward, since
+  // Polymarket's own historical CLOB data isn't usable for backtesting
+  // these markets (see SHADOW_MODE note in bot.js).
+  SHADOW_MODE: true,
+
   // ---- Bankroll / compounding ----
   STARTING_BANKROLL: 1000, // virtual dollars to start with
 
   // ---- Market ----
   ASSET: 'btc', // 'btc' or 'eth' — must match Polymarket's slug prefix
-  WINDOW_MINUTES: 15, // 15-minute up/down windows
+  WINDOW_MINUTES: 5, // Polymarket also runs 5-min BTC up/down markets
+  // (slug: btc-updown-5m-{timestamp}, launched Feb 2026) — switched from
+  // 15 to get through the shadow-validation sample ~3x faster (288
+  // windows/day instead of 96).
 
   // ---- Strategy: fair value model ----
   VOL_LOOKBACK_MINUTES: 120, // how many 1-min candles to use for realized vol
@@ -31,8 +50,12 @@ module.exports = {
   // Only attempt one entry per window, and only within this time-remaining
   // band (in seconds). Too early = thin/unstable market. Too late = no room
   // for the edge to play out and slippage eats it.
-  ENTRY_WINDOW_SECONDS_MIN: 300, // don't enter with less than 5 min left
-  ENTRY_WINDOW_SECONDS_MAX: 720, // don't enter with more than 12 min left
+  // Rescaled proportionally for a 300s (5-min) window — the old 300-720s
+  // band was sized for a 900s (15-min) window and wouldn't fit inside this
+  // one at all (window length itself is 300s, so a 300s minimum would
+  // basically never trigger).
+  ENTRY_WINDOW_SECONDS_MIN: 100, // don't enter with less than ~1:40 left
+  ENTRY_WINDOW_SECONDS_MAX: 240, // don't enter with more than 4:00 left
 
   // ---- Sizing ----
   KELLY_FRACTION: 0.25, // use 25% of full Kelly — full Kelly is too aggressive
