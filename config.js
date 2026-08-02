@@ -8,14 +8,15 @@ module.exports = {
   // ---- Mode ----
   DEMO_MODE: true, // true = paper trading only, never places real orders
 
-  // Live results (see the trade log) showed the "fade the market" model
-  // losing badly: on the 29/34 trades where the model disagreed with
-  // Polymarket's own price, the market's favored side was actually right
-  // 79% of the time. That's strong evidence the model has no real edge
-  // over these markets. Real staking is paused here while SHADOW_MODE
-  // collects a much larger, zero-cost sample to check whether that holds
-  // up statistically before risking demo money again.
-  TRADING_ENABLED: false,
+  // Live results (see the trade log) previously showed the "fade the
+  // market" model losing badly: on 29/34 disagreement trades, the
+  // market's favored side was right 79% of the time. Shadow validation
+  // was paused-trading while collecting a bigger sample to check that.
+  // Re-enabled at the user's request before that sample was necessarily
+  // large/positive — SHADOW_MODE stays on below so we keep tracking
+  // model vs market accuracy either way, but real demo money is staking
+  // again now regardless of what the shadow stats currently show.
+  TRADING_ENABLED: true,
 
   // When true, every window is evaluated and logged (model vs market vs
   // actual outcome) whether or not TRADING_ENABLED would have staked on
