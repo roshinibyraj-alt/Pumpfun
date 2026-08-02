@@ -433,12 +433,12 @@
       }
     } catch (e) { console.error('trade log render failed', e); }
 
-    $('footer').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · polling every 10s' +
+    $('footer').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · polling every 1s' +
       (s.lastCheck ? ' · bot last ticked ' + Math.max(0, Math.floor((Date.now() - new Date(s.lastCheck.timestamp).getTime())/1000)) + 's ago' : '');
   }
 
   refresh();
-  setInterval(refresh, 10000);
+  setInterval(refresh, 1000);
 </script>
 </body>
 </html>
