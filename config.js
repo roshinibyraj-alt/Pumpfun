@@ -59,13 +59,20 @@ module.exports = {
   ENTRY_WINDOW_SECONDS_MAX: 240, // don't enter with more than 4:00 left
 
   // ---- Sizing ----
-  KELLY_FRACTION: 0.25, // use 25% of full Kelly — full Kelly is too aggressive
-  MAX_POSITION_PCT_OF_BANKROLL: 0.05, // hard cap: never risk more than 5% on one trade
+  STAKE_MODE: 'fixed', // 'fixed' or 'kelly'
+  FIXED_STAKE_AMOUNT: 50, // used when STAKE_MODE === 'fixed' — flat $ per trade, no compounding
+  KELLY_FRACTION: 0.25, // used only when STAKE_MODE === 'kelly' — 25% of full Kelly
+  MAX_POSITION_PCT_OF_BANKROLL: 0.05, // used only when STAKE_MODE === 'kelly'
   MIN_STAKE_DOLLARS: 5, // don't bother with dust-sized trades
 
-  // ---- Fees (mirrors your other bots' 0.07 taker assumption) ----
-  TAKER_FEE_RATE: 0.0, // demo mode: set to 0 for now so you see pure model edge.
-  // Flip to 0.07 once you want to see fee-adjusted demo P&L.
+  // ---- Fees ----
+  // Confirmed against Polymarket's official docs (docs.polymarket.com/trading/fees):
+  // crypto-category markets charge a 7% taker fee (makers pay 0). The real
+  // formula is fee = shares × rate × price × (1-price); for a fixed dollar
+  // stake that simplifies to fee = stake × rate × (1 - price) — so cheap/
+  // longshot entries cost proportionally MORE in fees, not less. bot.js
+  // applies this formula directly rather than a flat percentage.
+  TAKER_FEE_RATE: 0.07,
 
   // ---- Resolution ----
   // Polymarket's own token price converges toward $1 for the winning side
@@ -75,7 +82,14 @@ module.exports = {
   RESOLUTION_LOSS_THRESHOLD: 0.10,
 
   // ---- Loop timing ----
-  POLL_INTERVAL_SECONDS: 20, // how often the bot checks the market
+  // Polymarket's own docs confirm /midpoint allows 1,500 req/10s (150/s) per
+  // IP — very generous, so we poll every 2s instead of 20s for genuinely
+  // live CLOB prices. To avoid wasting that on redundant work, bot.js
+  // caches the per-window market lookup + strike (only refetched when the
+  // window rolls over) and recomputes volatility on its own slower cadence
+  // below, rather than on every single 2s tick.
+  POLL_INTERVAL_SECONDS: 2,
+  VOL_RECOMPUTE_INTERVAL_SECONDS: 30,
 
   // ---- Files ----
   STATE_FILE: './state.json',
