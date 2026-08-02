@@ -59,9 +59,14 @@ function decideTrade({ bankroll, upPrice, downPrice, modelProbUp, config }) {
 
   if (edge < config.MIN_EDGE_TO_TRADE) return null;
 
-  const fullKelly = kellyFraction(trueProb, price);
-  const fraction = Math.min(fullKelly * config.KELLY_FRACTION, config.MAX_POSITION_PCT_OF_BANKROLL);
-  const stake = Math.round(bankroll * fraction * 100) / 100;
+  let stake;
+  if (config.STAKE_MODE === 'fixed') {
+    stake = config.FIXED_STAKE_AMOUNT;
+  } else {
+    const fullKelly = kellyFraction(trueProb, price);
+    const fraction = Math.min(fullKelly * config.KELLY_FRACTION, config.MAX_POSITION_PCT_OF_BANKROLL);
+    stake = Math.round(bankroll * fraction * 100) / 100;
+  }
 
   if (stake < config.MIN_STAKE_DOLLARS) return null;
 
