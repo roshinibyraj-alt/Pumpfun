@@ -21,6 +21,13 @@ function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
+// In-memory caches (don't need to survive restarts — a cold cache just
+// refetches once). Strike only needs fetching once per window; volatility
+// changes slowly enough that recomputing it every 2s tick would just be
+// wasted load on Coinbase's candles endpoint for no real benefit.
+let strikeCache = null; // { windowStart, strike }
+let volCache = null; // { sigma, computedAtMs }
+
 // Always runs, every tick, regardless of open position or entry timing.
 // This is the single source of truth for "what does the market look like
 // right now" — both for the dashboard and for trade decisions.
@@ -37,16 +44,29 @@ async function takeLiveSnapshot(state) {
   const { upTokenId, downTokenId } = polymarket.parseTokens(market);
 
   let strikeToUse;
-  try {
-    strikeToUse = await binance.getHistoricalPrice(config.ASSET, windowStart);
-  } catch (e) {
-    log(`WARNING: couldn't get historical strike for window ${windowStart} (${e.message})`);
-    return null; // no fallback — skip this tick's snapshot entirely
+  if (strikeCache && strikeCache.windowStart === windowStart) {
+    strikeToUse = strikeCache.strike;
+  } else {
+    try {
+      strikeToUse = await binance.getHistoricalPrice(config.ASSET, windowStart);
+      strikeCache = { windowStart, strike: strikeToUse };
+    } catch (e) {
+      log(`WARNING: couldn't get historical strike for window ${windowStart} (${e.message})`);
+      return null; // no fallback — skip this tick's snapshot entirely
+    }
   }
 
-  const [currentPrice, sigmaRaw, upPrice, downPrice] = await Promise.all([
+  const nowMs = Date.now();
+  let sigmaRaw;
+  if (volCache && nowMs - volCache.computedAtMs < config.VOL_RECOMPUTE_INTERVAL_SECONDS * 1000) {
+    sigmaRaw = volCache.sigma;
+  } else {
+    sigmaRaw = await binance.getRealizedVolPerMinute(config.ASSET, config.VOL_LOOKBACK_MINUTES);
+    volCache = { sigma: sigmaRaw, computedAtMs: nowMs };
+  }
+
+  const [currentPrice, upPrice, downPrice] = await Promise.all([
     binance.getSpotPrice(config.ASSET),
-    binance.getRealizedVolPerMinute(config.ASSET, config.VOL_LOOKBACK_MINUTES),
     polymarket.getMidpoint(upTokenId),
     polymarket.getMidpoint(downTokenId),
   ]);
@@ -107,7 +127,11 @@ async function resolveOpenPosition(state) {
     return; // still settling, check again next tick
   }
 
-  const fee = pos.stake * config.TAKER_FEE_RATE;
+  // Real Polymarket taker fee: fee = shares × rate × price × (1-price).
+  // For our fixed-dollar stake (shares = stake/price), that simplifies to
+  // fee = stake × rate × (1-price) — NOT a flat percentage of stake.
+  // Cheaper/longshot entries cost proportionally more in fees.
+  const fee = pos.stake * config.TAKER_FEE_RATE * (1 - pos.price);
   let pnl, grossPayout;
   if (won) {
     grossPayout = pos.stake / pos.price; // shares bought * $1 payout
