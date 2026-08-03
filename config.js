@@ -8,14 +8,8 @@ module.exports = {
   // ---- Mode ----
   DEMO_MODE: true, // true = paper trading only, never places real orders
 
-  // Live results (see the trade log) previously showed the "fade the
-  // market" model losing badly: on 29/34 disagreement trades, the
-  // market's favored side was right 79% of the time. Shadow validation
-  // was paused-trading while collecting a bigger sample to check that.
-  // Re-enabled at the user's request before that sample was necessarily
-  // large/positive — SHADOW_MODE stays on below so we keep tracking
-  // model vs market accuracy either way, but real demo money is staking
-  // again now regardless of what the shadow stats currently show.
+  // Re-enabled per explicit request — staying live in demo mode while
+  // testing the new price-level entry filter below (PRICE_ENTRY_LEVEL).
   TRADING_ENABLED: true,
 
   // When true, every window is evaluated and logged (model vs market vs
@@ -48,15 +42,30 @@ module.exports = {
   // only kicks in during genuinely quiet stretches.
   MIN_SIGMA_PER_MINUTE: 0.00015,
 
-  // Only attempt one entry per window, and only within this time-remaining
-  // band (in seconds). Too early = thin/unstable market. Too late = no room
-  // for the edge to play out and slippage eats it.
-  // Rescaled proportionally for a 300s (5-min) window — the old 300-720s
-  // band was sized for a 900s (15-min) window and wouldn't fit inside this
-  // one at all (window length itself is 300s, so a 300s minimum would
-  // basically never trigger).
-  ENTRY_WINDOW_SECONDS_MIN: 100, // don't enter with less than ~1:40 left
-  ENTRY_WINDOW_SECONDS_MAX: 240, // don't enter with more than 4:00 left
+  // Only attempt one entry per window. Previously restricted to a narrow
+  // time band; now opened to the full window (5s-295s remaining, i.e.
+  // almost the entire 300s window) since entry is now additionally gated
+  // by PRICE_ENTRY_LEVEL below — it can fire whenever that price
+  // condition is met, not just in a fixed time slice.
+  ENTRY_WINDOW_SECONDS_MIN: 5, // don't enter with less than 5s left (model math degenerates near zero time)
+  ENTRY_WINDOW_SECONDS_MAX: 295, // don't enter in literally the first instant of the window
+
+  // Only enter once the edge-side token has actually dropped to this
+  // price or below — buying the edge side cheap rather than at whatever
+  // price it happens to be when the edge threshold first clears. Still
+  // requires MIN_EDGE_TO_TRADE to be met too; this is an additional
+  // filter, not a replacement.
+  PRICE_ENTRY_LEVEL: 0.33,
+
+  // Only enter when the model itself is near-neutral (no strong directional
+  // view) but the market is pricing one side as a clear underdog anyway —
+  // i.e. trade the market's conviction against the model's lack of one,
+  // rather than trading on the model's own conviction. Note: earlier data
+  // mining on 206 real trades showed the OPPOSITE pattern performed better
+  // (58% win rate when the model was highly confident vs 38.5% when near
+  // 50%) — this filter deliberately narrows toward the historically worse
+  // segment. Implemented as requested; worth watching shadow stats closely.
+  MODEL_NEUTRAL_BAND_PP: 5, // model probability must be within this many pp of 50%
 
   // ---- Sizing ----
   STAKE_MODE: 'fixed', // 'fixed' or 'kelly'
