@@ -59,6 +59,18 @@ function decideTrade({ bankroll, upPrice, downPrice, modelProbUp, config }) {
 
   if (edge < config.MIN_EDGE_TO_TRADE) return null;
 
+  // Only trade when the model itself is near-neutral (close to 50%) but
+  // the market disagrees strongly enough to still clear the edge
+  // threshold above — trading the market's conviction, not the model's.
+  if (config.MODEL_NEUTRAL_BAND_PP !== undefined && Math.abs(trueProb * 100 - 50) > config.MODEL_NEUTRAL_BAND_PP) {
+    return null;
+  }
+
+  // Only enter once the edge side has actually dropped to (or below) the
+  // configured price level — buying cheap rather than at whatever price
+  // happened to be showing when the edge threshold first cleared.
+  if (config.PRICE_ENTRY_LEVEL !== undefined && price > config.PRICE_ENTRY_LEVEL) return null;
+
   let stake;
   if (config.STAKE_MODE === 'fixed') {
     stake = config.FIXED_STAKE_AMOUNT;
