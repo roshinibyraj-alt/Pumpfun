@@ -66,8 +66,8 @@
   .rung.waiting .status { color: var(--text-dim); background: rgba(255,255,255,0.04); }
   .rung.base_filled .status { color: var(--down); background: var(--down-dim); }
   .rung.base_filled { border-color: rgba(245,166,35,0.35); }
-  .rung.locked .status { color: var(--lock); background: var(--lock-dim); }
-  .rung.locked { border-color: rgba(167,139,250,0.35); }
+  .rung.counter_filled .status { color: var(--lock); background: var(--lock-dim); }
+  .rung.counter_filled { border-color: rgba(167,139,250,0.35); }
 
   .chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
   .chip { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 8px; text-align: center; }
@@ -111,10 +111,10 @@
   </div>
 
   <div class="chips">
-    <div class="chip"><div class="k">Locked</div><div class="v" id="lockedCount">—</div></div>
-    <div class="chip"><div class="k">Locked $</div><div class="v" id="lockedProfit">—</div></div>
-    <div class="chip"><div class="k">Resolved W/L</div><div class="v" id="resolvedWL">—</div></div>
-    <div class="chip"><div class="k">Active Rungs</div><div class="v" id="activeCount">—</div></div>
+    <div class="chip"><div class="k">Windows Resolved</div><div class="v" id="windowsResolved">—</div></div>
+    <div class="chip"><div class="k">Total PnL</div><div class="v" id="totalPnl">—</div></div>
+    <div class="chip"><div class="k">Avg PnL/Window</div><div class="v" id="avgPnl">—</div></div>
+    <div class="chip"><div class="k">Pending</div><div class="v" id="pendingCount">—</div></div>
   </div>
 
   <div class="card">
@@ -135,8 +135,8 @@
   </div>
 
   <div class="card">
-    <div class="card-title"><span>Completed Rungs</span></div>
-    <div id="completedLog"><div class="empty-state">No rungs completed yet.</div></div>
+    <div class="card-title"><span>Resolved Windows</span></div>
+    <div id="completedLog"><div class="empty-state">No windows resolved yet.</div></div>
   </div>
 
   <footer id="footer">—</footer>
@@ -181,7 +181,7 @@
   function statusLabel(rung) {
     if (rung.status === 'waiting_base') return 'waiting';
     if (rung.status === 'base_filled') return 'filled, hedging @ $' + rung.counterPrice.toFixed(2);
-    if (rung.status === 'locked') return 'LOCKED +$' + rung.lockedProfit.toFixed(2);
+    if (rung.status === 'counter_filled') return 'both legs filled, awaiting resolution';
     return rung.status;
   }
 
@@ -190,7 +190,7 @@
     const sideRungs = rungs.filter(r => r.side === side).sort((a,b) => b.rungPrice - a.rungPrice);
     if (sideRungs.length === 0) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
     el.innerHTML = sideRungs.map(r => {
-      const cls = r.status === 'locked' ? 'locked' : (r.status === 'base_filled' ? 'base_filled' : 'waiting');
+      const cls = r.status === 'counter_filled' ? 'counter_filled' : (r.status === 'base_filled' ? 'base_filled' : 'waiting');
       return '<div class="rung ' + cls + '">' +
         '<span class="px">$' + r.rungPrice.toFixed(2) + '</span>' +
         '<span class="status">' + statusLabel(r) + '</span>' +
@@ -227,58 +227,42 @@
 
     try {
       const curve = [s.startingBankroll];
-      let running = s.startingBankroll;
-      for (const r of s.completedRungs) {
-        if (r.pnl !== null && r.pnl !== undefined) { running += r.pnl; curve.push(Math.round(running*100)/100); }
-      }
+      for (const w of s.windowHistory) curve.push(w.bankrollAfter);
       buildSparkline(curve);
     } catch (e) { console.error('sparkline render failed', e); }
 
     try {
-      renderLadderCol('upLadder', s.activeRungs, 'UP');
-      renderLadderCol('downLadder', s.activeRungs, 'DOWN');
+      const rungs = s.currentWindow ? s.currentWindow.rungs : [];
+      renderLadderCol('upLadder', rungs, 'UP');
+      renderLadderCol('downLadder', rungs, 'DOWN');
     } catch (e) { console.error('ladder render failed', e); }
 
     try {
-      const locked = s.completedRungs.filter(r => r.status === 'locked');
-      const resolved = s.completedRungs.filter(r => r.status === 'resolved');
-      const wins = resolved.filter(r => r.resolvedWon).length;
-      const losses = resolved.length - wins;
-      $('lockedCount').textContent = locked.length;
-      $('lockedProfit').textContent = fmt$(locked.reduce((a,r)=>a+r.lockedProfit, 0));
-      $('resolvedWL').textContent = wins + 'W / ' + losses + 'L';
-      $('activeCount').textContent = s.activeRungs.length;
+      const hist = s.windowHistory;
+      $('windowsResolved').textContent = hist.length;
+      const totalPnl = hist.reduce((a,w) => a+w.pnl, 0);
+      $('totalPnl').textContent = fmt$(totalPnl);
+      $('totalPnl').style.color = totalPnl >= 0 ? 'var(--win)' : 'var(--loss)';
+      $('avgPnl').textContent = hist.length ? fmt$(totalPnl/hist.length) : '—';
+      $('pendingCount').textContent = s.pendingResolutions.length;
     } catch (e) { console.error('chips render failed', e); }
 
     try {
       const logEl = $('completedLog');
-      const all = s.completedRungs.slice().reverse().slice(0, 40);
+      const all = s.windowHistory.slice().reverse().slice(0, 40);
       if (all.length === 0) {
-        logEl.innerHTML = '<div class="empty-state">No rungs completed yet.</div>';
+        logEl.innerHTML = '<div class="empty-state">No windows resolved yet.</div>';
       } else {
         const fmtTime = (iso) => iso ? new Date(iso).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
-        logEl.innerHTML = all.map(r => {
-          if (r.status === 'expired_unfilled') {
-            return '<div class="entry">' +
-              '<span class="result-dot" style="background:var(--text-dim)"></span>' +
-              '<div class="mid"><div class="top"><span class="side-tag ' + r.side.toLowerCase() + '">' + r.side + '</span> @ $' + r.rungPrice.toFixed(2) + ' never filled</div>' +
-              '<div class="bottom">window ' + r.windowStart + '</div></div>' +
-              '<div class="pnl">$0.00</div>' +
-            '</div>';
-          }
-          const isLock = r.status === 'locked';
-          const cls = isLock ? 'lock' : (r.resolvedWon ? 'win' : 'loss');
-          const label = isLock ? 'LOCKED' : (r.resolvedWon ? 'WIN' : 'LOSS');
-          const detail = isLock
-            ? ('base $' + r.baseFillPrice.toFixed(2) + ' + counter $' + r.counterFillPrice.toFixed(2) + ' · locked ' + fmtTime(r.settledAt))
-            : ('unhedged @ $' + r.baseFillPrice.toFixed(2) + ' · settled ' + (r.finalTokenPrice !== undefined ? r.finalTokenPrice.toFixed(3) : '—') + ' · ' + fmtTime(r.settledAt));
+        logEl.innerHTML = all.map(w => {
+          const cls = w.pnl >= 0 ? 'win' : 'loss';
           return '<div class="entry">' +
             '<span class="result-dot ' + cls + '"></span>' +
             '<div class="mid">' +
-              '<div class="top"><span class="side-tag ' + r.side.toLowerCase() + '">' + r.side + '</span> ' + r.shares + ' sh @ $' + r.rungPrice.toFixed(2) + ' <span style="color:var(--text-dim); font-size:10px;">' + label + '</span></div>' +
-              '<div class="bottom">' + detail + '</div>' +
+              '<div class="top"><span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + '</span> won · UP ' + w.totalUpShares + 'sh/$' + w.totalUpCost.toFixed(2) + ' · DOWN ' + w.totalDownShares + 'sh/$' + w.totalDownCost.toFixed(2) + '</div>' +
+              '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' · ' + fmtTime(w.resolvedAt) + '</div>' +
             '</div>' +
-            '<div class="pnl ' + cls + '">' + (r.pnl >= 0 ? '+' : '') + r.pnl.toFixed(2) + '</div>' +
+            '<div class="pnl ' + cls + '">' + (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) + '</div>' +
           '</div>';
         }).join('');
       }
