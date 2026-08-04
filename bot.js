@@ -1,18 +1,18 @@
 // ============================================================
-// bot.js — the main loop. Every POLL_INTERVAL_SECONDS it:
-//   1. takes a fresh snapshot of the live market — price, strike,
-//      model probability, and both token prices — UNCONDITIONALLY,
-//      whether or not a trade is open or we're near entry. This is
-//      what the dashboard shows as "live."
-//   2. if we have an open position whose window has ended, resolves
-//      it by checking the token's own price convergence
-//   3. if we have no open position and we're in the entry window,
-//      evaluates the strategy against that same snapshot and maybe
-//      opens a trade
+// bot.js — ladder + counter-bet lock strategy. Every tick
+// (POLL_INTERVAL_MS):
+//   1. Detects the current window. If it's new, places a fresh
+//      12-rung ladder (6 UP + 6 DOWN) — all independent.
+//   2. For each rung in the currently-open window: checks if its
+//      base leg should fill (price crossed the rung level), or
+//      if its counter leg should fill (price crossed the lock
+//      price) — locking a guaranteed profit the instant it does.
+//   3. For any rung whose window has already closed with an
+//      unhedged base fill, resolves it the normal way — real
+//      token price convergence, no fallback.
 // ============================================================
 
 const config = require('./config');
-const binance = require('./binance');
 const polymarket = require('./polymarket');
 const strategy = require('./strategy');
 const { loadState, saveState } = require('./state');
@@ -21,306 +21,148 @@ function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
-// In-memory caches (don't need to survive restarts — a cold cache just
-// refetches once). Strike only needs fetching once per window; volatility
-// changes slowly enough that recomputing it every 2s tick would just be
-// wasted load on Coinbase's candles endpoint for no real benefit.
-let strikeCache = null; // { windowStart, strike }
-let volCache = null; // { sigma, computedAtMs }
-
-// Always runs, every tick, regardless of open position or entry timing.
-// This is the single source of truth for "what does the market look like
-// right now" — both for the dashboard and for trade decisions.
-async function takeLiveSnapshot(state) {
-  const found = await polymarket.getCurrentUpDownMarket(config.ASSET, config.WINDOW_MINUTES);
-  if (!found) {
-    log('No live market found for current window yet.');
-    return null;
-  }
-  const { market, windowStart, windowEnd } = found;
-  const nowSec = Math.floor(Date.now() / 1000);
-  const secondsRemaining = windowEnd - nowSec;
-
-  const { upTokenId, downTokenId } = polymarket.parseTokens(market);
-
-  let strikeToUse;
-  if (strikeCache && strikeCache.windowStart === windowStart) {
-    strikeToUse = strikeCache.strike;
-  } else {
-    try {
-      strikeToUse = await binance.getHistoricalPrice(config.ASSET, windowStart);
-      strikeCache = { windowStart, strike: strikeToUse };
-    } catch (e) {
-      log(`WARNING: couldn't get historical strike for window ${windowStart} (${e.message})`);
-      return null; // no fallback — skip this tick's snapshot entirely
+function processRungFill(rung, upPrice, downPrice, state) {
+  if (rung.status === 'waiting_base') {
+    const ownPrice = rung.side === 'UP' ? upPrice : downPrice;
+    if (ownPrice <= rung.rungPrice) {
+      rung.baseFillPrice = rung.rungPrice;
+      rung.baseFilledAt = new Date().toISOString();
+      rung.status = 'base_filled';
+      rung.counterPrice = strategy.counterPriceFor(rung.rungPrice, config.LOCK_SPREAD);
+      const counterSide = rung.side === 'UP' ? 'DOWN' : 'UP';
+      log(`FILL base ${rung.side} @ $${rung.rungPrice} (window ${rung.windowStart}) -> counter order ${counterSide} @ $${rung.counterPrice}`);
+    }
+  } else if (rung.status === 'base_filled') {
+    const oppPrice = rung.side === 'UP' ? downPrice : upPrice;
+    if (oppPrice <= rung.counterPrice) {
+      rung.counterFillPrice = rung.counterPrice;
+      rung.counterFilledAt = new Date().toISOString();
+      rung.status = 'locked';
+      rung.lockedProfit = Math.round(rung.shares * (1 - rung.baseFillPrice - rung.counterFillPrice) * 100) / 100;
+      rung.pnl = rung.lockedProfit;
+      rung.settledAt = rung.counterFilledAt;
+      state.bankroll = Math.round((state.bankroll + rung.lockedProfit) * 100) / 100;
+      log(`LOCKED ${rung.side}-rung @ $${rung.rungPrice} | base ${rung.baseFillPrice} + counter ${rung.counterFillPrice} | profit $${rung.lockedProfit} | bankroll $${state.bankroll}`);
     }
   }
-
-  const nowMs = Date.now();
-  let sigmaRaw;
-  if (volCache && nowMs - volCache.computedAtMs < config.VOL_RECOMPUTE_INTERVAL_SECONDS * 1000) {
-    sigmaRaw = volCache.sigma;
-  } else {
-    sigmaRaw = await binance.getRealizedVolPerMinute(config.ASSET, config.VOL_LOOKBACK_MINUTES);
-    volCache = { sigma: sigmaRaw, computedAtMs: nowMs };
-  }
-
-  const [currentPrice, upPrice, downPrice] = await Promise.all([
-    binance.getSpotPrice(config.ASSET),
-    polymarket.getMidpoint(upTokenId),
-    polymarket.getMidpoint(downTokenId),
-  ]);
-
-  const lowVolRegime = sigmaRaw < config.MIN_SIGMA_PER_MINUTE;
-  const sigma = Math.max(sigmaRaw, config.MIN_SIGMA_PER_MINUTE);
-
-  const minutesRemaining = secondsRemaining / 60;
-  const modelProbUp = strategy.modelProbabilityUp(currentPrice, strikeToUse, sigma, minutesRemaining);
-
-  const snapshot = {
-    timestamp: new Date().toISOString(),
-    market, windowStart, windowEnd, secondsRemaining,
-    upTokenId, downTokenId,
-    currentPrice, strike: strikeToUse, sigmaPerMinute: sigma, sigmaRaw, lowVolRegime,
-    modelProbUp, upPrice, downPrice,
-  };
-
-  // This is what makes the dashboard genuinely live: updated every single
-  // tick, independent of whether we're trading or waiting.
-  state.lastCheck = {
-    timestamp: snapshot.timestamp,
-    windowStart, windowEnd, secondsRemaining,
-    currentPrice, strike: strikeToUse, sigmaPerMinute: sigma, lowVolRegime,
-    modelProbUp, upPrice, downPrice,
-    tookTrade: false, // maybeEnterPosition overwrites this to true if it trades
-  };
-
-  return snapshot;
 }
 
-async function resolveOpenPosition(state) {
-  const pos = state.openPosition;
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (nowSec < pos.windowEnd) return; // window hasn't closed yet
-
-  // Resolution rule: check the price of the token we actually hold. Once
-  // the window closes, Polymarket's own market converges the winning
-  // side's price toward $1.00 and the losing side's toward $0.00. We wait
-  // for that convergence rather than guessing from an external feed — if
-  // it's still ambiguous (between the thresholds), we just check again
-  // next tick. No fallback, no guessing.
+// For a rung whose base leg filled but counter never did before the
+// window closed. Same no-fallback resolution rule as before: check the
+// held token's own price convergence, wait if still ambiguous.
+async function resolveUnhedgedRung(rung, state) {
   let tokenPrice;
   try {
-    tokenPrice = await polymarket.getMidpoint(pos.tokenId);
+    tokenPrice = await polymarket.getMidpoint(rung.tokenId);
   } catch (e) {
-    log('ERROR fetching token price to resolve position:', e.message);
+    log('ERROR fetching resolution price for unhedged rung:', e.message);
     return; // try again next tick
   }
 
   let won;
-  if (tokenPrice >= config.RESOLUTION_WIN_THRESHOLD) {
-    won = true;
-  } else if (tokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) {
-    won = false;
-  } else {
-    log(`Window ${pos.windowStart} closed but ${pos.side} token price (${tokenPrice.toFixed(3)}) hasn't converged yet — waiting.`);
-    return; // still settling, check again next tick
-  }
+  if (tokenPrice >= config.RESOLUTION_WIN_THRESHOLD) won = true;
+  else if (tokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) won = false;
+  else return; // not converged yet, try again next tick
 
-  // Real Polymarket taker fee: fee = shares × rate × price × (1-price).
-  // For our fixed-dollar stake (shares = stake/price), that simplifies to
-  // fee = stake × rate × (1-price) — NOT a flat percentage of stake.
-  // Cheaper/longshot entries cost proportionally more in fees.
-  const fee = pos.stake * config.TAKER_FEE_RATE * (1 - pos.price);
-  let pnl, grossPayout;
-  if (won) {
-    grossPayout = pos.stake / pos.price; // shares bought * $1 payout
-    pnl = grossPayout - pos.stake - fee;
-  } else {
-    grossPayout = 0;
-    pnl = -pos.stake - fee;
-  }
-
-  state.bankroll = Math.round((state.bankroll + pnl) * 100) / 100;
-  state.trades.push({
-    ...pos,
-    finalTokenPrice: tokenPrice,
-    grossPayout: Math.round(grossPayout * 100) / 100,
-    fee: Math.round(fee * 100) / 100,
-    won,
-    pnl: Math.round(pnl * 100) / 100,
-    bankrollAfter: state.bankroll,
-    resolvedAt: new Date().toISOString(),
-  });
-  state.openPosition = null;
-
-  log(`RESOLVED ${pos.side} | strike ${pos.strike} | token settled at ${tokenPrice.toFixed(3)} | ${won ? 'WIN' : 'LOSS'} | pnl ${pnl.toFixed(2)} | bankroll ${state.bankroll}`);
+  const cost = rung.shares * rung.baseFillPrice;
+  const payout = won ? rung.shares * 1 : 0;
+  rung.pnl = Math.round((payout - cost) * 100) / 100;
+  rung.resolvedWon = won;
+  rung.status = 'resolved';
+  rung.finalTokenPrice = tokenPrice;
+  rung.settledAt = new Date().toISOString();
+  state.bankroll = Math.round((state.bankroll + rung.pnl) * 100) / 100;
+  log(`RESOLVED unhedged ${rung.side}-rung @ $${rung.rungPrice} (window ${rung.windowStart}) | settled ${tokenPrice.toFixed(3)} | ${won ? 'WIN' : 'LOSS'} | pnl ${rung.pnl} | bankroll $${state.bankroll}`);
 }
 
-async function maybeEnterPosition(state, snapshot) {
-  if (!snapshot) return;
-  const { windowStart, windowEnd, secondsRemaining, upTokenId, downTokenId, upPrice, downPrice, modelProbUp, strike } = snapshot;
-
-  // already recorded a shadow/real observation for this exact window? skip.
-  if (state.pendingShadow && state.pendingShadow.windowStart === windowStart) return;
-  if (state.openPosition && state.openPosition.windowStart === windowStart) return;
-
-  if (
-    secondsRemaining > config.ENTRY_WINDOW_SECONDS_MAX ||
-    secondsRemaining < config.ENTRY_WINDOW_SECONDS_MIN
-  ) {
-    return; // not in our entry band yet — snapshot was still recorded for the dashboard
+function sweepCompleted(state) {
+  const done = [];
+  const remaining = [];
+  for (const rung of state.activeRungs) {
+    if (rung.status === 'locked' || rung.status === 'resolved' || rung.status === 'expired_unfilled') {
+      done.push(rung);
+    } else {
+      remaining.push(rung);
+    }
   }
-
-  const decision = strategy.decideTrade({
-    bankroll: state.bankroll,
-    upPrice,
-    downPrice,
-    modelProbUp,
-    config,
-  });
-
-  log(
-    `Checked window ${windowStart} | price ${snapshot.currentPrice} strike ${strike} | modelUp ${(modelProbUp * 100).toFixed(1)}% marketUp ${(upPrice * 100).toFixed(1)}% | ${decision ? `${config.TRADING_ENABLED ? 'TRADE' : 'WOULD-TRADE (shadow only)'} ${decision.side} $${decision.stake}` : 'no edge, pass'}`
-  );
-
-  // SHADOW_MODE: record every window we evaluated, regardless of whether
-  // an edge cleared the threshold, so we can check afterward whether
-  // "model disagrees with market" actually predicts anything — without
-  // staking a cent while we find out.
-  if (config.SHADOW_MODE) {
-    state.pendingShadow = {
-      windowStart, windowEnd,
-      upTokenId, downTokenId,
-      modelProbUp, upPrice, downPrice,
-      marketFavoredSide: upPrice > downPrice ? 'UP' : 'DOWN',
-      modelFavoredSide: modelProbUp > 0.5 ? 'UP' : 'DOWN',
-      wouldTradeSide: decision ? decision.side : null,
-      wouldTradeEdge: decision ? decision.edge : null,
-      lowVolRegime: snapshot.lowVolRegime,
-      capturedAt: new Date().toISOString(),
-    };
+  if (done.length) {
+    state.completedRungs.push(...done);
+    state.activeRungs = remaining;
   }
-
-  if (!decision) return;
-  if (!config.TRADING_ENABLED) return; // shadow-only: log what we would have done, but don't stake
-
-  state.lastCheck.tookTrade = true;
-
-  state.openPosition = {
-    windowStart,
-    windowEnd,
-    side: decision.side,
-    tokenId: decision.side === 'UP' ? upTokenId : downTokenId,
-    price: decision.price,
-    trueProb: decision.trueProb,
-    edge: decision.edge,
-    stake: decision.stake,
-    strike,
-    modelProbUpAtEntry: modelProbUp,
-    upPriceAtEntry: upPrice,
-    downPriceAtEntry: downPrice,
-    lowVolRegime: snapshot.lowVolRegime,
-    openedAt: new Date().toISOString(),
-  };
-}
-
-// Resolves the pending shadow observation once its window has closed, by
-// checking real token price convergence — same no-fallback rule as real
-// position resolution. Updates running accuracy counters so we can see,
-// live, whether the model or the market is the better predictor, and
-// specifically whether "would-trade" disagreement calls are actually
-// profitable before ever staking demo money on them again.
-async function resolveShadow(state) {
-  const shadow = state.pendingShadow;
-  if (!shadow) return;
-  const nowSec = Math.floor(Date.now() / 1000);
-  if (nowSec < shadow.windowEnd) return;
-
-  let upTokenPrice;
-  try {
-    upTokenPrice = await polymarket.getMidpoint(shadow.upTokenId);
-  } catch (e) {
-    log('ERROR fetching shadow resolution price:', e.message);
-    return;
-  }
-
-  let actualWinner;
-  if (upTokenPrice >= config.RESOLUTION_WIN_THRESHOLD) actualWinner = 'UP';
-  else if (upTokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) actualWinner = 'DOWN';
-  else {
-    log(`Shadow window ${shadow.windowStart} not converged yet (up token ${upTokenPrice.toFixed(3)}) — waiting.`);
-    return;
-  }
-
-  if (!state.shadowStats) {
-    state.shadowStats = {
-      totalWindows: 0,
-      modelCorrect: 0,
-      marketCorrect: 0,
-      disagreementCount: 0,
-      modelCorrectOnDisagreement: 0,
-      wouldTradeCount: 0,
-      wouldTradeWins: 0,
-    };
-  }
-  const stats = state.shadowStats;
-  stats.totalWindows++;
-  if (shadow.modelFavoredSide === actualWinner) stats.modelCorrect++;
-  if (shadow.marketFavoredSide === actualWinner) stats.marketCorrect++;
-  if (shadow.modelFavoredSide !== shadow.marketFavoredSide) {
-    stats.disagreementCount++;
-    if (shadow.modelFavoredSide === actualWinner) stats.modelCorrectOnDisagreement++;
-  }
-  if (shadow.wouldTradeSide) {
-    stats.wouldTradeCount++;
-    if (shadow.wouldTradeSide === actualWinner) stats.wouldTradeWins++;
-  }
-
-  log(`SHADOW RESOLVED window ${shadow.windowStart} | actual ${actualWinner} | model said ${shadow.modelFavoredSide} (${shadow.modelFavoredSide===actualWinner?'correct':'wrong'}) | market said ${shadow.marketFavoredSide} (${shadow.marketFavoredSide===actualWinner?'correct':'wrong'}) | running: model ${stats.modelCorrect}/${stats.totalWindows}, market ${stats.marketCorrect}/${stats.totalWindows}, would-trade ${stats.wouldTradeWins}/${stats.wouldTradeCount}`);
-
-  state.pendingShadow = null;
 }
 
 async function tick() {
   const state = loadState();
+  const nowSec = Math.floor(Date.now() / 1000);
 
-  let snapshot = null;
   try {
-    snapshot = await takeLiveSnapshot(state);
+    const found = await polymarket.getCurrentUpDownMarket(config.ASSET, config.WINDOW_MINUTES);
+
+    if (found) {
+      const { market, windowStart, windowEnd } = found;
+      const { upTokenId, downTokenId } = polymarket.parseTokens(market);
+
+      const hasRungsForThisWindow = state.activeRungs.some((r) => r.windowStart === windowStart);
+      if (!hasRungsForThisWindow) {
+        const newRungs = strategy.buildRungs(windowStart, windowEnd, upTokenId, downTokenId, config);
+        state.activeRungs.push(...newRungs);
+        log(`Window ${windowStart}: placed ${newRungs.length} rungs (${config.RUNG_PRICES.join('/')} on both sides, ${config.SHARES_PER_RUNG} shares each)`);
+      }
+
+      const [upPrice, downPrice] = await Promise.all([
+        polymarket.getMidpoint(upTokenId),
+        polymarket.getMidpoint(downTokenId),
+      ]);
+
+      state.lastCheck = {
+        timestamp: new Date().toISOString(),
+        windowStart,
+        windowEnd,
+        secondsRemaining: windowEnd - nowSec,
+        upPrice,
+        downPrice,
+      };
+
+      for (const rung of state.activeRungs) {
+        if (rung.windowStart === windowStart && (rung.status === 'waiting_base' || rung.status === 'base_filled')) {
+          processRungFill(rung, upPrice, downPrice, state);
+        }
+      }
+    } else {
+      log('No live market found for current window yet.');
+    }
   } catch (e) {
-    log('ERROR taking live snapshot:', e.message);
+    log('ERROR taking live snapshot / checking current window:', e.message);
     state.lastError = e.message;
   }
 
+  // Resolution / expiry pass — isolated from the block above so a hiccup
+  // finding the CURRENT window can't block resolving rungs from a window
+  // that already closed.
   try {
-    if (state.pendingShadow) {
-      await resolveShadow(state);
+    for (const rung of state.activeRungs) {
+      if (rung.status === 'base_filled' && nowSec >= rung.windowEnd) {
+        await resolveUnhedgedRung(rung, state);
+      } else if (rung.status === 'waiting_base' && nowSec >= rung.windowEnd) {
+        rung.status = 'expired_unfilled';
+        rung.pnl = 0;
+        rung.settledAt = new Date().toISOString();
+      }
     }
-  } catch (e) {
-    log('ERROR resolving shadow:', e.message);
-    state.lastError = e.message;
-  }
-
-  try {
-    if (state.openPosition) {
-      await resolveOpenPosition(state);
-    }
-    if (!state.openPosition) {
-      await maybeEnterPosition(state, snapshot);
-    }
+    sweepCompleted(state);
     if (!state.lastError) state.lastError = null;
   } catch (e) {
-    log('ERROR in tick:', e.message);
+    log('ERROR in resolution pass:', e.message);
     state.lastError = e.message;
   }
+
   saveState(state);
 }
 
 function startBotLoop() {
-  log(`Bot started. Trading enabled: ${config.TRADING_ENABLED} | Shadow mode: ${config.SHADOW_MODE} | Bankroll: $${config.STARTING_BANKROLL}`);
+  log(`Bot started (ladder+lock v2). Trading enabled: ${config.TRADING_ENABLED} | Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | lock spread $${config.LOCK_SPREAD}`);
   tick();
-  setInterval(tick, config.POLL_INTERVAL_SECONDS * 1000);
+  setInterval(tick, config.POLL_INTERVAL_MS);
 }
 
 module.exports = { startBotLoop, tick };
