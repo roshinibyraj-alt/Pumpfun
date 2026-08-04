@@ -1,10 +1,16 @@
 // ============================================================
-// state.js — reads/writes state.json. Now tracks a ladder of
-// independent rungs per window instead of a single position.
+// state.js — reads/writes state.json.
 //
-// IMPORTANT (Railway note): Railway's filesystem is ephemeral —
-// resets on every redeploy. Fine for now; ask if you want this
-// wired to a persistent volume later.
+// currentWindow: the window still open, placing/filling rungs.
+// pendingResolutions: windows that have closed but haven't yet
+//   resolved (Polymarket settlement lags ~2 min after close) —
+//   kept separate so we can keep checking them every tick without
+//   blocking the new window's ladder.
+// windowHistory: fully resolved windows with their aggregate
+//   UP/DOWN totals and final pnl, most recent last, capped.
+//
+// IMPORTANT (Railway note): filesystem is ephemeral, resets on
+// redeploy. Fine for now; ask if you want a persistent volume.
 // ============================================================
 
 const fs = require('fs');
@@ -14,9 +20,10 @@ function defaultState() {
   return {
     bankroll: config.STARTING_BANKROLL,
     startingBankroll: config.STARTING_BANKROLL,
-    activeRungs: [], // rungs for the current window still in play
-    completedRungs: [], // finished rungs (locked or resolved), most recent last, capped
-    lastCheck: null, // latest snapshot info for the dashboard (window, prices, countdown)
+    currentWindow: null,
+    pendingResolutions: [],
+    windowHistory: [],
+    lastCheck: null,
     lastError: null,
     startedAt: new Date().toISOString(),
   };
@@ -34,9 +41,8 @@ function loadState() {
 }
 
 function saveState(state) {
-  // cap completedRungs so state.json doesn't grow unbounded
-  if (state.completedRungs && state.completedRungs.length > 500) {
-    state.completedRungs = state.completedRungs.slice(-500);
+  if (state.windowHistory && state.windowHistory.length > 200) {
+    state.windowHistory = state.windowHistory.slice(-200);
   }
   fs.writeFileSync(config.STATE_FILE, JSON.stringify(state, null, 2));
 }
