@@ -1,12 +1,10 @@
 // ============================================================
-// state.js — reads/writes state.json. This is our entire
-// "database": bankroll, open position, and trade history.
+// state.js — reads/writes state.json. Now tracks a ladder of
+// independent rungs per window instead of a single position.
 //
 // IMPORTANT (Railway note): Railway's filesystem is ephemeral —
-// it resets on every redeploy. That's fine for now while you're
-// testing the strategy, but before you care about long demo
-// runs, ask me to wire this up to a Railway volume or a tiny
-// Postgres/SQLite add-on so history survives redeploys.
+// resets on every redeploy. Fine for now; ask if you want this
+// wired to a persistent volume later.
 // ============================================================
 
 const fs = require('fs');
@@ -16,10 +14,9 @@ function defaultState() {
   return {
     bankroll: config.STARTING_BANKROLL,
     startingBankroll: config.STARTING_BANKROLL,
-    openPosition: null, // { windowStart, windowEnd, side, price, stake, strike }
-    trades: [], // completed trades, most recent last
-    pendingShadow: null, // shadow observation awaiting resolution
-    shadowStats: null, // running accuracy counters, see bot.js resolveShadow
+    activeRungs: [], // rungs for the current window still in play
+    completedRungs: [], // finished rungs (locked or resolved), most recent last, capped
+    lastCheck: null, // latest snapshot info for the dashboard (window, prices, countdown)
     lastError: null,
     startedAt: new Date().toISOString(),
   };
@@ -37,6 +34,10 @@ function loadState() {
 }
 
 function saveState(state) {
+  // cap completedRungs so state.json doesn't grow unbounded
+  if (state.completedRungs && state.completedRungs.length > 500) {
+    state.completedRungs = state.completedRungs.slice(-500);
+  }
   fs.writeFileSync(config.STATE_FILE, JSON.stringify(state, null, 2));
 }
 
