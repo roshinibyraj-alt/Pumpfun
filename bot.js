@@ -1,15 +1,15 @@
 // ============================================================
-// bot.js — ladder + counter-bet lock strategy. Every tick
-// (POLL_INTERVAL_MS):
-//   1. Detects the current window. If it's new, places a fresh
-//      12-rung ladder (6 UP + 6 DOWN) — all independent.
-//   2. For each rung in the currently-open window: checks if its
-//      base leg should fill (price crossed the rung level), or
-//      if its counter leg should fill (price crossed the lock
-//      price) — locking a guaranteed profit the instant it does.
-//   3. For any rung whose window has already closed with an
-//      unhedged base fill, resolves it the normal way — real
-//      token price convergence, no fallback.
+// bot.js — ladder + counter-bet strategy, v3. No per-rung take
+// profit or "lock" assumption. Every fill — whether it came from
+// an original base rung or a counter order triggered by one —
+// just accumulates into a running total of UP shares and DOWN
+// shares held for that window. At window close, the whole
+// accumulated position resolves ONCE against the real outcome:
+//   payout = (winning side's total shares) × $1
+//   pnl = payout − (total cost of everything bought that window)
+// This naturally covers full hedges, partial hedges, and
+// unhedged single fills with the same formula — no special
+// casing needed.
 // ============================================================
 
 const config = require('./config');
@@ -21,7 +21,9 @@ function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
-function processRungFill(rung, upPrice, downPrice, state) {
+// Pure status/fill-price bookkeeping — no bankroll or pnl touched here.
+// Resolution only ever happens once, at window close, in resolveWindow().
+function processRungFill(rung, upPrice, downPrice) {
   if (rung.status === 'waiting_base') {
     const ownPrice = rung.side === 'UP' ? upPrice : downPrice;
     if (ownPrice <= rung.rungPrice) {
@@ -30,65 +32,77 @@ function processRungFill(rung, upPrice, downPrice, state) {
       rung.status = 'base_filled';
       rung.counterPrice = strategy.counterPriceFor(rung.rungPrice, config.LOCK_SPREAD);
       const counterSide = rung.side === 'UP' ? 'DOWN' : 'UP';
-      log(`FILL base ${rung.side} @ $${rung.rungPrice} (window ${rung.windowStart}) -> counter order ${counterSide} @ $${rung.counterPrice}`);
+      log(`FILL base ${rung.side} @ $${rung.rungPrice} -> counter order ${counterSide} @ $${rung.counterPrice}`);
     }
   } else if (rung.status === 'base_filled') {
     const oppPrice = rung.side === 'UP' ? downPrice : upPrice;
     if (oppPrice <= rung.counterPrice) {
       rung.counterFillPrice = rung.counterPrice;
       rung.counterFilledAt = new Date().toISOString();
-      rung.status = 'locked';
-      rung.lockedProfit = Math.round(rung.shares * (1 - rung.baseFillPrice - rung.counterFillPrice) * 100) / 100;
-      rung.pnl = rung.lockedProfit;
-      rung.settledAt = rung.counterFilledAt;
-      state.bankroll = Math.round((state.bankroll + rung.lockedProfit) * 100) / 100;
-      log(`LOCKED ${rung.side}-rung @ $${rung.rungPrice} | base ${rung.baseFillPrice} + counter ${rung.counterFillPrice} | profit $${rung.lockedProfit} | bankroll $${state.bankroll}`);
+      rung.status = 'counter_filled';
+      log(`COUNTER FILLED ${rung.side}-rung @ $${rung.rungPrice} | now holding both legs, awaiting window resolution`);
     }
   }
 }
 
-// For a rung whose base leg filled but counter never did before the
-// window closed. Same no-fallback resolution rule as before: check the
-// held token's own price convergence, wait if still ambiguous.
-async function resolveUnhedgedRung(rung, state) {
-  let tokenPrice;
+// Attempts to resolve a closed window: checks the real outcome (no
+// fallback — waits if still ambiguous), sums every fill (base AND
+// counter, from every rung) into total UP/DOWN shares and cost, and
+// settles the whole accumulated position in one shot. Returns true if
+// resolved this call, false if still waiting on convergence.
+async function resolveWindow(win, state) {
+  let upTokenPrice;
   try {
-    tokenPrice = await polymarket.getMidpoint(rung.tokenId);
+    upTokenPrice = await polymarket.getMidpoint(win.upTokenId);
   } catch (e) {
-    log('ERROR fetching resolution price for unhedged rung:', e.message);
-    return; // try again next tick
+    log(`ERROR checking resolution for window ${win.windowStart}:`, e.message);
+    return false;
   }
 
-  let won;
-  if (tokenPrice >= config.RESOLUTION_WIN_THRESHOLD) won = true;
-  else if (tokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) won = false;
-  else return; // not converged yet, try again next tick
+  let wonSide;
+  if (upTokenPrice >= config.RESOLUTION_WIN_THRESHOLD) wonSide = 'UP';
+  else if (upTokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) wonSide = 'DOWN';
+  else return false; // not converged yet, try again next tick
 
-  const cost = rung.shares * rung.baseFillPrice;
-  const payout = won ? rung.shares * 1 : 0;
-  rung.pnl = Math.round((payout - cost) * 100) / 100;
-  rung.resolvedWon = won;
-  rung.status = 'resolved';
-  rung.finalTokenPrice = tokenPrice;
-  rung.settledAt = new Date().toISOString();
-  state.bankroll = Math.round((state.bankroll + rung.pnl) * 100) / 100;
-  log(`RESOLVED unhedged ${rung.side}-rung @ $${rung.rungPrice} (window ${rung.windowStart}) | settled ${tokenPrice.toFixed(3)} | ${won ? 'WIN' : 'LOSS'} | pnl ${rung.pnl} | bankroll $${state.bankroll}`);
-}
-
-function sweepCompleted(state) {
-  const done = [];
-  const remaining = [];
-  for (const rung of state.activeRungs) {
-    if (rung.status === 'locked' || rung.status === 'resolved' || rung.status === 'expired_unfilled') {
-      done.push(rung);
-    } else {
-      remaining.push(rung);
+  let totalUpShares = 0, totalUpCost = 0, totalDownShares = 0, totalDownCost = 0;
+  for (const rung of win.rungs) {
+    if (rung.baseFillPrice !== null) {
+      if (rung.side === 'UP') { totalUpShares += rung.shares; totalUpCost += rung.shares * rung.baseFillPrice; }
+      else { totalDownShares += rung.shares; totalDownCost += rung.shares * rung.baseFillPrice; }
+    }
+    if (rung.counterFillPrice !== null) {
+      // the counter leg is always on the OPPOSITE token from rung.side
+      if (rung.side === 'UP') { totalDownShares += rung.shares; totalDownCost += rung.shares * rung.counterFillPrice; }
+      else { totalUpShares += rung.shares; totalUpCost += rung.shares * rung.counterFillPrice; }
     }
   }
-  if (done.length) {
-    state.completedRungs.push(...done);
-    state.activeRungs = remaining;
-  }
+
+  const payout = wonSide === 'UP' ? totalUpShares * 1 : totalDownShares * 1;
+  const cost = totalUpCost + totalDownCost;
+  const pnl = Math.round((payout - cost) * 100) / 100;
+
+  state.bankroll = Math.round((state.bankroll + pnl) * 100) / 100;
+
+  state.windowHistory.push({
+    windowStart: win.windowStart,
+    windowEnd: win.windowEnd,
+    rungs: win.rungs,
+    wonSide,
+    totalUpShares,
+    totalUpCost: Math.round(totalUpCost * 100) / 100,
+    totalDownShares,
+    totalDownCost: Math.round(totalDownCost * 100) / 100,
+    payout: Math.round(payout * 100) / 100,
+    cost: Math.round(cost * 100) / 100,
+    pnl,
+    bankrollAfter: state.bankroll,
+    resolvedAt: new Date().toISOString(),
+  });
+
+  log(
+    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | UP ${totalUpShares}sh/$${totalUpCost.toFixed(2)} | DOWN ${totalDownShares}sh/$${totalDownCost.toFixed(2)} | payout $${payout.toFixed(2)} | pnl $${pnl.toFixed(2)} | bankroll $${state.bankroll}`
+  );
+  return true;
 }
 
 async function tick() {
@@ -102,11 +116,16 @@ async function tick() {
       const { market, windowStart, windowEnd } = found;
       const { upTokenId, downTokenId } = polymarket.parseTokens(market);
 
-      const hasRungsForThisWindow = state.activeRungs.some((r) => r.windowStart === windowStart);
-      if (!hasRungsForThisWindow) {
-        const newRungs = strategy.buildRungs(windowStart, windowEnd, upTokenId, downTokenId, config);
-        state.activeRungs.push(...newRungs);
-        log(`Window ${windowStart}: placed ${newRungs.length} rungs (${config.RUNG_PRICES.join('/')} on both sides, ${config.SHARES_PER_RUNG} shares each)`);
+      if (!state.currentWindow || state.currentWindow.windowStart !== windowStart) {
+        if (state.currentWindow) {
+          state.pendingResolutions.push(state.currentWindow);
+          log(`Window ${state.currentWindow.windowStart} closed -> pending resolution`);
+        }
+        state.currentWindow = {
+          windowStart, windowEnd, upTokenId, downTokenId,
+          rungs: strategy.buildRungs(windowStart, windowEnd, upTokenId, downTokenId, config),
+        };
+        log(`Window ${windowStart}: placed ${state.currentWindow.rungs.length} rungs (${config.RUNG_PRICES.join('/')} on both sides, ${config.SHARES_PER_RUNG} shares each)`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -123,10 +142,8 @@ async function tick() {
         downPrice,
       };
 
-      for (const rung of state.activeRungs) {
-        if (rung.windowStart === windowStart && (rung.status === 'waiting_base' || rung.status === 'base_filled')) {
-          processRungFill(rung, upPrice, downPrice, state);
-        }
+      for (const rung of state.currentWindow.rungs) {
+        processRungFill(rung, upPrice, downPrice);
       }
     } else {
       log('No live market found for current window yet.');
@@ -136,20 +153,28 @@ async function tick() {
     state.lastError = e.message;
   }
 
-  // Resolution / expiry pass — isolated from the block above so a hiccup
-  // finding the CURRENT window can't block resolving rungs from a window
-  // that already closed.
+  // Proactively hand off the current window once its time is up, even if
+  // we haven't yet detected the NEXT window this tick — starts resolution
+  // checks promptly instead of waiting on window-rollover detection.
   try {
-    for (const rung of state.activeRungs) {
-      if (rung.status === 'base_filled' && nowSec >= rung.windowEnd) {
-        await resolveUnhedgedRung(rung, state);
-      } else if (rung.status === 'waiting_base' && nowSec >= rung.windowEnd) {
-        rung.status = 'expired_unfilled';
-        rung.pnl = 0;
-        rung.settledAt = new Date().toISOString();
-      }
+    if (state.currentWindow && nowSec >= state.currentWindow.windowEnd) {
+      state.pendingResolutions.push(state.currentWindow);
+      state.currentWindow = null;
     }
-    sweepCompleted(state);
+  } catch (e) {
+    log('ERROR handing off closed window:', e.message);
+    state.lastError = e.message;
+  }
+
+  // Resolution pass — isolated so a hiccup above can't block resolving
+  // windows that are already closed and just waiting on convergence.
+  try {
+    const stillPending = [];
+    for (const win of state.pendingResolutions) {
+      const resolved = await resolveWindow(win, state);
+      if (!resolved) stillPending.push(win);
+    }
+    state.pendingResolutions = stillPending;
     if (!state.lastError) state.lastError = null;
   } catch (e) {
     log('ERROR in resolution pass:', e.message);
@@ -160,7 +185,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (ladder+lock v2). Trading enabled: ${config.TRADING_ENABLED} | Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | lock spread $${config.LOCK_SPREAD}`);
+  log(`Bot started (ladder v3, aggregate resolution). Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | counter spread $${config.LOCK_SPREAD}`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
