@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Fair-Value Terminal</title>
+<title>Ladder Terminal</title>
 <style>
   :root {
     --void: #0a0e17;
@@ -12,12 +12,14 @@
     --border: #232c40;
     --text: #eef2f8;
     --text-dim: #7c869c;
-    --model: #2dd4bf;
-    --model-dim: rgba(45,212,191,0.14);
-    --market: #f5a623;
-    --market-dim: rgba(245,166,35,0.14);
+    --up: #2dd4bf;
+    --up-dim: rgba(45,212,191,0.14);
+    --down: #f5a623;
+    --down-dim: rgba(245,166,35,0.14);
     --win: #34d399;
     --loss: #f87171;
+    --lock: #a78bfa;
+    --lock-dim: rgba(167,139,250,0.14);
     --font-data: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
@@ -34,10 +36,8 @@
 
   .statusbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; flex-wrap: wrap; gap: 6px; }
   .brand { display: flex; align-items: center; gap: 8px; }
-  .brand .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--model); animation: pulse 2s infinite; flex-shrink: 0; }
+  .brand .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--lock); animation: pulse 2s infinite; flex-shrink: 0; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-  .brand .mode { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--text-dim); }
-  .brand .mode.demo { color: var(--market); }
   .brand h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: 0.2px; }
   .live-price { font-family: var(--font-data); font-size: 13px; color: var(--text-dim); }
   .live-price b { color: var(--text); font-weight: 600; }
@@ -55,64 +55,40 @@
   .card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
   .countdown { font-family: var(--font-data); color: var(--text); background: var(--surface-raised); padding: 2px 8px; border-radius: 6px; font-size: 11px; }
 
-  .price-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px; }
-  .price-box { border-radius: 10px; padding: 10px 12px; border: 1px solid var(--border); background: var(--surface-raised); }
-  .price-box.up { border-color: rgba(52,211,153,0.35); }
-  .price-box.down { border-color: rgba(248,113,113,0.35); }
-  .price-box .lbl { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); display: flex; justify-content: space-between; }
-  .price-box .lbl .side { font-weight: 700; }
-  .price-box.up .lbl .side { color: var(--win); }
-  .price-box.down .lbl .side { color: var(--loss); }
-  .price-box .px { font-family: var(--font-data); font-size: 22px; font-weight: 700; margin-top: 4px; }
-  .price-box .prob { font-family: var(--font-data); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
-
-  .gauge-row { display: flex; justify-content: space-between; font-family: var(--font-data); font-size: 12px; margin-bottom: 6px; }
-  .gauge-row .model-lbl { color: var(--model); } .gauge-row .market-lbl { color: var(--market); }
-  .gauge { position: relative; height: 34px; border-radius: 8px; background: var(--surface-raised); overflow: hidden; border: 1px solid var(--border); }
-  .gauge-fill-model { position: absolute; top: 0; left: 0; height: 100%; background: linear-gradient(90deg, transparent, var(--model-dim)); border-right: 2px solid var(--model); transition: width 0.6s ease; }
-  .gauge-fill-market { position: absolute; top: 0; left: 0; height: 100%; border-right: 2px dashed var(--market); transition: width 0.6s ease; }
-  .edge-readout { display: flex; justify-content: space-between; align-items: center; margin-top: 10px; font-size: 12px; }
-  .edge-readout .edge-val { font-family: var(--font-data); font-weight: 700; font-size: 16px; }
-  .edge-readout .edge-val.hot { color: var(--model); }
-  .edge-readout .edge-val.cold { color: var(--text-dim); }
-  .side-tag { font-family: var(--font-data); font-size: 10px; padding: 2px 7px; border-radius: 5px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
-  .side-tag.up { color: var(--win); background: rgba(52,211,153,0.12); }
-  .side-tag.down { color: var(--loss); background: rgba(248,113,113,0.12); }
-  .empty-state { color: var(--text-dim); font-size: 13px; text-align: center; padding: 18px 0; }
-  .lowvol-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--market); background: var(--market-dim); padding: 2px 8px; border-radius: 6px; margin-top: 10px; font-family: var(--font-data); }
-
-  .pos-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  .pos-item .k { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 3px; }
-  .pos-item .v { font-family: var(--font-data); font-size: 14px; font-weight: 600; }
+  .ladder-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .ladder-col .col-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; }
+  .ladder-col.up .col-head { color: var(--up); }
+  .ladder-col.down .col-head { color: var(--down); }
+  .rung { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; border-radius: 6px; margin-bottom: 4px; font-family: var(--font-data); font-size: 12px; background: var(--surface-raised); border: 1px solid var(--border); }
+  .rung .px { font-weight: 700; }
+  .rung .status { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; padding: 1px 6px; border-radius: 4px; }
+  .rung.waiting { opacity: 0.55; }
+  .rung.waiting .status { color: var(--text-dim); background: rgba(255,255,255,0.04); }
+  .rung.base_filled .status { color: var(--down); background: var(--down-dim); }
+  .rung.base_filled { border-color: rgba(245,166,35,0.35); }
+  .rung.locked .status { color: var(--lock); background: var(--lock-dim); }
+  .rung.locked { border-color: rgba(167,139,250,0.35); }
 
   .chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
   .chip { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 8px; text-align: center; }
   .chip .k { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
   .chip .v { font-family: var(--font-data); font-size: 17px; font-weight: 700; }
 
-  .trade { padding: 12px 0; border-bottom: 1px solid var(--border); }
-  .trade:last-child { border-bottom: none; }
-  .trade .head { display: flex; align-items: center; gap: 10px; }
-  .trade .result-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .trade .result-dot.win { background: var(--win); } .trade .result-dot.loss { background: var(--loss); }
-  .trade .mid { flex: 1; min-width: 0; }
-  .trade .mid .top { font-size: 13px; font-weight: 600; display: flex; gap: 6px; align-items: center; }
-  .trade .mid .bottom { font-family: var(--font-data); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
-  .trade .pnl { font-family: var(--font-data); font-size: 14px; font-weight: 700; text-align: right; flex-shrink: 0; }
-  .trade .pnl.win { color: var(--win); } .trade .pnl.loss { color: var(--loss); }
-  .trade .detail-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
-  .trade .detail-grid .d-item .k { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.4px; }
-  .trade .detail-grid .d-item .v { font-family: var(--font-data); font-size: 12px; font-weight: 600; margin-top: 2px; }
+  .entry { padding: 10px 0; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .entry:last-child { border-bottom: none; }
+  .entry .result-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .entry .result-dot.win { background: var(--win); } .entry .result-dot.loss { background: var(--loss); } .entry .result-dot.lock { background: var(--lock); }
+  .entry .mid { flex: 1; min-width: 0; }
+  .entry .mid .top { font-size: 13px; font-weight: 600; display: flex; gap: 6px; align-items: center; }
+  .entry .mid .bottom { font-family: var(--font-data); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  .entry .pnl { font-family: var(--font-data); font-size: 14px; font-weight: 700; text-align: right; flex-shrink: 0; }
+  .entry .pnl.win { color: var(--win); } .entry .pnl.loss { color: var(--loss); } .entry .pnl.lock { color: var(--lock); }
+  .side-tag { font-family: var(--font-data); font-size: 10px; padding: 2px 7px; border-radius: 5px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
+  .side-tag.up { color: var(--up); background: var(--up-dim); }
+  .side-tag.down { color: var(--down); background: var(--down-dim); }
+  .empty-state { color: var(--text-dim); font-size: 13px; text-align: center; padding: 18px 0; }
 
   footer { text-align: center; color: var(--text-dim); font-size: 11px; margin-top: 20px; font-family: var(--font-data); }
-
-  .shadow-banner { background: rgba(245,166,35,0.1); border: 1px solid rgba(245,166,35,0.35); border-radius: 10px; padding: 10px 14px; margin-bottom: 12px; font-size: 12px; color: var(--market); }
-  .shadow-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  .shadow-item { text-align: center; }
-  .shadow-item .k { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
-  .shadow-item .v { font-family: var(--font-data); font-size: 20px; font-weight: 700; }
-  .shadow-item .n { font-family: var(--font-data); font-size: 10px; color: var(--text-dim); margin-top: 2px; }
-  .shadow-vs { text-align: center; color: var(--text-dim); font-size: 11px; margin: 10px 0 4px; }
 </style>
 </head>
 <body>
@@ -120,14 +96,9 @@
   <div class="statusbar">
     <div class="brand">
       <span class="dot"></span>
-      <h1>Fair-Value Terminal</h1>
-      <span class="mode demo" id="modeTag">DEMO</span>
+      <h1>Ladder Terminal</h1>
     </div>
     <div class="live-price" id="livePrice">— —</div>
-  </div>
-
-  <div class="shadow-banner" id="tradingPausedBanner" style="display:none;">
-    ⏸ Real staking is paused — validating the model against the market for free before risking more demo money. See Shadow Validation below.
   </div>
 
   <div class="hero">
@@ -139,59 +110,33 @@
     <svg class="sparkline" id="sparkline" preserveAspectRatio="none"></svg>
   </div>
 
-  <div class="card" id="shadowCard" style="display:none;">
-    <div class="card-title"><span>Shadow Validation</span><span class="countdown" id="shadowN">0 windows</span></div>
-    <div class="shadow-grid">
-      <div class="shadow-item"><div class="k">Model Accuracy</div><div class="v" id="shadowModelAcc">—</div><div class="n" id="shadowModelN">—</div></div>
-      <div class="shadow-item"><div class="k">Market Accuracy</div><div class="v" id="shadowMarketAcc">—</div><div class="n" id="shadowMarketN">—</div></div>
-      <div class="shadow-item"><div class="k">Would-Trade Win%</div><div class="v" id="shadowTradeAcc">—</div><div class="n" id="shadowTradeN">—</div></div>
-    </div>
-    <div class="shadow-vs" id="shadowVerdict">Collecting data — need a larger sample before this means anything.</div>
+  <div class="chips">
+    <div class="chip"><div class="k">Locked</div><div class="v" id="lockedCount">—</div></div>
+    <div class="chip"><div class="k">Locked $</div><div class="v" id="lockedProfit">—</div></div>
+    <div class="chip"><div class="k">Resolved W/L</div><div class="v" id="resolvedWL">—</div></div>
+    <div class="chip"><div class="k">Active Rungs</div><div class="v" id="activeCount">—</div></div>
   </div>
 
   <div class="card">
     <div class="card-title">
-      <span>Live Market</span>
+      <span>Current Ladder</span>
       <span class="countdown" id="countdown">—</span>
     </div>
-
-    <div class="price-strip">
-      <div class="price-box up">
-        <div class="lbl"><span class="side">UP</span><span>token</span></div>
-        <div class="px" id="upPrice">—</div>
-        <div class="prob" id="upProb">—</div>
+    <div class="ladder-wrap">
+      <div class="ladder-col up">
+        <div class="col-head"><span>UP</span><span id="upLivePx">—</span></div>
+        <div id="upLadder"></div>
       </div>
-      <div class="price-box down">
-        <div class="lbl"><span class="side">DOWN</span><span>token</span></div>
-        <div class="px" id="downPrice">—</div>
-        <div class="prob" id="downProb">—</div>
+      <div class="ladder-col down">
+        <div class="col-head"><span>DOWN</span><span id="downLivePx">—</span></div>
+        <div id="downLadder"></div>
       </div>
     </div>
-
-    <div id="gaugeWrap">
-      <div class="empty-state">Waiting for the bot's first read on the current window…</div>
-    </div>
-  </div>
-
-  <div class="card" id="positionCard" style="display:none;">
-    <div class="card-title"><span>Open Position</span><span class="side-tag" id="posSide">—</span></div>
-    <div class="pos-grid">
-      <div class="pos-item"><div class="k">Stake</div><div class="v" id="posStake">—</div></div>
-      <div class="pos-item"><div class="k">Entry Price</div><div class="v" id="posPrice">—</div></div>
-      <div class="pos-item"><div class="k">Strike</div><div class="v" id="posStrike">—</div></div>
-    </div>
-  </div>
-
-  <div class="chips">
-    <div class="chip"><div class="k">Win Rate</div><div class="v" id="winRate">—</div></div>
-    <div class="chip"><div class="k">Trades</div><div class="v" id="tradeCount">—</div></div>
-    <div class="chip"><div class="k">Avg Edge</div><div class="v" id="avgEdge">—</div></div>
-    <div class="chip"><div class="k">Streak</div><div class="v" id="streak">—</div></div>
   </div>
 
   <div class="card">
-    <div class="card-title"><span>Trade Log</span></div>
-    <div id="tradeLog"><div class="empty-state">No trades yet — the model is still watching.</div></div>
+    <div class="card-title"><span>Completed Rungs</span></div>
+    <div id="completedLog"><div class="empty-state">No rungs completed yet.</div></div>
   </div>
 
   <footer id="footer">—</footer>
@@ -199,7 +144,7 @@
 <script>
   const $ = (id) => document.getElementById(id);
   const fmt$ = (n) => '$' + Number(n).toFixed(2);
-  const fmtPct = (n, digits=1) => (n * 100).toFixed(digits) + '%';
+  const fmtPct = (n, digits=2) => (n * 100).toFixed(digits) + '%';
 
   function fmtCountdown(sec) {
     if (sec == null) return '—';
@@ -233,64 +178,24 @@
       '<path d="' + path + '" fill="none" stroke="' + stroke + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
   }
 
-  function renderLiveMarket(lastCheck, openPosition) {
-    const countdownEl = $('countdown');
-    const gaugeWrap = $('gaugeWrap');
+  function statusLabel(rung) {
+    if (rung.status === 'waiting_base') return 'waiting';
+    if (rung.status === 'base_filled') return 'filled, hedging @ $' + rung.counterPrice.toFixed(2);
+    if (rung.status === 'locked') return 'LOCKED +$' + rung.lockedProfit.toFixed(2);
+    return rung.status;
+  }
 
-    if (!lastCheck && !openPosition) {
-      $('upPrice').textContent = '—'; $('downPrice').textContent = '—';
-      $('upProb').textContent = '—'; $('downProb').textContent = '—';
-      countdownEl.textContent = '—';
-      gaugeWrap.innerHTML = '<div class="empty-state">Waiting for the bot\'s first read on the current window…</div>';
-      return;
-    }
-
-    let upPx, downPx, modelUp, secondsRemaining, tookTrade, lowVol;
-    if (lastCheck) {
-      upPx = lastCheck.upPrice;
-      downPx = lastCheck.downPrice;
-      modelUp = lastCheck.modelProbUp;
-      secondsRemaining = lastCheck.secondsRemaining - Math.floor((Date.now() - new Date(lastCheck.timestamp).getTime())/1000);
-      tookTrade = lastCheck.tookTrade;
-      lowVol = lastCheck.lowVolRegime;
-    } else {
-      const p = openPosition;
-      upPx = p.side === 'UP' ? p.price : 1 - p.price;
-      downPx = p.side === 'DOWN' ? p.price : 1 - p.price;
-      modelUp = p.side === 'UP' ? p.trueProb : 1 - p.trueProb;
-      secondsRemaining = Math.floor((new Date(p.windowEnd*1000) - Date.now())/1000);
-      tookTrade = true;
-      lowVol = p.lowVolRegime;
-    }
-
-    $('upPrice').textContent = upPx.toFixed(3);
-    $('downPrice').textContent = downPx.toFixed(3);
-    $('upProb').textContent = fmtPct(upPx,1) + ' implied';
-    $('downProb').textContent = fmtPct(downPx,1) + ' implied';
-
-    countdownEl.textContent = secondsRemaining > 0 ? fmtCountdown(secondsRemaining) + ' left' : 'resolving…';
-
-    const modelPct = Math.max(0, Math.min(1, modelUp)) * 100;
-    const marketPct = Math.max(0, Math.min(1, upPx)) * 100;
-    const edge = modelUp - upPx;
-    const edgeAbs = Math.abs(edge);
-    const side = edge >= 0 ? 'UP' : 'DOWN';
-
-    gaugeWrap.innerHTML =
-      '<div class="gauge-row">' +
-        '<span class="model-lbl">● MODEL ' + fmtPct(modelUp,1) + '</span>' +
-        '<span class="market-lbl">◆ MARKET ' + fmtPct(upPx,1) + '</span>' +
-      '</div>' +
-      '<div class="gauge">' +
-        '<div class="gauge-fill-model" style="width:' + modelPct + '%"></div>' +
-        '<div class="gauge-fill-market" style="width:' + marketPct + '%; border-color: var(--market);"></div>' +
-      '</div>' +
-      '<div class="edge-readout">' +
-        '<span class="side-tag ' + side.toLowerCase() + '">' + side + '</span>' +
-        '<span><span class="edge-val ' + (tookTrade ? 'hot' : 'cold') + '">' + (edgeAbs >= 0 ? '+' : '') + fmtPct(edgeAbs,1) + '</span>' +
-        '<span style="color:var(--text-dim); font-size:11px;"> edge ' + (tookTrade ? '· traded' : '· below threshold') + '</span></span>' +
-      '</div>' +
-      (lowVol ? '<div class="lowvol-badge">⚠ low volatility — model confidence capped</div>' : '');
+  function renderLadderCol(elId, rungs, side) {
+    const el = $(elId);
+    const sideRungs = rungs.filter(r => r.side === side).sort((a,b) => b.rungPrice - a.rungPrice);
+    if (sideRungs.length === 0) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
+    el.innerHTML = sideRungs.map(r => {
+      const cls = r.status === 'locked' ? 'locked' : (r.status === 'base_filled' ? 'base_filled' : 'waiting');
+      return '<div class="rung ' + cls + '">' +
+        '<span class="px">$' + r.rungPrice.toFixed(2) + '</span>' +
+        '<span class="status">' + statusLabel(r) + '</span>' +
+      '</div>';
+    }).join('');
   }
 
   async function refresh() {
@@ -305,47 +210,12 @@
     }
 
     try {
-      $('modeTag').textContent = s.config.DEMO_MODE ? 'DEMO' : 'LIVE';
-      $('modeTag').className = 'mode' + (s.config.DEMO_MODE ? ' demo' : '');
-      const price = (s.lastCheck && s.lastCheck.currentPrice) || (s.openPosition && s.openPosition.strike);
-      $('livePrice').innerHTML = price ? s.config.ASSET.toUpperCase() + ' <b>$' + Number(price).toLocaleString(undefined,{maximumFractionDigits:0}) + '</b>' : '—';
-      $('tradingPausedBanner').style.display = s.config.TRADING_ENABLED === false ? '' : 'none';
+      const lc = s.lastCheck;
+      $('livePrice').innerHTML = lc ? s.config.ASSET.toUpperCase() + ' market' : '—';
+      $('countdown').textContent = lc ? (Math.max(0, lc.secondsRemaining) > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—';
+      $('upLivePx').textContent = lc ? '$' + lc.upPrice.toFixed(3) : '—';
+      $('downLivePx').textContent = lc ? '$' + lc.downPrice.toFixed(3) : '—';
     } catch (e) { console.error('header render failed', e); }
-
-    try {
-      const sc = $('shadowCard');
-      if (s.shadowStats && s.shadowStats.totalWindows > 0) {
-        sc.style.display = '';
-        const st = s.shadowStats;
-        $('shadowN').textContent = st.totalWindows + ' windows';
-        $('shadowModelAcc').textContent = Math.round(st.modelCorrect/st.totalWindows*100) + '%';
-        $('shadowModelN').textContent = st.modelCorrect + '/' + st.totalWindows;
-        $('shadowMarketAcc').textContent = Math.round(st.marketCorrect/st.totalWindows*100) + '%';
-        $('shadowMarketN').textContent = st.marketCorrect + '/' + st.totalWindows;
-        $('shadowTradeAcc').textContent = st.wouldTradeCount ? Math.round(st.wouldTradeWins/st.wouldTradeCount*100) + '%' : '—';
-        $('shadowTradeN').textContent = st.wouldTradeCount ? (st.wouldTradeWins + '/' + st.wouldTradeCount) : 'no signals yet';
-
-        const modelAcc = st.modelCorrect/st.totalWindows, marketAcc = st.marketCorrect/st.totalWindows;
-        const tradeAcc = st.wouldTradeCount ? st.wouldTradeWins/st.wouldTradeCount : null;
-        $('shadowModelAcc').style.color = modelAcc >= marketAcc ? 'var(--win)' : 'var(--loss)';
-        $('shadowMarketAcc').style.color = marketAcc > modelAcc ? 'var(--win)' : 'var(--text)';
-        if (tradeAcc !== null) $('shadowTradeAcc').style.color = tradeAcc > 0.5 ? 'var(--win)' : 'var(--loss)';
-
-        let verdict;
-        if (st.totalWindows < 100) {
-          verdict = 'Collecting data — ' + (100 - st.totalWindows) + ' more windows before this is statistically meaningful.';
-        } else if (tradeAcc !== null && tradeAcc > 0.55 && st.wouldTradeCount >= 50) {
-          verdict = 'Would-trade signal is beating the market so far — worth considering re-enabling staking.';
-        } else if (tradeAcc !== null) {
-          verdict = 'Would-trade signal is not beating the market — staking stays paused.';
-        } else {
-          verdict = 'No would-trade signals in this sample yet.';
-        }
-        $('shadowVerdict').textContent = verdict;
-      } else {
-        sc.style.display = 'none';
-      }
-    } catch (e) { console.error('shadow stats render failed', e); }
 
     try {
       $('bankroll').textContent = fmt$(s.bankroll);
@@ -356,82 +226,63 @@
     } catch (e) { console.error('bankroll render failed', e); }
 
     try {
-      const curve = [s.startingBankroll, ...s.trades.map(t => t.bankrollAfter)];
+      const curve = [s.startingBankroll];
+      let running = s.startingBankroll;
+      for (const r of s.completedRungs) {
+        if (r.pnl !== null && r.pnl !== undefined) { running += r.pnl; curve.push(Math.round(running*100)/100); }
+      }
       buildSparkline(curve);
     } catch (e) { console.error('sparkline render failed', e); }
 
     try {
-      renderLiveMarket(s.lastCheck, s.openPosition);
-    } catch (e) { console.error('live market render failed', e); }
+      renderLadderCol('upLadder', s.activeRungs, 'UP');
+      renderLadderCol('downLadder', s.activeRungs, 'DOWN');
+    } catch (e) { console.error('ladder render failed', e); }
 
     try {
-      const posCard = $('positionCard');
-      if (s.openPosition) {
-        posCard.style.display = '';
-        const p = s.openPosition;
-        const sideEl = $('posSide');
-        sideEl.textContent = p.side;
-        sideEl.className = 'side-tag ' + p.side.toLowerCase();
-        $('posStake').textContent = fmt$(p.stake);
-        $('posPrice').textContent = p.price.toFixed(3);
-        $('posStrike').textContent = '$' + Number(p.strike).toLocaleString(undefined,{maximumFractionDigits:0});
+      const locked = s.completedRungs.filter(r => r.status === 'locked');
+      const resolved = s.completedRungs.filter(r => r.status === 'resolved');
+      const wins = resolved.filter(r => r.resolvedWon).length;
+      const losses = resolved.length - wins;
+      $('lockedCount').textContent = locked.length;
+      $('lockedProfit').textContent = fmt$(locked.reduce((a,r)=>a+r.lockedProfit, 0));
+      $('resolvedWL').textContent = wins + 'W / ' + losses + 'L';
+      $('activeCount').textContent = s.activeRungs.length;
+    } catch (e) { console.error('chips render failed', e); }
+
+    try {
+      const logEl = $('completedLog');
+      const all = s.completedRungs.slice().reverse().slice(0, 40);
+      if (all.length === 0) {
+        logEl.innerHTML = '<div class="empty-state">No rungs completed yet.</div>';
       } else {
-        posCard.style.display = 'none';
-      }
-    } catch (e) { console.error('position card render failed', e); }
-
-    try {
-      const trades = s.trades;
-      $('tradeCount').textContent = trades.length;
-      const wins = trades.filter(t => t.won).length;
-      $('winRate').textContent = trades.length ? Math.round(wins/trades.length*100) + '%' : '—';
-      $('avgEdge').textContent = trades.length ? fmtPct(trades.reduce((a,t)=>a+t.edge,0)/trades.length, 1) : '—';
-
-      let streak = 0, streakType = null;
-      for (let i = trades.length - 1; i >= 0; i--) {
-        const w = trades[i].won;
-        if (streakType === null) { streakType = w; streak = 1; }
-        else if (w === streakType) streak++;
-        else break;
-      }
-      $('streak').textContent = trades.length ? (streak + (streakType ? 'W' : 'L')) : '—';
-      $('streak').style.color = streakType === true ? 'var(--win)' : streakType === false ? 'var(--loss)' : 'var(--text)';
-    } catch (e) { console.error('stats chips render failed', e); }
-
-    try {
-      const trades = s.trades;
-      const logEl = $('tradeLog');
-      if (trades.length === 0) {
-        logEl.innerHTML = '<div class="empty-state">No trades yet — the model is still watching.</div>';
-      } else {
-        const fmtTime = (iso) => new Date(iso).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'});
-        logEl.innerHTML = trades.slice().reverse().slice(0, 40).map(t => {
-          const settled = (t.finalTokenPrice !== undefined && t.finalTokenPrice !== null) ? t.finalTokenPrice.toFixed(3) : '—';
-          const modelAtEntry = t.modelProbUpAtEntry !== undefined ? fmtPct(t.side === 'UP' ? t.modelProbUpAtEntry : 1 - t.modelProbUpAtEntry, 1) : '—';
-          return '<div class="trade">' +
-            '<div class="head">' +
-              '<span class="result-dot ' + (t.won ? 'win' : 'loss') + '"></span>' +
-              '<div class="mid">' +
-                '<div class="top"><span class="side-tag ' + t.side.toLowerCase() + '">' + t.side + '</span> ' + fmt$(t.stake) + ' cost @ ' + t.price.toFixed(3) + (t.lowVolRegime ? ' <span style="color:var(--market)">⚠</span>' : '') + '</div>' +
-                '<div class="bottom">opened ' + fmtTime(t.openedAt) + '</div>' +
-              '</div>' +
-              '<div class="pnl ' + (t.won ? 'win' : 'loss') + '">' + (t.pnl >= 0 ? '+' : '') + t.pnl.toFixed(2) + '</div>' +
+        const fmtTime = (iso) => iso ? new Date(iso).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
+        logEl.innerHTML = all.map(r => {
+          if (r.status === 'expired_unfilled') {
+            return '<div class="entry">' +
+              '<span class="result-dot" style="background:var(--text-dim)"></span>' +
+              '<div class="mid"><div class="top"><span class="side-tag ' + r.side.toLowerCase() + '">' + r.side + '</span> @ $' + r.rungPrice.toFixed(2) + ' never filled</div>' +
+              '<div class="bottom">window ' + r.windowStart + '</div></div>' +
+              '<div class="pnl">$0.00</div>' +
+            '</div>';
+          }
+          const isLock = r.status === 'locked';
+          const cls = isLock ? 'lock' : (r.resolvedWon ? 'win' : 'loss');
+          const label = isLock ? 'LOCKED' : (r.resolvedWon ? 'WIN' : 'LOSS');
+          const detail = isLock
+            ? ('base $' + r.baseFillPrice.toFixed(2) + ' + counter $' + r.counterFillPrice.toFixed(2) + ' · locked ' + fmtTime(r.settledAt))
+            : ('unhedged @ $' + r.baseFillPrice.toFixed(2) + ' · settled ' + (r.finalTokenPrice !== undefined ? r.finalTokenPrice.toFixed(3) : '—') + ' · ' + fmtTime(r.settledAt));
+          return '<div class="entry">' +
+            '<span class="result-dot ' + cls + '"></span>' +
+            '<div class="mid">' +
+              '<div class="top"><span class="side-tag ' + r.side.toLowerCase() + '">' + r.side + '</span> ' + r.shares + ' sh @ $' + r.rungPrice.toFixed(2) + ' <span style="color:var(--text-dim); font-size:10px;">' + label + '</span></div>' +
+              '<div class="bottom">' + detail + '</div>' +
             '</div>' +
-            '<div class="detail-grid">' +
-              '<div class="d-item"><div class="k">Strike</div><div class="v">$' + Number(t.strike).toLocaleString(undefined,{maximumFractionDigits:0}) + '</div></div>' +
-              '<div class="d-item"><div class="k">Model @ Entry</div><div class="v">' + modelAtEntry + '</div></div>' +
-              '<div class="d-item"><div class="k">Edge</div><div class="v">' + fmtPct(t.edge,1) + '</div></div>' +
-              '<div class="d-item"><div class="k">Gross Payout</div><div class="v">' + (t.grossPayout !== undefined ? fmt$(t.grossPayout) : '—') + '</div></div>' +
-              '<div class="d-item"><div class="k">Fee</div><div class="v">' + (t.fee !== undefined ? fmt$(t.fee) : '—') + '</div></div>' +
-              '<div class="d-item"><div class="k">Settled Price</div><div class="v">' + settled + '</div></div>' +
-              '<div class="d-item"><div class="k">Resolved</div><div class="v">' + fmtTime(t.resolvedAt) + '</div></div>' +
-              '<div class="d-item"><div class="k">Result</div><div class="v ' + (t.won ? 'win' : 'loss') + '" style="color:' + (t.won ? 'var(--win)' : 'var(--loss)') + '">' + (t.won ? 'WIN' : 'LOSS') + '</div></div>' +
-              '<div class="d-item"><div class="k">Bankroll After</div><div class="v">' + fmt$(t.bankrollAfter) + '</div></div>' +
-            '</div>' +
+            '<div class="pnl ' + cls + '">' + (r.pnl >= 0 ? '+' : '') + r.pnl.toFixed(2) + '</div>' +
           '</div>';
         }).join('');
       }
-    } catch (e) { console.error('trade log render failed', e); }
+    } catch (e) { console.error('completed log render failed', e); }
 
     $('footer').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · polling every 1s' +
       (s.lastCheck ? ' · bot last ticked ' + Math.max(0, Math.floor((Date.now() - new Date(s.lastCheck.timestamp).getTime())/1000)) + 's ago' : '');
