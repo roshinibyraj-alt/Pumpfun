@@ -1,6 +1,9 @@
 // ============================================================
-// bot.js — ladder + counter-bet strategy, v3. No per-rung take
-// profit or "lock" assumption. Every fill — whether it came from
+// bot.js — ladder + counter-bet strategy, v3-reversed (breakout
+// entry). Base leg now fills when price rises TO OR ABOVE a rung
+// (momentum/breakout) instead of dropping to or below it (dip-buy).
+// Everything downstream — hedging, resolution, pnl — is unchanged
+// and direction-agnostic. Every fill — whether it came from
 // an original base rung or a counter order triggered by one —
 // just accumulates into a running total of UP shares and DOWN
 // shares held for that window. At window close, the whole
@@ -26,7 +29,9 @@ function log(...args) {
 function processRungFill(rung, upPrice, downPrice) {
   if (rung.status === 'waiting_base') {
     const ownPrice = rung.side === 'UP' ? upPrice : downPrice;
-    if (ownPrice <= rung.rungPrice) {
+    // Reversed (v3r): breakout/momentum entry — fire when price rises
+    // TO OR ABOVE the rung, instead of dropping to or below it.
+    if (ownPrice >= rung.rungPrice) {
       rung.baseFillPrice = rung.rungPrice;
       rung.baseFilledAt = new Date().toISOString();
       rung.status = 'base_filled';
@@ -185,7 +190,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (ladder v3, aggregate resolution). Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | counter spread $${config.LOCK_SPREAD}`);
+  log(`Bot started (ladder v3-reversed/breakout entry, aggregate resolution). Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | counter spread $${config.LOCK_SPREAD}`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
