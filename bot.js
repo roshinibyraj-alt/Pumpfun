@@ -24,6 +24,13 @@ function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
+// Polymarket's official fee formula (docs.polymarket.com/trading/fees):
+//   fee = shares × feeRate × price × (1 - price)
+// Only takers pay this; makers always pay $0.
+function takerFeeUSDC(shares, price, feeRate) {
+  return shares * feeRate * price * (1 - price);
+}
+
 // Pure status/fill-price bookkeeping — no bankroll or pnl touched here.
 // Resolution only ever happens once, at window close, in resolveWindow().
 function processRungFill(rung, upPrice, downPrice) {
@@ -33,19 +40,26 @@ function processRungFill(rung, upPrice, downPrice) {
     // TO OR ABOVE the rung, instead of dropping to or below it.
     if (ownPrice >= rung.rungPrice) {
       rung.baseFillPrice = rung.rungPrice;
+      // Base leg is now a TAKER market order (see config.js) — real
+      // Polymarket fee applies, fee = shares × feeRate × p × (1-p).
+      rung.baseFillFee = Math.round(
+        takerFeeUSDC(rung.shares, rung.baseFillPrice, config.BASE_TAKER_FEE_RATE) * 100000
+      ) / 100000;
       rung.baseFilledAt = new Date().toISOString();
       rung.status = 'base_filled';
       rung.counterPrice = strategy.counterPriceFor(rung.rungPrice, config.LOCK_SPREAD);
       const counterSide = rung.side === 'UP' ? 'DOWN' : 'UP';
-      log(`FILL base ${rung.side} @ $${rung.rungPrice} -> counter order ${counterSide} @ $${rung.counterPrice}`);
+      log(`FILL base ${rung.side} @ $${rung.rungPrice} (taker fee $${rung.baseFillFee.toFixed(5)}) -> counter order ${counterSide} @ $${rung.counterPrice}`);
     }
   } else if (rung.status === 'base_filled') {
     const oppPrice = rung.side === 'UP' ? downPrice : upPrice;
     if (oppPrice <= rung.counterPrice) {
       rung.counterFillPrice = rung.counterPrice;
+      // Counter leg is a genuine resting maker limit order -> $0 fee.
+      rung.counterFillFee = 0;
       rung.counterFilledAt = new Date().toISOString();
       rung.status = 'counter_filled';
-      log(`COUNTER FILLED ${rung.side}-rung @ $${rung.rungPrice} | now holding both legs, awaiting window resolution`);
+      log(`COUNTER FILLED ${rung.side}-rung @ $${rung.rungPrice} (maker, $0 fee) | now holding both legs, awaiting window resolution`);
     }
   }
 }
@@ -69,16 +83,22 @@ async function resolveWindow(win, state) {
   else if (upTokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) wonSide = 'DOWN';
   else return false; // not converged yet, try again next tick
 
-  let totalUpShares = 0, totalUpCost = 0, totalDownShares = 0, totalDownCost = 0;
+  let totalUpShares = 0, totalUpCost = 0, totalDownShares = 0, totalDownCost = 0, totalFees = 0;
   for (const rung of win.rungs) {
     if (rung.baseFillPrice !== null) {
-      if (rung.side === 'UP') { totalUpShares += rung.shares; totalUpCost += rung.shares * rung.baseFillPrice; }
-      else { totalDownShares += rung.shares; totalDownCost += rung.shares * rung.baseFillPrice; }
+      const fee = rung.baseFillFee || 0;
+      totalFees += fee;
+      if (rung.side === 'UP') { totalUpShares += rung.shares; totalUpCost += rung.shares * rung.baseFillPrice + fee; }
+      else { totalDownShares += rung.shares; totalDownCost += rung.shares * rung.baseFillPrice + fee; }
     }
     if (rung.counterFillPrice !== null) {
       // the counter leg is always on the OPPOSITE token from rung.side
-      if (rung.side === 'UP') { totalDownShares += rung.shares; totalDownCost += rung.shares * rung.counterFillPrice; }
-      else { totalUpShares += rung.shares; totalUpCost += rung.shares * rung.counterFillPrice; }
+      // maker fill -> $0 fee (rung.counterFillFee is always 0, kept for
+      // symmetry/auditability rather than assumed)
+      const fee = rung.counterFillFee || 0;
+      totalFees += fee;
+      if (rung.side === 'UP') { totalDownShares += rung.shares; totalDownCost += rung.shares * rung.counterFillPrice + fee; }
+      else { totalUpShares += rung.shares; totalUpCost += rung.shares * rung.counterFillPrice + fee; }
     }
   }
 
@@ -97,6 +117,7 @@ async function resolveWindow(win, state) {
     totalUpCost: Math.round(totalUpCost * 100) / 100,
     totalDownShares,
     totalDownCost: Math.round(totalDownCost * 100) / 100,
+    totalFees: Math.round(totalFees * 100000) / 100000,
     payout: Math.round(payout * 100) / 100,
     cost: Math.round(cost * 100) / 100,
     pnl,
@@ -105,7 +126,7 @@ async function resolveWindow(win, state) {
   });
 
   log(
-    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | UP ${totalUpShares}sh/$${totalUpCost.toFixed(2)} | DOWN ${totalDownShares}sh/$${totalDownCost.toFixed(2)} | payout $${payout.toFixed(2)} | pnl $${pnl.toFixed(2)} | bankroll $${state.bankroll}`
+    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | UP ${totalUpShares}sh/$${totalUpCost.toFixed(2)} | DOWN ${totalDownShares}sh/$${totalDownCost.toFixed(2)} | fees $${totalFees.toFixed(5)} | payout $${payout.toFixed(2)} | pnl $${pnl.toFixed(2)} | bankroll $${state.bankroll}`
   );
   return true;
 }
