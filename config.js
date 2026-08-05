@@ -3,9 +3,10 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v6 — retest-confirmed maker base leg): ladder + counter-bet
-// lock. No BTC price, no fair-value model, no directional prediction at
-// all anymore. Pure Polymarket order-book mechanics:
+// STRATEGY (v8 — retest-confirmed maker base leg + portfolio-level
+// imbalance hedge): ladder + counter-bet lock. No BTC price, no
+// fair-value model, no directional prediction at all anymore. Pure
+// Polymarket order-book mechanics:
 //   1. At window start, watch six price rungs each on BOTH sides.
 //      Polymarket has no conditional/stop order type, so a rung is
 //      NOT a resting order — it's a trigger we detect by polling.
@@ -21,9 +22,12 @@
 //      fill — regardless of which side the window actually resolves to.
 //   3. The counter order is a genuine resting GTC/GTD limit order
 //      (maker, $0 fee) — this one really can sit and wait.
-//   4. If a rung's base fills but its counter never does before
-//      the window closes, that leftover position rides to real
-//      resolution like a normal directional bet.
+//   4. If a base leg's own price fully reverses back down to
+//      IMBALANCE_HEDGE_TRIGGER_PRICE before its ideal counter has
+//      filled, that's treated as a failed breakout — the NET unhedged
+//      imbalance across all such rungs on that side gets hedged in one
+//      combined taker trade, instead of leaving each rung to ride
+//      naked or waiting on a per-rung fallback.
 // Every rung is independent — filling one never cancels or
 // affects any other rung.
 // ============================================================
@@ -99,23 +103,21 @@ module.exports = {
   // still resting unfilled at that point gets cancelled outright — a
   // fill with under a minute left has essentially no chance of getting
   // hedged before the window closes, so it would just become naked risk
-  // with zero time to react. This is also when the fallback hedge below
-  // kicks in for positions that are ALREADY filled.
+  // with zero time to react.
   ENTRY_BLACKOUT_END_SECONDS: 60,
 
-  // ---- Fallback hedge ----
-  // If a base rung has already filled and the IDEAL counter price
-  // (1-P-LOCK_SPREAD) hasn't been reached yet, and we're inside the
-  // final ENTRY_BLACKOUT_END_SECONDS of the window, accept a worse but
-  // still real hedge once the opposite side falls to this price instead
-  // of holding out for the ideal one. This trades locked profit for a
-  // bounded, known loss instead of riding a naked position with no time
-  // left to react — e.g. base @ $0.70 + fallback @ $0.45 = $1.15 cost,
-  // a guaranteed $0.15/share loss, instead of risking the full $0.70 if
-  // the naked leg resolves to zero. Only ever used as a last resort —
-  // the ideal counter price is always tried first, for as long as there's
-  // time left to wait for it.
-  FALLBACK_HEDGE_PRICE: 0.45,
+  // ---- Imbalance hedge (portfolio-level stop-hedge) ----
+  // Corrected design (2026-08-05): triggers on the BASE side's OWN price
+  // retracing back down to this level — e.g. if UP was bought as base and
+  // UP's own price falls to $0.45 (the breakout has fully failed) — NOT
+  // on the opposite side rising to it. When that happens, hedge ONLY the
+  // current net unhedged imbalance (unhedged UP shares minus unhedged
+  // DOWN shares, or vice versa) in ONE combined trade — not a fresh
+  // per-rung hedge. This is an urgent de-risking action once the move
+  // has clearly reversed, so it's placed as a real TAKER order (pays
+  // BASE_TAKER_FEE_RATE, no rebate) for certainty of execution instead
+  // of hoping a passive order fills before things move further.
+  IMBALANCE_HEDGE_TRIGGER_PRICE: 0.45,
 
   // Counter leg is still a genuine resting GTC/GTD limit order placed
   // below market after the base fills — a real maker fill, $0 fee. We do
