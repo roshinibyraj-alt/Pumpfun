@@ -1,21 +1,22 @@
 // ============================================================
-// bot.js — ladder + counter-bet strategy, v7 (time-filtered entries
-// + fallback hedge). No new base positions in the first or last
-// minute of a window (config.ENTRY_BLACKOUT_*); any base order
-// still unfilled with under a minute left is cancelled outright.
-// A base leg that's already filled and can't reach its ideal
-// counter price in time falls back to a worse-but-real hedge at
-// config.FALLBACK_HEDGE_PRICE once inside that same last-minute
-// window — trading locked profit for a bounded loss instead of
-// riding naked exposure to resolution. Everything downstream —
+// bot.js — ladder + counter-bet strategy, v8 (time-filtered entries
+// + portfolio-level imbalance hedge). No new base positions in the
+// first or last minute of a window (config.ENTRY_BLACKOUT_*); any
+// base order still unfilled with under a minute left is cancelled
+// outright. Separately, if a side that's bought unhedged base
+// positions sees its OWN price fully reverse back down to
+// config.IMBALANCE_HEDGE_TRIGGER_PRICE, the NET unhedged imbalance
+// (not a fresh per-rung hedge) gets flattened in one combined taker
+// trade — trading a small known cost for removing naked exposure
+// once a breakout has clearly failed. Everything downstream —
 // resolution, pnl — is unchanged. Every fill — whether it came from
-// an original base rung or a counter order triggered by one —
-// just accumulates into a running total of UP shares and DOWN
-// shares held for that window. At window close, the whole
-// accumulated position resolves ONCE against the real outcome:
+// an original base rung, a per-rung counter, or a portfolio-level
+// imbalance hedge — just accumulates into a running total of UP
+// shares and DOWN shares held for that window. At window close, the
+// whole accumulated position resolves ONCE against the real outcome:
 //   payout = (winning side's total shares) × $1
 //   pnl = payout − (total cost of everything bought that window)
-// This naturally covers full hedges, partial hedges, fallback
+// This naturally covers full hedges, partial hedges, imbalance
 // hedges, and unhedged single fills with the same formula — no
 // special casing needed.
 // ============================================================
@@ -95,25 +96,66 @@ function processRungFill(rung, upPrice, downPrice, secondsIntoWindow, secondsRem
     // else: order still resting unfilled — keep checking each tick.
   } else if (rung.status === 'base_filled') {
     const oppPrice = rung.side === 'UP' ? downPrice : upPrice;
-    let fillType = null;
     if (oppPrice <= rung.counterPrice) {
-      fillType = 'ideal';
-    } else if (secondsRemaining < config.ENTRY_BLACKOUT_END_SECONDS && oppPrice <= config.FALLBACK_HEDGE_PRICE) {
-      // Ideal price out of reach and time is short — take the worse but
-      // still real hedge instead of riding this naked to resolution.
-      fillType = 'fallback';
-    }
-    if (fillType) {
-      rung.counterFillPrice = fillType === 'ideal' ? rung.counterPrice : config.FALLBACK_HEDGE_PRICE;
-      rung.counterFillType = fillType;
+      rung.counterFillPrice = rung.counterPrice;
       rung.counterFillFee = 0; // maker fill -> $0
       rung.counterFillRebate = estimateMakerRebate(rung.shares, rung.counterFillPrice);
       rung.counterFilledAt = new Date().toISOString();
       rung.status = 'counter_filled';
-      const label = fillType === 'ideal' ? 'maker, $0 fee' : 'FALLBACK hedge, maker, $0 fee';
-      log(`COUNTER FILLED ${rung.side}-rung @ $${rung.counterFillPrice} (${label}, est. rebate $${rung.counterFillRebate.toFixed(5)}) | now holding both legs, awaiting window resolution`);
+      log(`COUNTER FILLED ${rung.side}-rung @ $${rung.counterFillPrice} (maker, $0 fee, est. rebate $${rung.counterFillRebate.toFixed(5)}) | now holding both legs, awaiting window resolution`);
     }
+    // else: still waiting on the ideal counter price. If this side's own
+    // price fully reverses instead, processImbalanceHedge (below) handles
+    // it at the portfolio level rather than per-rung.
   }
+}
+
+// Portfolio-level stop-hedge: runs once per tick, AFTER all per-rung
+// processing, across the whole current window. Triggers when a side that
+// has unhedged base fills (status === 'base_filled', ideal counter not
+// yet reached) sees its OWN price fully reverse back down to
+// config.IMBALANCE_HEDGE_TRIGGER_PRICE — i.e. the breakout has clearly
+// failed. Hedges ONLY the net imbalance (unhedged shares on that side
+// minus unhedged shares already offset by the other side's own unhedged
+// fills, if any) in ONE combined trade, not a fresh per-rung hedge. This
+// is urgent de-risking once the move has reversed, so it's a real TAKER
+// order — pays BASE_TAKER_FEE_RATE, no maker rebate — for certainty of
+// execution instead of hoping a passive order fills before price moves
+// further.
+function processImbalanceHedge(win, upPrice, downPrice) {
+  const unhedgedUpRungs = win.rungs.filter(r => r.status === 'base_filled' && r.side === 'UP');
+  const unhedgedDownRungs = win.rungs.filter(r => r.status === 'base_filled' && r.side === 'DOWN');
+  const unhedgedUp = unhedgedUpRungs.reduce((a, r) => a + r.shares, 0);
+  const unhedgedDown = unhedgedDownRungs.reduce((a, r) => a + r.shares, 0);
+  const netImbalance = unhedgedUp - unhedgedDown;
+
+  if (netImbalance > 0 && upPrice <= config.IMBALANCE_HEDGE_TRIGGER_PRICE) {
+    // UP was bought as base and has fully reversed -> flatten with DOWN
+    const hedgeShares = netImbalance;
+    const hedgePrice = downPrice;
+    const fee = Math.round(hedgeShares * config.BASE_TAKER_FEE_RATE * hedgePrice * (1 - hedgePrice) * 100000) / 100000;
+    if (!win.imbalanceHedges) win.imbalanceHedges = [];
+    win.imbalanceHedges.push({
+      side: 'DOWN', shares: hedgeShares, price: hedgePrice, fee, rebate: 0,
+      filledAt: new Date().toISOString(),
+      reason: `UP retraced to $${upPrice.toFixed(2)} (<= $${config.IMBALANCE_HEDGE_TRIGGER_PRICE}), flattened ${hedgeShares} unhedged UP shares`,
+    });
+    for (const r of unhedgedUpRungs) { r.status = 'imbalance_hedged'; r.cancelledAt = new Date().toISOString(); }
+    log(`IMBALANCE HEDGE: UP retraced to $${upPrice.toFixed(2)} -> bought ${hedgeShares} DOWN @ $${hedgePrice.toFixed(2)} (taker, fee $${fee.toFixed(5)}) to flatten net imbalance`);
+  } else if (netImbalance < 0 && downPrice <= config.IMBALANCE_HEDGE_TRIGGER_PRICE) {
+    const hedgeShares = -netImbalance;
+    const hedgePrice = upPrice;
+    const fee = Math.round(hedgeShares * config.BASE_TAKER_FEE_RATE * hedgePrice * (1 - hedgePrice) * 100000) / 100000;
+    if (!win.imbalanceHedges) win.imbalanceHedges = [];
+    win.imbalanceHedges.push({
+      side: 'UP', shares: hedgeShares, price: hedgePrice, fee, rebate: 0,
+      filledAt: new Date().toISOString(),
+      reason: `DOWN retraced to $${downPrice.toFixed(2)} (<= $${config.IMBALANCE_HEDGE_TRIGGER_PRICE}), flattened ${hedgeShares} unhedged DOWN shares`,
+    });
+    for (const r of unhedgedDownRungs) { r.status = 'imbalance_hedged'; r.cancelledAt = new Date().toISOString(); }
+    log(`IMBALANCE HEDGE: DOWN retraced to $${downPrice.toFixed(2)} -> bought ${hedgeShares} UP @ $${hedgePrice.toFixed(2)} (taker, fee $${fee.toFixed(5)}) to flatten net imbalance`);
+  }
+  // else: no imbalance, or neither side has reversed far enough — nothing to do.
 }
 
 // Attempts to resolve a closed window: checks the real outcome (no
@@ -158,6 +200,15 @@ async function resolveWindow(win, state) {
     }
   }
 
+  // Portfolio-level imbalance hedges (see processImbalanceHedge) — one
+  // combined trade per trigger, not tied to a single rung.
+  for (const hedge of win.imbalanceHedges || []) {
+    totalFees += hedge.fee;
+    totalRebates += hedge.rebate;
+    if (hedge.side === 'UP') { totalUpShares += hedge.shares; totalUpCost += hedge.shares * hedge.price + hedge.fee - hedge.rebate; }
+    else { totalDownShares += hedge.shares; totalDownCost += hedge.shares * hedge.price + hedge.fee - hedge.rebate; }
+  }
+
   const payout = wonSide === 'UP' ? totalUpShares * 1 : totalDownShares * 1;
   const cost = totalUpCost + totalDownCost;
   const pnl = Math.round((payout - cost) * 100) / 100;
@@ -168,6 +219,7 @@ async function resolveWindow(win, state) {
     windowStart: win.windowStart,
     windowEnd: win.windowEnd,
     rungs: win.rungs,
+    imbalanceHedges: win.imbalanceHedges || [],
     wonSide,
     totalUpShares,
     totalUpCost: Math.round(totalUpCost * 100) / 100,
@@ -228,6 +280,7 @@ async function tick() {
       for (const rung of state.currentWindow.rungs) {
         processRungFill(rung, upPrice, downPrice, nowSec - windowStart, windowEnd - nowSec);
       }
+      processImbalanceHedge(state.currentWindow, upPrice, downPrice);
     } else {
       log('No live market found for current window yet.');
     }
@@ -268,7 +321,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (ladder v7/time-filtered + fallback hedge, aggregate resolution). Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | counter spread $${config.LOCK_SPREAD} | breakout confirm buffer $${config.BASE_ORDER_SLIPPAGE_CAP} | entry blackout ${config.ENTRY_BLACKOUT_START_SECONDS}s/${config.ENTRY_BLACKOUT_END_SECONDS}s | fallback hedge $${config.FALLBACK_HEDGE_PRICE}`);
+  log(`Bot started (ladder v8/time-filtered + imbalance hedge, aggregate resolution). Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | counter spread $${config.LOCK_SPREAD} | breakout confirm buffer $${config.BASE_ORDER_SLIPPAGE_CAP} | entry blackout ${config.ENTRY_BLACKOUT_START_SECONDS}s/${config.ENTRY_BLACKOUT_END_SECONDS}s | imbalance hedge trigger $${config.IMBALANCE_HEDGE_TRIGGER_PRICE}`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
