@@ -1,7 +1,9 @@
 // ============================================================
-// bot.js — ladder + counter-bet strategy, v3-reversed (breakout
-// entry). Base leg now fills when price rises TO OR ABOVE a rung
-// (momentum/breakout) instead of dropping to or below it (dip-buy).
+// bot.js — ladder + counter-bet strategy, v6 (retest-confirmed
+// maker base leg). Base leg fires only once price has confirmed
+// BASE_ORDER_SLIPPAGE_CAP past a rung (real breakout, not noise),
+// then rests a passive limit order back at the rung price — a
+// genuine maker fill, $0 fee, that only fills on a retest/pullback.
 // Everything downstream — hedging, resolution, pnl — is unchanged
 // and direction-agnostic. Every fill — whether it came from
 // an original base rung or a counter order triggered by one —
@@ -24,39 +26,46 @@ function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
-// Polymarket's official fee formula (docs.polymarket.com/trading/fees):
-//   fee = shares × feeRate × price × (1 - price)
-// Only takers pay this; makers always pay $0.
-function takerFeeUSDC(shares, price, feeRate) {
-  return shares * feeRate * price * (1 - price);
-}
-
 // Pure status/fill-price bookkeeping — no bankroll or pnl touched here.
 // Resolution only ever happens once, at window close, in resolveWindow().
 function processRungFill(rung, upPrice, downPrice) {
   if (rung.status === 'waiting_base') {
     const ownPrice = rung.side === 'UP' ? upPrice : downPrice;
-    // Reversed (v3r): breakout/momentum entry — fire when price rises
-    // TO OR ABOVE the rung, instead of dropping to or below it.
-    if (ownPrice >= rung.rungPrice) {
-      rung.baseFillPrice = rung.rungPrice;
-      // Base leg is now a TAKER market order (see config.js) — real
-      // Polymarket fee applies, fee = shares × feeRate × p × (1-p).
-      rung.baseFillFee = Math.round(
-        takerFeeUSDC(rung.shares, rung.baseFillPrice, config.BASE_TAKER_FEE_RATE) * 100000
-      ) / 100000;
+    // Confirm the breakout with a buffer before committing to an order —
+    // only once price has moved BASE_ORDER_SLIPPAGE_CAP past the rung
+    // (e.g. $0.62 for a $0.60 rung) do we treat this as a real breakout,
+    // not just noise ticking through the level.
+    if (ownPrice >= rung.rungPrice + config.BASE_ORDER_SLIPPAGE_CAP) {
+      // Now rest a REAL limit order back at the original rung price —
+      // since price is confirmed above it, this order is NOT marketable
+      // at submission (it's a passive buy below current market), so
+      // it's a genuine MAKER order: $0 fee, and it just waits for a
+      // retest/pullback to $rungPrice to fill. If price never comes
+      // back down, this rung simply never fills — a real, valid outcome.
+      rung.baseOrderPrice = rung.rungPrice;
+      rung.baseOrderPlacedAt = new Date().toISOString();
+      rung.status = 'base_pending';
+      log(`LIMIT order placed base ${rung.side} @ $${rung.baseOrderPrice} (breakout confirmed @ $${ownPrice.toFixed(2)}, resting for retest)`);
+    }
+  } else if (rung.status === 'base_pending') {
+    const ownPrice = rung.side === 'UP' ? upPrice : downPrice;
+    // Fills when price retraces back down to our resting order price —
+    // a genuine maker match, same mechanic as the counter leg below.
+    if (ownPrice <= rung.baseOrderPrice) {
+      rung.baseFillPrice = rung.baseOrderPrice;
+      rung.baseFillFee = 0; // maker fill -> $0, per Polymarket's fee docs
       rung.baseFilledAt = new Date().toISOString();
       rung.status = 'base_filled';
-      rung.counterPrice = strategy.counterPriceFor(rung.rungPrice, config.LOCK_SPREAD);
+      rung.counterPrice = strategy.counterPriceFor(rung.baseFillPrice, config.LOCK_SPREAD);
       const counterSide = rung.side === 'UP' ? 'DOWN' : 'UP';
-      log(`FILL base ${rung.side} @ $${rung.rungPrice} (taker fee $${rung.baseFillFee.toFixed(5)}) -> counter order ${counterSide} @ $${rung.counterPrice}`);
+      log(`FILL base ${rung.side} @ $${rung.baseFillPrice} (maker, $0 fee, retest confirmed) -> counter order ${counterSide} @ $${rung.counterPrice}`);
     }
+    // else: order still resting unfilled — keep checking each tick.
   } else if (rung.status === 'base_filled') {
     const oppPrice = rung.side === 'UP' ? downPrice : upPrice;
     if (oppPrice <= rung.counterPrice) {
       rung.counterFillPrice = rung.counterPrice;
-      // Counter leg is a genuine resting maker limit order -> $0 fee.
-      rung.counterFillFee = 0;
+      rung.counterFillFee = 0; // maker fill -> $0
       rung.counterFilledAt = new Date().toISOString();
       rung.status = 'counter_filled';
       log(`COUNTER FILLED ${rung.side}-rung @ $${rung.rungPrice} (maker, $0 fee) | now holding both legs, awaiting window resolution`);
@@ -211,7 +220,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (ladder v3-reversed/breakout entry, aggregate resolution). Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | counter spread $${config.LOCK_SPREAD}`);
+  log(`Bot started (ladder v6/retest-confirmed maker entry, aggregate resolution). Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | counter spread $${config.LOCK_SPREAD} | breakout confirm buffer $${config.BASE_ORDER_SLIPPAGE_CAP}`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
