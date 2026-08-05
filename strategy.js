@@ -19,7 +19,7 @@ function buildRungs(windowStart, windowEnd, upTokenId, downTokenId, config) {
         shares: config.SHARES_PER_RUNG,
         tokenId: side === 'UP' ? upTokenId : downTokenId,
         counterTokenId: side === 'UP' ? downTokenId : upTokenId,
-        status: 'waiting_base', // waiting_base -> base_pending -> base_filled -> counter_filled
+        status: 'waiting_base', // waiting_base -> base_pending -> base_filled -> counter_filled | base_cancelled
         baseOrderPrice: null,
         baseOrderPlacedAt: null,
         baseFillPrice: null,
@@ -30,7 +30,9 @@ function buildRungs(windowStart, windowEnd, upTokenId, downTokenId, config) {
         counterFillPrice: null,
         counterFillFee: null,
         counterFillRebate: null,
+        counterFillType: null, // 'ideal' | 'fallback'
         counterFilledAt: null,
+        cancelledAt: null,
         lockedProfit: null,
         resolvedWon: null,
         pnl: null,
