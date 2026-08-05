@@ -314,9 +314,10 @@
           const marginPct = w.cost > 0 ? (w.pnl / w.cost) * 100 : 0;
           const detailRows = rungs.slice().sort((a,b) => a.side === b.side ? b.rungPrice - a.rungPrice : (a.side === 'UP' ? -1 : 1)).map(r => {
             let stCls = 'none', stLabel = 'untouched';
-            if (r.status === 'counter_filled') { stCls = 'full'; stLabel = 'both legs'; }
+            if (r.status === 'counter_filled') { stCls = 'full'; stLabel = r.counterFillType === 'fallback' ? 'fallback hedge' : 'both legs'; }
             else if (r.status === 'base_filled') { stCls = 'base'; stLabel = 'base only'; }
             else if (r.status === 'base_pending') { stCls = 'none'; stLabel = 'order unfilled'; }
+            else if (r.status === 'base_cancelled') { stCls = 'none'; stLabel = 'cancelled (time)'; }
             const basePx = r.baseFillPrice !== null ? '$' + r.baseFillPrice.toFixed(2) : '—';
             const counterPx = r.counterFillPrice !== null ? '$' + r.counterFillPrice.toFixed(2) : '—';
             const baseRebateStr = r.baseFillRebate ? ' (+$' + r.baseFillRebate.toFixed(4) + ' rbt)' : '';
