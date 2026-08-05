@@ -21,9 +21,11 @@ function buildRungs(windowStart, windowEnd, upTokenId, downTokenId, config) {
         counterTokenId: side === 'UP' ? downTokenId : upTokenId,
         status: 'waiting_base', // waiting_base -> base_filled -> locked | resolving | resolved
         baseFillPrice: null,
+        baseFillFee: null,
         baseFilledAt: null,
         counterPrice: null,
         counterFillPrice: null,
+        counterFillFee: null,
         counterFilledAt: null,
         lockedProfit: null,
         resolvedWon: null,
