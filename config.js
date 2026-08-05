@@ -3,20 +3,22 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v4 — market-order base leg): ladder + counter-bet lock.
-// No BTC price, no fair-value model, no directional prediction at
+// STRATEGY (v6 — retest-confirmed maker base leg): ladder + counter-bet
+// lock. No BTC price, no fair-value model, no directional prediction at
 // all anymore. Pure Polymarket order-book mechanics:
 //   1. At window start, watch six price rungs each on BOTH sides.
 //      Polymarket has no conditional/stop order type, so a rung is
 //      NOT a resting order — it's a trigger we detect by polling.
-//   2. When price crosses a rung, immediately fire a TAKER market
-//      order (FOK/FAK) for that side — this pays the real Crypto
-//      category taker fee, and may fill at a worse price than the
-//      nominal rung price under slippage (not yet modeled; see
-//      BASE_TAKER_FEE_RATE below). Once filled, place a counter
-//      order on the OPPOSITE side, priced to lock a guaranteed
-//      profit once both legs fill — regardless of which side the
-//      window actually resolves to.
+//   2. Once price moves BASE_ORDER_SLIPPAGE_CAP past a rung (confirms
+//      a real breakout, not noise), rest a passive LIMIT order back
+//      at the original rung price. Since price is already above that
+//      level, the order isn't marketable when placed — it's a genuine
+//      MAKER order ($0 fee) that fills only if price retests/pulls
+//      back down to the rung. If it never does, that rung just never
+//      fills — no cost, a real tradeoff of fill-rate for a fee-free,
+//      price-certain entry. Once filled, place a counter order on the
+//      OPPOSITE side, priced to lock a guaranteed profit once both legs
+//      fill — regardless of which side the window actually resolves to.
 //   3. The counter order is a genuine resting GTC/GTD limit order
 //      (maker, $0 fee) — this one really can sit and wait.
 //   4. If a rung's base fills but its counter never does before
@@ -58,16 +60,23 @@ module.exports = {
 
   // ---- Fees ----
   // Confirmed against Polymarket's official docs (docs.polymarket.com/trading/fees):
-  //   fee = shares × feeRate × price × (1 - price)
-  // Only TAKERS pay this fee; makers always pay $0.
+  //   fee = shares × feeRate × price × (1 - price), TAKERS ONLY.
+  // Makers always pay $0.
   //
-  // Base leg is now a TAKER order (market order, FOK/FAK) — per the design
-  // decision that a resting limit order above current price for a breakout
-  // entry would just fill immediately as a taker anyway, so we chase the
-  // move deliberately with a market order instead of pretending it's a
-  // passive maker fill. BTC/ETH up-down markets fall under Polymarket's
-  // "Crypto" category, feeRate = 0.07 (peaks at $1.75 per 100 shares @ 50c).
-  BASE_TAKER_FEE_RATE: 0.07,
+  // Both legs are now genuine MAKER fills, $0 fee:
+  //  - Base leg: we wait for price to confirm BASE_ORDER_SLIPPAGE_CAP past
+  //    the rung (real breakout, not noise), THEN rest a passive limit
+  //    order back at the original rung price. Since price is already
+  //    above that level when the order is placed, it's not marketable —
+  //    it just waits for a retest/pullback to fill. If price never comes
+  //    back down, the rung simply never fills (no cost) — a real
+  //    tradeoff of fill-frequency for a fee-free entry, not a bug.
+  //  - Counter leg: unchanged, a real resting limit below market.
+  // If you ever want to chase fills more aggressively with a marketable
+  // order instead (higher fill rate, lower price certainty), that's a
+  // taker fill and pays feeRate 0.07 for Crypto — re-add that path
+  // explicitly rather than assuming these numbers apply to it unchanged.
+  BASE_ORDER_SLIPPAGE_CAP: 0.02, // required confirmation buffer past the rung before resting the base order
 
   // Counter leg is still a genuine resting GTC/GTD limit order placed
   // below market after the base fills — a real maker fill, $0 fee. We do
