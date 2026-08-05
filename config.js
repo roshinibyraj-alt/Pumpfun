@@ -52,30 +52,36 @@ module.exports = {
 
   // Once a base rung fills at price P, the counter order on the opposite
   // side is placed at (1 - P - LOCK_SPREAD). E.g. base fills at $0.60 ->
-  // opposite side is implied at $0.40 -> counter order at $0.35. If both
-  // fill, cost = P + (1-P-spread) = 1-spread per share pair, but exactly
-  // one side always pays $1/share at resolution — so profit is locked at
-  // LOCK_SPREAD per share, guaranteed, the moment the counter fills.
-  LOCK_SPREAD: 0.05,
+  // opposite side is implied at $0.40 -> counter order at $0.30 (widened
+  // +$0.05 from the original $0.35). If both fill, cost = P + (1-P-spread)
+  // = 1-spread per share pair, but exactly one side always pays $1/share
+  // at resolution — so profit is locked at LOCK_SPREAD per share,
+  // guaranteed, the moment the counter fills. Wider spread = bigger
+  // locked margin per fill, but a lower price the counter side has to
+  // retrace to, so it fills less often.
+  LOCK_SPREAD: 0.10,
 
-  // ---- Fees ----
+  // ---- Fees & Rebates ----
   // Confirmed against Polymarket's official docs (docs.polymarket.com/trading/fees):
   //   fee = shares × feeRate × price × (1 - price), TAKERS ONLY.
-  // Makers always pay $0.
+  // Makers always pay $0 fee.
   //
-  // Both legs are now genuine MAKER fills, $0 fee:
-  //  - Base leg: we wait for price to confirm BASE_ORDER_SLIPPAGE_CAP past
-  //    the rung (real breakout, not noise), THEN rest a passive limit
-  //    order back at the original rung price. Since price is already
-  //    above that level when the order is placed, it's not marketable —
-  //    it just waits for a retest/pullback to fill. If price never comes
-  //    back down, the rung simply never fills (no cost) — a real
-  //    tradeoff of fill-frequency for a fee-free entry, not a bug.
-  //  - Counter leg: unchanged, a real resting limit below market.
-  // If you ever want to chase fills more aggressively with a marketable
-  // order instead (higher fill rate, lower price certainty), that's a
-  // taker fill and pays feeRate 0.07 for Crypto — re-add that path
-  // explicitly rather than assuming these numbers apply to it unchanged.
+  // Both legs are genuine MAKER fills (base: retest-confirmed passive
+  // limit at the rung; counter: passive limit at the hedge price) — $0
+  // fee on both, per v6.
+  //
+  // MAKER REBATE (estimate, not exact): Polymarket's Maker Rebates
+  // Program pays out from a pool proportional to your share of total
+  // maker volume in that market — we have no visibility into that share,
+  // so an exact number isn't obtainable from this bot. As a standard
+  // expected-value proxy, we estimate rebate = MAKER_REBATE_PCT × the
+  // taker fee the counterparty would have paid on that same fill
+  // (fee = shares × BASE_TAKER_FEE_RATE × p × (1-p)). This is an
+  // approximation of expected rebate income, not a guaranteed payout —
+  // real daily rebates depend on aggregate market activity you can't see
+  // in advance.
+  BASE_TAKER_FEE_RATE: 0.07, // Crypto category taker fee rate, used only to estimate counterparty fee for rebate calc
+  MAKER_REBATE_PCT: 0.20,    // Crypto category maker rebate share, per Polymarket docs
   BASE_ORDER_SLIPPAGE_CAP: 0.02, // required confirmation buffer past the rung before resting the base order
 
   // Counter leg is still a genuine resting GTC/GTD limit order placed
