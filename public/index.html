@@ -314,7 +314,8 @@
           const marginPct = w.cost > 0 ? (w.pnl / w.cost) * 100 : 0;
           const detailRows = rungs.slice().sort((a,b) => a.side === b.side ? b.rungPrice - a.rungPrice : (a.side === 'UP' ? -1 : 1)).map(r => {
             let stCls = 'none', stLabel = 'untouched';
-            if (r.status === 'counter_filled') { stCls = 'full'; stLabel = r.counterFillType === 'fallback' ? 'fallback hedge' : 'both legs'; }
+            if (r.status === 'counter_filled') { stCls = 'full'; stLabel = 'both legs'; }
+            else if (r.status === 'imbalance_hedged') { stCls = 'full'; stLabel = 'imbalance hedged'; }
             else if (r.status === 'base_filled') { stCls = 'base'; stLabel = 'base only'; }
             else if (r.status === 'base_pending') { stCls = 'none'; stLabel = 'order unfilled'; }
             else if (r.status === 'base_cancelled') { stCls = 'none'; stLabel = 'cancelled (time)'; }
@@ -325,6 +326,11 @@
             return '<div class="drow"><span>' + r.side + ' @ $' + r.rungPrice.toFixed(2) + '</span>' +
               '<span>base ' + basePx + baseRebateStr + ' · ctr ' + counterPx + ctrRebateStr + '</span>' +
               '<span class="st ' + stCls + '">' + stLabel + '</span></div>';
+          }).join('');
+          const hedgeRows = (w.imbalanceHedges || []).map(h => {
+            return '<div class="drow"><span>IMBALANCE HEDGE</span>' +
+              '<span>' + h.side + ' ' + h.shares + 'sh @ $' + h.price.toFixed(2) + ' (fee $' + h.fee.toFixed(4) + ')</span>' +
+              '<span class="st base">taker</span></div>';
           }).join('');
           return '<div class="entry" onclick="this.querySelector(\'.entry-detail\').classList.toggle(\'open\')">' +
             '<div class="row1">' +
@@ -337,7 +343,7 @@
             '</div>' +
             '<div class="entry-detail">' +
               '<div class="dhead"><span>Rung</span><span>Fill Prices</span><span>Status</span></div>' +
-              detailRows +
+              detailRows + hedgeRows +
             '</div>' +
           '</div>';
         }).join('');
