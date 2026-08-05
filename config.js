@@ -52,14 +52,20 @@ module.exports = {
 
   // Once a base rung fills at price P, the counter order on the opposite
   // side is placed at (1 - P - LOCK_SPREAD). E.g. base fills at $0.60 ->
-  // opposite side is implied at $0.40 -> counter order at $0.30 (widened
-  // +$0.05 from the original $0.35). If both fill, cost = P + (1-P-spread)
-  // = 1-spread per share pair, but exactly one side always pays $1/share
-  // at resolution — so profit is locked at LOCK_SPREAD per share,
-  // guaranteed, the moment the counter fills. Wider spread = bigger
-  // locked margin per fill, but a lower price the counter side has to
-  // retrace to, so it fills less often.
-  LOCK_SPREAD: 0.10,
+  // opposite side is implied at $0.40 -> counter order at $0.35.
+  //
+  // NARROWED back from $0.10 to $0.05 (2026-08-05): the wider spread
+  // required a much bigger pullback for the counter to fill than for the
+  // base to fill (base only needs a retest of the rung; counter needs
+  // price to travel all the way down to 1-P-spread) — within a 5-min
+  // window, that mismatch meant many rungs never got hedged in time,
+  // leaving naked directional exposure that lost far more than the
+  // locked spread ever made (see 2026-08-05 log analysis: every balanced
+  // UP=DOWN window was profitable, every imbalanced one lost money). A
+  // tighter spread asks for a smaller pullback on the counter leg too,
+  // raising the odds it fills before window close — trading a smaller
+  // locked profit per hedge for a meaningfully lower naked-exposure rate.
+  LOCK_SPREAD: 0.05,
 
   // ---- Fees & Rebates ----
   // Confirmed against Polymarket's official docs (docs.polymarket.com/trading/fees):
