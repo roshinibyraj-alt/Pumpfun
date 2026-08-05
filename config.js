@@ -33,12 +33,18 @@ module.exports = {
   WINDOW_MINUTES: 5,
 
   // ---- Ladder ----
-  RUNG_PRICES: [0.40, 0.35, 0.30, 0.25, 0.20, 0.15], // applied to BOTH sides independently
+  // v3-reversed (breakout entry): base leg fires when price rises TO OR
+  // ABOVE a rung. These levels sit ABOVE the typical ~0.50 starting price
+  // (mirrored from the old dip-buy levels 0.40..0.15) so a rung only
+  // fires on a genuine upward move through that level — NOT trivially at
+  // window open. Do not set these below ~0.50 with the reversed trigger,
+  // or every rung fires at once regardless of price action.
+  RUNG_PRICES: [0.60, 0.65, 0.70, 0.75, 0.80, 0.85], // applied to BOTH sides independently
   SHARES_PER_RUNG: 20, // fixed share count per rung, both the base leg and its counter leg
 
   // Once a base rung fills at price P, the counter order on the opposite
-  // side is placed at (1 - P - LOCK_SPREAD). E.g. base fills at $0.40 ->
-  // opposite side is implied at $0.60 -> counter order at $0.55. If both
+  // side is placed at (1 - P - LOCK_SPREAD). E.g. base fills at $0.60 ->
+  // opposite side is implied at $0.40 -> counter order at $0.35. If both
   // fill, cost = P + (1-P-spread) = 1-spread per share pair, but exactly
   // one side always pays $1/share at resolution — so profit is locked at
   // LOCK_SPREAD per share, guaranteed, the moment the counter fills.
