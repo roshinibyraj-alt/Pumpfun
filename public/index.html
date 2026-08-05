@@ -74,19 +74,32 @@
   .chip .k { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
   .chip .v { font-family: var(--font-data); font-size: 17px; font-weight: 700; }
 
-  .entry { padding: 10px 0; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .entry { padding: 10px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
   .entry:last-child { border-bottom: none; }
+  .entry .row1 { display: flex; align-items: center; gap: 10px; }
   .entry .result-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .entry .result-dot.win { background: var(--win); } .entry .result-dot.loss { background: var(--loss); } .entry .result-dot.lock { background: var(--lock); }
   .entry .mid { flex: 1; min-width: 0; }
-  .entry .mid .top { font-size: 13px; font-weight: 600; display: flex; gap: 6px; align-items: center; }
+  .entry .mid .top { font-size: 13px; font-weight: 600; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .entry .mid .bottom { font-family: var(--font-data); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
   .entry .pnl { font-family: var(--font-data); font-size: 14px; font-weight: 700; text-align: right; flex-shrink: 0; }
   .entry .pnl.win { color: var(--win); } .entry .pnl.loss { color: var(--loss); } .entry .pnl.lock { color: var(--lock); }
+  .entry .pnl .margin { display: block; font-size: 10px; font-weight: 500; color: var(--text-dim); margin-top: 1px; }
   .side-tag { font-family: var(--font-data); font-size: 10px; padding: 2px 7px; border-radius: 5px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
   .side-tag.up { color: var(--up); background: var(--up-dim); }
   .side-tag.down { color: var(--down); background: var(--down-dim); }
+  .fill-badge { font-family: var(--font-data); font-size: 10px; padding: 1px 6px; border-radius: 5px; color: var(--text-dim); background: rgba(255,255,255,0.05); }
+  .fill-badge.full { color: var(--lock); background: var(--lock-dim); }
   .empty-state { color: var(--text-dim); font-size: 13px; text-align: center; padding: 18px 0; }
+  .entry-detail { display: none; margin-top: 10px; padding: 10px; background: var(--surface-raised); border-radius: 8px; border: 1px solid var(--border); }
+  .entry-detail.open { display: block; }
+  .entry-detail .drow { display: flex; justify-content: space-between; font-family: var(--font-data); font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+  .entry-detail .drow:last-child { border-bottom: none; }
+  .entry-detail .drow .st { text-transform: uppercase; font-size: 9px; letter-spacing: 0.4px; padding: 1px 5px; border-radius: 4px; }
+  .entry-detail .drow .st.full { color: var(--lock); background: var(--lock-dim); }
+  .entry-detail .drow .st.base { color: var(--down); background: var(--down-dim); }
+  .entry-detail .drow .st.none { color: var(--text-dim); background: rgba(255,255,255,0.04); }
+  .entry-detail .dhead { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; }
 
   footer { text-align: center; color: var(--text-dim); font-size: 11px; margin-top: 20px; font-family: var(--font-data); }
 </style>
@@ -115,6 +128,12 @@
     <div class="chip"><div class="k">Total PnL</div><div class="v" id="totalPnl">—</div></div>
     <div class="chip"><div class="k">Avg PnL/Window</div><div class="v" id="avgPnl">—</div></div>
     <div class="chip"><div class="k">Pending</div><div class="v" id="pendingCount">—</div></div>
+  </div>
+  <div class="chips">
+    <div class="chip"><div class="k">Avg Rungs Filled</div><div class="v" id="avgRungsFilled">—</div></div>
+    <div class="chip"><div class="k">Avg Margin</div><div class="v" id="avgMargin">—</div></div>
+    <div class="chip"><div class="k">Total Cost</div><div class="v" id="totalCost">—</div></div>
+    <div class="chip"><div class="k">Total Payout</div><div class="v" id="totalPayout">—</div></div>
   </div>
 
   <div class="card">
@@ -248,21 +267,66 @@
     } catch (e) { console.error('chips render failed', e); }
 
     try {
+      const hist = s.windowHistory;
+      if (hist.length) {
+        // rungsFilled(w): count of rungs that reached at least base_filled (i.e. touched)
+        const filledCounts = hist.map(w => (w.rungs || []).filter(r => r.status !== 'waiting_base').length);
+        const totalRungs = hist.length ? (hist[0].rungs || []).length : 12;
+        const avgFilled = filledCounts.reduce((a,b) => a+b, 0) / hist.length;
+        $('avgRungsFilled').textContent = avgFilled.toFixed(1) + ' / ' + totalRungs;
+        const totalCost = hist.reduce((a,w) => a + w.cost, 0);
+        const totalPayout = hist.reduce((a,w) => a + w.payout, 0);
+        const totalPnl2 = hist.reduce((a,w) => a + w.pnl, 0);
+        const avgMarginPct = totalCost > 0 ? (totalPnl2 / totalCost) * 100 : 0;
+        $('avgMargin').textContent = (avgMarginPct >= 0 ? '+' : '') + avgMarginPct.toFixed(2) + '%';
+        $('avgMargin').style.color = avgMarginPct >= 0 ? 'var(--win)' : 'var(--loss)';
+        $('totalCost').textContent = fmt$(totalCost);
+        $('totalPayout').textContent = fmt$(totalPayout);
+      } else {
+        $('avgRungsFilled').textContent = '—';
+        $('avgMargin').textContent = '—';
+        $('totalCost').textContent = '—';
+        $('totalPayout').textContent = '—';
+      }
+    } catch (e) { console.error('detail chips render failed', e); }
+
+    try {
       const logEl = $('completedLog');
       const all = s.windowHistory.slice().reverse().slice(0, 40);
       if (all.length === 0) {
         logEl.innerHTML = '<div class="empty-state">No windows resolved yet.</div>';
       } else {
         const fmtTime = (iso) => iso ? new Date(iso).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
-        logEl.innerHTML = all.map(w => {
+        logEl.innerHTML = all.map((w, i) => {
           const cls = w.pnl >= 0 ? 'win' : 'loss';
-          return '<div class="entry">' +
-            '<span class="result-dot ' + cls + '"></span>' +
-            '<div class="mid">' +
-              '<div class="top"><span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + '</span> won · UP ' + w.totalUpShares + 'sh/$' + w.totalUpCost.toFixed(2) + ' · DOWN ' + w.totalDownShares + 'sh/$' + w.totalDownCost.toFixed(2) + '</div>' +
-              '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' · ' + fmtTime(w.resolvedAt) + '</div>' +
+          const rungs = w.rungs || [];
+          const totalRungs = rungs.length;
+          const filled = rungs.filter(r => r.status !== 'waiting_base').length;
+          const fullBadgeCls = filled === totalRungs && totalRungs > 0 ? 'full' : '';
+          const marginPct = w.cost > 0 ? (w.pnl / w.cost) * 100 : 0;
+          const detailRows = rungs.slice().sort((a,b) => a.side === b.side ? b.rungPrice - a.rungPrice : (a.side === 'UP' ? -1 : 1)).map(r => {
+            let stCls = 'none', stLabel = 'untouched';
+            if (r.status === 'counter_filled') { stCls = 'full'; stLabel = 'both legs'; }
+            else if (r.status === 'base_filled') { stCls = 'base'; stLabel = 'base only'; }
+            const basePx = r.baseFillPrice !== null ? '$' + r.baseFillPrice.toFixed(2) : '—';
+            const counterPx = r.counterFillPrice !== null ? '$' + r.counterFillPrice.toFixed(2) : '—';
+            return '<div class="drow"><span>' + r.side + ' @ $' + r.rungPrice.toFixed(2) + '</span>' +
+              '<span>base ' + basePx + ' · ctr ' + counterPx + '</span>' +
+              '<span class="st ' + stCls + '">' + stLabel + '</span></div>';
+          }).join('');
+          return '<div class="entry" onclick="this.querySelector(\'.entry-detail\').classList.toggle(\'open\')">' +
+            '<div class="row1">' +
+              '<span class="result-dot ' + cls + '"></span>' +
+              '<div class="mid">' +
+                '<div class="top"><span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + '</span> won · UP ' + w.totalUpShares + 'sh/$' + w.totalUpCost.toFixed(2) + ' · DOWN ' + w.totalDownShares + 'sh/$' + w.totalDownCost.toFixed(2) + ' <span class="fill-badge ' + fullBadgeCls + '">' + filled + '/' + totalRungs + ' rungs</span></div>' +
+                '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' · ' + fmtTime(w.resolvedAt) + '</div>' +
+              '</div>' +
+              '<div class="pnl ' + cls + '">' + (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) + '<span class="margin">' + (marginPct >= 0 ? '+' : '') + marginPct.toFixed(2) + '%</span></div>' +
             '</div>' +
-            '<div class="pnl ' + cls + '">' + (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) + '</div>' +
+            '<div class="entry-detail">' +
+              '<div class="dhead"><span>Rung</span><span>Fill Prices</span><span>Status</span></div>' +
+              detailRows +
+            '</div>' +
           '</div>';
         }).join('');
       }
