@@ -135,6 +135,7 @@
     <div class="chip"><div class="k">Total Cost</div><div class="v" id="totalCost">—</div></div>
     <div class="chip"><div class="k">Total Payout</div><div class="v" id="totalPayout">—</div></div>
     <div class="chip"><div class="k">Total Fees</div><div class="v" id="totalFees">—</div></div>
+    <div class="chip"><div class="k">Est. Rebates</div><div class="v" id="totalRebates">—</div></div>
   </div>
 
   <div class="card">
@@ -285,12 +286,15 @@
         $('totalPayout').textContent = fmt$(totalPayout);
         const totalFees = hist.reduce((a,w) => a + (w.totalFees || 0), 0);
         $('totalFees').textContent = '$' + totalFees.toFixed(3);
+        const totalRebates = hist.reduce((a,w) => a + (w.totalRebates || 0), 0);
+        $('totalRebates').textContent = '$' + totalRebates.toFixed(3);
       } else {
         $('avgRungsFilled').textContent = '—';
         $('avgMargin').textContent = '—';
         $('totalCost').textContent = '—';
         $('totalPayout').textContent = '—';
         $('totalFees').textContent = '—';
+        $('totalRebates').textContent = '—';
       }
     } catch (e) { console.error('detail chips render failed', e); }
 
@@ -312,11 +316,13 @@
             let stCls = 'none', stLabel = 'untouched';
             if (r.status === 'counter_filled') { stCls = 'full'; stLabel = 'both legs'; }
             else if (r.status === 'base_filled') { stCls = 'base'; stLabel = 'base only'; }
+            else if (r.status === 'base_pending') { stCls = 'none'; stLabel = 'order unfilled'; }
             const basePx = r.baseFillPrice !== null ? '$' + r.baseFillPrice.toFixed(2) : '—';
             const counterPx = r.counterFillPrice !== null ? '$' + r.counterFillPrice.toFixed(2) : '—';
-            const feeStr = r.baseFillFee ? ' (fee $' + r.baseFillFee.toFixed(4) + ')' : '';
+            const baseRebateStr = r.baseFillRebate ? ' (+$' + r.baseFillRebate.toFixed(4) + ' rbt)' : '';
+            const ctrRebateStr = r.counterFillRebate ? ' (+$' + r.counterFillRebate.toFixed(4) + ' rbt)' : '';
             return '<div class="drow"><span>' + r.side + ' @ $' + r.rungPrice.toFixed(2) + '</span>' +
-              '<span>base ' + basePx + feeStr + ' · ctr ' + counterPx + '</span>' +
+              '<span>base ' + basePx + baseRebateStr + ' · ctr ' + counterPx + ctrRebateStr + '</span>' +
               '<span class="st ' + stCls + '">' + stLabel + '</span></div>';
           }).join('');
           return '<div class="entry" onclick="this.querySelector(\'.entry-detail\').classList.toggle(\'open\')">' +
@@ -324,7 +330,7 @@
               '<span class="result-dot ' + cls + '"></span>' +
               '<div class="mid">' +
                 '<div class="top"><span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + '</span> won · UP ' + w.totalUpShares + 'sh/$' + w.totalUpCost.toFixed(2) + ' · DOWN ' + w.totalDownShares + 'sh/$' + w.totalDownCost.toFixed(2) + ' <span class="fill-badge ' + fullBadgeCls + '">' + filled + '/' + totalRungs + ' rungs</span></div>' +
-                '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' (incl. $' + (w.totalFees || 0).toFixed(4) + ' fees) · ' + fmtTime(w.resolvedAt) + '</div>' +
+                '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' (fees $' + (w.totalFees || 0).toFixed(4) + ', est. rebates +$' + (w.totalRebates || 0).toFixed(4) + ') · ' + fmtTime(w.resolvedAt) + '</div>' +
               '</div>' +
               '<div class="pnl ' + cls + '">' + (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) + '<span class="margin">' + (marginPct >= 0 ? '+' : '') + marginPct.toFixed(2) + '%</span></div>' +
             '</div>' +
