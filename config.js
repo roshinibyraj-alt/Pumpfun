@@ -90,6 +90,33 @@ module.exports = {
   MAKER_REBATE_PCT: 0.20,    // Crypto category maker rebate share, per Polymarket docs
   BASE_ORDER_SLIPPAGE_CAP: 0.02, // required confirmation buffer past the rung before resting the base order
 
+  // ---- Time filters ----
+  // No NEW base entries in the first minute of a window — price hasn't
+  // had time to establish a real move yet, so early crosses are more
+  // likely noise than a genuine breakout.
+  ENTRY_BLACKOUT_START_SECONDS: 60,
+  // No NEW base entries in the last minute either, and any base order
+  // still resting unfilled at that point gets cancelled outright — a
+  // fill with under a minute left has essentially no chance of getting
+  // hedged before the window closes, so it would just become naked risk
+  // with zero time to react. This is also when the fallback hedge below
+  // kicks in for positions that are ALREADY filled.
+  ENTRY_BLACKOUT_END_SECONDS: 60,
+
+  // ---- Fallback hedge ----
+  // If a base rung has already filled and the IDEAL counter price
+  // (1-P-LOCK_SPREAD) hasn't been reached yet, and we're inside the
+  // final ENTRY_BLACKOUT_END_SECONDS of the window, accept a worse but
+  // still real hedge once the opposite side falls to this price instead
+  // of holding out for the ideal one. This trades locked profit for a
+  // bounded, known loss instead of riding a naked position with no time
+  // left to react — e.g. base @ $0.70 + fallback @ $0.45 = $1.15 cost,
+  // a guaranteed $0.15/share loss, instead of risking the full $0.70 if
+  // the naked leg resolves to zero. Only ever used as a last resort —
+  // the ideal counter price is always tried first, for as long as there's
+  // time left to wait for it.
+  FALLBACK_HEDGE_PRICE: 0.45,
+
   // Counter leg is still a genuine resting GTC/GTD limit order placed
   // below market after the base fills — a real maker fill, $0 fee. We do
   // NOT add a maker rebate on top: the actual rebate payout depends on
