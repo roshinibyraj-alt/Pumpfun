@@ -1,20 +1,23 @@
 // ============================================================
-// bot.js — ladder + counter-bet strategy, v6 (retest-confirmed
-// maker base leg). Base leg fires only once price has confirmed
-// BASE_ORDER_SLIPPAGE_CAP past a rung (real breakout, not noise),
-// then rests a passive limit order back at the rung price — a
-// genuine maker fill, $0 fee, that only fills on a retest/pullback.
-// Everything downstream — hedging, resolution, pnl — is unchanged
-// and direction-agnostic. Every fill — whether it came from
+// bot.js — ladder + counter-bet strategy, v7 (time-filtered entries
+// + fallback hedge). No new base positions in the first or last
+// minute of a window (config.ENTRY_BLACKOUT_*); any base order
+// still unfilled with under a minute left is cancelled outright.
+// A base leg that's already filled and can't reach its ideal
+// counter price in time falls back to a worse-but-real hedge at
+// config.FALLBACK_HEDGE_PRICE once inside that same last-minute
+// window — trading locked profit for a bounded loss instead of
+// riding naked exposure to resolution. Everything downstream —
+// resolution, pnl — is unchanged. Every fill — whether it came from
 // an original base rung or a counter order triggered by one —
 // just accumulates into a running total of UP shares and DOWN
 // shares held for that window. At window close, the whole
 // accumulated position resolves ONCE against the real outcome:
 //   payout = (winning side's total shares) × $1
 //   pnl = payout − (total cost of everything bought that window)
-// This naturally covers full hedges, partial hedges, and
-// unhedged single fills with the same formula — no special
-// casing needed.
+// This naturally covers full hedges, partial hedges, fallback
+// hedges, and unhedged single fills with the same formula — no
+// special casing needed.
 // ============================================================
 
 const config = require('./config');
@@ -39,8 +42,16 @@ function estimateMakerRebate(shares, price) {
 
 // Pure status/fill-price bookkeeping — no bankroll or pnl touched here.
 // Resolution only ever happens once, at window close, in resolveWindow().
-function processRungFill(rung, upPrice, downPrice) {
+// secondsIntoWindow / secondsRemaining gate entries at both ends of the
+// window (see config.ENTRY_BLACKOUT_*) and unlock the fallback hedge
+// once time is short (see config.FALLBACK_HEDGE_PRICE).
+function processRungFill(rung, upPrice, downPrice, secondsIntoWindow, secondsRemaining) {
+  const inEntryBlackout =
+    secondsIntoWindow < config.ENTRY_BLACKOUT_START_SECONDS ||
+    secondsRemaining < config.ENTRY_BLACKOUT_END_SECONDS;
+
   if (rung.status === 'waiting_base') {
+    if (inEntryBlackout) return; // no new positions this close to open/close
     const ownPrice = rung.side === 'UP' ? upPrice : downPrice;
     // Confirm the breakout with a buffer before committing to an order —
     // only once price has moved BASE_ORDER_SLIPPAGE_CAP past the rung
@@ -59,6 +70,15 @@ function processRungFill(rung, upPrice, downPrice) {
       log(`LIMIT order placed base ${rung.side} @ $${rung.baseOrderPrice} (breakout confirmed @ $${ownPrice.toFixed(2)}, resting for retest)`);
     }
   } else if (rung.status === 'base_pending') {
+    if (secondsRemaining < config.ENTRY_BLACKOUT_END_SECONDS) {
+      // Under a minute left and still unfilled — a fill now would have
+      // no realistic chance of getting hedged, so pull the order instead
+      // of letting it become naked risk with zero time to react.
+      rung.status = 'base_cancelled';
+      rung.cancelledAt = new Date().toISOString();
+      log(`CANCELLED unfilled base order ${rung.side} @ $${rung.baseOrderPrice} (< ${config.ENTRY_BLACKOUT_END_SECONDS}s left in window)`);
+      return;
+    }
     const ownPrice = rung.side === 'UP' ? upPrice : downPrice;
     // Fills when price retraces back down to our resting order price —
     // a genuine maker match, same mechanic as the counter leg below.
@@ -75,13 +95,23 @@ function processRungFill(rung, upPrice, downPrice) {
     // else: order still resting unfilled — keep checking each tick.
   } else if (rung.status === 'base_filled') {
     const oppPrice = rung.side === 'UP' ? downPrice : upPrice;
+    let fillType = null;
     if (oppPrice <= rung.counterPrice) {
-      rung.counterFillPrice = rung.counterPrice;
+      fillType = 'ideal';
+    } else if (secondsRemaining < config.ENTRY_BLACKOUT_END_SECONDS && oppPrice <= config.FALLBACK_HEDGE_PRICE) {
+      // Ideal price out of reach and time is short — take the worse but
+      // still real hedge instead of riding this naked to resolution.
+      fillType = 'fallback';
+    }
+    if (fillType) {
+      rung.counterFillPrice = fillType === 'ideal' ? rung.counterPrice : config.FALLBACK_HEDGE_PRICE;
+      rung.counterFillType = fillType;
       rung.counterFillFee = 0; // maker fill -> $0
       rung.counterFillRebate = estimateMakerRebate(rung.shares, rung.counterFillPrice);
       rung.counterFilledAt = new Date().toISOString();
       rung.status = 'counter_filled';
-      log(`COUNTER FILLED ${rung.side}-rung @ $${rung.rungPrice} (maker, $0 fee, est. rebate $${rung.counterFillRebate.toFixed(5)}) | now holding both legs, awaiting window resolution`);
+      const label = fillType === 'ideal' ? 'maker, $0 fee' : 'FALLBACK hedge, maker, $0 fee';
+      log(`COUNTER FILLED ${rung.side}-rung @ $${rung.counterFillPrice} (${label}, est. rebate $${rung.counterFillRebate.toFixed(5)}) | now holding both legs, awaiting window resolution`);
     }
   }
 }
@@ -196,7 +226,7 @@ async function tick() {
       };
 
       for (const rung of state.currentWindow.rungs) {
-        processRungFill(rung, upPrice, downPrice);
+        processRungFill(rung, upPrice, downPrice, nowSec - windowStart, windowEnd - nowSec);
       }
     } else {
       log('No live market found for current window yet.');
@@ -238,7 +268,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (ladder v6/retest-confirmed maker entry, aggregate resolution). Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | counter spread $${config.LOCK_SPREAD} | breakout confirm buffer $${config.BASE_ORDER_SLIPPAGE_CAP}`);
+  log(`Bot started (ladder v7/time-filtered + fallback hedge, aggregate resolution). Bankroll: $${config.STARTING_BANKROLL} | Rungs: ${config.RUNG_PRICES.join('/')} | ${config.SHARES_PER_RUNG} shares/rung | counter spread $${config.LOCK_SPREAD} | breakout confirm buffer $${config.BASE_ORDER_SLIPPAGE_CAP} | entry blackout ${config.ENTRY_BLACKOUT_START_SECONDS}s/${config.ENTRY_BLACKOUT_END_SECONDS}s | fallback hedge $${config.FALLBACK_HEDGE_PRICE}`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
