@@ -72,8 +72,8 @@
   .position-box .reason { color: var(--text-dim); font-size: 10px; margin-top: 6px; }
   .position-box.filled .status-pill { color: var(--down); background: var(--down-dim); }
   .position-box.filled { border-color: rgba(245,166,35,0.35); }
-  .position-box.tp_filled .status-pill, .position-box.resolved_win .status-pill { color: var(--win); background: rgba(52,211,153,0.14); }
-  .position-box.tp_filled, .position-box.resolved_win { border-color: rgba(52,211,153,0.35); }
+  .position-box.resolved_win .status-pill { color: var(--win); background: rgba(52,211,153,0.14); }
+  .position-box.resolved_win { border-color: rgba(52,211,153,0.35); }
   .position-box.resolved_loss .status-pill { color: var(--loss); background: rgba(248,113,113,0.14); }
   .position-box.resolved_loss { border-color: rgba(248,113,113,0.35); }
   .no-trade-box { padding: 14px; border-radius: 10px; background: var(--surface-raised); border: 1px dashed var(--border); color: var(--text-dim); font-size: 12px; text-align: center; }
@@ -140,7 +140,7 @@
     <div class="chip"><div class="k">Win Rate</div><div class="v" id="winRate">—</div></div>
     <div class="chip"><div class="k">Order Size</div><div class="v" id="notional">—</div></div>
     <div class="chip"><div class="k">Trade Rate</div><div class="v" id="tradeRate">—</div></div>
-    <div class="chip"><div class="k">TP Fill Rate</div><div class="v" id="tpRate">—</div></div>
+    <div class="chip"><div class="k">Avg Fill Price</div><div class="v" id="avgFill">—</div></div>
   </div>
 
   <div class="card">
@@ -207,8 +207,7 @@
   }
 
   function positionStatusLabel(pos) {
-    if (pos.status === 'filled') return 'filled (taker) @ $' + pos.fillPrice.toFixed(2) + ' · TP resting @ $' + pos.tpPrice.toFixed(2);
-    if (pos.status === 'tp_filled') return 'TP filled @ $' + pos.tpFillPrice.toFixed(2);
+    if (pos.status === 'filled') return 'filled (taker) @ $' + pos.fillPrice.toFixed(2) + ' · riding to resolution';
     if (pos.status === 'resolved_win') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · won @ resolution';
     if (pos.status === 'resolved_loss') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · lost @ resolution';
     return pos.status;
@@ -222,7 +221,6 @@
       el.innerHTML = '<div class="position-box ' + pos.status + '">' +
         '<div class="side-line"><span class="side-tag ' + pos.side.toLowerCase() + '">' + pos.side + '</span><span>$' + pos.notional + ' notional · ' + pos.shares + ' shares</span></div>' +
         '<div class="price-row"><span class="lbl">Fill</span><span>$' + pos.fillPrice.toFixed(2) + '</span></div>' +
-        '<div class="price-row"><span class="lbl">TP</span><span>$' + pos.tpPrice.toFixed(2) + '</span></div>' +
         '<span class="status-pill">' + positionStatusLabel(pos) + '</span>' +
         '<div class="reason">' + (pos.entryReason || '') + '</div>' +
       '</div>';
@@ -250,7 +248,9 @@
 
     try {
       const lc = s.lastCheck;
-      $('livePrice').innerHTML = lc ? s.config.ASSET.toUpperCase() + ' market' : '—';
+      $('livePrice').innerHTML = lc
+        ? 'UP <b>$' + lc.upPrice.toFixed(2) + '</b> · DOWN <b>$' + lc.downPrice.toFixed(2) + '</b>'
+        : '— —';
       $('countdown').textContent = lc ? (Math.max(0, lc.secondsRemaining) > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—';
     } catch (e) { console.error('header render failed', e); }
 
@@ -297,13 +297,12 @@
         $('tradeRate').textContent = traded.length + ' / ' + hist.length;
         const wins = traded.filter(w => w.pnl >= 0);
         $('winRate').textContent = traded.length ? wins.length + ' / ' + traded.length : '—';
-        const settled = traded.filter(w => w.position && (w.position.status === 'tp_filled' || w.position.status === 'resolved_win' || w.position.status === 'resolved_loss'));
-        const tp = settled.filter(w => w.position.status === 'tp_filled');
-        $('tpRate').textContent = settled.length ? tp.length + ' / ' + settled.length : '—';
+        const withFill = traded.filter(w => w.position && w.position.fillPrice != null);
+        $('avgFill').textContent = withFill.length ? '$' + (withFill.reduce((a,w)=>a+w.position.fillPrice,0)/withFill.length).toFixed(2) : '—';
       } else {
         $('tradeRate').textContent = '—';
         $('winRate').textContent = '—';
-        $('tpRate').textContent = '—';
+        $('avgFill').textContent = '—';
       }
     } catch (e) { console.error('martingale chips render failed', e); }
 
@@ -320,15 +319,12 @@
           const sideTag = w.traded
             ? '<span class="side-tag ' + w.side.toLowerCase() + '">' + w.side + '</span>'
             : '<span class="side-tag skip">no trade</span>';
-          const badge = w.traded && w.position && w.position.status === 'tp_filled'
-            ? '<span class="fill-badge tp">TP hit</span>' : '';
           let detailRows = '<div class="drow"><span>Pattern</span><span>' + (w.pattern || '(none)') + '</span></div>' +
             '<div class="drow"><span>Signal</span><span>' + w.signal + '</span></div>';
           if (w.traded && w.position) {
             const p = w.position;
             detailRows += '<div class="drow"><span>Notional / Shares</span><span>$' + p.notional + ' / ' + p.shares + '</span></div>' +
-              '<div class="drow"><span>Fill / TP</span><span>' +
-              '$' + p.fillPrice.toFixed(2) + ' / ' + (p.tpFillPrice !== null ? '$'+p.tpFillPrice.toFixed(2) : '—') + '</span></div>' +
+              '<div class="drow"><span>Fill</span><span>$' + p.fillPrice.toFixed(2) + '</span></div>' +
               '<div class="drow"><span>Entry reason</span><span>' + (p.entryReason || '—') + '</span></div>';
           } else {
             detailRows += '<div class="drow"><span>Reason</span><span>' + (w.skipReason || '—') + '</span></div>';
@@ -337,7 +333,7 @@
             '<div class="row1">' +
               '<span class="result-dot ' + cls + '"></span>' +
               '<div class="mid">' +
-                '<div class="top">' + sideTag + ' <span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + ' won</span> ' + badge + '</div>' +
+                '<div class="top">' + sideTag + ' <span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + ' won</span></div>' +
                 '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' (fees $' + (w.totalFees || 0).toFixed(4) + ', est. rebates +$' + (w.totalRebates || 0).toFixed(4) + ') · ' + fmtTime(w.resolvedAt) + '</div>' +
               '</div>' +
               '<div class="pnl ' + cls + '">' + (w.traded ? (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) : '—') + (w.traded ? '<span class="margin">' + (marginPct >= 0 ? '+' : '') + marginPct.toFixed(2) + '%</span>' : '') + '</div>' +
