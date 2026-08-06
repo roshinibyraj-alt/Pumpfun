@@ -3,44 +3,37 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v11 — candle-pattern side selection + timed forced entry,
-// $-notional sizing, no hedge):
-//   1. Whenever a new Polymarket UP/DOWN window is detected, fetch the
-//      last CANDLE_LOOKBACK CLOSED real BTC/ETH candles (Binance,
-//      CANDLE_INTERVAL) and run them through strategy.detectPattern()
-//      exactly as before to pick a side: MOMENTUM_UP/DOWN,
-//      REVERSAL_UP/DOWN, or CHOP/NONE (no trade).
-//   2. If CHOP/NONE, the window is SKIPPED — no order at all.
-//   3. If a side is picked, entry timing/price now works like this:
-//        - From window start (0s) to ENTRY_WAIT_SECONDS: watch the
-//          signaled side's live price every tick. The INSTANT it drops
-//          to <= EARLY_ENTRY_TRIGGER_PRICE, fire an immediate buy
-//          (this is a genuine TAKER order — it executes right away at
-//          whatever the price is at that moment, it does NOT rest and
-//          wait for a retest like the old dip-buy did).
-//        - If ENTRY_WAIT_SECONDS elapses with no trigger, fire an
-//          immediate buy anyway, at whatever the current price is —
-//          no price condition at that point. Also a genuine TAKER
-//          order.
-//      Net effect: EVERY window that gets a directional signal WILL
-//      get a trade — either an early cheap fill, or a forced fill at
-//      whatever price is showing once the minute is up.
-//   4. Every entry is sized in DOLLARS, not shares:
-//      shares = ORDER_NOTIONAL_USD / fillPrice (fractional shares
-//      allowed). This means the entry price directly determines how
-//      many shares you end up holding — a cheaper fill buys more
-//      shares for the same $ risk.
-//   5. NO take-profit exit anymore (v12): every filled position rides
-//      naked all the way to real resolution. A window resolves the
-//      instant either side's price is observed at/above
-//      RESOLUTION_WIN_THRESHOLD in the LAST tick sampled before the
-//      window closes — that side is declared the winner immediately,
-//      no waiting on the official market to fully settle. If neither
-//      side had cleared the threshold by that last tick, resolution
-//      falls back to polling the real market price until it converges.
-//   6. Sizing is FIXED: every trade uses ORDER_NOTIONAL_USD, no
-//      martingale, no doubling, no loss-streak tracking of any kind.
-//      Wins and losses have no effect on the size of the next trade.
+// STRATEGY (v13 — fixed side pattern + immediate entry, alternating
+// double-size bet, no hedge, no candle signal):
+//   1. Whenever a new Polymarket UP/DOWN window is detected, the side
+//      is picked from BET_PATTERN, cycling one step per window —
+//      candles / detectPattern() are NOT consulted at all anymore.
+//      Every window trades; nothing is ever skipped as chop/no-signal.
+//   2. Entry fires IMMEDIATELY on the first tick the window is seen —
+//      no wait, no price trigger condition. It's a genuine TAKER buy
+//      at whatever price is showing right then.
+//   3. Every entry is sized in DOLLARS, not shares:
+//      shares = notional / fillPrice (fractional shares allowed).
+//   4. NO take-profit exit — every filled position rides naked all the
+//      way to real resolution. A window resolves the instant either
+//      side's price is observed at/above RESOLUTION_WIN_THRESHOLD in
+//      the LAST tick sampled before the window closes — that side is
+//      declared the winner immediately, no waiting on the official
+//      market to fully settle. If neither side had cleared the
+//      threshold by that last tick, resolution falls back to polling
+//      the real market price until it converges.
+//   5. Sizing alternates base -> double -> base -> double forever, one
+//      step per trade, driven by a counter that is completely
+//      INDEPENDENT of both the BET_PATTERN position and the win/loss
+//      outcome of any trade:
+//        trade 1 = ORDER_NOTIONAL_USD (base)
+//        trade 2 = ORDER_NOTIONAL_USD * DOUBLE_MULTIPLIER
+//        trade 3 = base again
+//        trade 4 = double again
+//        ...
+//      This is NOT a martingale that chases losses — it doesn't matter
+//      whether the previous trade won or lost, the toggle just flips
+//      every window.
 // ============================================================
 
 module.exports = {
@@ -52,30 +45,31 @@ module.exports = {
   STARTING_BANKROLL: 1000, // virtual dollars to start with
 
   // ---- Market ----
-  ASSET: 'btc', // 'btc' or 'eth' — must match Polymarket's slug prefix AND maps to a Binance symbol (BTCUSDT/ETHUSDT) in binance.js
+  ASSET: 'btc', // 'btc' or 'eth' — must match Polymarket's slug prefix
   WINDOW_MINUTES: 5,
 
-  // ---- Candle pattern source (unchanged from v10) ----
-  // Real exchange candles for the underlying asset from Binance's
-  // public REST API — NOT the Polymarket UP/DOWN token price.
-  CANDLE_INTERVAL: '5m',
-  CANDLE_LOOKBACK: 4,
+  // ---- Side pattern ----
+  // Fixed repeating sequence of sides — one step consumed per window,
+  // wrapping back to index 0 after the last entry. 'UP' = bet up-side
+  // token, 'DOWN' = bet down-side token. NOT derived from candles or
+  // any live signal — every window trades this sequence no matter
+  // what the market is doing.
+  BET_PATTERN: ['UP', 'DOWN', 'UP', 'UP', 'DOWN', 'UP', 'DOWN', 'DOWN'], // U D U U D U D D
 
-  // ---- Entry timing/price ----
-  // Wait this long after window start before forcing an entry.
-  ENTRY_WAIT_SECONDS: 60,
-  // During the wait window, fire the instant the signaled side's
-  // price drops to or below this level. This is checked every tick
-  // from window start; if it never happens, ENTRY_WAIT_SECONDS forces
-  // the entry anyway at whatever price is showing then.
-  EARLY_ENTRY_TRIGGER_PRICE: 0.33,
+  // ---- Entry timing ----
+  // No wait, no price trigger: the entry fires immediately, the first
+  // tick the window is seen, at whatever price is showing.
 
   // ---- Position sizing ----
-  // Fixed dollar notional for EVERY trade, no exceptions. shares =
-  // ORDER_NOTIONAL_USD / fillPrice, computed at fill time — not a
-  // fixed share count. No martingale, no doubling, no dependence on
-  // past wins/losses.
+  // Base dollar notional. shares = notional / fillPrice, computed at
+  // fill time — not a fixed share count.
   ORDER_NOTIONAL_USD: 50,
+  // Sizing alternates base -> double -> base -> double -> ... one step
+  // per trade. This toggle is driven purely by trade count — it does
+  // NOT look at whether the previous trade won or lost, and it does
+  // NOT track a losing streak. Only ever one double at a time before
+  // it resets back to base.
+  DOUBLE_MULTIPLIER: 2,
 
   // ---- Fees ----
   // Confirmed against Polymarket's official docs (docs.polymarket.com/trading/fees):
