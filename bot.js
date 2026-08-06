@@ -1,57 +1,57 @@
 // ============================================================
-// bot.js — candle-pattern directional strategy, v10. NO hedge, NO
-// dual-side dip-buy, NO ladder. Per window:
-//   1. The moment a new window is detected, fetch the last
-//      config.CANDLE_LOOKBACK CLOSED real BTC/ETH candles (Binance,
-//      config.CANDLE_INTERVAL) and run them through
-//      strategy.detectPattern() to get a Green/Red pattern + signal:
-//      MOMENTUM_UP/DOWN, REVERSAL_UP/DOWN, CHOP, or NONE.
-//   2. CHOP/NONE -> the window is SKIPPED entirely, no order on
-//      either side.
-//   3. A directional signal (UP or DOWN) -> if that side's live
-//      Polymarket price is within [ENTRY_PRICE_MIN, ENTRY_PRICE_MAX],
-//      place ONE resting limit buy at config.LIMIT_BUY_PRICE for
-//      state.currentShareSize shares on ONLY that side. If the price
-//      is outside that sanity range, the window is skipped instead.
+// bot.js — candle-pattern side-selection + timed forced-entry
+// strategy, v11. NO hedge, NO dual-side dip-buy, NO resting-order
+// entry. Per window:
+//   1. On new window detection, fetch the last config.CANDLE_LOOKBACK
+//      CLOSED real BTC/ETH candles (Binance, config.CANDLE_INTERVAL)
+//      and run strategy.detectPattern() to pick a side (or CHOP/NONE).
+//   2. CHOP/NONE -> window SKIPPED entirely, no order.
+//   3. A directional signal -> every tick from window start:
+//        - while secondsIntoWindow < ENTRY_WAIT_SECONDS: fire an
+//          IMMEDIATE (taker) buy the instant the signaled side's price
+//          is <= EARLY_ENTRY_TRIGGER_PRICE.
+//        - once secondsIntoWindow >= ENTRY_WAIT_SECONDS and no entry
+//          has fired yet: fire an IMMEDIATE (taker) buy at whatever
+//          the current price is, no price condition.
+//      Every directionally-signaled window therefore gets exactly one
+//      trade, always sized at $config.ORDER_NOTIONAL_USD worth of
+//      shares at the fill price — shares = notional / fillPrice.
 //   4. Once filled, a take-profit sell rests at
-//      config.TAKE_PROFIT_PRICE. If it fills before the window
-//      closes, profit is locked. If not, the position rides naked to
-//      the real window outcome (full win/loss).
-//   5. Skipped windows (no position ever taken) do NOT affect the
-//      consecutive-loss streak or share size — only TRADED windows
-//      count. A traded window with net pnl < $0 is a loss; hitting a
-//      fresh multiple of config.CONSECUTIVE_LOSS_DOUBLE_THRESHOLD
-//      consecutive losses doubles state.currentShareSize going
-//      forward. A winning traded window resets the streak to 0.
+//      config.TAKE_PROFIT_PRICE (still a genuine maker order). If it
+//      fills before the window closes, profit is locked; otherwise the
+//      position rides naked to the real window outcome.
+//   5. NO martingale of any kind: every trade uses the same fixed
+//      config.ORDER_NOTIONAL_USD regardless of win/loss history. There
+//      is no loss-streak tracking, no doubling, no size adjustment
+//      based on past outcomes.
 // ============================================================
 
 const config = require('./config');
 const polymarket = require('./polymarket');
 const strategy = require('./strategy');
-const candles = require('./binance');
+const binance = require('./binance');
 const { loadState, saveState } = require('./state');
 
 function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
-// Estimate for the Maker Rebates Program: real payouts are pooled and
-// proportional to your share of total maker volume in the market, which
-// this bot can't observe. As a standard proxy, estimate our rebate as
-// MAKER_REBATE_PCT of the taker fee our counterparty would have paid on
-// this same fill. This is an expected-value approximation, not a
-// guaranteed number.
+// Estimate for the Maker Rebates Program (TP fills only — see
+// config.js). Real payouts are pooled and proportional to your share
+// of total maker volume in the market, which this bot can't observe.
+// As a standard proxy, estimate our rebate as MAKER_REBATE_PCT of the
+// taker fee our counterparty would have paid on this same fill.
 function estimateMakerRebate(shares, price) {
   const counterpartyTakerFee = shares * config.BASE_TAKER_FEE_RATE * price * (1 - price);
   return Math.round(counterpartyTakerFee * config.MAKER_REBATE_PCT * 100000) / 100000;
 }
 
 // Fetches the recent candle pattern and returns a detectPattern()-shaped
-// result. Never throws — on any fetch/parsing error it degrades to a
-// NONE signal (skip the window) rather than trading blind.
+// result. Never throws — on any fetch/parsing error it degrades to an
+// ERROR signal (skip the window) rather than trading blind.
 async function getPatternSignal() {
   try {
-    const recent = await candles.getRecentClosedCandles(config.ASSET, config.CANDLE_INTERVAL, config.CANDLE_LOOKBACK);
+    const recent = await binance.getRecentClosedCandles(config.ASSET, config.CANDLE_INTERVAL, config.CANDLE_LOOKBACK);
     const colors = strategy.colorsFromCandles(recent);
     const result = strategy.detectPattern(colors);
     log(`Candle pattern (${config.ASSET.toUpperCase()} ${config.CANDLE_INTERVAL}, last ${colors.length}): ${colors.join('') || '(none)'} -> pattern ${result.pattern || '(none)'} / signal ${result.signal}${result.side ? ' / side ' + result.side : ''}`);
@@ -62,35 +62,46 @@ async function getPatternSignal() {
   }
 }
 
-// Pure status/fill-price bookkeeping for the single live position — no
+// Checks whether the entry condition is met this tick and fires an
+// immediate taker buy if so. Only ever called while win.position is
+// still null. Mutates win.position in place.
+function maybeFireEntry(win, ownPrice, upTokenId, downTokenId, nowSec) {
+  const secondsIntoWindow = nowSec - win.windowStart;
+  let reason = null;
+
+  if (secondsIntoWindow < config.ENTRY_WAIT_SECONDS) {
+    if (ownPrice <= config.EARLY_ENTRY_TRIGGER_PRICE) {
+      reason = `early trigger — price $${ownPrice.toFixed(2)} <= $${config.EARLY_ENTRY_TRIGGER_PRICE} at ${secondsIntoWindow}s into window`;
+    }
+  } else {
+    reason = `forced entry — ${config.ENTRY_WAIT_SECONDS}s elapsed with no early trigger, firing at current price $${ownPrice.toFixed(2)} regardless of level`;
+  }
+
+  if (!reason) return; // still waiting, no condition met yet
+
+  const tokenId = win.side === 'UP' ? upTokenId : downTokenId;
+  win.position = strategy.openPosition(win.windowStart, win.windowEnd, win.side, tokenId, win.notional, ownPrice, reason, config);
+  log(`ENTRY (TAKER): pattern ${win.pattern} (${win.signal}) -> ${win.side} @ $${ownPrice.toFixed(2)}, $${win.notional} notional = ${win.position.shares} shares (fee $${win.position.fillFee.toFixed(5)}) — ${reason}`);
+}
+
+// Pure take-profit bookkeeping for the single live position — no
 // bankroll or pnl touched here. Resolution only happens once, at
 // window close, in resolveWindow().
-function processPosition(pos, ownPrice) {
-  if (!pos) return;
-  if (pos.status === 'order_pending') {
-    if (ownPrice <= pos.orderPrice) {
-      pos.fillPrice = pos.orderPrice;
-      pos.fillFee = 0; // maker fill -> $0, per Polymarket's fee docs
-      pos.fillRebate = estimateMakerRebate(pos.shares, pos.fillPrice);
-      pos.filledAt = new Date().toISOString();
-      pos.status = 'filled';
-      log(`FILL ${pos.side} @ $${pos.fillPrice} (maker, $0 fee, est. rebate $${pos.fillRebate.toFixed(5)}) -> TP order resting @ $${pos.tpPrice}`);
-    }
-  } else if (pos.status === 'filled') {
-    if (ownPrice >= pos.tpPrice) {
-      pos.tpFillPrice = pos.tpPrice;
-      pos.tpFillFee = 0; // maker fill -> $0
-      pos.tpFillRebate = estimateMakerRebate(pos.shares, pos.tpFillPrice);
-      pos.tpFilledAt = new Date().toISOString();
-      pos.status = 'tp_filled';
-      log(`TP FILLED ${pos.side} @ $${pos.tpFillPrice} (maker, $0 fee, est. rebate $${pos.tpFillRebate.toFixed(5)}) | locked $${((pos.tpFillPrice - pos.fillPrice) * pos.shares).toFixed(2)} profit on ${pos.shares} shares`);
-    }
+function processTakeProfit(pos, ownPrice) {
+  if (!pos || pos.status !== 'filled') return;
+  if (ownPrice >= pos.tpPrice) {
+    pos.tpFillPrice = pos.tpPrice;
+    pos.tpFillFee = 0; // maker fill -> $0
+    pos.tpFillRebate = estimateMakerRebate(pos.shares, pos.tpFillPrice);
+    pos.tpFilledAt = new Date().toISOString();
+    pos.status = 'tp_filled';
+    log(`TP FILLED ${pos.side} @ $${pos.tpFillPrice} (maker, $0 fee, est. rebate $${pos.tpFillRebate.toFixed(5)}) | locked $${((pos.tpFillPrice - pos.fillPrice) * pos.shares).toFixed(2)} profit on ${pos.shares} shares`);
   }
 }
 
 // Attempts to resolve a closed window: checks the real outcome (no
 // fallback — waits if still ambiguous), settles the single position
-// (if any was taken), and updates the martingale streak. Returns true
+// (if any was taken) at a fixed notional. Returns true
 // if resolved this call, false if still waiting on convergence.
 async function resolveWindow(win, state) {
   let upTokenPrice;
@@ -119,6 +130,8 @@ async function resolveWindow(win, state) {
       fees += f;
       rebates += r;
     } else if (pos.status === 'filled') {
+      // Filled but never hit TP before window close — rides naked to
+      // the real outcome.
       const f = pos.fillFee || 0;
       const r = pos.fillRebate || 0;
       cost = pos.shares * pos.fillPrice + f;
@@ -127,11 +140,6 @@ async function resolveWindow(win, state) {
       pos.status = pos.resolvedWon ? 'resolved_win' : 'resolved_loss';
       fees += f;
       rebates += r;
-    } else if (pos.status === 'order_pending') {
-      cost = 0;
-      payout = 0;
-      pos.status = 'order_cancelled';
-      pos.cancelledAt = new Date().toISOString();
     }
     pos.cost = Math.round(cost * 100000) / 100000;
     pos.payout = Math.round(payout * 100000) / 100000;
@@ -141,25 +149,7 @@ async function resolveWindow(win, state) {
 
   const pnl = Math.round((payout - cost) * 100) / 100;
   state.bankroll = Math.round((state.bankroll + pnl) * 100) / 100;
-
-  // ---- Martingale: only TRADED windows affect the streak/size ----
-  let isLoss = null;
-  if (traded) {
-    isLoss = pnl < 0;
-    if (isLoss) {
-      state.consecutiveLosses = (state.consecutiveLosses || 0) + 1;
-      if (state.consecutiveLosses % config.CONSECUTIVE_LOSS_DOUBLE_THRESHOLD === 0) {
-        const prevSize = state.currentShareSize;
-        state.currentShareSize = state.currentShareSize * 2;
-        log(`MARTINGALE: ${state.consecutiveLosses} consecutive losing TRADED windows -> doubling share size ${prevSize} -> ${state.currentShareSize}`);
-      }
-    } else {
-      if (state.consecutiveLosses > 0) {
-        log(`Loss streak broken at ${state.consecutiveLosses} (window pnl $${pnl.toFixed(2)} >= 0)`);
-      }
-      state.consecutiveLosses = 0;
-    }
-  }
+  const isLoss = traded ? pnl < 0 : null;
 
   state.windowHistory.push({
     windowStart: win.windowStart,
@@ -170,7 +160,7 @@ async function resolveWindow(win, state) {
     traded,
     skipped: win.skipped,
     skipReason: win.skipReason,
-    shareSize: win.shareSize,
+    notional: win.notional,
     position: win.position,
     wonSide,
     totalFees: Math.round(fees * 100000) / 100000,
@@ -179,14 +169,12 @@ async function resolveWindow(win, state) {
     cost: Math.round(cost * 100) / 100,
     pnl,
     isLoss,
-    consecutiveLossesAfter: state.consecutiveLosses,
-    shareSizeAfter: state.currentShareSize,
     bankrollAfter: state.bankroll,
     resolvedAt: new Date().toISOString(),
   });
 
   log(
-    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | pattern ${win.pattern || '(none)'} (${win.signal}) | ${traded ? `traded ${win.side}` : 'SKIPPED (' + win.skipReason + ')'} | fees $${fees.toFixed(5)} | est. rebates $${rebates.toFixed(5)} | pnl $${pnl.toFixed(2)} | ${traded ? (isLoss ? 'LOSS' : 'WIN') + ` (streak ${state.consecutiveLosses})` : 'no trade, streak unchanged'} | next share size ${state.currentShareSize} | bankroll $${state.bankroll}`
+    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | pattern ${win.pattern || '(none)'} (${win.signal}) | ${traded ? `traded ${win.side} (${win.position.shares}sh @ $${win.position.fillPrice})` : 'SKIPPED (' + win.skipReason + ')'} | fees $${fees.toFixed(5)} | est. rebates $${rebates.toFixed(5)} | pnl $${pnl.toFixed(2)} | ${traded ? (isLoss ? 'LOSS' : 'WIN') : 'no trade'} | bankroll $${state.bankroll}`
   );
   return true;
 }
@@ -194,9 +182,6 @@ async function resolveWindow(win, state) {
 async function tick() {
   const state = loadState();
   const nowSec = Math.floor(Date.now() / 1000);
-
-  if (state.currentShareSize == null) state.currentShareSize = config.BASE_SHARES;
-  if (state.consecutiveLosses == null) state.consecutiveLosses = 0;
 
   try {
     const found = await polymarket.getCurrentUpDownMarket(config.ASSET, config.WINDOW_MINUTES);
@@ -211,12 +196,12 @@ async function tick() {
           log(`Window ${state.currentWindow.windowStart} closed -> pending resolution`);
         }
 
-        const shareSize = state.currentShareSize;
+        const notional = config.ORDER_NOTIONAL_USD;
         const patternResult = await getPatternSignal();
 
         state.currentWindow = {
           windowStart, windowEnd, upTokenId, downTokenId,
-          shareSize,
+          notional,
           pattern: patternResult.pattern,
           signal: patternResult.signal,
           side: patternResult.side,
@@ -248,24 +233,14 @@ async function tick() {
 
       const win = state.currentWindow;
 
-      // First tick after a directional signal: check the sanity price
-      // range and arm the single-side order (or skip if out of range).
       if (win.side && !win.position && !win.skipped) {
         const ownPrice = win.side === 'UP' ? upPrice : downPrice;
-        if (ownPrice >= config.ENTRY_PRICE_MIN && ownPrice <= config.ENTRY_PRICE_MAX) {
-          const tokenId = win.side === 'UP' ? upTokenId : downTokenId;
-          win.position = strategy.buildPosition(windowStart, windowEnd, win.side, tokenId, win.shareSize, config);
-          log(`ENTRY: pattern ${win.pattern} (${win.signal}) -> LIMIT buy ${win.side} @ $${config.LIMIT_BUY_PRICE}, ${win.shareSize} shares (price $${ownPrice.toFixed(2)} in sanity range [${config.ENTRY_PRICE_MIN},${config.ENTRY_PRICE_MAX}])`);
-        } else {
-          win.skipped = true;
-          win.skipReason = `signaled ${win.side} but price $${ownPrice.toFixed(2)} outside sanity range [${config.ENTRY_PRICE_MIN},${config.ENTRY_PRICE_MAX}]`;
-          log(`Window ${windowStart}: SKIPPED — ${win.skipReason}`);
-        }
+        maybeFireEntry(win, ownPrice, upTokenId, downTokenId, nowSec);
       }
 
       if (win.position) {
         const ownPrice = win.side === 'UP' ? upPrice : downPrice;
-        processPosition(win.position, ownPrice);
+        processTakeProfit(win.position, ownPrice);
       }
     } else {
       log('No live market found for current window yet.');
@@ -307,7 +282,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (candle-pattern directional v10, no hedge). Bankroll: $${config.STARTING_BANKROLL} | candles ${config.ASSET.toUpperCase()} ${config.CANDLE_INTERVAL} x${config.CANDLE_LOOKBACK} | buy $${config.LIMIT_BUY_PRICE} signaled side only | TP $${config.TAKE_PROFIT_PRICE} | sanity range [${config.ENTRY_PRICE_MIN},${config.ENTRY_PRICE_MAX}] | base size ${config.BASE_SHARES} | double size every ${config.CONSECUTIVE_LOSS_DOUBLE_THRESHOLD} consecutive losing trades`);
+  log(`Bot started (candle-pattern + timed forced entry, no hedge, no martingale). Bankroll: $${config.STARTING_BANKROLL} | candles ${config.ASSET.toUpperCase()} ${config.CANDLE_INTERVAL} x${config.CANDLE_LOOKBACK} | early trigger <= $${config.EARLY_ENTRY_TRIGGER_PRICE} within ${config.ENTRY_WAIT_SECONDS}s, else forced at market | TP $${config.TAKE_PROFIT_PRICE} | fixed notional $${config.ORDER_NOTIONAL_USD} every trade`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
