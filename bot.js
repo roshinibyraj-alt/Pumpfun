@@ -1,7 +1,7 @@
 // ============================================================
 // bot.js — candle-pattern side-selection + timed forced-entry
-// strategy, v11. NO hedge, NO dual-side dip-buy, NO resting-order
-// entry. Per window:
+// strategy, v12. NO hedge, NO dual-side dip-buy, NO resting-order
+// entry, NO take-profit exit. Per window:
 //   1. On new window detection, fetch the last config.CANDLE_LOOKBACK
 //      CLOSED real BTC/ETH candles (Binance, config.CANDLE_INTERVAL)
 //      and run strategy.detectPattern() to pick a side (or CHOP/NONE).
@@ -16,10 +16,16 @@
 //      Every directionally-signaled window therefore gets exactly one
 //      trade, always sized at $config.ORDER_NOTIONAL_USD worth of
 //      shares at the fill price — shares = notional / fillPrice.
-//   4. Once filled, a take-profit sell rests at
-//      config.TAKE_PROFIT_PRICE (still a genuine maker order). If it
-//      fills before the window closes, profit is locked; otherwise the
-//      position rides naked to the real window outcome.
+//   4. Once filled, the position rides naked all the way to real
+//      resolution — there is no take-profit exit anymore. Every tick
+//      we snapshot both sides' live prices onto the window; whichever
+//      snapshot lands closest to windowEnd is treated as "the last
+//      second of the window". If either side's price in that final
+//      snapshot is >= config.RESOLUTION_WIN_THRESHOLD, that side is
+//      declared the winner immediately at resolution time — no need
+//      to wait on the real market to fully settle. If neither side
+//      had cleared the threshold by that last tick, resolution falls
+//      back to polling the real market price until it converges.
 //   5. NO martingale of any kind: every trade uses the same fixed
 //      config.ORDER_NOTIONAL_USD regardless of win/loss history. There
 //      is no loss-streak tracking, no doubling, no size adjustment
@@ -34,16 +40,6 @@ const { loadState, saveState } = require('./state');
 
 function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
-}
-
-// Estimate for the Maker Rebates Program (TP fills only — see
-// config.js). Real payouts are pooled and proportional to your share
-// of total maker volume in the market, which this bot can't observe.
-// As a standard proxy, estimate our rebate as MAKER_REBATE_PCT of the
-// taker fee our counterparty would have paid on this same fill.
-function estimateMakerRebate(shares, price) {
-  const counterpartyTakerFee = shares * config.BASE_TAKER_FEE_RATE * price * (1 - price);
-  return Math.round(counterpartyTakerFee * config.MAKER_REBATE_PCT * 100000) / 100000;
 }
 
 // Fetches the recent candle pattern and returns a detectPattern()-shaped
@@ -84,63 +80,56 @@ function maybeFireEntry(win, ownPrice, upTokenId, downTokenId, nowSec) {
   log(`ENTRY (TAKER): pattern ${win.pattern} (${win.signal}) -> ${win.side} @ $${ownPrice.toFixed(2)}, $${win.notional} notional = ${win.position.shares} shares (fee $${win.position.fillFee.toFixed(5)}) — ${reason}`);
 }
 
-// Pure take-profit bookkeeping for the single live position — no
-// bankroll or pnl touched here. Resolution only happens once, at
-// window close, in resolveWindow().
-function processTakeProfit(pos, ownPrice) {
-  if (!pos || pos.status !== 'filled') return;
-  if (ownPrice >= pos.tpPrice) {
-    pos.tpFillPrice = pos.tpPrice;
-    pos.tpFillFee = 0; // maker fill -> $0
-    pos.tpFillRebate = estimateMakerRebate(pos.shares, pos.tpFillPrice);
-    pos.tpFilledAt = new Date().toISOString();
-    pos.status = 'tp_filled';
-    log(`TP FILLED ${pos.side} @ $${pos.tpFillPrice} (maker, $0 fee, est. rebate $${pos.tpFillRebate.toFixed(5)}) | locked $${((pos.tpFillPrice - pos.fillPrice) * pos.shares).toFixed(2)} profit on ${pos.shares} shares`);
-  }
+// Checks whether the window's LAST observed tick (closest snapshot to
+// windowEnd — see win.finalUpPrice/finalDownPrice, updated every tick
+// in tick() below) already shows a side at/above the win threshold.
+// If so we can declare that side the winner immediately instead of
+// waiting for the real market to fully settle.
+function immediateWinnerFromLastTick(win) {
+  if (win.finalUpPrice != null && win.finalUpPrice >= config.RESOLUTION_WIN_THRESHOLD) return 'UP';
+  if (win.finalDownPrice != null && win.finalDownPrice >= config.RESOLUTION_WIN_THRESHOLD) return 'DOWN';
+  return null;
 }
 
-// Attempts to resolve a closed window: checks the real outcome (no
-// fallback — waits if still ambiguous), settles the single position
-// (if any was taken) at a fixed notional. Returns true
-// if resolved this call, false if still waiting on convergence.
+// Attempts to resolve a closed window. First checks whether the last
+// tick sampled before the window closed already showed a side at/above
+// RESOLUTION_WIN_THRESHOLD — if so, that side is declared the winner
+// immediately with no extra network call. Otherwise falls back to
+// polling the real market price (no fallback beyond that — waits if
+// still ambiguous). Settles the single position (if any was taken) at
+// a fixed notional. Returns true if resolved this call, false if
+// still waiting on convergence.
 async function resolveWindow(win, state) {
-  let upTokenPrice;
-  try {
-    upTokenPrice = await polymarket.getMidpoint(win.upTokenId);
-  } catch (e) {
-    log(`ERROR checking resolution for window ${win.windowStart}:`, e.message);
-    return false;
-  }
+  let wonSide = immediateWinnerFromLastTick(win);
 
-  let wonSide;
-  if (upTokenPrice >= config.RESOLUTION_WIN_THRESHOLD) wonSide = 'UP';
-  else if (upTokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) wonSide = 'DOWN';
-  else return false; // not converged yet, try again next tick
+  if (!wonSide) {
+    let upTokenPrice;
+    try {
+      upTokenPrice = await polymarket.getMidpoint(win.upTokenId);
+    } catch (e) {
+      log(`ERROR checking resolution for window ${win.windowStart}:`, e.message);
+      return false;
+    }
+
+    if (upTokenPrice >= config.RESOLUTION_WIN_THRESHOLD) wonSide = 'UP';
+    else if (upTokenPrice <= config.RESOLUTION_LOSS_THRESHOLD) wonSide = 'DOWN';
+    else return false; // not converged yet, try again next tick
+  }
 
   let cost = 0, payout = 0, fees = 0, rebates = 0;
   const pos = win.position;
   const traded = !!pos;
 
   if (pos) {
-    if (pos.status === 'tp_filled') {
-      const f = (pos.fillFee || 0) + (pos.tpFillFee || 0);
-      const r = (pos.fillRebate || 0) + (pos.tpFillRebate || 0);
-      cost = pos.shares * pos.fillPrice + f;
-      payout = pos.shares * pos.tpFillPrice + r;
-      fees += f;
-      rebates += r;
-    } else if (pos.status === 'filled') {
-      // Filled but never hit TP before window close — rides naked to
-      // the real outcome.
-      const f = pos.fillFee || 0;
-      const r = pos.fillRebate || 0;
-      cost = pos.shares * pos.fillPrice + f;
-      payout = (pos.side === wonSide ? pos.shares * 1 : 0) + r;
-      pos.resolvedWon = pos.side === wonSide;
-      pos.status = pos.resolvedWon ? 'resolved_win' : 'resolved_loss';
-      fees += f;
-      rebates += r;
-    }
+    // Position rides naked all the way to resolution — no TP exit.
+    const f = pos.fillFee || 0;
+    const r = pos.fillRebate || 0;
+    cost = pos.shares * pos.fillPrice + f;
+    payout = (pos.side === wonSide ? pos.shares * 1 : 0) + r;
+    pos.resolvedWon = pos.side === wonSide;
+    pos.status = pos.resolvedWon ? 'resolved_win' : 'resolved_loss';
+    fees += f;
+    rebates += r;
     pos.cost = Math.round(cost * 100000) / 100000;
     pos.payout = Math.round(payout * 100000) / 100000;
     pos.pnl = Math.round((payout - cost) * 100000) / 100000;
@@ -238,9 +227,13 @@ async function tick() {
         maybeFireEntry(win, ownPrice, upTokenId, downTokenId, nowSec);
       }
 
-      if (win.position) {
-        const ownPrice = win.side === 'UP' ? upPrice : downPrice;
-        processTakeProfit(win.position, ownPrice);
+      // Snapshot both sides' prices on every tick while the window is
+      // still open. Whichever snapshot ends up closest to windowEnd is
+      // what resolveWindow() treats as "the last second of the
+      // window" for immediate-winner detection.
+      if (nowSec < windowEnd) {
+        win.finalUpPrice = upPrice;
+        win.finalDownPrice = downPrice;
       }
     } else {
       log('No live market found for current window yet.');
@@ -282,7 +275,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (candle-pattern + timed forced entry, no hedge, no martingale). Bankroll: $${config.STARTING_BANKROLL} | candles ${config.ASSET.toUpperCase()} ${config.CANDLE_INTERVAL} x${config.CANDLE_LOOKBACK} | early trigger <= $${config.EARLY_ENTRY_TRIGGER_PRICE} within ${config.ENTRY_WAIT_SECONDS}s, else forced at market | TP $${config.TAKE_PROFIT_PRICE} | fixed notional $${config.ORDER_NOTIONAL_USD} every trade`);
+  log(`Bot started (candle-pattern + timed forced entry, no hedge, no martingale, no TP — rides to resolution). Bankroll: $${config.STARTING_BANKROLL} | candles ${config.ASSET.toUpperCase()} ${config.CANDLE_INTERVAL} x${config.CANDLE_LOOKBACK} | early trigger <= $${config.EARLY_ENTRY_TRIGGER_PRICE} within ${config.ENTRY_WAIT_SECONDS}s, else forced at market | resolution win threshold $${config.RESOLUTION_WIN_THRESHOLD} | fixed notional $${config.ORDER_NOTIONAL_USD} every trade`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
