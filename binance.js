@@ -1,82 +1,60 @@
 // ============================================================
-// binance.js — despite the filename (kept so bot.js doesn't
-// need edits), this now pulls live price and volatility from
-// COINBASE's public API. Binance blocks US-based server IPs
-// (which is what Railway uses) with a 451 error, so Coinbase's
-// Exchange API is the price feed here instead. No key needed.
+// candles.js — fetches real OHLC candles for the underlying asset
+// from Binance's public REST API (no key required). This is
+// deliberately independent from polymarket.js: the Polymarket
+// UP/DOWN token price is a derived prediction-market price, not the
+// actual BTC/ETH price, so pattern detection needs its own real
+// price feed.
 // ============================================================
 
-const SYMBOL_MAP = { btc: 'BTC-USD', eth: 'ETH-USD' };
+const BINANCE_SYMBOLS = {
+  btc: 'BTCUSDT',
+  eth: 'ETHUSDT',
+};
 
-// Coinbase's edge (Cloudflare) sometimes rejects requests with no
-// User-Agent header, so we always send one.
-const HEADERS = { 'User-Agent': 'btc-fairvalue-bot/1.0' };
-
-async function getSpotPrice(asset) {
-  const product = SYMBOL_MAP[asset];
-  const res = await fetch(`https://api.exchange.coinbase.com/products/${product}/ticker`, {
-    headers: HEADERS,
-  });
-  if (!res.ok) throw new Error(`Coinbase price fetch failed: ${res.status}`);
-  const data = await res.json();
-  return parseFloat(data.price);
+function binanceSymbol(asset) {
+  const symbol = BINANCE_SYMBOLS[String(asset).toLowerCase()];
+  if (!symbol) {
+    throw new Error(`No Binance symbol mapping for asset "${asset}" (add it to BINANCE_SYMBOLS in candles.js)`);
+  }
+  return symbol;
 }
 
-// Realized volatility from 1-minute candles, expressed as
-// "sigma per minute" (stdev of log returns between consecutive closes).
-async function getRealizedVolPerMinute(asset, lookbackMinutes) {
-  const product = SYMBOL_MAP[asset];
-  const granularitySeconds = 60; // 1-minute candles
-  const now = Math.floor(Date.now() / 1000);
-  const start = new Date((now - lookbackMinutes * 60) * 1000).toISOString();
-  const end = new Date(now * 1000).toISOString();
-
-  const url = `https://api.exchange.coinbase.com/products/${product}/candles?granularity=${granularitySeconds}&start=${start}&end=${end}`;
-  const res = await fetch(url, { headers: HEADERS });
-  if (!res.ok) throw new Error(`Coinbase candles fetch failed: ${res.status}`);
-  const candles = await res.json();
-  // Each candle: [ time, low, high, open, close, volume ]
-
-  if (!Array.isArray(candles) || candles.length < 3) {
-    throw new Error('Coinbase candles: not enough data returned');
+// Returns the most recent `limit` CLOSED candles (oldest first, most
+// recent last) as { openTime, open, high, low, close, volume, closeTime }.
+// Explicitly drops any still-forming candle (closeTime in the future),
+// since that one's color can still flip before it closes.
+async function getRecentClosedCandles(asset, interval, limit) {
+  if (typeof fetch !== 'function') {
+    throw new Error('global fetch is not available — Node 18+ is required (or install/polyfill node-fetch)');
   }
+  const symbol = binanceSymbol(asset);
+  // Ask for a couple extra in case the most recent bar returned is
+  // still forming — we filter it out below rather than trust `limit`
+  // to exactly match closed candles.
+  const fetchLimit = limit + 2;
+  const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${fetchLimit}`;
 
-  const closes = candles.map((c) => c[4]);
-  const logReturns = [];
-  for (let i = 1; i < closes.length; i++) {
-    logReturns.push(Math.log(closes[i] / closes[i - 1]));
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Binance klines request failed: ${res.status} ${res.statusText}`);
   }
+  const raw = await res.json();
 
-  const mean = logReturns.reduce((a, b) => a + b, 0) / logReturns.length;
-  const variance =
-    logReturns.reduce((a, b) => a + (b - mean) ** 2, 0) / (logReturns.length - 1);
+  const nowMs = Date.now();
+  const candles = raw
+    .map((k) => ({
+      openTime: k[0],
+      open: parseFloat(k[1]),
+      high: parseFloat(k[2]),
+      low: parseFloat(k[3]),
+      close: parseFloat(k[4]),
+      volume: parseFloat(k[5]),
+      closeTime: k[6],
+    }))
+    .filter((c) => c.closeTime <= nowMs);
 
-  return Math.sqrt(variance); // sigma per 1-minute step
+  return candles.slice(-limit);
 }
 
-// Historical price at a specific past timestamp — used to independently
-// determine the strike/opening price of a window, since Polymarket's
-// Gamma API does not reliably expose it as a field.
-async function getHistoricalPrice(asset, unixTimestampSeconds) {
-  const product = SYMBOL_MAP[asset];
-  const start = new Date((unixTimestampSeconds - 120) * 1000).toISOString();
-  const end = new Date((unixTimestampSeconds + 120) * 1000).toISOString();
-  const url = `https://api.exchange.coinbase.com/products/${product}/candles?granularity=60&start=${start}&end=${end}`;
-  const res = await fetch(url, { headers: HEADERS });
-  if (!res.ok) throw new Error(`Coinbase historical candles fetch failed: ${res.status}`);
-  const candles = await res.json();
-  if (!Array.isArray(candles) || candles.length === 0) {
-    throw new Error('Coinbase historical candles: no data returned');
-  }
-  // Each candle: [ time, low, high, open, close, volume ]. Find the one
-  // whose start time is closest to the target timestamp, use its open.
-  let closest = candles[0];
-  for (const c of candles) {
-    if (Math.abs(c[0] - unixTimestampSeconds) < Math.abs(closest[0] - unixTimestampSeconds)) {
-      closest = c;
-    }
-  }
-  return closest[3]; // open price
-}
-
-module.exports = { getSpotPrice, getRealizedVolPerMinute, getHistoricalPrice };
+module.exports = { binanceSymbol, getRecentClosedCandles };
