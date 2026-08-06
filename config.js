@@ -30,9 +30,14 @@
 //      allowed). This means the entry price directly determines how
 //      many shares you end up holding — a cheaper fill buys more
 //      shares for the same $ risk.
-//   5. Once filled, a take-profit SELL still rests at
-//      TAKE_PROFIT_PRICE (this one IS a genuine resting maker order —
-//      only the entry became a taker/immediate fill, not the TP).
+//   5. NO take-profit exit anymore (v12): every filled position rides
+//      naked all the way to real resolution. A window resolves the
+//      instant either side's price is observed at/above
+//      RESOLUTION_WIN_THRESHOLD in the LAST tick sampled before the
+//      window closes — that side is declared the winner immediately,
+//      no waiting on the official market to fully settle. If neither
+//      side had cleared the threshold by that last tick, resolution
+//      falls back to polling the real market price until it converges.
 //   6. Sizing is FIXED: every trade uses ORDER_NOTIONAL_USD, no
 //      martingale, no doubling, no loss-streak tracking of any kind.
 //      Wins and losses have no effect on the size of the next trade.
@@ -65,12 +70,6 @@ module.exports = {
   // the entry anyway at whatever price is showing then.
   EARLY_ENTRY_TRIGGER_PRICE: 0.33,
 
-  // ---- Take-profit ----
-  // Resting limit SELL at this price once a position is filled. This
-  // remains a genuine maker order — only the entry itself became an
-  // immediate/taker fill in v11.
-  TAKE_PROFIT_PRICE: 0.90,
-
   // ---- Position sizing ----
   // Fixed dollar notional for EVERY trade, no exceptions. shares =
   // ORDER_NOTIONAL_USD / fillPrice, computed at fill time — not a
@@ -78,17 +77,22 @@ module.exports = {
   // past wins/losses.
   ORDER_NOTIONAL_USD: 50,
 
-  // ---- Fees & Rebates ----
+  // ---- Fees ----
   // Confirmed against Polymarket's official docs (docs.polymarket.com/trading/fees):
   //   fee = shares × feeRate × price × (1 - price), TAKERS ONLY.
-  // Makers always pay $0 fee. In v11 the ENTRY is a genuine taker fill
-  // (pays this fee, no rebate) since it executes immediately rather
-  // than resting; the TP SELL remains a genuine maker fill ($0 fee,
-  // rebate-eligible).
+  // The ENTRY is a genuine taker fill (pays this fee) since it
+  // executes immediately rather than resting. There is no maker leg
+  // anymore (v12 removed the resting TP sell), so no rebate ever
+  // applies.
   BASE_TAKER_FEE_RATE: 0.07, // Crypto category taker fee rate
-  MAKER_REBATE_PCT: 0.20,    // Crypto category maker rebate share, per Polymarket docs — applied only to the TP maker fill
 
-  // ---- Resolution (for a filled position left naked / no TP at window close) ----
+  // ---- Resolution ----
+  // A position rides naked to real resolution — no take-profit exit.
+  // If either side's price is observed at/above RESOLUTION_WIN_THRESHOLD
+  // in the last tick sampled before the window closes, that side is
+  // declared the winner immediately. Otherwise resolution falls back
+  // to polling the real market price after close until it converges
+  // past one of these thresholds.
   RESOLUTION_WIN_THRESHOLD: 0.90,
   RESOLUTION_LOSS_THRESHOLD: 0.10,
 
