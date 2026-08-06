@@ -1,50 +1,46 @@
 // ============================================================
-// strategy.js — pure math helpers for the ladder + counter-bet
-// lock strategy. No prediction model anymore — this is just:
-// build the rung ladder, and compute the counter price once a
-// rung's base leg fills.
+// strategy.js — pure math/data helpers for the dip-buy + take-profit
+// strategy. No ladder, no counter-bet, no hedge. Just: build the two
+// (UP, DOWN) positions for a fresh window, both starting inactive
+// until the entry condition fires.
 // ============================================================
 
-// Builds the fresh set of rungs for a new window: one entry per
-// (side, price) combination, all starting in 'waiting_base' status.
-function buildRungs(windowStart, windowEnd, upTokenId, downTokenId, config) {
-  const rungs = [];
+// Builds the two positions (one UP, one DOWN) for a new window. Both
+// start in 'inactive' status — they only become live orders once the
+// entry condition (checked in bot.js from ENTRY_CHECK_MINUTE onward)
+// fires, which flips both to 'order_pending' at the same time.
+function buildPositions(windowStart, windowEnd, upTokenId, downTokenId, shares, config) {
+  const positions = [];
   for (const side of ['UP', 'DOWN']) {
-    for (const rungPrice of config.RUNG_PRICES) {
-      rungs.push({
-        windowStart,
-        windowEnd,
-        side,
-        rungPrice,
-        shares: config.SHARES_PER_RUNG,
-        tokenId: side === 'UP' ? upTokenId : downTokenId,
-        counterTokenId: side === 'UP' ? downTokenId : upTokenId,
-        status: 'waiting_base', // waiting_base -> base_pending -> base_filled -> counter_filled | base_cancelled | imbalance_hedged
-        baseOrderPrice: null,
-        baseOrderPlacedAt: null,
-        baseFillPrice: null,
-        baseFillFee: null,
-        baseFillRebate: null,
-        baseFilledAt: null,
-        counterPrice: null,
-        counterFillPrice: null,
-        counterFillFee: null,
-        counterFillRebate: null,
-        counterFilledAt: null,
-        cancelledAt: null,
-        lockedProfit: null,
-        resolvedWon: null,
-        pnl: null,
-        settledAt: null,
-      });
-    }
+    positions.push({
+      windowStart,
+      windowEnd,
+      side,
+      tokenId: side === 'UP' ? upTokenId : downTokenId,
+      shares,
+      orderPrice: config.LIMIT_BUY_PRICE,
+      tpPrice: config.TAKE_PROFIT_PRICE,
+      // inactive -> order_pending -> filled -> tp_filled | resolved_win | resolved_loss
+      //                            -> order_cancelled (never filled, window closed)
+      status: 'inactive',
+      orderPlacedAt: null,
+      fillPrice: null,
+      fillFee: null,
+      fillRebate: null,
+      filledAt: null,
+      tpFillPrice: null,
+      tpFillFee: null,
+      tpFillRebate: null,
+      tpFilledAt: null,
+      cancelledAt: null,
+      resolvedWon: null,
+      cost: null,
+      payout: null,
+      pnl: null,
+      settledAt: null,
+    });
   }
-  return rungs;
+  return positions;
 }
 
-// Price for the counter/hedge leg once the base leg has filled at basePrice.
-function counterPriceFor(basePrice, lockSpread) {
-  return Math.round((1 - basePrice - lockSpread) * 1000) / 1000;
-}
-
-module.exports = { buildRungs, counterPriceFor };
+module.exports = { buildPositions };
