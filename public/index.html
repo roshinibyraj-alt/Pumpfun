@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Dip Buy Terminal</title>
+<title>Pattern Terminal</title>
 <style>
   :root {
     --void: #0a0e17;
@@ -18,8 +18,8 @@
     --down-dim: rgba(245,166,35,0.14);
     --win: #34d399;
     --loss: #f87171;
-    --lock: #a78bfa;
-    --lock-dim: rgba(167,139,250,0.14);
+    --chop: #a78bfa;
+    --chop-dim: rgba(167,139,250,0.14);
     --tp: #60a5fa;
     --tp-dim: rgba(96,165,250,0.14);
     --font-data: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -57,28 +57,26 @@
   .card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
   .countdown { font-family: var(--font-data); color: var(--text); background: var(--surface-raised); padding: 2px 8px; border-radius: 6px; font-size: 11px; }
 
-  .entry-status { font-family: var(--font-data); font-size: 12px; color: var(--text-dim); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 12px; }
-  .entry-status.armed { color: var(--tp); border-color: rgba(96,165,250,0.35); }
+  .pattern-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .pattern-chip { font-family: var(--font-data); font-size: 13px; font-weight: 700; padding: 6px 12px; border-radius: 8px; background: var(--surface-raised); border: 1px solid var(--border); letter-spacing: 1px; }
+  .signal-chip { font-family: var(--font-data); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; padding: 3px 9px; border-radius: 6px; background: rgba(255,255,255,0.05); color: var(--text-dim); }
+  .signal-chip.up { color: var(--up); background: var(--up-dim); }
+  .signal-chip.down { color: var(--down); background: var(--down-dim); }
+  .signal-chip.chop { color: var(--chop); background: var(--chop-dim); }
 
-  .legs-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .leg-col .col-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; }
-  .leg-col.up .col-head { color: var(--up); }
-  .leg-col.down .col-head { color: var(--down); }
-  .leg-box { padding: 10px; border-radius: 8px; font-family: var(--font-data); font-size: 12px; background: var(--surface-raised); border: 1px solid var(--border); }
-  .leg-box .price-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
-  .leg-box .price-row .lbl { color: var(--text-dim); font-size: 10px; text-transform: uppercase; }
-  .leg-box .status-pill { display: inline-block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; padding: 2px 7px; border-radius: 4px; margin-top: 4px; }
-  .leg-box.inactive { opacity: 0.55; }
-  .leg-box.inactive .status-pill { color: var(--text-dim); background: rgba(255,255,255,0.04); }
-  .leg-box.order_pending .status-pill { color: var(--text-dim); background: rgba(255,255,255,0.06); }
-  .leg-box.order_pending { border-color: rgba(255,255,255,0.12); }
-  .leg-box.filled .status-pill { color: var(--down); background: var(--down-dim); }
-  .leg-box.filled { border-color: rgba(245,166,35,0.35); }
-  .leg-box.tp_filled .status-pill, .leg-box.resolved_win .status-pill { color: var(--win); background: rgba(52,211,153,0.14); }
-  .leg-box.tp_filled, .leg-box.resolved_win { border-color: rgba(52,211,153,0.35); }
-  .leg-box.resolved_loss .status-pill { color: var(--loss); background: rgba(248,113,113,0.14); }
-  .leg-box.resolved_loss { border-color: rgba(248,113,113,0.35); }
-  .leg-box.order_cancelled .status-pill { color: var(--text-dim); background: rgba(255,255,255,0.04); }
+  .position-box { padding: 12px; border-radius: 10px; font-family: var(--font-data); font-size: 12px; background: var(--surface-raised); border: 1px solid var(--border); }
+  .position-box .side-line { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .position-box .price-row { display: flex; justify-content: space-between; padding: 3px 0; }
+  .position-box .price-row .lbl { color: var(--text-dim); font-size: 10px; text-transform: uppercase; }
+  .position-box .status-pill { display: inline-block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; padding: 2px 7px; border-radius: 4px; margin-top: 6px; }
+  .position-box.order_pending .status-pill { color: var(--text-dim); background: rgba(255,255,255,0.06); }
+  .position-box.filled .status-pill { color: var(--down); background: var(--down-dim); }
+  .position-box.filled { border-color: rgba(245,166,35,0.35); }
+  .position-box.tp_filled .status-pill, .position-box.resolved_win .status-pill { color: var(--win); background: rgba(52,211,153,0.14); }
+  .position-box.tp_filled, .position-box.resolved_win { border-color: rgba(52,211,153,0.35); }
+  .position-box.resolved_loss .status-pill { color: var(--loss); background: rgba(248,113,113,0.14); }
+  .position-box.resolved_loss { border-color: rgba(248,113,113,0.35); }
+  .no-trade-box { padding: 14px; border-radius: 10px; background: var(--surface-raised); border: 1px dashed var(--border); color: var(--text-dim); font-size: 12px; text-align: center; }
 
   .chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
   .chip { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 8px; text-align: center; }
@@ -90,30 +88,24 @@
   .entry:last-child { border-bottom: none; }
   .entry .row1 { display: flex; align-items: center; gap: 10px; }
   .entry .result-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .entry .result-dot.win { background: var(--win); } .entry .result-dot.loss { background: var(--loss); }
+  .entry .result-dot.win { background: var(--win); } .entry .result-dot.loss { background: var(--loss); } .entry .result-dot.skip { background: var(--text-dim); }
   .entry .mid { flex: 1; min-width: 0; }
   .entry .mid .top { font-size: 13px; font-weight: 600; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .entry .mid .bottom { font-family: var(--font-data); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
   .entry .pnl { font-family: var(--font-data); font-size: 14px; font-weight: 700; text-align: right; flex-shrink: 0; }
-  .entry .pnl.win { color: var(--win); } .entry .pnl.loss { color: var(--loss); }
+  .entry .pnl.win { color: var(--win); } .entry .pnl.loss { color: var(--loss); } .entry .pnl.skip { color: var(--text-dim); }
   .entry .pnl .margin { display: block; font-size: 10px; font-weight: 500; color: var(--text-dim); margin-top: 1px; }
   .side-tag { font-family: var(--font-data); font-size: 10px; padding: 2px 7px; border-radius: 5px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
   .side-tag.up { color: var(--up); background: var(--up-dim); }
   .side-tag.down { color: var(--down); background: var(--down-dim); }
+  .side-tag.skip { color: var(--text-dim); background: rgba(255,255,255,0.05); }
   .fill-badge { font-family: var(--font-data); font-size: 10px; padding: 1px 6px; border-radius: 5px; color: var(--text-dim); background: rgba(255,255,255,0.05); }
   .fill-badge.tp { color: var(--tp); background: var(--tp-dim); }
-  .fill-badge.noentry { color: var(--text-dim); background: rgba(255,255,255,0.05); }
   .empty-state { color: var(--text-dim); font-size: 13px; text-align: center; padding: 18px 0; }
   .entry-detail { display: none; margin-top: 10px; padding: 10px; background: var(--surface-raised); border-radius: 8px; border: 1px solid var(--border); }
   .entry-detail.open { display: block; }
   .entry-detail .drow { display: flex; justify-content: space-between; font-family: var(--font-data); font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--border); }
   .entry-detail .drow:last-child { border-bottom: none; }
-  .entry-detail .drow .st { text-transform: uppercase; font-size: 9px; letter-spacing: 0.4px; padding: 1px 5px; border-radius: 4px; }
-  .entry-detail .drow .st.win { color: var(--win); background: rgba(52,211,153,0.14); }
-  .entry-detail .drow .st.loss { color: var(--loss); background: rgba(248,113,113,0.14); }
-  .entry-detail .drow .st.tp { color: var(--tp); background: var(--tp-dim); }
-  .entry-detail .drow .st.none { color: var(--text-dim); background: rgba(255,255,255,0.04); }
-  .entry-detail .dhead { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; }
 
   footer { text-align: center; color: var(--text-dim); font-size: 11px; margin-top: 20px; font-family: var(--font-data); }
 </style>
@@ -123,7 +115,7 @@
   <div class="statusbar">
     <div class="brand">
       <span class="dot"></span>
-      <h1>Dip Buy Terminal</h1>
+      <h1>Pattern Terminal</h1>
     </div>
     <div class="live-price" id="livePrice">— —</div>
   </div>
@@ -140,13 +132,13 @@
   <div class="chips">
     <div class="chip"><div class="k">Windows Resolved</div><div class="v" id="windowsResolved">—</div></div>
     <div class="chip"><div class="k">Total PnL</div><div class="v" id="totalPnl">—</div></div>
-    <div class="chip"><div class="k">Avg PnL/Window</div><div class="v" id="avgPnl">—</div></div>
+    <div class="chip"><div class="k">Avg PnL/Trade</div><div class="v" id="avgPnl">—</div></div>
     <div class="chip"><div class="k">Pending</div><div class="v" id="pendingCount">—</div></div>
   </div>
   <div class="chips">
     <div class="chip"><div class="k">Loss Streak</div><div class="v" id="lossStreak">—</div></div>
     <div class="chip"><div class="k">Next Share Size</div><div class="v" id="shareSize">—</div></div>
-    <div class="chip"><div class="k">Entries Fired</div><div class="v" id="entryRate">—</div></div>
+    <div class="chip"><div class="k">Trade Rate</div><div class="v" id="tradeRate">—</div></div>
     <div class="chip"><div class="k">TP Fill Rate</div><div class="v" id="tpRate">—</div></div>
   </div>
 
@@ -155,17 +147,11 @@
       <span>Current Window</span>
       <span class="countdown" id="countdown">—</span>
     </div>
-    <div class="entry-status" id="entryStatus">—</div>
-    <div class="legs-wrap">
-      <div class="leg-col up">
-        <div class="col-head"><span>UP</span><span id="upLivePx">—</span></div>
-        <div id="upLeg"></div>
-      </div>
-      <div class="leg-col down">
-        <div class="col-head"><span>DOWN</span><span id="downLivePx">—</span></div>
-        <div id="downLeg"></div>
-      </div>
+    <div class="pattern-row">
+      <span class="pattern-chip" id="patternChip">— — —</span>
+      <span class="signal-chip" id="signalChip">—</span>
     </div>
+    <div id="positionArea"></div>
   </div>
 
   <div class="card">
@@ -212,8 +198,14 @@
       '<path d="' + path + '" fill="none" stroke="' + stroke + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
   }
 
-  function legStatusLabel(pos) {
-    if (pos.status === 'inactive') return 'waiting for entry';
+  function signalClass(signal) {
+    if (signal === 'MOMENTUM_UP' || signal === 'REVERSAL_UP') return 'up';
+    if (signal === 'MOMENTUM_DOWN' || signal === 'REVERSAL_DOWN') return 'down';
+    if (signal === 'CHOP') return 'chop';
+    return '';
+  }
+
+  function positionStatusLabel(pos) {
     if (pos.status === 'order_pending') return 'limit buy resting @ $' + pos.orderPrice.toFixed(2);
     if (pos.status === 'filled') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · TP resting @ $' + pos.tpPrice.toFixed(2);
     if (pos.status === 'tp_filled') return 'TP filled @ $' + pos.tpFillPrice.toFixed(2);
@@ -223,16 +215,22 @@
     return pos.status;
   }
 
-  function renderLeg(elId, positions, side) {
-    const el = $(elId);
-    const pos = (positions || []).find(p => p.side === side);
-    if (!pos) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
-    el.innerHTML = '<div class="leg-box ' + pos.status + '">' +
-      '<div class="price-row"><span class="lbl">Shares</span><span>' + pos.shares + '</span></div>' +
-      '<div class="price-row"><span class="lbl">Entry</span><span>$' + pos.orderPrice.toFixed(2) + '</span></div>' +
-      '<div class="price-row"><span class="lbl">TP</span><span>$' + pos.tpPrice.toFixed(2) + '</span></div>' +
-      '<span class="status-pill">' + legStatusLabel(pos) + '</span>' +
-    '</div>';
+  function renderPositionArea(win) {
+    const el = $('positionArea');
+    if (!win) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
+    if (win.position) {
+      const pos = win.position;
+      el.innerHTML = '<div class="position-box ' + pos.status + '">' +
+        '<div class="side-line"><span class="side-tag ' + pos.side.toLowerCase() + '">' + pos.side + '</span><span>' + pos.shares + ' shares</span></div>' +
+        '<div class="price-row"><span class="lbl">Entry</span><span>$' + pos.orderPrice.toFixed(2) + '</span></div>' +
+        '<div class="price-row"><span class="lbl">TP</span><span>$' + pos.tpPrice.toFixed(2) + '</span></div>' +
+        '<span class="status-pill">' + positionStatusLabel(pos) + '</span>' +
+      '</div>';
+    } else if (win.skipped) {
+      el.innerHTML = '<div class="no-trade-box">NO TRADE — ' + (win.skipReason || 'skipped') + '</div>';
+    } else {
+      el.innerHTML = '<div class="no-trade-box">watching for entry…</div>';
+    }
   }
 
   async function refresh() {
@@ -250,8 +248,6 @@
       const lc = s.lastCheck;
       $('livePrice').innerHTML = lc ? s.config.ASSET.toUpperCase() + ' market' : '—';
       $('countdown').textContent = lc ? (Math.max(0, lc.secondsRemaining) > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—';
-      $('upLivePx').textContent = lc ? '$' + lc.upPrice.toFixed(3) : '—';
-      $('downLivePx').textContent = lc ? '$' + lc.downPrice.toFixed(3) : '—';
     } catch (e) { console.error('header render failed', e); }
 
     try {
@@ -269,22 +265,12 @@
     } catch (e) { console.error('sparkline render failed', e); }
 
     try {
-      const cfg = s.config || {};
       const win = s.currentWindow;
-      const positions = win ? win.positions : [];
-      renderLeg('upLeg', positions, 'UP');
-      renderLeg('downLeg', positions, 'DOWN');
-      const es = $('entryStatus');
-      if (!win) {
-        es.textContent = '—';
-        es.className = 'entry-status';
-      } else if (win.entryTriggered) {
-        es.textContent = 'ENTRY ARMED — both legs bought @ $' + (cfg.LIMIT_BUY_PRICE != null ? cfg.LIMIT_BUY_PRICE.toFixed(2) : '0.10') + ', TP @ $' + (cfg.TAKE_PROFIT_PRICE != null ? cfg.TAKE_PROFIT_PRICE.toFixed(2) : '0.90');
-        es.className = 'entry-status armed';
-      } else {
-        es.textContent = 'watching — entry checks start at minute ' + (cfg.ENTRY_CHECK_MINUTE != null ? cfg.ENTRY_CHECK_MINUTE : 4) + ', needs UP price in [' + (cfg.ENTRY_PRICE_MIN != null ? cfg.ENTRY_PRICE_MIN : 0.30) + ',' + (cfg.ENTRY_PRICE_MAX != null ? cfg.ENTRY_PRICE_MAX : 0.70) + ']';
-        es.className = 'entry-status';
-      }
+      $('patternChip').textContent = win && win.pattern ? win.pattern : '— — —';
+      const sigEl = $('signalChip');
+      sigEl.textContent = win ? win.signal : '—';
+      sigEl.className = 'signal-chip ' + (win ? signalClass(win.signal) : '');
+      renderPositionArea(win);
     } catch (e) { console.error('current window render failed', e); }
 
     try {
@@ -293,7 +279,8 @@
       const totalPnl = hist.reduce((a,w) => a+w.pnl, 0);
       $('totalPnl').textContent = fmt$(totalPnl);
       $('totalPnl').style.color = totalPnl >= 0 ? 'var(--win)' : 'var(--loss)';
-      $('avgPnl').textContent = hist.length ? fmt$(totalPnl/hist.length) : '—';
+      const traded = hist.filter(w => w.traded);
+      $('avgPnl').textContent = traded.length ? fmt$(traded.reduce((a,w)=>a+w.pnl,0)/traded.length) : '—';
       $('pendingCount').textContent = s.pendingResolutions.length;
     } catch (e) { console.error('chips render failed', e); }
 
@@ -303,15 +290,15 @@
       const streakEl = $('lossStreak');
       streakEl.textContent = lossStreak;
       streakEl.className = 'v' + (lossStreak > 0 ? ' warn' : '');
-      $('shareSize').textContent = (s.currentShareSize != null ? s.currentShareSize : '—') + '/side';
+      $('shareSize').textContent = (s.currentShareSize != null ? s.currentShareSize : '—');
       if (hist.length) {
-        const triggered = hist.filter(w => w.entryTriggered).length;
-        $('entryRate').textContent = triggered + ' / ' + hist.length;
-        const filledLegs = hist.flatMap(w => w.positions || []).filter(p => p.status === 'tp_filled' || p.status === 'resolved_win' || p.status === 'resolved_loss');
-        const tpLegs = filledLegs.filter(p => p.status === 'tp_filled');
-        $('tpRate').textContent = filledLegs.length ? tpLegs.length + ' / ' + filledLegs.length : '—';
+        const traded = hist.filter(w => w.traded);
+        $('tradeRate').textContent = traded.length + ' / ' + hist.length;
+        const settled = traded.filter(w => w.position && (w.position.status === 'tp_filled' || w.position.status === 'resolved_win' || w.position.status === 'resolved_loss'));
+        const tp = settled.filter(w => w.position.status === 'tp_filled');
+        $('tpRate').textContent = settled.length ? tp.length + ' / ' + settled.length : '—';
       } else {
-        $('entryRate').textContent = '—';
+        $('tradeRate').textContent = '—';
         $('tpRate').textContent = '—';
       }
     } catch (e) { console.error('martingale chips render failed', e); }
@@ -324,37 +311,33 @@
       } else {
         const fmtTime = (iso) => iso ? new Date(iso).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
         logEl.innerHTML = all.map((w) => {
-          const cls = w.pnl >= 0 ? 'win' : 'loss';
-          const positions = w.positions || [];
+          const cls = !w.traded ? 'skip' : (w.pnl >= 0 ? 'win' : 'loss');
           const marginPct = w.cost > 0 ? (w.pnl / w.cost) * 100 : 0;
-          const badge = w.entryTriggered
-            ? '<span class="fill-badge tp">entry fired</span>'
-            : '<span class="fill-badge noentry">no entry</span>';
-          const detailRows = positions.map((p) => {
-            let stCls = 'none', stLabel = 'no entry';
-            if (p.status === 'tp_filled') { stCls = 'tp'; stLabel = 'TP hit'; }
-            else if (p.status === 'resolved_win') { stCls = 'win'; stLabel = 'won (naked)'; }
-            else if (p.status === 'resolved_loss') { stCls = 'loss'; stLabel = 'lost (naked)'; }
-            else if (p.status === 'order_cancelled') { stCls = 'none'; stLabel = 'unfilled'; }
-            const fillPx = p.fillPrice !== null && p.fillPrice !== undefined ? '$' + p.fillPrice.toFixed(2) : '—';
-            const tpPx = p.tpFillPrice !== null && p.tpFillPrice !== undefined ? '$' + p.tpFillPrice.toFixed(2) : '—';
-            return '<div class="drow"><span>' + p.side + ' · ' + p.shares + 'sh</span>' +
-              '<span>buy ' + fillPx + ' · tp ' + tpPx + '</span>' +
-              '<span class="st ' + stCls + '">' + stLabel + '</span></div>';
-          }).join('');
+          const sideTag = w.traded
+            ? '<span class="side-tag ' + w.side.toLowerCase() + '">' + w.side + '</span>'
+            : '<span class="side-tag skip">no trade</span>';
+          const badge = w.traded && w.position && w.position.status === 'tp_filled'
+            ? '<span class="fill-badge tp">TP hit</span>' : '';
+          let detailRows = '<div class="drow"><span>Pattern</span><span>' + (w.pattern || '(none)') + '</span></div>' +
+            '<div class="drow"><span>Signal</span><span>' + w.signal + '</span></div>';
+          if (w.traded && w.position) {
+            const p = w.position;
+            detailRows += '<div class="drow"><span>Entry / TP</span><span>' +
+              (p.fillPrice !== null ? '$'+p.fillPrice.toFixed(2) : '—') + ' / ' +
+              (p.tpFillPrice !== null ? '$'+p.tpFillPrice.toFixed(2) : '—') + '</span></div>';
+          } else {
+            detailRows += '<div class="drow"><span>Reason</span><span>' + (w.skipReason || '—') + '</span></div>';
+          }
           return '<div class="entry" onclick="this.querySelector(\'.entry-detail\').classList.toggle(\'open\')">' +
             '<div class="row1">' +
               '<span class="result-dot ' + cls + '"></span>' +
               '<div class="mid">' +
-                '<div class="top"><span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + '</span> won · ' + w.shareSize + 'sh/side ' + badge + '</div>' +
-                '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' (fees $' + (w.totalFees || 0).toFixed(4) + ', est. rebates +$' + (w.totalRebates || 0).toFixed(4) + ') · streak ' + w.consecutiveLossesAfter + ' · ' + fmtTime(w.resolvedAt) + '</div>' +
+                '<div class="top">' + sideTag + ' <span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + ' won</span> ' + badge + '</div>' +
+                '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' (fees $' + (w.totalFees || 0).toFixed(4) + ', est. rebates +$' + (w.totalRebates || 0).toFixed(4) + ') · ' + fmtTime(w.resolvedAt) + '</div>' +
               '</div>' +
-              '<div class="pnl ' + cls + '">' + (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) + '<span class="margin">' + (marginPct >= 0 ? '+' : '') + marginPct.toFixed(2) + '%</span></div>' +
+              '<div class="pnl ' + cls + '">' + (w.traded ? (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) : '—') + (w.traded ? '<span class="margin">' + (marginPct >= 0 ? '+' : '') + marginPct.toFixed(2) + '%</span>' : '') + '</div>' +
             '</div>' +
-            '<div class="entry-detail">' +
-              '<div class="dhead"><span>Leg</span><span>Fill Prices</span><span>Status</span></div>' +
-              (detailRows || '<div class="empty-state">no legs armed this window</div>') +
-            '</div>' +
+            '<div class="entry-detail">' + detailRows + '</div>' +
           '</div>';
         }).join('');
       }
