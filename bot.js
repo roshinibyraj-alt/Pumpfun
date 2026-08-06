@@ -1,24 +1,21 @@
 // ============================================================
-// bot.js — candle-pattern side-selection + timed forced-entry
-// strategy, v12. NO hedge, NO dual-side dip-buy, NO resting-order
-// entry, NO take-profit exit. Per window:
-//   1. On new window detection, fetch the last config.CANDLE_LOOKBACK
-//      CLOSED real BTC/ETH candles (Binance, config.CANDLE_INTERVAL)
-//      and run strategy.detectPattern() to pick a side (or CHOP/NONE).
-//   2. CHOP/NONE -> window SKIPPED entirely, no order.
-//   3. A directional signal -> every tick from window start:
-//        - while secondsIntoWindow < ENTRY_WAIT_SECONDS: fire an
-//          IMMEDIATE (taker) buy the instant the signaled side's price
-//          is <= EARLY_ENTRY_TRIGGER_PRICE.
-//        - once secondsIntoWindow >= ENTRY_WAIT_SECONDS and no entry
-//          has fired yet: fire an IMMEDIATE (taker) buy at whatever
-//          the current price is, no price condition.
-//      Every directionally-signaled window therefore gets exactly one
-//      trade, always sized at $config.ORDER_NOTIONAL_USD worth of
-//      shares at the fill price — shares = notional / fillPrice.
+// bot.js — fixed side-pattern + immediate-entry strategy, v13. NO
+// candle signal, NO hedge, NO entry wait, NO take-profit exit. Per
+// window:
+//   1. On new window detection, the side comes from config.BET_PATTERN
+//      at state.patternIndex, which then advances (wrapping) — no
+//      candles, no strategy.detectPattern(), no CHOP/NONE skip. Every
+//      window trades.
+//   2. Entry fires IMMEDIATELY, the first tick the window is seen, as
+//      a genuine TAKER buy at whatever price is showing right then.
+//      No wait, no price condition.
+//   3. Sized at $config.ORDER_NOTIONAL_USD, but alternating with
+//      state.doubleToggle: base, double, base, double, ... one step
+//      per trade, advancing regardless of win/loss and independent of
+//      patternIndex — NOT a loss-chasing martingale.
 //   4. Once filled, the position rides naked all the way to real
-//      resolution — there is no take-profit exit anymore. Every tick
-//      we snapshot both sides' live prices onto the window; whichever
+//      resolution — there is no take-profit exit. Every tick we
+//      snapshot both sides' live prices onto the window; whichever
 //      snapshot lands closest to windowEnd is treated as "the last
 //      second of the window". If either side's price in that final
 //      snapshot is >= config.RESOLUTION_WIN_THRESHOLD, that side is
@@ -26,58 +23,50 @@
 //      to wait on the real market to fully settle. If neither side
 //      had cleared the threshold by that last tick, resolution falls
 //      back to polling the real market price until it converges.
-//   5. NO martingale of any kind: every trade uses the same fixed
-//      config.ORDER_NOTIONAL_USD regardless of win/loss history. There
-//      is no loss-streak tracking, no doubling, no size adjustment
-//      based on past outcomes.
 // ============================================================
 
 const config = require('./config');
 const polymarket = require('./polymarket');
 const strategy = require('./strategy');
-const binance = require('./binance');
 const { loadState, saveState } = require('./state');
 
 function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
-// Fetches the recent candle pattern and returns a detectPattern()-shaped
-// result. Never throws — on any fetch/parsing error it degrades to an
-// ERROR signal (skip the window) rather than trading blind.
-async function getPatternSignal() {
-  try {
-    const recent = await binance.getRecentClosedCandles(config.ASSET, config.CANDLE_INTERVAL, config.CANDLE_LOOKBACK);
-    const colors = strategy.colorsFromCandles(recent);
-    const result = strategy.detectPattern(colors);
-    log(`Candle pattern (${config.ASSET.toUpperCase()} ${config.CANDLE_INTERVAL}, last ${colors.length}): ${colors.join('') || '(none)'} -> pattern ${result.pattern || '(none)'} / signal ${result.signal}${result.side ? ' / side ' + result.side : ''}`);
-    return result;
-  } catch (e) {
-    log('ERROR fetching candle pattern (skipping window):', e.message);
-    return { pattern: null, signal: 'ERROR', side: null };
-  }
+// Picks the next side off config.BET_PATTERN using state.patternIndex,
+// then advances the index (wrapping). Self-initializes on first run.
+function nextPatternSide(state) {
+  if (state.patternIndex == null) state.patternIndex = 0;
+  const pattern = config.BET_PATTERN;
+  const idx = state.patternIndex % pattern.length;
+  const side = pattern[idx];
+  state.patternIndex = (state.patternIndex + 1) % pattern.length;
+  return { side, patternLabel: pattern.join('') + ` [pos ${idx + 1}/${pattern.length}]` };
 }
 
-// Checks whether the entry condition is met this tick and fires an
-// immediate taker buy if so. Only ever called while win.position is
-// still null. Mutates win.position in place.
-function maybeFireEntry(win, ownPrice, upTokenId, downTokenId, nowSec) {
-  const secondsIntoWindow = nowSec - win.windowStart;
-  let reason = null;
+// Picks this trade's notional using state.doubleToggle, then flips the
+// toggle for next time. Purely a trade-count alternation — completely
+// independent of win/loss outcome and of patternIndex. Self-initializes
+// on first run.
+function nextNotional(state) {
+  if (state.doubleToggle == null) state.doubleToggle = false; // false = base next, true = double next
+  const notional = state.doubleToggle
+    ? Math.round(config.ORDER_NOTIONAL_USD * config.DOUBLE_MULTIPLIER * 100) / 100
+    : config.ORDER_NOTIONAL_USD;
+  const wasDouble = state.doubleToggle;
+  state.doubleToggle = !state.doubleToggle;
+  return { notional, wasDouble };
+}
 
-  if (secondsIntoWindow < config.ENTRY_WAIT_SECONDS) {
-    if (ownPrice <= config.EARLY_ENTRY_TRIGGER_PRICE) {
-      reason = `early trigger — price $${ownPrice.toFixed(2)} <= $${config.EARLY_ENTRY_TRIGGER_PRICE} at ${secondsIntoWindow}s into window`;
-    }
-  } else {
-    reason = `forced entry — ${config.ENTRY_WAIT_SECONDS}s elapsed with no early trigger, firing at current price $${ownPrice.toFixed(2)} regardless of level`;
-  }
-
-  if (!reason) return; // still waiting, no condition met yet
-
+// Fires an immediate taker buy at the current price. Only ever called
+// once, the first tick a window's position is still null. Mutates
+// win.position in place.
+function fireEntry(win, ownPrice, upTokenId, downTokenId) {
+  const reason = `immediate entry — window start, firing at current price $${ownPrice.toFixed(2)}, no wait`;
   const tokenId = win.side === 'UP' ? upTokenId : downTokenId;
   win.position = strategy.openPosition(win.windowStart, win.windowEnd, win.side, tokenId, win.notional, ownPrice, reason, config);
-  log(`ENTRY (TAKER): pattern ${win.pattern} (${win.signal}) -> ${win.side} @ $${ownPrice.toFixed(2)}, $${win.notional} notional = ${win.position.shares} shares (fee $${win.position.fillFee.toFixed(5)}) — ${reason}`);
+  log(`ENTRY (TAKER): pattern ${win.pattern} -> ${win.side} @ $${ownPrice.toFixed(2)}, $${win.notional} notional${win.isDouble ? ' (DOUBLE)' : ' (base)'} = ${win.position.shares} shares (fee $${win.position.fillFee.toFixed(5)}) — ${reason}`);
 }
 
 // Checks whether the window's LAST observed tick (closest snapshot to
@@ -185,25 +174,22 @@ async function tick() {
           log(`Window ${state.currentWindow.windowStart} closed -> pending resolution`);
         }
 
-        const notional = config.ORDER_NOTIONAL_USD;
-        const patternResult = await getPatternSignal();
+        const { side, patternLabel } = nextPatternSide(state);
+        const { notional, wasDouble } = nextNotional(state);
 
         state.currentWindow = {
           windowStart, windowEnd, upTokenId, downTokenId,
           notional,
-          pattern: patternResult.pattern,
-          signal: patternResult.signal,
-          side: patternResult.side,
+          isDouble: wasDouble,
+          pattern: patternLabel,
+          signal: wasDouble ? 'FIXED_PATTERN_DOUBLE' : 'FIXED_PATTERN_BASE',
+          side,
           position: null,
-          skipped: !patternResult.side,
-          skipReason: patternResult.side
-            ? null
-            : (patternResult.signal === 'ERROR' ? 'candle fetch failed' : 'no directional signal (chop/insufficient data)'),
+          skipped: false,
+          skipReason: null,
         };
 
-        if (state.currentWindow.skipped) {
-          log(`Window ${windowStart}: SKIPPED — ${state.currentWindow.skipReason}`);
-        }
+        log(`Window ${windowStart}: side ${side} (${patternLabel}), notional $${notional}${wasDouble ? ' [DOUBLE]' : ' [base]'}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -222,9 +208,9 @@ async function tick() {
 
       const win = state.currentWindow;
 
-      if (win.side && !win.position && !win.skipped) {
+      if (win.side && !win.position) {
         const ownPrice = win.side === 'UP' ? upPrice : downPrice;
-        maybeFireEntry(win, ownPrice, upTokenId, downTokenId, nowSec);
+        fireEntry(win, ownPrice, upTokenId, downTokenId);
       }
 
       // Snapshot both sides' prices on every tick while the window is
@@ -275,7 +261,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (candle-pattern + timed forced entry, no hedge, no martingale, no TP — rides to resolution). Bankroll: $${config.STARTING_BANKROLL} | candles ${config.ASSET.toUpperCase()} ${config.CANDLE_INTERVAL} x${config.CANDLE_LOOKBACK} | early trigger <= $${config.EARLY_ENTRY_TRIGGER_PRICE} within ${config.ENTRY_WAIT_SECONDS}s, else forced at market | resolution win threshold $${config.RESOLUTION_WIN_THRESHOLD} | fixed notional $${config.ORDER_NOTIONAL_USD} every trade`);
+  log(`Bot started (fixed pattern ${config.BET_PATTERN.join('')} + immediate entry, no hedge, no TP — rides to resolution). Bankroll: $${config.STARTING_BANKROLL} | entry fires instantly at window start | resolution win threshold $${config.RESOLUTION_WIN_THRESHOLD} | sizing alternates $${config.ORDER_NOTIONAL_USD} base / $${Math.round(config.ORDER_NOTIONAL_USD * config.DOUBLE_MULTIPLIER * 100) / 100} double, one step per trade`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
