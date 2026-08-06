@@ -15,7 +15,21 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/state', (req, res) => {
   const state = loadState();
-  res.json({ config: { DEMO_MODE: config.DEMO_MODE, ASSET: config.ASSET, TRADING_ENABLED: config.TRADING_ENABLED, RUNG_PRICES: config.RUNG_PRICES, SHARES_PER_RUNG: config.SHARES_PER_RUNG, LOCK_SPREAD: config.LOCK_SPREAD }, ...state });
+  res.json({
+    config: {
+      DEMO_MODE: config.DEMO_MODE,
+      TRADING_ENABLED: config.TRADING_ENABLED,
+      ASSET: config.ASSET,
+      WINDOW_MINUTES: config.WINDOW_MINUTES,
+      CANDLE_INTERVAL: config.CANDLE_INTERVAL,
+      CANDLE_LOOKBACK: config.CANDLE_LOOKBACK,
+      ENTRY_WAIT_SECONDS: config.ENTRY_WAIT_SECONDS,
+      EARLY_ENTRY_TRIGGER_PRICE: config.EARLY_ENTRY_TRIGGER_PRICE,
+      TAKE_PROFIT_PRICE: config.TAKE_PROFIT_PRICE,
+      ORDER_NOTIONAL_USD: config.ORDER_NOTIONAL_USD,
+    },
+    ...state,
+  });
 });
 
 const PORT = process.env.PORT || 3000;
