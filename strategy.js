@@ -1,9 +1,12 @@
 // ============================================================
-// strategy.js — pure helpers for the candle-pattern directional
-// strategy. No ladder, no hedge, no dual-side dip-buy. Two jobs:
-//   1. Turn a run of candles into a Green/Red pattern + trade signal.
-//   2. Build the single position object for whichever side (if any)
-//      the pattern signals.
+// strategy.js — pure helpers for the candle-pattern side-selection +
+// timed forced-entry strategy. Two jobs:
+//   1. Turn a run of candles into a Green/Red pattern + trade signal
+//      (unchanged from v10 — this part of the strategy didn't change).
+//   2. Build the position object at the moment an entry actually
+//      fires (v11: entries are immediate/taker fills, not resting
+//      orders, so there's no more "pending" order phase — a position
+//      only ever gets created already-filled).
 // ============================================================
 
 // Green if it closed up, Red if it closed down, Neutral (doji) if
@@ -57,31 +60,35 @@ function detectPattern(colors) {
   return { pattern: colors.join(''), signal: 'NONE', side: null };
 }
 
-// Builds the single live position for the signaled side. Only ever
-// called when detectPattern() returned a non-null side AND the entry
-// sanity price check passed.
-function buildPosition(windowStart, windowEnd, side, tokenId, shares, config) {
+// Builds an ALREADY-FILLED position at the moment an entry fires.
+// v11 entries are immediate taker fills (either the early
+// EARLY_ENTRY_TRIGGER_PRICE breach, or the forced fire once
+// ENTRY_WAIT_SECONDS elapses) — there's no resting/pending phase to
+// model, so the position is constructed directly in 'filled' status.
+// shares are derived from the dollar notional and the actual fill
+// price, NOT a fixed share count.
+function openPosition(windowStart, windowEnd, side, tokenId, notional, fillPrice, entryReason, config) {
+  const shares = Math.round((notional / fillPrice) * 10000) / 10000;
+  const fillFee = Math.round(shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice) * 100000) / 100000;
   return {
     windowStart,
     windowEnd,
     side,
     tokenId,
+    notional,
     shares,
-    orderPrice: config.LIMIT_BUY_PRICE,
+    fillPrice,
+    fillFee,      // taker fee — entry is an immediate fill, not maker
+    fillRebate: 0, // no maker rebate on a taker fill
+    filledAt: new Date().toISOString(),
+    entryReason,
     tpPrice: config.TAKE_PROFIT_PRICE,
-    // order_pending -> filled -> tp_filled | resolved_win | resolved_loss
-    //               -> order_cancelled (never filled, window closed)
-    status: 'order_pending',
-    orderPlacedAt: new Date().toISOString(),
-    fillPrice: null,
-    fillFee: null,
-    fillRebate: null,
-    filledAt: null,
+    // filled -> tp_filled | resolved_win | resolved_loss
+    status: 'filled',
     tpFillPrice: null,
     tpFillFee: null,
     tpFillRebate: null,
     tpFilledAt: null,
-    cancelledAt: null,
     resolvedWon: null,
     cost: null,
     payout: null,
@@ -90,4 +97,4 @@ function buildPosition(windowStart, windowEnd, side, tokenId, shares, config) {
   };
 }
 
-module.exports = { candleColor, colorsFromCandles, detectPattern, buildPosition };
+module.exports = { candleColor, colorsFromCandles, detectPattern, openPosition };
