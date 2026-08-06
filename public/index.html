@@ -227,9 +227,7 @@
     } else if (win.skipped) {
       el.innerHTML = '<div class="no-trade-box">NO TRADE — ' + (win.skipReason || 'skipped') + '</div>';
     } else if (win.side) {
-      const waitSec = cfg.ENTRY_WAIT_SECONDS != null ? cfg.ENTRY_WAIT_SECONDS : 60;
-      const trigPx = cfg.EARLY_ENTRY_TRIGGER_PRICE != null ? cfg.EARLY_ENTRY_TRIGGER_PRICE : 0.33;
-      el.innerHTML = '<div class="no-trade-box">watching ' + win.side + ' — fires instantly at ≤ $' + trigPx.toFixed(2) + ', or forced at market after ' + waitSec + 's</div>';
+      el.innerHTML = '<div class="no-trade-box">' + win.side + ' — firing immediately…</div>';
     } else {
       el.innerHTML = '<div class="no-trade-box">watching for entry…</div>';
     }
