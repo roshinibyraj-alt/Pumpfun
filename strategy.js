@@ -1,12 +1,12 @@
 // ============================================================
-// strategy.js — pure helpers for the candle-pattern side-selection +
-// timed forced-entry strategy. Two jobs:
-//   1. Turn a run of candles into a Green/Red pattern + trade signal
-//      (unchanged from v10 — this part of the strategy didn't change).
-//   2. Build the position object at the moment an entry actually
-//      fires (v11: entries are immediate/taker fills, not resting
-//      orders, so there's no more "pending" order phase — a position
-//      only ever gets created already-filled).
+// strategy.js — pure helpers.
+//   1. candleColor/colorsFromCandles/detectPattern: candle-pattern
+//      side-selection logic, kept here for reference but NO LONGER
+//      CALLED by bot.js as of v13 — side selection now comes from
+//      config.BET_PATTERN (a fixed sequence), not from candles.
+//   2. openPosition: builds the position object at the moment an entry
+//      actually fires (entries are immediate/taker fills, not resting
+//      orders — a position only ever gets created already-filled).
 // ============================================================
 
 // Green if it closed up, Red if it closed down, Neutral (doji) if
