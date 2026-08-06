@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Ladder Terminal</title>
+<title>Dip Buy Terminal</title>
 <style>
   :root {
     --void: #0a0e17;
@@ -20,6 +20,8 @@
     --loss: #f87171;
     --lock: #a78bfa;
     --lock-dim: rgba(167,139,250,0.14);
+    --tp: #60a5fa;
+    --tp-dim: rgba(96,165,250,0.14);
     --font-data: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
@@ -36,7 +38,7 @@
 
   .statusbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; flex-wrap: wrap; gap: 6px; }
   .brand { display: flex; align-items: center; gap: 8px; }
-  .brand .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--lock); animation: pulse 2s infinite; flex-shrink: 0; }
+  .brand .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tp); animation: pulse 2s infinite; flex-shrink: 0; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
   .brand h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: 0.2px; }
   .live-price { font-family: var(--font-data); font-size: 13px; color: var(--text-dim); }
@@ -55,49 +57,61 @@
   .card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
   .countdown { font-family: var(--font-data); color: var(--text); background: var(--surface-raised); padding: 2px 8px; border-radius: 6px; font-size: 11px; }
 
-  .ladder-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .ladder-col .col-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; }
-  .ladder-col.up .col-head { color: var(--up); }
-  .ladder-col.down .col-head { color: var(--down); }
-  .rung { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; border-radius: 6px; margin-bottom: 4px; font-family: var(--font-data); font-size: 12px; background: var(--surface-raised); border: 1px solid var(--border); }
-  .rung .px { font-weight: 700; }
-  .rung .status { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; padding: 1px 6px; border-radius: 4px; }
-  .rung.waiting { opacity: 0.55; }
-  .rung.waiting .status { color: var(--text-dim); background: rgba(255,255,255,0.04); }
-  .rung.base_filled .status { color: var(--down); background: var(--down-dim); }
-  .rung.base_filled { border-color: rgba(245,166,35,0.35); }
-  .rung.counter_filled .status { color: var(--lock); background: var(--lock-dim); }
-  .rung.counter_filled { border-color: rgba(167,139,250,0.35); }
+  .entry-status { font-family: var(--font-data); font-size: 12px; color: var(--text-dim); background: var(--surface-raised); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 12px; }
+  .entry-status.armed { color: var(--tp); border-color: rgba(96,165,250,0.35); }
+
+  .legs-wrap { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .leg-col .col-head { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; }
+  .leg-col.up .col-head { color: var(--up); }
+  .leg-col.down .col-head { color: var(--down); }
+  .leg-box { padding: 10px; border-radius: 8px; font-family: var(--font-data); font-size: 12px; background: var(--surface-raised); border: 1px solid var(--border); }
+  .leg-box .price-row { display: flex; justify-content: space-between; margin-bottom: 4px; }
+  .leg-box .price-row .lbl { color: var(--text-dim); font-size: 10px; text-transform: uppercase; }
+  .leg-box .status-pill { display: inline-block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; padding: 2px 7px; border-radius: 4px; margin-top: 4px; }
+  .leg-box.inactive { opacity: 0.55; }
+  .leg-box.inactive .status-pill { color: var(--text-dim); background: rgba(255,255,255,0.04); }
+  .leg-box.order_pending .status-pill { color: var(--text-dim); background: rgba(255,255,255,0.06); }
+  .leg-box.order_pending { border-color: rgba(255,255,255,0.12); }
+  .leg-box.filled .status-pill { color: var(--down); background: var(--down-dim); }
+  .leg-box.filled { border-color: rgba(245,166,35,0.35); }
+  .leg-box.tp_filled .status-pill, .leg-box.resolved_win .status-pill { color: var(--win); background: rgba(52,211,153,0.14); }
+  .leg-box.tp_filled, .leg-box.resolved_win { border-color: rgba(52,211,153,0.35); }
+  .leg-box.resolved_loss .status-pill { color: var(--loss); background: rgba(248,113,113,0.14); }
+  .leg-box.resolved_loss { border-color: rgba(248,113,113,0.35); }
+  .leg-box.order_cancelled .status-pill { color: var(--text-dim); background: rgba(255,255,255,0.04); }
 
   .chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
   .chip { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 8px; text-align: center; }
   .chip .k { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
   .chip .v { font-family: var(--font-data); font-size: 17px; font-weight: 700; }
+  .chip .v.warn { color: var(--loss); }
 
   .entry { padding: 10px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
   .entry:last-child { border-bottom: none; }
   .entry .row1 { display: flex; align-items: center; gap: 10px; }
   .entry .result-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .entry .result-dot.win { background: var(--win); } .entry .result-dot.loss { background: var(--loss); } .entry .result-dot.lock { background: var(--lock); }
+  .entry .result-dot.win { background: var(--win); } .entry .result-dot.loss { background: var(--loss); }
   .entry .mid { flex: 1; min-width: 0; }
   .entry .mid .top { font-size: 13px; font-weight: 600; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
   .entry .mid .bottom { font-family: var(--font-data); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
   .entry .pnl { font-family: var(--font-data); font-size: 14px; font-weight: 700; text-align: right; flex-shrink: 0; }
-  .entry .pnl.win { color: var(--win); } .entry .pnl.loss { color: var(--loss); } .entry .pnl.lock { color: var(--lock); }
+  .entry .pnl.win { color: var(--win); } .entry .pnl.loss { color: var(--loss); }
   .entry .pnl .margin { display: block; font-size: 10px; font-weight: 500; color: var(--text-dim); margin-top: 1px; }
   .side-tag { font-family: var(--font-data); font-size: 10px; padding: 2px 7px; border-radius: 5px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
   .side-tag.up { color: var(--up); background: var(--up-dim); }
   .side-tag.down { color: var(--down); background: var(--down-dim); }
   .fill-badge { font-family: var(--font-data); font-size: 10px; padding: 1px 6px; border-radius: 5px; color: var(--text-dim); background: rgba(255,255,255,0.05); }
-  .fill-badge.full { color: var(--lock); background: var(--lock-dim); }
+  .fill-badge.tp { color: var(--tp); background: var(--tp-dim); }
+  .fill-badge.noentry { color: var(--text-dim); background: rgba(255,255,255,0.05); }
   .empty-state { color: var(--text-dim); font-size: 13px; text-align: center; padding: 18px 0; }
   .entry-detail { display: none; margin-top: 10px; padding: 10px; background: var(--surface-raised); border-radius: 8px; border: 1px solid var(--border); }
   .entry-detail.open { display: block; }
   .entry-detail .drow { display: flex; justify-content: space-between; font-family: var(--font-data); font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--border); }
   .entry-detail .drow:last-child { border-bottom: none; }
   .entry-detail .drow .st { text-transform: uppercase; font-size: 9px; letter-spacing: 0.4px; padding: 1px 5px; border-radius: 4px; }
-  .entry-detail .drow .st.full { color: var(--lock); background: var(--lock-dim); }
-  .entry-detail .drow .st.base { color: var(--down); background: var(--down-dim); }
+  .entry-detail .drow .st.win { color: var(--win); background: rgba(52,211,153,0.14); }
+  .entry-detail .drow .st.loss { color: var(--loss); background: rgba(248,113,113,0.14); }
+  .entry-detail .drow .st.tp { color: var(--tp); background: var(--tp-dim); }
   .entry-detail .drow .st.none { color: var(--text-dim); background: rgba(255,255,255,0.04); }
   .entry-detail .dhead { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; }
 
@@ -109,7 +123,7 @@
   <div class="statusbar">
     <div class="brand">
       <span class="dot"></span>
-      <h1>Ladder Terminal</h1>
+      <h1>Dip Buy Terminal</h1>
     </div>
     <div class="live-price" id="livePrice">— —</div>
   </div>
@@ -130,27 +144,26 @@
     <div class="chip"><div class="k">Pending</div><div class="v" id="pendingCount">—</div></div>
   </div>
   <div class="chips">
-    <div class="chip"><div class="k">Avg Rungs Filled</div><div class="v" id="avgRungsFilled">—</div></div>
-    <div class="chip"><div class="k">Avg Margin</div><div class="v" id="avgMargin">—</div></div>
-    <div class="chip"><div class="k">Total Cost</div><div class="v" id="totalCost">—</div></div>
-    <div class="chip"><div class="k">Total Payout</div><div class="v" id="totalPayout">—</div></div>
-    <div class="chip"><div class="k">Total Fees</div><div class="v" id="totalFees">—</div></div>
-    <div class="chip"><div class="k">Est. Rebates</div><div class="v" id="totalRebates">—</div></div>
+    <div class="chip"><div class="k">Loss Streak</div><div class="v" id="lossStreak">—</div></div>
+    <div class="chip"><div class="k">Next Share Size</div><div class="v" id="shareSize">—</div></div>
+    <div class="chip"><div class="k">Entries Fired</div><div class="v" id="entryRate">—</div></div>
+    <div class="chip"><div class="k">TP Fill Rate</div><div class="v" id="tpRate">—</div></div>
   </div>
 
   <div class="card">
     <div class="card-title">
-      <span>Current Ladder</span>
+      <span>Current Window</span>
       <span class="countdown" id="countdown">—</span>
     </div>
-    <div class="ladder-wrap">
-      <div class="ladder-col up">
+    <div class="entry-status" id="entryStatus">—</div>
+    <div class="legs-wrap">
+      <div class="leg-col up">
         <div class="col-head"><span>UP</span><span id="upLivePx">—</span></div>
-        <div id="upLadder"></div>
+        <div id="upLeg"></div>
       </div>
-      <div class="ladder-col down">
+      <div class="leg-col down">
         <div class="col-head"><span>DOWN</span><span id="downLivePx">—</span></div>
-        <div id="downLadder"></div>
+        <div id="downLeg"></div>
       </div>
     </div>
   </div>
@@ -199,24 +212,27 @@
       '<path d="' + path + '" fill="none" stroke="' + stroke + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
   }
 
-  function statusLabel(rung) {
-    if (rung.status === 'waiting_base') return 'waiting';
-    if (rung.status === 'base_filled') return 'filled, hedging @ $' + rung.counterPrice.toFixed(2);
-    if (rung.status === 'counter_filled') return 'both legs filled, awaiting resolution';
-    return rung.status;
+  function legStatusLabel(pos) {
+    if (pos.status === 'inactive') return 'waiting for entry';
+    if (pos.status === 'order_pending') return 'limit buy resting @ $' + pos.orderPrice.toFixed(2);
+    if (pos.status === 'filled') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · TP resting @ $' + pos.tpPrice.toFixed(2);
+    if (pos.status === 'tp_filled') return 'TP filled @ $' + pos.tpFillPrice.toFixed(2);
+    if (pos.status === 'order_cancelled') return 'order never filled';
+    if (pos.status === 'resolved_win') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · won @ resolution';
+    if (pos.status === 'resolved_loss') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · lost @ resolution';
+    return pos.status;
   }
 
-  function renderLadderCol(elId, rungs, side) {
+  function renderLeg(elId, positions, side) {
     const el = $(elId);
-    const sideRungs = rungs.filter(r => r.side === side).sort((a,b) => b.rungPrice - a.rungPrice);
-    if (sideRungs.length === 0) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
-    el.innerHTML = sideRungs.map(r => {
-      const cls = r.status === 'counter_filled' ? 'counter_filled' : (r.status === 'base_filled' ? 'base_filled' : 'waiting');
-      return '<div class="rung ' + cls + '">' +
-        '<span class="px">$' + r.rungPrice.toFixed(2) + '</span>' +
-        '<span class="status">' + statusLabel(r) + '</span>' +
-      '</div>';
-    }).join('');
+    const pos = (positions || []).find(p => p.side === side);
+    if (!pos) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
+    el.innerHTML = '<div class="leg-box ' + pos.status + '">' +
+      '<div class="price-row"><span class="lbl">Shares</span><span>' + pos.shares + '</span></div>' +
+      '<div class="price-row"><span class="lbl">Entry</span><span>$' + pos.orderPrice.toFixed(2) + '</span></div>' +
+      '<div class="price-row"><span class="lbl">TP</span><span>$' + pos.tpPrice.toFixed(2) + '</span></div>' +
+      '<span class="status-pill">' + legStatusLabel(pos) + '</span>' +
+    '</div>';
   }
 
   async function refresh() {
@@ -253,10 +269,23 @@
     } catch (e) { console.error('sparkline render failed', e); }
 
     try {
-      const rungs = s.currentWindow ? s.currentWindow.rungs : [];
-      renderLadderCol('upLadder', rungs, 'UP');
-      renderLadderCol('downLadder', rungs, 'DOWN');
-    } catch (e) { console.error('ladder render failed', e); }
+      const cfg = s.config || {};
+      const win = s.currentWindow;
+      const positions = win ? win.positions : [];
+      renderLeg('upLeg', positions, 'UP');
+      renderLeg('downLeg', positions, 'DOWN');
+      const es = $('entryStatus');
+      if (!win) {
+        es.textContent = '—';
+        es.className = 'entry-status';
+      } else if (win.entryTriggered) {
+        es.textContent = 'ENTRY ARMED — both legs bought @ $' + (cfg.LIMIT_BUY_PRICE != null ? cfg.LIMIT_BUY_PRICE.toFixed(2) : '0.10') + ', TP @ $' + (cfg.TAKE_PROFIT_PRICE != null ? cfg.TAKE_PROFIT_PRICE.toFixed(2) : '0.90');
+        es.className = 'entry-status armed';
+      } else {
+        es.textContent = 'watching — entry checks start at minute ' + (cfg.ENTRY_CHECK_MINUTE != null ? cfg.ENTRY_CHECK_MINUTE : 4) + ', needs UP price in [' + (cfg.ENTRY_PRICE_MIN != null ? cfg.ENTRY_PRICE_MIN : 0.30) + ',' + (cfg.ENTRY_PRICE_MAX != null ? cfg.ENTRY_PRICE_MAX : 0.70) + ']';
+        es.className = 'entry-status';
+      }
+    } catch (e) { console.error('current window render failed', e); }
 
     try {
       const hist = s.windowHistory;
@@ -270,33 +299,22 @@
 
     try {
       const hist = s.windowHistory;
+      const lossStreak = s.consecutiveLosses || 0;
+      const streakEl = $('lossStreak');
+      streakEl.textContent = lossStreak;
+      streakEl.className = 'v' + (lossStreak > 0 ? ' warn' : '');
+      $('shareSize').textContent = (s.currentShareSize != null ? s.currentShareSize : '—') + '/side';
       if (hist.length) {
-        // rungsFilled(w): count of rungs that reached at least base_filled (i.e. touched)
-        const filledCounts = hist.map(w => (w.rungs || []).filter(r => r.status !== 'waiting_base').length);
-        const totalRungs = hist.length ? (hist[0].rungs || []).length : 12;
-        const avgFilled = filledCounts.reduce((a,b) => a+b, 0) / hist.length;
-        $('avgRungsFilled').textContent = avgFilled.toFixed(1) + ' / ' + totalRungs;
-        const totalCost = hist.reduce((a,w) => a + w.cost, 0);
-        const totalPayout = hist.reduce((a,w) => a + w.payout, 0);
-        const totalPnl2 = hist.reduce((a,w) => a + w.pnl, 0);
-        const avgMarginPct = totalCost > 0 ? (totalPnl2 / totalCost) * 100 : 0;
-        $('avgMargin').textContent = (avgMarginPct >= 0 ? '+' : '') + avgMarginPct.toFixed(2) + '%';
-        $('avgMargin').style.color = avgMarginPct >= 0 ? 'var(--win)' : 'var(--loss)';
-        $('totalCost').textContent = fmt$(totalCost);
-        $('totalPayout').textContent = fmt$(totalPayout);
-        const totalFees = hist.reduce((a,w) => a + (w.totalFees || 0), 0);
-        $('totalFees').textContent = '$' + totalFees.toFixed(3);
-        const totalRebates = hist.reduce((a,w) => a + (w.totalRebates || 0), 0);
-        $('totalRebates').textContent = '$' + totalRebates.toFixed(3);
+        const triggered = hist.filter(w => w.entryTriggered).length;
+        $('entryRate').textContent = triggered + ' / ' + hist.length;
+        const filledLegs = hist.flatMap(w => w.positions || []).filter(p => p.status === 'tp_filled' || p.status === 'resolved_win' || p.status === 'resolved_loss');
+        const tpLegs = filledLegs.filter(p => p.status === 'tp_filled');
+        $('tpRate').textContent = filledLegs.length ? tpLegs.length + ' / ' + filledLegs.length : '—';
       } else {
-        $('avgRungsFilled').textContent = '—';
-        $('avgMargin').textContent = '—';
-        $('totalCost').textContent = '—';
-        $('totalPayout').textContent = '—';
-        $('totalFees').textContent = '—';
-        $('totalRebates').textContent = '—';
+        $('entryRate').textContent = '—';
+        $('tpRate').textContent = '—';
       }
-    } catch (e) { console.error('detail chips render failed', e); }
+    } catch (e) { console.error('martingale chips render failed', e); }
 
     try {
       const logEl = $('completedLog');
@@ -305,45 +323,37 @@
         logEl.innerHTML = '<div class="empty-state">No windows resolved yet.</div>';
       } else {
         const fmtTime = (iso) => iso ? new Date(iso).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
-        logEl.innerHTML = all.map((w, i) => {
+        logEl.innerHTML = all.map((w) => {
           const cls = w.pnl >= 0 ? 'win' : 'loss';
-          const rungs = w.rungs || [];
-          const totalRungs = rungs.length;
-          const filled = rungs.filter(r => r.status !== 'waiting_base').length;
-          const fullBadgeCls = filled === totalRungs && totalRungs > 0 ? 'full' : '';
+          const positions = w.positions || [];
           const marginPct = w.cost > 0 ? (w.pnl / w.cost) * 100 : 0;
-          const detailRows = rungs.slice().sort((a,b) => a.side === b.side ? b.rungPrice - a.rungPrice : (a.side === 'UP' ? -1 : 1)).map(r => {
-            let stCls = 'none', stLabel = 'untouched';
-            if (r.status === 'counter_filled') { stCls = 'full'; stLabel = 'both legs'; }
-            else if (r.status === 'imbalance_hedged') { stCls = 'full'; stLabel = 'imbalance hedged'; }
-            else if (r.status === 'base_filled') { stCls = 'base'; stLabel = 'base only'; }
-            else if (r.status === 'base_pending') { stCls = 'none'; stLabel = 'order unfilled'; }
-            else if (r.status === 'base_cancelled') { stCls = 'none'; stLabel = 'cancelled (time)'; }
-            const basePx = r.baseFillPrice !== null ? '$' + r.baseFillPrice.toFixed(2) : '—';
-            const counterPx = r.counterFillPrice !== null ? '$' + r.counterFillPrice.toFixed(2) : '—';
-            const baseRebateStr = r.baseFillRebate ? ' (+$' + r.baseFillRebate.toFixed(4) + ' rbt)' : '';
-            const ctrRebateStr = r.counterFillRebate ? ' (+$' + r.counterFillRebate.toFixed(4) + ' rbt)' : '';
-            return '<div class="drow"><span>' + r.side + ' @ $' + r.rungPrice.toFixed(2) + '</span>' +
-              '<span>base ' + basePx + baseRebateStr + ' · ctr ' + counterPx + ctrRebateStr + '</span>' +
+          const badge = w.entryTriggered
+            ? '<span class="fill-badge tp">entry fired</span>'
+            : '<span class="fill-badge noentry">no entry</span>';
+          const detailRows = positions.map((p) => {
+            let stCls = 'none', stLabel = 'no entry';
+            if (p.status === 'tp_filled') { stCls = 'tp'; stLabel = 'TP hit'; }
+            else if (p.status === 'resolved_win') { stCls = 'win'; stLabel = 'won (naked)'; }
+            else if (p.status === 'resolved_loss') { stCls = 'loss'; stLabel = 'lost (naked)'; }
+            else if (p.status === 'order_cancelled') { stCls = 'none'; stLabel = 'unfilled'; }
+            const fillPx = p.fillPrice !== null && p.fillPrice !== undefined ? '$' + p.fillPrice.toFixed(2) : '—';
+            const tpPx = p.tpFillPrice !== null && p.tpFillPrice !== undefined ? '$' + p.tpFillPrice.toFixed(2) : '—';
+            return '<div class="drow"><span>' + p.side + ' · ' + p.shares + 'sh</span>' +
+              '<span>buy ' + fillPx + ' · tp ' + tpPx + '</span>' +
               '<span class="st ' + stCls + '">' + stLabel + '</span></div>';
-          }).join('');
-          const hedgeRows = (w.imbalanceHedges || []).map(h => {
-            return '<div class="drow"><span>IMBALANCE HEDGE</span>' +
-              '<span>' + h.side + ' ' + h.shares + 'sh @ $' + h.price.toFixed(2) + ' (fee $' + h.fee.toFixed(4) + ')</span>' +
-              '<span class="st base">taker</span></div>';
           }).join('');
           return '<div class="entry" onclick="this.querySelector(\'.entry-detail\').classList.toggle(\'open\')">' +
             '<div class="row1">' +
               '<span class="result-dot ' + cls + '"></span>' +
               '<div class="mid">' +
-                '<div class="top"><span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + '</span> won · UP ' + w.totalUpShares + 'sh/$' + w.totalUpCost.toFixed(2) + ' · DOWN ' + w.totalDownShares + 'sh/$' + w.totalDownCost.toFixed(2) + ' <span class="fill-badge ' + fullBadgeCls + '">' + filled + '/' + totalRungs + ' rungs</span></div>' +
-                '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' (fees $' + (w.totalFees || 0).toFixed(4) + ', est. rebates +$' + (w.totalRebates || 0).toFixed(4) + ') · ' + fmtTime(w.resolvedAt) + '</div>' +
+                '<div class="top"><span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + '</span> won · ' + w.shareSize + 'sh/side ' + badge + '</div>' +
+                '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' (fees $' + (w.totalFees || 0).toFixed(4) + ', est. rebates +$' + (w.totalRebates || 0).toFixed(4) + ') · streak ' + w.consecutiveLossesAfter + ' · ' + fmtTime(w.resolvedAt) + '</div>' +
               '</div>' +
               '<div class="pnl ' + cls + '">' + (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) + '<span class="margin">' + (marginPct >= 0 ? '+' : '') + marginPct.toFixed(2) + '%</span></div>' +
             '</div>' +
             '<div class="entry-detail">' +
-              '<div class="dhead"><span>Rung</span><span>Fill Prices</span><span>Status</span></div>' +
-              detailRows + hedgeRows +
+              '<div class="dhead"><span>Leg</span><span>Fill Prices</span><span>Status</span></div>' +
+              (detailRows || '<div class="empty-state">no legs armed this window</div>') +
             '</div>' +
           '</div>';
         }).join('');
