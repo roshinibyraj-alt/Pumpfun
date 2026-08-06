@@ -61,12 +61,15 @@ function detectPattern(colors) {
 }
 
 // Builds an ALREADY-FILLED position at the moment an entry fires.
-// v11 entries are immediate taker fills (either the early
+// Entries are immediate taker fills (either the early
 // EARLY_ENTRY_TRIGGER_PRICE breach, or the forced fire once
 // ENTRY_WAIT_SECONDS elapses) — there's no resting/pending phase to
 // model, so the position is constructed directly in 'filled' status.
 // shares are derived from the dollar notional and the actual fill
 // price, NOT a fixed share count.
+// v12: no take-profit exit — every position rides naked straight to
+// real resolution, so there's no tpPrice/tpFill* bookkeeping anymore;
+// status only ever goes filled -> resolved_win | resolved_loss.
 function openPosition(windowStart, windowEnd, side, tokenId, notional, fillPrice, entryReason, config) {
   const shares = Math.round((notional / fillPrice) * 10000) / 10000;
   const fillFee = Math.round(shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice) * 100000) / 100000;
@@ -82,13 +85,8 @@ function openPosition(windowStart, windowEnd, side, tokenId, notional, fillPrice
     fillRebate: 0, // no maker rebate on a taker fill
     filledAt: new Date().toISOString(),
     entryReason,
-    tpPrice: config.TAKE_PROFIT_PRICE,
-    // filled -> tp_filled | resolved_win | resolved_loss
+    // filled -> resolved_win | resolved_loss
     status: 'filled',
-    tpFillPrice: null,
-    tpFillFee: null,
-    tpFillRebate: null,
-    tpFilledAt: null,
     resolvedWon: null,
     cost: null,
     payout: null,
