@@ -69,7 +69,7 @@
   .position-box .price-row { display: flex; justify-content: space-between; padding: 3px 0; }
   .position-box .price-row .lbl { color: var(--text-dim); font-size: 10px; text-transform: uppercase; }
   .position-box .status-pill { display: inline-block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; padding: 2px 7px; border-radius: 4px; margin-top: 6px; }
-  .position-box.order_pending .status-pill { color: var(--text-dim); background: rgba(255,255,255,0.06); }
+  .position-box .reason { color: var(--text-dim); font-size: 10px; margin-top: 6px; }
   .position-box.filled .status-pill { color: var(--down); background: var(--down-dim); }
   .position-box.filled { border-color: rgba(245,166,35,0.35); }
   .position-box.tp_filled .status-pill, .position-box.resolved_win .status-pill { color: var(--win); background: rgba(52,211,153,0.14); }
@@ -104,7 +104,8 @@
   .empty-state { color: var(--text-dim); font-size: 13px; text-align: center; padding: 18px 0; }
   .entry-detail { display: none; margin-top: 10px; padding: 10px; background: var(--surface-raised); border-radius: 8px; border: 1px solid var(--border); }
   .entry-detail.open { display: block; }
-  .entry-detail .drow { display: flex; justify-content: space-between; font-family: var(--font-data); font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+  .entry-detail .drow { display: flex; justify-content: space-between; font-family: var(--font-data); font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--border); gap: 10px; }
+  .entry-detail .drow span:last-child { text-align: right; }
   .entry-detail .drow:last-child { border-bottom: none; }
 
   footer { text-align: center; color: var(--text-dim); font-size: 11px; margin-top: 20px; font-family: var(--font-data); }
@@ -136,8 +137,8 @@
     <div class="chip"><div class="k">Pending</div><div class="v" id="pendingCount">—</div></div>
   </div>
   <div class="chips">
-    <div class="chip"><div class="k">Loss Streak</div><div class="v" id="lossStreak">—</div></div>
-    <div class="chip"><div class="k">Next Share Size</div><div class="v" id="shareSize">—</div></div>
+    <div class="chip"><div class="k">Win Rate</div><div class="v" id="winRate">—</div></div>
+    <div class="chip"><div class="k">Order Size</div><div class="v" id="notional">—</div></div>
     <div class="chip"><div class="k">Trade Rate</div><div class="v" id="tradeRate">—</div></div>
     <div class="chip"><div class="k">TP Fill Rate</div><div class="v" id="tpRate">—</div></div>
   </div>
@@ -206,28 +207,31 @@
   }
 
   function positionStatusLabel(pos) {
-    if (pos.status === 'order_pending') return 'limit buy resting @ $' + pos.orderPrice.toFixed(2);
-    if (pos.status === 'filled') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · TP resting @ $' + pos.tpPrice.toFixed(2);
+    if (pos.status === 'filled') return 'filled (taker) @ $' + pos.fillPrice.toFixed(2) + ' · TP resting @ $' + pos.tpPrice.toFixed(2);
     if (pos.status === 'tp_filled') return 'TP filled @ $' + pos.tpFillPrice.toFixed(2);
-    if (pos.status === 'order_cancelled') return 'order never filled';
     if (pos.status === 'resolved_win') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · won @ resolution';
     if (pos.status === 'resolved_loss') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · lost @ resolution';
     return pos.status;
   }
 
-  function renderPositionArea(win) {
+  function renderPositionArea(win, cfg, secondsRemaining) {
     const el = $('positionArea');
     if (!win) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
     if (win.position) {
       const pos = win.position;
       el.innerHTML = '<div class="position-box ' + pos.status + '">' +
-        '<div class="side-line"><span class="side-tag ' + pos.side.toLowerCase() + '">' + pos.side + '</span><span>' + pos.shares + ' shares</span></div>' +
-        '<div class="price-row"><span class="lbl">Entry</span><span>$' + pos.orderPrice.toFixed(2) + '</span></div>' +
+        '<div class="side-line"><span class="side-tag ' + pos.side.toLowerCase() + '">' + pos.side + '</span><span>$' + pos.notional + ' notional · ' + pos.shares + ' shares</span></div>' +
+        '<div class="price-row"><span class="lbl">Fill</span><span>$' + pos.fillPrice.toFixed(2) + '</span></div>' +
         '<div class="price-row"><span class="lbl">TP</span><span>$' + pos.tpPrice.toFixed(2) + '</span></div>' +
         '<span class="status-pill">' + positionStatusLabel(pos) + '</span>' +
+        '<div class="reason">' + (pos.entryReason || '') + '</div>' +
       '</div>';
     } else if (win.skipped) {
       el.innerHTML = '<div class="no-trade-box">NO TRADE — ' + (win.skipReason || 'skipped') + '</div>';
+    } else if (win.side) {
+      const waitSec = cfg.ENTRY_WAIT_SECONDS != null ? cfg.ENTRY_WAIT_SECONDS : 60;
+      const trigPx = cfg.EARLY_ENTRY_TRIGGER_PRICE != null ? cfg.EARLY_ENTRY_TRIGGER_PRICE : 0.33;
+      el.innerHTML = '<div class="no-trade-box">watching ' + win.side + ' — fires instantly at ≤ $' + trigPx.toFixed(2) + ', or forced at market after ' + waitSec + 's</div>';
     } else {
       el.innerHTML = '<div class="no-trade-box">watching for entry…</div>';
     }
@@ -266,11 +270,12 @@
 
     try {
       const win = s.currentWindow;
+      const cfg = s.config || {};
       $('patternChip').textContent = win && win.pattern ? win.pattern : '— — —';
       const sigEl = $('signalChip');
       sigEl.textContent = win ? win.signal : '—';
       sigEl.className = 'signal-chip ' + (win ? signalClass(win.signal) : '');
-      renderPositionArea(win);
+      renderPositionArea(win, cfg, win ? win.windowEnd : null);
     } catch (e) { console.error('current window render failed', e); }
 
     try {
@@ -286,19 +291,18 @@
 
     try {
       const hist = s.windowHistory;
-      const lossStreak = s.consecutiveLosses || 0;
-      const streakEl = $('lossStreak');
-      streakEl.textContent = lossStreak;
-      streakEl.className = 'v' + (lossStreak > 0 ? ' warn' : '');
-      $('shareSize').textContent = (s.currentShareSize != null ? s.currentShareSize : '—');
+      $('notional').textContent = (s.config && s.config.ORDER_NOTIONAL_USD != null) ? '$' + s.config.ORDER_NOTIONAL_USD : '—';
       if (hist.length) {
         const traded = hist.filter(w => w.traded);
         $('tradeRate').textContent = traded.length + ' / ' + hist.length;
+        const wins = traded.filter(w => w.pnl >= 0);
+        $('winRate').textContent = traded.length ? wins.length + ' / ' + traded.length : '—';
         const settled = traded.filter(w => w.position && (w.position.status === 'tp_filled' || w.position.status === 'resolved_win' || w.position.status === 'resolved_loss'));
         const tp = settled.filter(w => w.position.status === 'tp_filled');
         $('tpRate').textContent = settled.length ? tp.length + ' / ' + settled.length : '—';
       } else {
         $('tradeRate').textContent = '—';
+        $('winRate').textContent = '—';
         $('tpRate').textContent = '—';
       }
     } catch (e) { console.error('martingale chips render failed', e); }
@@ -322,9 +326,10 @@
             '<div class="drow"><span>Signal</span><span>' + w.signal + '</span></div>';
           if (w.traded && w.position) {
             const p = w.position;
-            detailRows += '<div class="drow"><span>Entry / TP</span><span>' +
-              (p.fillPrice !== null ? '$'+p.fillPrice.toFixed(2) : '—') + ' / ' +
-              (p.tpFillPrice !== null ? '$'+p.tpFillPrice.toFixed(2) : '—') + '</span></div>';
+            detailRows += '<div class="drow"><span>Notional / Shares</span><span>$' + p.notional + ' / ' + p.shares + '</span></div>' +
+              '<div class="drow"><span>Fill / TP</span><span>' +
+              '$' + p.fillPrice.toFixed(2) + ' / ' + (p.tpFillPrice !== null ? '$'+p.tpFillPrice.toFixed(2) : '—') + '</span></div>' +
+              '<div class="drow"><span>Entry reason</span><span>' + (p.entryReason || '—') + '</span></div>';
           } else {
             detailRows += '<div class="drow"><span>Reason</span><span>' + (w.skipReason || '—') + '</span></div>';
           }
