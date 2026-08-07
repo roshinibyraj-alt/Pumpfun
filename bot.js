@@ -1,12 +1,12 @@
 // ============================================================
-// bot.js — time-scheduled cheap/expensive buys, v15. Per 5-minute
+// bot.js — time-scheduled cheap/expensive buys, v16. Per 5-minute
 // window (300 seconds):
 //
 //   CHEAP side (the side with the LOWER midpoint), one 50-share
-//   buy per 30-second block:
-//     t = 0-30s    -> buy CHEAP, 50 shares
-//     t = 30-60s   -> buy CHEAP, 50 shares
-//     t = 60-90s   -> buy CHEAP, 50 shares
+//   buy at each of:
+//     t = 30s      -> buy CHEAP, 50 shares
+//     t = 60s      -> buy CHEAP, 50 shares
+//     t = 90s      -> buy CHEAP, 50 shares
 //
 //   EXPENSIVE side (the side with the HIGHER midpoint), one
 //   50-share buy at each of:
@@ -20,12 +20,23 @@
 // then. Every order is exactly config.ORDER_SHARES (50) shares
 // regardless of cost — no ladder, no pattern, no hedge.
 //
+// FEES & REBATES (docs.polymarket.com/trading/fees + maker-rebates):
+//   Crypto: taker fee = shares x 0.07 x price x (1 - price).
+//   Makers never pay fees; crypto maker rebate = 20% of the
+//   fee-equivalent, only for resting (maker) fills.
+//   config.ENTRY_IS_MAKER=false -> taker fills: fee charged,
+//   rebate 0. true -> maker fills: fee 0, 20% rebate credited.
+//
 // Filled entries ride naked to real resolution (win = $1/share,
 // lose = $0, no take-profit exit). Resolution: whichever side's
 // price is at/above RESOLUTION_WIN_THRESHOLD in the LAST tick
 // sampled before close is declared the winner immediately;
 // otherwise fall back to polling the real market price until it
 // converges. All filled entries for the window settle together.
+//
+// Live marks: every tick we snapshot both sides' midpoints; the
+// dashboard uses them (via computeUnrealized) to show real-time
+// unrealized P&L on every open position.
 // ============================================================
 
 const config = require('./config');
@@ -36,6 +47,9 @@ function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
+function round2(n) { return Math.round(n * 100) / 100; }
+function round5(n) { return Math.round(n * 100000) / 100000; }
+
 function priceOf(side, upPrice, downPrice) {
   return side === 'UP' ? upPrice : downPrice;
 }
@@ -44,17 +58,20 @@ function cheapSide(upPrice, downPrice) { return upPrice <= downPrice ? 'UP' : 'D
 function expensiveSide(upPrice, downPrice) { return upPrice >= downPrice ? 'UP' : 'DOWN'; }
 
 // Builds an ALREADY-FILLED entry at the moment a scheduled buy fires.
-// Entries are immediate taker fills at the current midpoint; the
-// size is always exactly config.ORDER_SHARES shares.
+// Entries fill at the current midpoint; size is always exactly
+// config.ORDER_SHARES shares. Fee/rebate follow config.ENTRY_IS_MAKER
+// (see the header comment — taker default, maker opt-in).
 function makeEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
-  const fillFee = Math.round(shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice) * 100000) / 100000;
+  const feeEquiv = shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice);
+  const isMaker = !!config.ENTRY_IS_MAKER;
   return {
     side,
     tokenId,
     shares,
     fillPrice,
-    fillFee,
+    fillFee: isMaker ? 0 : round5(feeEquiv),
+    fillRebate: isMaker ? round5(feeEquiv * config.MAKER_REBATE_RATE) : 0,
     filledAt: new Date().toISOString(),
     entryReason: reason,
     status: 'filled', // filled -> resolved_win | resolved_loss
@@ -66,11 +83,11 @@ function makeEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason)
   };
 }
 
-// Records a scheduled taker buy on win.entries.
+// Records a scheduled taker/maker buy on win.entries.
 function fireEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const entry = makeEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason);
   win.entries.push(entry);
-  log(`ENTRY (TAKER): ${side} ${shares}sh @ $${fillPrice.toFixed(2)} — ${reason}`);
+  log(`ENTRY: ${side} ${shares}sh @ $${fillPrice.toFixed(2)} | fee $${entry.fillFee.toFixed(4)} | rebate $${entry.fillRebate.toFixed(4)} — ${reason}`);
 }
 
 // Checks whether the window's LAST observed tick (closest snapshot to
@@ -90,8 +107,8 @@ function immediateWinnerFromLastTick(win) {
 // immediately with no extra network call. Otherwise falls back to
 // polling the real market price (no fallback beyond that — waits if
 // still ambiguous). Settles ALL filled entries of the window together
-// (win = $1/share, lose = $0). Returns true if resolved this call,
-// false if still waiting on convergence.
+// (win = $1/share, lose = $0; rebate credited to payout when present).
+// Returns true if resolved this call, false if still waiting.
 async function resolveWindow(win, state) {
   let wonSide = immediateWinnerFromLastTick(win);
 
@@ -110,18 +127,20 @@ async function resolveWindow(win, state) {
   }
 
   const entries = win.entries || [];
-  let cost = 0, payout = 0, fees = 0;
+  let cost = 0, payout = 0, fees = 0, rebates = 0;
   const traded = entries.length > 0;
 
   for (const pos of entries) {
     const f = pos.fillFee || 0;
+    const r = pos.fillRebate || 0;
     cost += pos.shares * pos.fillPrice + f;
-    payout += (pos.side === wonSide ? pos.shares * 1 : 0);
+    payout += (pos.side === wonSide ? pos.shares * 1 : 0) + r;
     fees += f;
+    rebates += r;
     pos.resolvedWon = pos.side === wonSide;
     pos.status = pos.resolvedWon ? 'resolved_win' : 'resolved_loss';
     pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
-    pos.payout = Math.round((pos.side === wonSide ? pos.shares : 0) * 100000) / 100000;
+    pos.payout = Math.round((pos.side === wonSide ? pos.shares : 0) * 100000) / 100000 + r;
     pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
     pos.settledAt = new Date().toISOString();
   }
@@ -140,6 +159,7 @@ async function resolveWindow(win, state) {
     wonSide,
     traded,
     totalFees: Math.round(fees * 100000) / 100000,
+    totalRebates: Math.round(rebates * 100000) / 100000,
     payout: Math.round(payout * 100) / 100,
     cost: Math.round(cost * 100) / 100,
     pnl,
@@ -149,9 +169,59 @@ async function resolveWindow(win, state) {
   });
 
   log(
-    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | ${entries.length} entries (${entries.map((e) => e.side).join(', ') || 'none'}) | payout $${payout.toFixed(2)} | cost $${cost.toFixed(2)} | fees $${fees.toFixed(5)} | pnl $${pnl.toFixed(2)} | bankroll $${state.bankroll}`
+    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | ${entries.length} entries (${entries.map((e) => e.side).join(', ') || 'none'}) | payout $${payout.toFixed(2)} | cost $${cost.toFixed(2)} | fees $${fees.toFixed(5)} | rebates $${rebates.toFixed(5)} | pnl $${pnl.toFixed(2)} | bankroll $${state.bankroll}`
   );
   return true;
+}
+
+// Computes live unrealized P&L for the open window using the latest
+// midpoint snapshot (state.lastCheck). Used by the dashboard's
+// /api/state so positions are marked to market in real time.
+function computeUnrealized(state) {
+  const win = state.currentWindow;
+  const lc = state.lastCheck || {};
+  const out = {
+    upPrice: lc.upPrice != null ? lc.upPrice : null,
+    downPrice: lc.downPrice != null ? lc.downPrice : null,
+    entries: [],
+    costBasis: 0,
+    currentValue: 0,
+    unrealizedPnl: 0,
+    fees: 0,
+    rebates: 0,
+  };
+  if (!win || !Array.isArray(win.entries) || win.entries.length === 0) return out;
+
+  for (const e of win.entries) {
+    const cur = e.side === 'UP' ? lc.upPrice : lc.downPrice;
+    const fee = e.fillFee || 0;
+    const rebate = e.fillRebate || 0;
+    const cost = e.shares * e.fillPrice + fee;
+    const value = cur != null ? e.shares * cur : cost;
+    out.costBasis += cost;
+    out.currentValue += value;
+    out.unrealizedPnl += value - cost;
+    out.fees += fee;
+    out.rebates += rebate;
+    out.entries.push({
+      side: e.side,
+      shares: e.shares,
+      fillPrice: e.fillPrice,
+      currentPrice: cur != null ? cur : null,
+      fee: round5(fee),
+      rebate: round5(rebate),
+      cost: round5(cost),
+      value: round5(value),
+      unrealizedPnl: cur != null ? round5(value - cost) : null,
+      entryReason: e.entryReason,
+    });
+  }
+  out.costBasis = round2(out.costBasis);
+  out.currentValue = round2(out.currentValue);
+  out.unrealizedPnl = round2(out.unrealizedPnl);
+  out.fees = round2(out.fees);
+  out.rebates = round2(out.rebates);
+  return out;
 }
 
 let tickRunning = false;
@@ -213,12 +283,12 @@ async function tick() {
             downTokenId,
             signal: 'TIME_SCHEDULED_CHEAP_EXPENSIVE',
             entries: [],  // every 50-share order taken this window
-            fired: [],    // schedule keys already executed: cheap-0/1/2, exp-210/240/270
+            fired: [],    // schedule keys already executed: cheap-30/60/90, exp-210/240/270
             finalUpPrice: null,
             finalDownPrice: null,
           };
 
-          log(`Window ${windowStart}: time-scheduled cheap/expensive — CHEAP x${config.CHEAP_BUY_BUCKETS.length} in first 90s, EXPENSIVE @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s, ${config.ORDER_SHARES}sh per order`);
+          log(`Window ${windowStart}: CHEAP @ ${config.CHEAP_BUY_AT_SECS.join('/')}s, EXPENSIVE @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s, ${config.ORDER_SHARES}sh per order | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
         }
 
         const [upPrice, downPrice] = await Promise.all([
@@ -240,25 +310,27 @@ async function tick() {
         if (win && nowSec < windowEnd) {
           const elapsed = nowSec - win.windowStart;
 
-          // CHEAP — one 50-share buy per 30-second block in the first 90s.
-          // Side re-evaluated fresh here, so it can flip between blocks.
-          config.CHEAP_BUY_BUCKETS.forEach((bucket, i) => {
-            const key = 'cheap-' + i;
+          // CHEAP — one 50-share buy at each scheduled second. Each has a
+          // 30s validity window (sec .. sec+30) so a mid-window restart
+          // doesn't dump all missed cheap buys at once. Side re-evaluated
+          // fresh here, so it can flip between buys.
+          config.CHEAP_BUY_AT_SECS.forEach((sec, i) => {
+            const key = 'cheap-' + sec;
             if (win.fired.includes(key)) return;
-            if (elapsed >= bucket.start && elapsed < bucket.end) {
+            if (elapsed >= sec && elapsed < sec + 30) {
               const side = cheapSide(upPrice, downPrice);
               win.fired.push(key);
               fireEntry(win, side, config.ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
-                `cheap buy #${i + 1} — t ${bucket.start}-${bucket.end}s (${side} is cheap at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
+                `cheap buy #${i + 1} — t=${sec}s (${side} is cheap at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
             }
           });
 
-          // EXPENSIVE — one 50-share buy at each scheduled second. Side
-          // re-evaluated fresh at each tick, so it can flip between buys.
+          // EXPENSIVE — one 50-share buy at each scheduled second. Each
+          // also gets a 30s validity window. Side re-evaluated fresh.
           config.EXPENSIVE_BUY_AT_SECS.forEach((sec) => {
             const key = 'exp-' + sec;
             if (win.fired.includes(key)) return;
-            if (elapsed >= sec) {
+            if (elapsed >= sec && elapsed < sec + 30) {
               const side = expensiveSide(upPrice, downPrice);
               win.fired.push(key);
               fireEntry(win, side, config.ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
@@ -301,9 +373,9 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (time-scheduled cheap/expensive, ${config.WINDOW_MINUTES}-min window). Bankroll: $${config.STARTING_BANKROLL} | ${config.ORDER_SHARES}sh per order | CHEAP: ${config.CHEAP_BUY_BUCKETS.length} buys in first 90s (${config.CHEAP_BUY_BUCKETS.map((b) => b.start + '-' + b.end).join(' / ')}) | EXPENSIVE: ${config.EXPENSIVE_BUY_AT_SECS.length} buys @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s | rides to resolution, no TP`);
+  log(`Bot started (time-scheduled cheap/expensive, ${config.WINDOW_MINUTES}-min window). Bankroll: $${config.STARTING_BANKROLL} | ${config.ORDER_SHARES}sh per order | CHEAP @ ${config.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'} | rides to resolution, no TP`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
 
-module.exports = { startBotLoop, tick };
+module.exports = { startBotLoop, tick, computeUnrealized };

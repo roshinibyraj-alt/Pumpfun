@@ -3,27 +3,37 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v15 — time-scheduled cheap/expensive buys, 5-minute
+// STRATEGY (v16 — time-scheduled cheap/expensive buys, 5-minute
 // window, fixed 50 shares per order):
 //   1. Every 5-minute Polymarket UP/DOWN window is traded.
 //   2. CHEAP side (the side with the LOWER midpoint) is bought
-//      3 times during the first 90 seconds, once per 30-second
-//      block:
-//        t = 0-30s   -> buy CHEAP, 50 shares
-//        t = 30-60s  -> buy CHEAP, 50 shares
-//        t = 60-90s  -> buy CHEAP, 50 shares
+//      once at each of these seconds after window start:
+//        t = 30s    -> buy CHEAP, 50 shares
+//        t = 60s    -> buy CHEAP, 50 shares
+//        t = 90s    -> buy CHEAP, 50 shares
 //   3. EXPENSIVE side (the side with the HIGHER midpoint) is
-//      bought 3 times late in the window:
-//        t = 210s    -> buy EXPENSIVE, 50 shares
-//        t = 240s    -> buy EXPENSIVE, 50 shares
-//        t = 270s    -> buy EXPENSIVE, 50 shares
+//      bought once at each of:
+//        t = 210s   -> buy EXPENSIVE, 50 shares
+//        t = 240s   -> buy EXPENSIVE, 50 shares
+//        t = 270s   -> buy EXPENSIVE, 50 shares
 //   4. Cheap/expensive is re-evaluated FRESH at each scheduled
 //      tick from the live midpoints — the sides may flip mid-
 //      window and each order simply follows whichever side is
 //      cheap/expensive right then.
 //   5. Every order is exactly ORDER_SHARES (50) shares regardless
 //      of cost. No ladder, no pattern, no hedge.
-//   6. Filled entries ride naked to real resolution — no take-
+//   6. Fees/rebates (per docs.polymarket.com/trading/fees and
+//      docs.polymarket.com/programs/maker-rebates):
+//        - Crypto category: taker fee rate = 0.07
+//        - Makers are never charged fees; taker fee formula is
+//          fee = shares x feeRate x price x (1 - price)
+//        - Crypto maker rebate = 20% of the fee-equivalent,
+//          paid to resting (maker) fills only
+//        - ENTRY_IS_MAKER=false (default) models our entries as
+//          taker fills at the current mid: fee applies, rebate 0.
+//          Flip it to true to model resting maker fills instead:
+//          no fee, 20% rebate credited.
+//   7. Filled entries ride naked to real resolution — no take-
 //      profit exit. Resolution: whichever side is at/above the win
 //      threshold in the last tick before close is declared the
 //      winner immediately; otherwise fall back to polling the real
@@ -47,24 +57,26 @@ module.exports = {
   // what the price/cost is. No scaling, no ladder.
   ORDER_SHARES: 50,
 
-  // ---- Cheap-side schedule (first 90 seconds) ----
-  // One 50-share buy per 30-second block on the cheaper side.
-  CHEAP_BUY_BUCKETS: [
-    { start: 0,  end: 30 },
-    { start: 30, end: 60 },
-    { start: 60, end: 90 },
-  ],
+  // ---- Cheap-side schedule ----
+  // One 50-share buy on the cheaper side at each of these seconds
+  // after window start (NOT at t=0 — first buy is at the 30th sec).
+  CHEAP_BUY_AT_SECS: [30, 60, 90],
 
   // ---- Expensive-side schedule (late window) ----
-  // One 50-share buy at each of these seconds on the expensive side.
+  // One 50-share buy on the expensive side at each of these seconds.
   EXPENSIVE_BUY_AT_SECS: [210, 240, 270],
 
-  // ---- Fees ----
-  // Confirmed against Polymarket's official docs (docs.polymarket.com/trading/fees):
-  //   fee = shares × feeRate × price × (1 - price), TAKERS ONLY.
-  // Entries are genuine taker fills (they execute immediately at the
-  // current midpoint rather than resting), so this fee always applies.
-  BASE_TAKER_FEE_RATE: 0.07, // Crypto category taker fee rate
+  // ---- Fees & rebates (Polymarket docs, Crypto category) ----
+  // Taker fee = shares x BASE_TAKER_FEE_RATE x price x (1 - price).
+  // Crypto taker fee rate is 0.07; makers are never charged.
+  BASE_TAKER_FEE_RATE: 0.07,
+  // Maker rebate = 20% of the fee-equivalent (Crypto category).
+  // Only resting (maker) fills earn it.
+  MAKER_REBATE_RATE: 0.20,
+  // false = entries are taker fills at the current mid (pay fee,
+  // no rebate). true = entries modeled as maker fills (no fee,
+  // 20% rebate credited). Default false.
+  ENTRY_IS_MAKER: false,
 
   // ---- Resolution ----
   // Positions ride naked to real resolution — no take-profit exit.

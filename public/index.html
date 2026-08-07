@@ -108,6 +108,16 @@
   .entry-detail .drow span:last-child { text-align: right; }
   .entry-detail .drow:last-child { border-bottom: none; }
 
+  .pnl-line { display: flex; justify-content: space-between; gap: 10px; font-family: var(--font-data); font-size: 11px; color: var(--text-dim); margin: 8px 0 4px; }
+  .pnl-line b { font-weight: 700; }
+  .live-summary { display: flex; justify-content: space-between; gap: 8px; font-family: var(--font-data); font-size: 11px; padding: 10px 12px; border-radius: 10px; background: var(--surface-raised); border: 1px solid var(--border); margin-bottom: 8px; }
+  .live-summary span { color: var(--text-dim); }
+  .live-summary b { color: var(--text); font-weight: 700; }
+  .pnl-pos { color: var(--win) !important; }
+  .pnl-neg { color: var(--loss) !important; }
+  .upnl { font-family: var(--font-data); font-weight: 700; }
+  .upnl.pos { color: var(--win); }
+  .upnl.neg { color: var(--loss); }
   footer { text-align: center; color: var(--text-dim); font-size: 11px; margin-top: 20px; font-family: var(--font-data); }
 </style>
 </head>
@@ -122,10 +132,14 @@
   </div>
 
   <div class="hero">
-    <div class="label">Bankroll</div>
+    <div class="label">Bankroll (realized)</div>
     <div class="row">
       <div class="bankroll" id="bankroll">$—</div>
       <div class="return" id="returnPct">—</div>
+    </div>
+    <div class="pnl-line">
+      <span>Unrealized <b id="unrealizedPnl">$—</b></span>
+      <span>Total Equity <b id="totalEquity">$—</b></span>
     </div>
     <svg class="sparkline" id="sparkline" preserveAspectRatio="none"></svg>
   </div>
@@ -141,6 +155,12 @@
     <div class="chip"><div class="k">Order Shares</div><div class="v" id="notional">—</div></div>
     <div class="chip"><div class="k">Trade Rate</div><div class="v" id="tradeRate">—</div></div>
     <div class="chip"><div class="k">Avg Fill Price</div><div class="v" id="avgFill">—</div></div>
+  </div>
+  <div class="chips">
+    <div class="chip"><div class="k">Fees Paid</div><div class="v" id="feesPaid">—</div></div>
+    <div class="chip"><div class="k">Rebates</div><div class="v" id="rebates">—</div></div>
+    <div class="chip"><div class="k">Schedule</div><div class="v" id="schedule" style="font-size:12px">—</div></div>
+    <div class="chip"><div class="k">Entry Mode</div><div class="v" id="entryMode" style="font-size:12px">—</div></div>
   </div>
 
   <div class="card">
@@ -213,7 +233,7 @@
     return pos.status;
   }
 
-  function renderPositionArea(win, cfg, secondsRemaining) {
+  function renderPositionArea(win, cfg, secondsRemaining, live) {
     const el = $('positionArea');
     if (!win) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
     const entries = win.entries || [];
@@ -221,13 +241,29 @@
       el.innerHTML = '<div class="no-trade-box">watching for scheduled buys…</div>';
       return;
     }
-    el.innerHTML = entries.slice().reverse().map((pos) =>
-      '<div class="position-box ' + pos.status + '">' +
-        '<div class="side-line"><span class="side-tag ' + pos.side.toLowerCase() + '">' + pos.side + '</span><span>' + pos.shares + ' shares @ $' + pos.fillPrice.toFixed(2) + '</span></div>' +
+    const lv = (live && live.entries) || [];
+    const summary = live
+      ? '<div class="live-summary">' +
+          '<span>Cost <b>$' + (live.costBasis || 0).toFixed(2) + '</b></span>' +
+          '<span>Value <b>$' + (live.currentValue || 0).toFixed(2) + '</b></span>' +
+          '<span>Unrealized <b class="' + ((live.unrealizedPnl || 0) >= 0 ? 'pnl-pos' : 'pnl-neg') + '">' + ((live.unrealizedPnl || 0) >= 0 ? '+' : '') + (live.unrealizedPnl || 0).toFixed(2) + '</b></span>' +
+        '</div>'
+      : '';
+    el.innerHTML = summary + entries.slice().reverse().map((pos, ri) => {
+      const l = lv[entries.length - 1 - ri] || {};
+      const upnl = l.unrealizedPnl;
+      const upnlStr = upnl != null ? ((upnl >= 0 ? '+' : '') + upnl.toFixed(2)) : '—';
+      const nowStr = l.currentPrice != null ? '$' + l.currentPrice.toFixed(3) : '—';
+      return '<div class="position-box ' + pos.status + '">' +
+        '<div class="side-line"><span class="side-tag ' + pos.side.toLowerCase() + '">' + pos.side + '</span><span>' + pos.shares + ' shares @ $' + pos.fillPrice.toFixed(2) + '</span>' +
+        '<span class="upnl ' + (upnl != null ? (upnl >= 0 ? 'pos' : 'neg') : '') + '">' + upnlStr + '</span></div>' +
+        '<div class="price-row"><span class="lbl">Now</span><span>' + nowStr + '</span>' +
+        '<span class="lbl">Fee</span><span>$' + (l.fee || 0).toFixed(3) + '</span>' +
+        '<span class="lbl">Rebate</span><span>$' + (l.rebate || 0).toFixed(3) + '</span></div>' +
         '<div class="reason">' + (pos.entryReason || '') + '</div>' +
         '<span class="status-pill">' + positionStatusLabel(pos) + '</span>' +
-      '</div>'
-    ).join('');
+      '</div>';
+    }).join('');
   }
 
   async function refresh() {
@@ -250,36 +286,45 @@
     } catch (e) { console.error('header render failed', e); }
 
     try {
+      const live = s.liveWindow || { unrealizedPnl: 0 };
+      const upnl = live.unrealizedPnl || 0;
+      const equity = s.bankroll + upnl;
       $('bankroll').textContent = fmt$(s.bankroll);
-      const retPct = (s.bankroll - s.startingBankroll) / s.startingBankroll;
+      const retPct = (equity - s.startingBankroll) / s.startingBankroll;
       const retEl = $('returnPct');
       retEl.textContent = (retPct >= 0 ? '+' : '') + fmtPct(retPct, 2);
       retEl.className = 'return ' + (retPct >= 0 ? 'pos' : 'neg');
+      const upEl = $('unrealizedPnl');
+      upEl.textContent = (upnl >= 0 ? '+' : '') + upnl.toFixed(2);
+      upEl.style.color = upnl >= 0 ? 'var(--win)' : 'var(--loss)';
+      $('totalEquity').textContent = fmt$(equity);
+      $('totalEquity').style.color = equity >= s.startingBankroll ? 'var(--win)' : 'var(--loss)';
     } catch (e) { console.error('bankroll render failed', e); }
 
     try {
       const curve = [s.startingBankroll];
       for (const w of s.windowHistory) curve.push(w.bankrollAfter);
+      if (s.liveWindow) curve.push(s.bankroll + (s.liveWindow.unrealizedPnl || 0));
       buildSparkline(curve);
     } catch (e) { console.error('sparkline render failed', e); }
 
     try {
       const win = s.currentWindow;
       const cfg = s.config || {};
-      const cheapN = (cfg.CHEAP_BUY_BUCKETS && cfg.CHEAP_BUY_BUCKETS.length) || 3;
+      const cheapN = (cfg.CHEAP_BUY_AT_SECS && cfg.CHEAP_BUY_AT_SECS.length) || 3;
       const expN = (cfg.EXPENSIVE_BUY_AT_SECS && cfg.EXPENSIVE_BUY_AT_SECS.length) || 3;
       const totalBuys = cheapN + expN;
-      $('patternChip').textContent = win ? 'CHEAP ×' + cheapN + ' → EXPENSIVE ×' + expN : '— — —';
+      $('patternChip').textContent = win ? 'CHEAP @ ' + (cfg.CHEAP_BUY_AT_SECS || [30,60,90]).join('/') + 's' : '— — —';
       const sigEl = $('signalChip');
       sigEl.textContent = win ? ((win.entries || []).length) + ' / ' + totalBuys + ' buys placed' : '—';
       sigEl.className = 'signal-chip';
-      renderPositionArea(win, cfg, win ? win.windowEnd : null);
+      renderPositionArea(win, cfg, win ? win.windowEnd : null, s.liveWindow);
     } catch (e) { console.error('current window render failed', e); }
 
     try {
       const hist = s.windowHistory;
       $('windowsResolved').textContent = hist.length;
-      const totalPnl = hist.reduce((a,w) => a+w.pnl, 0);
+      const totalPnl = hist.reduce((a,w) => a+w.pnl, 0) + ((s.liveWindow && s.liveWindow.unrealizedPnl) || 0);
       $('totalPnl').textContent = fmt$(totalPnl);
       $('totalPnl').style.color = totalPnl >= 0 ? 'var(--win)' : 'var(--loss)';
       const traded = hist.filter(w => w.traded);
@@ -306,6 +351,14 @@
     } catch (e) { console.error('martingale chips render failed', e); }
 
     try {
+      $('feesPaid').textContent = '$' + (s.totalFees || 0).toFixed(2);
+      $('rebates').textContent = '$' + (s.totalRebates || 0).toFixed(2);
+      const cfgS = s.config || {};
+      $('schedule').textContent = (cfgS.CHEAP_BUY_AT_SECS || [30,60,90]).join('/') + 's → ' + (cfgS.EXPENSIVE_BUY_AT_SECS || [210,240,270]).join('/') + 's';
+      $('entryMode').textContent = cfgS.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER';
+    } catch (e) { console.error('extra chips render failed', e); }
+
+    try {
       const logEl = $('completedLog');
       const all = s.windowHistory.slice().reverse().slice(0, 40);
       if (all.length === 0) {
@@ -322,7 +375,7 @@
           let detailRows = '<div class="drow"><span>Schedule</span><span>' + (w.signal || '(none)') + '</span></div>' +
             '<div class="drow"><span>Entries</span><span>' + (w.entryCount || 0) + ' × 50sh</span></div>';
           (w.entries || []).forEach((p, i) => {
-            detailRows += '<div class="drow"><span>#' + (i + 1) + ' ' + p.side + ' @ $' + p.fillPrice.toFixed(2) + '</span><span>pnl $' + (p.pnl != null ? p.pnl.toFixed(2) : '—') + '</span></div>';
+            detailRows += '<div class="drow"><span>#' + (i + 1) + ' ' + p.side + ' @ $' + p.fillPrice.toFixed(2) + ' (fee $' + (p.fillFee || 0).toFixed(3) + ', reb $' + (p.fillRebate || 0).toFixed(3) + ')</span><span>pnl $' + (p.pnl != null ? p.pnl.toFixed(2) : '—') + '</span></div>';
           });
           return '<div class="entry" onclick="this.querySelector(\'.entry-detail\').classList.toggle(\'open\')">' +
             '<div class="row1">' +
