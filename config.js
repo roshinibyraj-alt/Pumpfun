@@ -3,8 +3,8 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v13 — fixed side pattern + immediate entry, alternating
-// double-size bet, no hedge, no candle signal):
+// STRATEGY (v14 — fixed side pattern + immediate entry, LINEAR
+// win/loss staking, no hedge, no candle signal):
 //   1. Whenever a new Polymarket UP/DOWN window is detected, the side
 //      is picked from BET_PATTERN, cycling one step per window —
 //      candles / detectPattern() are NOT consulted at all anymore.
@@ -22,18 +22,17 @@
 //      market to fully settle. If neither side had cleared the
 //      threshold by that last tick, resolution falls back to polling
 //      the real market price until it converges.
-//   5. Sizing alternates base -> double -> base -> double forever, one
-//      step per trade, driven by a counter that is completely
-//      INDEPENDENT of both the BET_PATTERN position and the win/loss
-//      outcome of any trade:
-//        trade 1 = ORDER_NOTIONAL_USD (base)
-//        trade 2 = ORDER_NOTIONAL_USD * DOUBLE_MULTIPLIER
-//        trade 3 = base again
-//        trade 4 = double again
-//        ...
-//      This is NOT a martingale that chases losses — it doesn't matter
-//      whether the previous trade won or lost, the toggle just flips
-//      every window.
+//   5. Sizing is a LINEAR win/loss ladder, tracked in
+//      state.currentBet:
+//        - after a LOSS: currentBet += LINEAR_STEP_USD
+//        - after a WIN:  currentBet -= LINEAR_STEP_USD, floored at
+//          ORDER_NOTIONAL_USD (never goes below the base bet)
+//      This is genuinely outcome-dependent (unlike the old alternating
+//      base/double toggle, which ignored win/loss entirely). Because
+//      resolution of a window must be known before the NEXT window's
+//      bet is sized, bot.js resolves any closed window FIRST each
+//      tick, before creating the next window or firing its entry —
+//      otherwise sizing would lag the true win/loss by one window.
 // ============================================================
 
 module.exports = {
@@ -61,15 +60,13 @@ module.exports = {
   // tick the window is seen, at whatever price is showing.
 
   // ---- Position sizing ----
-  // Base dollar notional. shares = notional / fillPrice, computed at
-  // fill time — not a fixed share count.
+  // Base dollar notional AND floor for the ladder below. shares =
+  // notional / fillPrice, computed at fill time.
   ORDER_NOTIONAL_USD: 50,
-  // Sizing alternates base -> double -> base -> double -> ... one step
-  // per trade. This toggle is driven purely by trade count — it does
-  // NOT look at whether the previous trade won or lost, and it does
-  // NOT track a losing streak. Only ever one double at a time before
-  // it resets back to base.
-  DOUBLE_MULTIPLIER: 2,
+  // Linear win/loss ladder: after a LOSS, add this much to the next
+  // bet; after a WIN, subtract this much (never going below
+  // ORDER_NOTIONAL_USD). Tracked in state.currentBet.
+  LINEAR_STEP_USD: 50,
 
   // ---- Fees ----
   // Confirmed against Polymarket's official docs (docs.polymarket.com/trading/fees):
