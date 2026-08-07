@@ -1,5 +1,5 @@
 // ============================================================
-// bot.js — fixed side-pattern + immediate-entry strategy, v13. NO
+// bot.js — fixed side-pattern + immediate-entry strategy, v14. NO
 // candle signal, NO hedge, NO entry wait, NO take-profit exit. Per
 // window:
 //   1. On new window detection, the side comes from config.BET_PATTERN
@@ -9,10 +9,12 @@
 //   2. Entry fires IMMEDIATELY, the first tick the window is seen, as
 //      a genuine TAKER buy at whatever price is showing right then.
 //      No wait, no price condition.
-//   3. Sized at $config.ORDER_NOTIONAL_USD, but alternating with
-//      state.doubleToggle: base, double, base, double, ... one step
-//      per trade, advancing regardless of win/loss and independent of
-//      patternIndex — NOT a loss-chasing martingale.
+//   3. Sized via a LINEAR win/loss ladder (state.currentBet): a LOSS
+//      adds config.LINEAR_STEP_USD to the next bet, a WIN subtracts
+//      it, floored at config.ORDER_NOTIONAL_USD. To make this
+//      genuinely reflect the most recently CLOSED window (not one
+//      further back), tick() resolves any closed window FIRST, before
+//      creating the next window and firing its entry.
 //   4. Once filled, the position rides naked all the way to real
 //      resolution — there is no take-profit exit. Every tick we
 //      snapshot both sides' live prices onto the window; whichever
@@ -45,18 +47,14 @@ function nextPatternSide(state) {
   return { side, patternLabel: pattern.join('') + ` [pos ${idx + 1}/${pattern.length}]` };
 }
 
-// Picks this trade's notional using state.doubleToggle, then flips the
-// toggle for next time. Purely a trade-count alternation — completely
-// independent of win/loss outcome and of patternIndex. Self-initializes
-// on first run.
-function nextNotional(state) {
-  if (state.doubleToggle == null) state.doubleToggle = false; // false = base next, true = double next
-  const notional = state.doubleToggle
-    ? Math.round(config.ORDER_NOTIONAL_USD * config.DOUBLE_MULTIPLIER * 100) / 100
-    : config.ORDER_NOTIONAL_USD;
-  const wasDouble = state.doubleToggle;
-  state.doubleToggle = !state.doubleToggle;
-  return { notional, wasDouble };
+// Reads the current rung of the linear win/loss ladder. Does NOT
+// mutate it — the ladder is only ever adjusted inside resolveWindow(),
+// right when a trade's outcome becomes known, so that by the time this
+// runs (for the NEXT window) it already reflects the most recently
+// resolved trade. Self-initializes to the base bet on first run.
+function currentLadderNotional(state) {
+  if (state.currentBet == null) state.currentBet = config.ORDER_NOTIONAL_USD;
+  return state.currentBet;
 }
 
 // Fires an immediate taker buy at the current price. Only ever called
@@ -66,7 +64,7 @@ function fireEntry(win, ownPrice, upTokenId, downTokenId) {
   const reason = `immediate entry — window start, firing at current price $${ownPrice.toFixed(2)}, no wait`;
   const tokenId = win.side === 'UP' ? upTokenId : downTokenId;
   win.position = strategy.openPosition(win.windowStart, win.windowEnd, win.side, tokenId, win.notional, ownPrice, reason, config);
-  log(`ENTRY (TAKER): pattern ${win.pattern} -> ${win.side} @ $${ownPrice.toFixed(2)}, $${win.notional} notional${win.isDouble ? ' (DOUBLE)' : ' (base)'} = ${win.position.shares} shares (fee $${win.position.fillFee.toFixed(5)}) — ${reason}`);
+  log(`ENTRY (TAKER): pattern ${win.pattern} -> ${win.side} @ $${ownPrice.toFixed(2)}, $${win.notional} notional (ladder) = ${win.position.shares} shares (fee $${win.position.fillFee.toFixed(5)}) — ${reason}`);
 }
 
 // Checks whether the window's LAST observed tick (closest snapshot to
@@ -123,6 +121,17 @@ async function resolveWindow(win, state) {
     pos.payout = Math.round(payout * 100000) / 100000;
     pos.pnl = Math.round((payout - cost) * 100000) / 100000;
     pos.settledAt = new Date().toISOString();
+
+    // Step the linear win/loss ladder right here, the moment the
+    // outcome is known — this must happen BEFORE the next window is
+    // sized (tick() resolves closed windows before creating the next
+    // one specifically so this update lands in time).
+    if (state.currentBet == null) state.currentBet = config.ORDER_NOTIONAL_USD;
+    if (pos.resolvedWon) {
+      state.currentBet = Math.max(config.ORDER_NOTIONAL_USD, Math.round((state.currentBet - config.LINEAR_STEP_USD) * 100) / 100);
+    } else {
+      state.currentBet = Math.round((state.currentBet + config.LINEAR_STEP_USD) * 100) / 100;
+    }
   }
 
   const pnl = Math.round((payout - cost) * 100) / 100;
@@ -152,7 +161,7 @@ async function resolveWindow(win, state) {
   });
 
   log(
-    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | pattern ${win.pattern || '(none)'} (${win.signal}) | ${traded ? `traded ${win.side} (${win.position.shares}sh @ $${win.position.fillPrice})` : 'SKIPPED (' + win.skipReason + ')'} | fees $${fees.toFixed(5)} | est. rebates $${rebates.toFixed(5)} | pnl $${pnl.toFixed(2)} | ${traded ? (isLoss ? 'LOSS' : 'WIN') : 'no trade'} | bankroll $${state.bankroll}`
+    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | pattern ${win.pattern || '(none)'} (${win.signal}) | ${traded ? `traded ${win.side} (${win.position.shares}sh @ $${win.position.fillPrice})` : 'SKIPPED (' + win.skipReason + ')'} | fees $${fees.toFixed(5)} | est. rebates $${rebates.toFixed(5)} | pnl $${pnl.toFixed(2)} | ${traded ? (isLoss ? 'LOSS' : 'WIN') : 'no trade'} | next bet -> $${state.currentBet} | bankroll $${state.bankroll}`
   );
   return true;
 }
@@ -161,6 +170,41 @@ async function tick() {
   const state = loadState();
   const nowSec = Math.floor(Date.now() / 1000);
 
+  // 1) Hand off the current window for resolution the moment its time
+  //    is up — BEFORE we look at creating the next window. Order
+  //    matters here: the linear ladder must be stepped from the
+  //    outcome of the window that just closed before we size the next
+  //    one, or sizing would lag the true win/loss by one window.
+  try {
+    if (state.currentWindow && nowSec >= state.currentWindow.windowEnd) {
+      state.pendingResolutions.push(state.currentWindow);
+      log(`Window ${state.currentWindow.windowStart} closed -> pending resolution`);
+      state.currentWindow = null;
+    }
+  } catch (e) {
+    log('ERROR handing off closed window:', e.message);
+    state.lastError = e.message;
+  }
+
+  // 2) Resolution pass — runs before any new-window sizing decision.
+  //    Isolated in its own try/catch so a hiccup here can't block the
+  //    rest of the tick.
+  try {
+    const stillPending = [];
+    for (const win of state.pendingResolutions) {
+      const resolved = await resolveWindow(win, state);
+      if (!resolved) stillPending.push(win);
+    }
+    state.pendingResolutions = stillPending;
+    if (!state.lastError) state.lastError = null;
+  } catch (e) {
+    log('ERROR in resolution pass:', e.message);
+    state.lastError = e.message;
+  }
+
+  // 3) Market snapshot, new-window creation (sizing now reflects
+  //    whatever the resolution pass above just settled), and immediate
+  //    entry firing.
   try {
     const found = await polymarket.getCurrentUpDownMarket(config.ASSET, config.WINDOW_MINUTES);
 
@@ -169,27 +213,29 @@ async function tick() {
       const { upTokenId, downTokenId } = polymarket.parseTokens(market);
 
       if (!state.currentWindow || state.currentWindow.windowStart !== windowStart) {
+        // Safety net: if for some reason step 1 didn't already catch
+        // a stale window (e.g. windowStart changed without our local
+        // clock yet reading past windowEnd), hand it off here too.
         if (state.currentWindow) {
           state.pendingResolutions.push(state.currentWindow);
-          log(`Window ${state.currentWindow.windowStart} closed -> pending resolution`);
+          log(`Window ${state.currentWindow.windowStart} closed -> pending resolution (late detection)`);
         }
 
         const { side, patternLabel } = nextPatternSide(state);
-        const { notional, wasDouble } = nextNotional(state);
+        const notional = currentLadderNotional(state);
 
         state.currentWindow = {
           windowStart, windowEnd, upTokenId, downTokenId,
           notional,
-          isDouble: wasDouble,
           pattern: patternLabel,
-          signal: wasDouble ? 'FIXED_PATTERN_DOUBLE' : 'FIXED_PATTERN_BASE',
+          signal: 'FIXED_PATTERN_LINEAR_LADDER',
           side,
           position: null,
           skipped: false,
           skipReason: null,
         };
 
-        log(`Window ${windowStart}: side ${side} (${patternLabel}), notional $${notional}${wasDouble ? ' [DOUBLE]' : ' [base]'}`);
+        log(`Window ${windowStart}: side ${side} (${patternLabel}), notional $${notional} [ladder]`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -229,31 +275,17 @@ async function tick() {
     state.lastError = e.message;
   }
 
-  // Proactively hand off the current window once its time is up, even if
-  // we haven't yet detected the NEXT window this tick — starts resolution
-  // checks promptly instead of waiting on window-rollover detection.
+  // 4) Extra safety net: in case the current window's time ran out
+  //    again during step 3 (e.g. a slow network call straddled the
+  //    boundary), catch it here too rather than waiting a full extra
+  //    poll interval.
   try {
     if (state.currentWindow && nowSec >= state.currentWindow.windowEnd) {
       state.pendingResolutions.push(state.currentWindow);
       state.currentWindow = null;
     }
   } catch (e) {
-    log('ERROR handing off closed window:', e.message);
-    state.lastError = e.message;
-  }
-
-  // Resolution pass — isolated so a hiccup above can't block resolving
-  // windows that are already closed and just waiting on convergence.
-  try {
-    const stillPending = [];
-    for (const win of state.pendingResolutions) {
-      const resolved = await resolveWindow(win, state);
-      if (!resolved) stillPending.push(win);
-    }
-    state.pendingResolutions = stillPending;
-    if (!state.lastError) state.lastError = null;
-  } catch (e) {
-    log('ERROR in resolution pass:', e.message);
+    log('ERROR handing off closed window (late):', e.message);
     state.lastError = e.message;
   }
 
@@ -261,7 +293,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (fixed pattern ${config.BET_PATTERN.join('')} + immediate entry, no hedge, no TP — rides to resolution). Bankroll: $${config.STARTING_BANKROLL} | entry fires instantly at window start | resolution win threshold $${config.RESOLUTION_WIN_THRESHOLD} | sizing alternates $${config.ORDER_NOTIONAL_USD} base / $${Math.round(config.ORDER_NOTIONAL_USD * config.DOUBLE_MULTIPLIER * 100) / 100} double, one step per trade`);
+  log(`Bot started (fixed pattern ${config.BET_PATTERN.join('')} + immediate entry, no hedge, no TP — rides to resolution). Bankroll: $${config.STARTING_BANKROLL} | entry fires instantly at window start | resolution win threshold $${config.RESOLUTION_WIN_THRESHOLD} | linear ladder: base/floor $${config.ORDER_NOTIONAL_USD}, step $${config.LINEAR_STEP_USD} (+step on loss, -step on win)`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
