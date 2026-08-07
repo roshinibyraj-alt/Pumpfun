@@ -24,7 +24,7 @@ app.get('/api/state', (req, res) => {
       BET_PATTERN: config.BET_PATTERN,
       RESOLUTION_WIN_THRESHOLD: config.RESOLUTION_WIN_THRESHOLD,
       ORDER_NOTIONAL_USD: config.ORDER_NOTIONAL_USD,
-      DOUBLE_MULTIPLIER: config.DOUBLE_MULTIPLIER,
+      LINEAR_STEP_USD: config.LINEAR_STEP_USD,
     },
     ...state,
   });
