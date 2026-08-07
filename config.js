@@ -3,36 +3,31 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v14 — fixed side pattern + immediate entry, LINEAR
-// win/loss staking, no hedge, no candle signal):
-//   1. Whenever a new Polymarket UP/DOWN window is detected, the side
-//      is picked from BET_PATTERN, cycling one step per window —
-//      candles / detectPattern() are NOT consulted at all anymore.
-//      Every window trades; nothing is ever skipped as chop/no-signal.
-//   2. Entry fires IMMEDIATELY on the first tick the window is seen —
-//      no wait, no price trigger condition. It's a genuine TAKER buy
-//      at whatever price is showing right then.
-//   3. Every entry is sized in DOLLARS, not shares:
-//      shares = notional / fillPrice (fractional shares allowed).
-//   4. NO take-profit exit — every filled position rides naked all the
-//      way to real resolution. A window resolves the instant either
-//      side's price is observed at/above RESOLUTION_WIN_THRESHOLD in
-//      the LAST tick sampled before the window closes — that side is
-//      declared the winner immediately, no waiting on the official
-//      market to fully settle. If neither side had cleared the
-//      threshold by that last tick, resolution falls back to polling
-//      the real market price until it converges.
-//   5. Sizing is a LINEAR win/loss ladder, tracked in
-//      state.currentBet:
-//        - after a LOSS: currentBet += LINEAR_STEP_USD
-//        - after a WIN:  currentBet -= LINEAR_STEP_USD, floored at
-//          ORDER_NOTIONAL_USD (never goes below the base bet)
-//      This is genuinely outcome-dependent (unlike the old alternating
-//      base/double toggle, which ignored win/loss entirely). Because
-//      resolution of a window must be known before the NEXT window's
-//      bet is sized, bot.js resolves any closed window FIRST each
-//      tick, before creating the next window or firing its entry —
-//      otherwise sizing would lag the true win/loss by one window.
+// STRATEGY (v15 — time-scheduled cheap/expensive buys, 5-minute
+// window, fixed 50 shares per order):
+//   1. Every 5-minute Polymarket UP/DOWN window is traded.
+//   2. CHEAP side (the side with the LOWER midpoint) is bought
+//      3 times during the first 90 seconds, once per 30-second
+//      block:
+//        t = 0-30s   -> buy CHEAP, 50 shares
+//        t = 30-60s  -> buy CHEAP, 50 shares
+//        t = 60-90s  -> buy CHEAP, 50 shares
+//   3. EXPENSIVE side (the side with the HIGHER midpoint) is
+//      bought 3 times late in the window:
+//        t = 210s    -> buy EXPENSIVE, 50 shares
+//        t = 240s    -> buy EXPENSIVE, 50 shares
+//        t = 270s    -> buy EXPENSIVE, 50 shares
+//   4. Cheap/expensive is re-evaluated FRESH at each scheduled
+//      tick from the live midpoints — the sides may flip mid-
+//      window and each order simply follows whichever side is
+//      cheap/expensive right then.
+//   5. Every order is exactly ORDER_SHARES (50) shares regardless
+//      of cost. No ladder, no pattern, no hedge.
+//   6. Filled entries ride naked to real resolution — no take-
+//      profit exit. Resolution: whichever side is at/above the win
+//      threshold in the last tick before close is declared the
+//      winner immediately; otherwise fall back to polling the real
+//      market price until it converges.
 // ============================================================
 
 module.exports = {
@@ -45,40 +40,34 @@ module.exports = {
 
   // ---- Market ----
   ASSET: 'btc', // 'btc' or 'eth' — must match Polymarket's slug prefix
-  WINDOW_MINUTES: 5,
+  WINDOW_MINUTES: 5, // always 5-minute windows
 
-  // ---- Side pattern ----
-  // Fixed repeating sequence of sides — one step consumed per window,
-  // wrapping back to index 0 after the last entry. 'UP' = bet up-side
-  // token, 'DOWN' = bet down-side token. NOT derived from candles or
-  // any live signal — every window trades this sequence no matter
-  // what the market is doing.
-  BET_PATTERN: ['UP', 'DOWN', 'UP', 'UP', 'DOWN', 'UP', 'DOWN', 'DOWN'], // U D U U D U D D
+  // ---- Order size ----
+  // Every scheduled buy is exactly this many shares, regardless of
+  // what the price/cost is. No scaling, no ladder.
+  ORDER_SHARES: 50,
 
-  // ---- Entry timing ----
-  // No wait, no price trigger: the entry fires immediately, the first
-  // tick the window is seen, at whatever price is showing.
+  // ---- Cheap-side schedule (first 90 seconds) ----
+  // One 50-share buy per 30-second block on the cheaper side.
+  CHEAP_BUY_BUCKETS: [
+    { start: 0,  end: 30 },
+    { start: 30, end: 60 },
+    { start: 60, end: 90 },
+  ],
 
-  // ---- Position sizing ----
-  // Base dollar notional AND floor for the ladder below. shares =
-  // notional / fillPrice, computed at fill time.
-  ORDER_NOTIONAL_USD: 50,
-  // Linear win/loss ladder: after a LOSS, add this much to the next
-  // bet; after a WIN, subtract this much (never going below
-  // ORDER_NOTIONAL_USD). Tracked in state.currentBet.
-  LINEAR_STEP_USD: 50,
+  // ---- Expensive-side schedule (late window) ----
+  // One 50-share buy at each of these seconds on the expensive side.
+  EXPENSIVE_BUY_AT_SECS: [210, 240, 270],
 
   // ---- Fees ----
   // Confirmed against Polymarket's official docs (docs.polymarket.com/trading/fees):
   //   fee = shares × feeRate × price × (1 - price), TAKERS ONLY.
-  // The ENTRY is a genuine taker fill (pays this fee) since it
-  // executes immediately rather than resting. There is no maker leg
-  // anymore (v12 removed the resting TP sell), so no rebate ever
-  // applies.
+  // Entries are genuine taker fills (they execute immediately at the
+  // current midpoint rather than resting), so this fee always applies.
   BASE_TAKER_FEE_RATE: 0.07, // Crypto category taker fee rate
 
   // ---- Resolution ----
-  // A position rides naked to real resolution — no take-profit exit.
+  // Positions ride naked to real resolution — no take-profit exit.
   // If either side's price is observed at/above RESOLUTION_WIN_THRESHOLD
   // in the last tick sampled before the window closes, that side is
   // declared the winner immediately. Otherwise resolution falls back
@@ -90,9 +79,7 @@ module.exports = {
   // ---- Loop timing ----
   // Polymarket's own docs confirm /midpoint allows 1,500 req/10s (150/s)
   // per IP. Polling every 500ms uses a small fraction of that even with
-  // two tokens checked per tick. The Binance klines call only happens
-  // once per NEW window (not every tick), so it stays well within
-  // Binance's public rate limits too.
+  // two tokens checked per tick.
   POLL_INTERVAL_MS: 500,
 
   // ---- Files ----

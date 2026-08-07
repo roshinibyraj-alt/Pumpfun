@@ -116,7 +116,7 @@
   <div class="statusbar">
     <div class="brand">
       <span class="dot"></span>
-      <h1>Pattern Terminal</h1>
+      <h1>Scheduled Terminal</h1>
     </div>
     <div class="live-price" id="livePrice">— —</div>
   </div>
@@ -138,7 +138,7 @@
   </div>
   <div class="chips">
     <div class="chip"><div class="k">Win Rate</div><div class="v" id="winRate">—</div></div>
-    <div class="chip"><div class="k">Order Size</div><div class="v" id="notional">—</div></div>
+    <div class="chip"><div class="k">Order Shares</div><div class="v" id="notional">—</div></div>
     <div class="chip"><div class="k">Trade Rate</div><div class="v" id="tradeRate">—</div></div>
     <div class="chip"><div class="k">Avg Fill Price</div><div class="v" id="avgFill">—</div></div>
   </div>
@@ -216,21 +216,18 @@
   function renderPositionArea(win, cfg, secondsRemaining) {
     const el = $('positionArea');
     if (!win) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
-    if (win.position) {
-      const pos = win.position;
-      el.innerHTML = '<div class="position-box ' + pos.status + '">' +
-        '<div class="side-line"><span class="side-tag ' + pos.side.toLowerCase() + '">' + pos.side + '</span><span>$' + pos.notional + ' notional · ' + pos.shares + ' shares</span></div>' +
-        '<div class="price-row"><span class="lbl">Fill</span><span>$' + pos.fillPrice.toFixed(2) + '</span></div>' +
-        '<span class="status-pill">' + positionStatusLabel(pos) + '</span>' +
-        '<div class="reason">' + (pos.entryReason || '') + '</div>' +
-      '</div>';
-    } else if (win.skipped) {
-      el.innerHTML = '<div class="no-trade-box">NO TRADE — ' + (win.skipReason || 'skipped') + '</div>';
-    } else if (win.side) {
-      el.innerHTML = '<div class="no-trade-box">' + win.side + ' — firing immediately…</div>';
-    } else {
-      el.innerHTML = '<div class="no-trade-box">watching for entry…</div>';
+    const entries = win.entries || [];
+    if (entries.length === 0) {
+      el.innerHTML = '<div class="no-trade-box">watching for scheduled buys…</div>';
+      return;
     }
+    el.innerHTML = entries.slice().reverse().map((pos) =>
+      '<div class="position-box ' + pos.status + '">' +
+        '<div class="side-line"><span class="side-tag ' + pos.side.toLowerCase() + '">' + pos.side + '</span><span>' + pos.shares + ' shares @ $' + pos.fillPrice.toFixed(2) + '</span></div>' +
+        '<div class="reason">' + (pos.entryReason || '') + '</div>' +
+        '<span class="status-pill">' + positionStatusLabel(pos) + '</span>' +
+      '</div>'
+    ).join('');
   }
 
   async function refresh() {
@@ -269,10 +266,13 @@
     try {
       const win = s.currentWindow;
       const cfg = s.config || {};
-      $('patternChip').textContent = win && win.pattern ? win.pattern : '— — —';
+      const cheapN = (cfg.CHEAP_BUY_BUCKETS && cfg.CHEAP_BUY_BUCKETS.length) || 3;
+      const expN = (cfg.EXPENSIVE_BUY_AT_SECS && cfg.EXPENSIVE_BUY_AT_SECS.length) || 3;
+      const totalBuys = cheapN + expN;
+      $('patternChip').textContent = win ? 'CHEAP ×' + cheapN + ' → EXPENSIVE ×' + expN : '— — —';
       const sigEl = $('signalChip');
-      sigEl.textContent = win ? win.signal : '—';
-      sigEl.className = 'signal-chip ' + (win ? signalClass(win.signal) : '');
+      sigEl.textContent = win ? ((win.entries || []).length) + ' / ' + totalBuys + ' buys placed' : '—';
+      sigEl.className = 'signal-chip';
       renderPositionArea(win, cfg, win ? win.windowEnd : null);
     } catch (e) { console.error('current window render failed', e); }
 
@@ -289,14 +289,15 @@
 
     try {
       const hist = s.windowHistory;
-      $('notional').textContent = (s.config && s.config.ORDER_NOTIONAL_USD != null) ? '$' + s.config.ORDER_NOTIONAL_USD : '—';
+      $('notional').textContent = (s.config && s.config.ORDER_SHARES != null) ? s.config.ORDER_SHARES + ' shares' : '—';
       if (hist.length) {
         const traded = hist.filter(w => w.traded);
         $('tradeRate').textContent = traded.length + ' / ' + hist.length;
         const wins = traded.filter(w => w.pnl >= 0);
         $('winRate').textContent = traded.length ? wins.length + ' / ' + traded.length : '—';
-        const withFill = traded.filter(w => w.position && w.position.fillPrice != null);
-        $('avgFill').textContent = withFill.length ? '$' + (withFill.reduce((a,w)=>a+w.position.fillPrice,0)/withFill.length).toFixed(2) : '—';
+        const fills = [];
+        for (const w of traded) for (const e of (w.entries || [])) if (e.fillPrice != null) fills.push(e.fillPrice);
+        $('avgFill').textContent = fills.length ? '$' + (fills.reduce((a,b)=>a+b,0)/fills.length).toFixed(2) : '—';
       } else {
         $('tradeRate').textContent = '—';
         $('winRate').textContent = '—';
@@ -314,19 +315,15 @@
         logEl.innerHTML = all.map((w) => {
           const cls = !w.traded ? 'skip' : (w.pnl >= 0 ? 'win' : 'loss');
           const marginPct = w.cost > 0 ? (w.pnl / w.cost) * 100 : 0;
+          const sides = w.sides || [];
           const sideTag = w.traded
-            ? '<span class="side-tag ' + w.side.toLowerCase() + '">' + w.side + '</span>'
+            ? '<span class="side-tag ' + (sides.length === 1 ? sides[0].toLowerCase() : '') + '">' + (sides.length ? sides.join('/') : '?') + '</span>'
             : '<span class="side-tag skip">no trade</span>';
-          let detailRows = '<div class="drow"><span>Pattern</span><span>' + (w.pattern || '(none)') + '</span></div>' +
-            '<div class="drow"><span>Signal</span><span>' + w.signal + '</span></div>';
-          if (w.traded && w.position) {
-            const p = w.position;
-            detailRows += '<div class="drow"><span>Notional / Shares</span><span>$' + p.notional + ' / ' + p.shares + '</span></div>' +
-              '<div class="drow"><span>Fill</span><span>$' + p.fillPrice.toFixed(2) + '</span></div>' +
-              '<div class="drow"><span>Entry reason</span><span>' + (p.entryReason || '—') + '</span></div>';
-          } else {
-            detailRows += '<div class="drow"><span>Reason</span><span>' + (w.skipReason || '—') + '</span></div>';
-          }
+          let detailRows = '<div class="drow"><span>Schedule</span><span>' + (w.signal || '(none)') + '</span></div>' +
+            '<div class="drow"><span>Entries</span><span>' + (w.entryCount || 0) + ' × 50sh</span></div>';
+          (w.entries || []).forEach((p, i) => {
+            detailRows += '<div class="drow"><span>#' + (i + 1) + ' ' + p.side + ' @ $' + p.fillPrice.toFixed(2) + '</span><span>pnl $' + (p.pnl != null ? p.pnl.toFixed(2) : '—') + '</span></div>';
+          });
           return '<div class="entry" onclick="this.querySelector(\'.entry-detail\').classList.toggle(\'open\')">' +
             '<div class="row1">' +
               '<span class="result-dot ' + cls + '"></span>' +

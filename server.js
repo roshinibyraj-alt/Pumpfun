@@ -21,10 +21,10 @@ app.get('/api/state', (req, res) => {
       TRADING_ENABLED: config.TRADING_ENABLED,
       ASSET: config.ASSET,
       WINDOW_MINUTES: config.WINDOW_MINUTES,
-      BET_PATTERN: config.BET_PATTERN,
+      ORDER_SHARES: config.ORDER_SHARES,
+      CHEAP_BUY_BUCKETS: config.CHEAP_BUY_BUCKETS,
+      EXPENSIVE_BUY_AT_SECS: config.EXPENSIVE_BUY_AT_SECS,
       RESOLUTION_WIN_THRESHOLD: config.RESOLUTION_WIN_THRESHOLD,
-      ORDER_NOTIONAL_USD: config.ORDER_NOTIONAL_USD,
-      LINEAR_STEP_USD: config.LINEAR_STEP_USD,
     },
     ...state,
   });

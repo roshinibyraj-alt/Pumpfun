@@ -1,70 +1,76 @@
 // ============================================================
-// bot.js — fixed side-pattern + immediate-entry strategy, v14. NO
-// candle signal, NO hedge, NO entry wait, NO take-profit exit. Per
-// window:
-//   1. On new window detection, the side comes from config.BET_PATTERN
-//      at state.patternIndex, which then advances (wrapping) — no
-//      candles, no strategy.detectPattern(), no CHOP/NONE skip. Every
-//      window trades.
-//   2. Entry fires IMMEDIATELY, the first tick the window is seen, as
-//      a genuine TAKER buy at whatever price is showing right then.
-//      No wait, no price condition.
-//   3. Sized via a LINEAR win/loss ladder (state.currentBet): a LOSS
-//      adds config.LINEAR_STEP_USD to the next bet, a WIN subtracts
-//      it, floored at config.ORDER_NOTIONAL_USD. To make this
-//      genuinely reflect the most recently CLOSED window (not one
-//      further back), tick() resolves any closed window FIRST, before
-//      creating the next window and firing its entry.
-//   4. Once filled, the position rides naked all the way to real
-//      resolution — there is no take-profit exit. Every tick we
-//      snapshot both sides' live prices onto the window; whichever
-//      snapshot lands closest to windowEnd is treated as "the last
-//      second of the window". If either side's price in that final
-//      snapshot is >= config.RESOLUTION_WIN_THRESHOLD, that side is
-//      declared the winner immediately at resolution time — no need
-//      to wait on the real market to fully settle. If neither side
-//      had cleared the threshold by that last tick, resolution falls
-//      back to polling the real market price until it converges.
+// bot.js — time-scheduled cheap/expensive buys, v15. Per 5-minute
+// window (300 seconds):
+//
+//   CHEAP side (the side with the LOWER midpoint), one 50-share
+//   buy per 30-second block:
+//     t = 0-30s    -> buy CHEAP, 50 shares
+//     t = 30-60s   -> buy CHEAP, 50 shares
+//     t = 60-90s   -> buy CHEAP, 50 shares
+//
+//   EXPENSIVE side (the side with the HIGHER midpoint), one
+//   50-share buy at each of:
+//     t = 210s     -> buy EXPENSIVE, 50 shares
+//     t = 240s     -> buy EXPENSIVE, 50 shares
+//     t = 270s     -> buy EXPENSIVE, 50 shares
+//
+// Cheap/expensive is re-evaluated FRESH at each scheduled tick
+// from the live midpoints — sides may flip mid-window and each
+// order simply follows whichever side is cheap/expensive right
+// then. Every order is exactly config.ORDER_SHARES (50) shares
+// regardless of cost — no ladder, no pattern, no hedge.
+//
+// Filled entries ride naked to real resolution (win = $1/share,
+// lose = $0, no take-profit exit). Resolution: whichever side's
+// price is at/above RESOLUTION_WIN_THRESHOLD in the LAST tick
+// sampled before close is declared the winner immediately;
+// otherwise fall back to polling the real market price until it
+// converges. All filled entries for the window settle together.
 // ============================================================
 
 const config = require('./config');
 const polymarket = require('./polymarket');
-const strategy = require('./strategy');
 const { loadState, saveState } = require('./state');
 
 function log(...args) {
   console.log(new Date().toISOString(), '-', ...args);
 }
 
-// Picks the next side off config.BET_PATTERN using state.patternIndex,
-// then advances the index (wrapping). Self-initializes on first run.
-function nextPatternSide(state) {
-  if (state.patternIndex == null) state.patternIndex = 0;
-  const pattern = config.BET_PATTERN;
-  const idx = state.patternIndex % pattern.length;
-  const side = pattern[idx];
-  state.patternIndex = (state.patternIndex + 1) % pattern.length;
-  return { side, patternLabel: pattern.join('') + ` [pos ${idx + 1}/${pattern.length}]` };
+function priceOf(side, upPrice, downPrice) {
+  return side === 'UP' ? upPrice : downPrice;
+}
+// Cheap = lower midpoint, Expensive = higher midpoint.
+function cheapSide(upPrice, downPrice) { return upPrice <= downPrice ? 'UP' : 'DOWN'; }
+function expensiveSide(upPrice, downPrice) { return upPrice >= downPrice ? 'UP' : 'DOWN'; }
+
+// Builds an ALREADY-FILLED entry at the moment a scheduled buy fires.
+// Entries are immediate taker fills at the current midpoint; the
+// size is always exactly config.ORDER_SHARES shares.
+function makeEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
+  const tokenId = side === 'UP' ? upTokenId : downTokenId;
+  const fillFee = Math.round(shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice) * 100000) / 100000;
+  return {
+    side,
+    tokenId,
+    shares,
+    fillPrice,
+    fillFee,
+    filledAt: new Date().toISOString(),
+    entryReason: reason,
+    status: 'filled', // filled -> resolved_win | resolved_loss
+    resolvedWon: null,
+    cost: null,
+    payout: null,
+    pnl: null,
+    settledAt: null,
+  };
 }
 
-// Reads the current rung of the linear win/loss ladder. Does NOT
-// mutate it — the ladder is only ever adjusted inside resolveWindow(),
-// right when a trade's outcome becomes known, so that by the time this
-// runs (for the NEXT window) it already reflects the most recently
-// resolved trade. Self-initializes to the base bet on first run.
-function currentLadderNotional(state) {
-  if (state.currentBet == null) state.currentBet = config.ORDER_NOTIONAL_USD;
-  return state.currentBet;
-}
-
-// Fires an immediate taker buy at the current price. Only ever called
-// once, the first tick a window's position is still null. Mutates
-// win.position in place.
-function fireEntry(win, ownPrice, upTokenId, downTokenId) {
-  const reason = `immediate entry — window start, firing at current price $${ownPrice.toFixed(2)}, no wait`;
-  const tokenId = win.side === 'UP' ? upTokenId : downTokenId;
-  win.position = strategy.openPosition(win.windowStart, win.windowEnd, win.side, tokenId, win.notional, ownPrice, reason, config);
-  log(`ENTRY (TAKER): pattern ${win.pattern} -> ${win.side} @ $${ownPrice.toFixed(2)}, $${win.notional} notional (ladder) = ${win.position.shares} shares (fee $${win.position.fillFee.toFixed(5)}) — ${reason}`);
+// Records a scheduled taker buy on win.entries.
+function fireEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
+  const entry = makeEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason);
+  win.entries.push(entry);
+  log(`ENTRY (TAKER): ${side} ${shares}sh @ $${fillPrice.toFixed(2)} — ${reason}`);
 }
 
 // Checks whether the window's LAST observed tick (closest snapshot to
@@ -83,9 +89,9 @@ function immediateWinnerFromLastTick(win) {
 // RESOLUTION_WIN_THRESHOLD — if so, that side is declared the winner
 // immediately with no extra network call. Otherwise falls back to
 // polling the real market price (no fallback beyond that — waits if
-// still ambiguous). Settles the single position (if any was taken) at
-// a fixed notional. Returns true if resolved this call, false if
-// still waiting on convergence.
+// still ambiguous). Settles ALL filled entries of the window together
+// (win = $1/share, lose = $0). Returns true if resolved this call,
+// false if still waiting on convergence.
 async function resolveWindow(win, state) {
   let wonSide = immediateWinnerFromLastTick(win);
 
@@ -103,35 +109,21 @@ async function resolveWindow(win, state) {
     else return false; // not converged yet, try again next tick
   }
 
-  let cost = 0, payout = 0, fees = 0, rebates = 0;
-  const pos = win.position;
-  const traded = !!pos;
+  const entries = win.entries || [];
+  let cost = 0, payout = 0, fees = 0;
+  const traded = entries.length > 0;
 
-  if (pos) {
-    // Position rides naked all the way to resolution — no TP exit.
+  for (const pos of entries) {
     const f = pos.fillFee || 0;
-    const r = pos.fillRebate || 0;
-    cost = pos.shares * pos.fillPrice + f;
-    payout = (pos.side === wonSide ? pos.shares * 1 : 0) + r;
+    cost += pos.shares * pos.fillPrice + f;
+    payout += (pos.side === wonSide ? pos.shares * 1 : 0);
+    fees += f;
     pos.resolvedWon = pos.side === wonSide;
     pos.status = pos.resolvedWon ? 'resolved_win' : 'resolved_loss';
-    fees += f;
-    rebates += r;
-    pos.cost = Math.round(cost * 100000) / 100000;
-    pos.payout = Math.round(payout * 100000) / 100000;
-    pos.pnl = Math.round((payout - cost) * 100000) / 100000;
+    pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
+    pos.payout = Math.round((pos.side === wonSide ? pos.shares : 0) * 100000) / 100000;
+    pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
     pos.settledAt = new Date().toISOString();
-
-    // Step the linear win/loss ladder right here, the moment the
-    // outcome is known — this must happen BEFORE the next window is
-    // sized (tick() resolves closed windows before creating the next
-    // one specifically so this update lands in time).
-    if (state.currentBet == null) state.currentBet = config.ORDER_NOTIONAL_USD;
-    if (pos.resolvedWon) {
-      state.currentBet = Math.max(config.ORDER_NOTIONAL_USD, Math.round((state.currentBet - config.LINEAR_STEP_USD) * 100) / 100);
-    } else {
-      state.currentBet = Math.round((state.currentBet + config.LINEAR_STEP_USD) * 100) / 100;
-    }
   }
 
   const pnl = Math.round((payout - cost) * 100) / 100;
@@ -141,17 +133,13 @@ async function resolveWindow(win, state) {
   state.windowHistory.push({
     windowStart: win.windowStart,
     windowEnd: win.windowEnd,
-    pattern: win.pattern,
     signal: win.signal,
-    side: win.side,
-    traded,
-    skipped: win.skipped,
-    skipReason: win.skipReason,
-    notional: win.notional,
-    position: win.position,
+    entries,
+    entryCount: entries.length,
+    sides: entries.map((e) => e.side),
     wonSide,
+    traded,
     totalFees: Math.round(fees * 100000) / 100000,
-    totalRebates: Math.round(rebates * 100000) / 100000,
     payout: Math.round(payout * 100) / 100,
     cost: Math.round(cost * 100) / 100,
     pnl,
@@ -161,139 +149,159 @@ async function resolveWindow(win, state) {
   });
 
   log(
-    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | pattern ${win.pattern || '(none)'} (${win.signal}) | ${traded ? `traded ${win.side} (${win.position.shares}sh @ $${win.position.fillPrice})` : 'SKIPPED (' + win.skipReason + ')'} | fees $${fees.toFixed(5)} | est. rebates $${rebates.toFixed(5)} | pnl $${pnl.toFixed(2)} | ${traded ? (isLoss ? 'LOSS' : 'WIN') : 'no trade'} | next bet -> $${state.currentBet} | bankroll $${state.bankroll}`
+    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | ${entries.length} entries (${entries.map((e) => e.side).join(', ') || 'none'}) | payout $${payout.toFixed(2)} | cost $${cost.toFixed(2)} | fees $${fees.toFixed(5)} | pnl $${pnl.toFixed(2)} | bankroll $${state.bankroll}`
   );
   return true;
 }
 
+let tickRunning = false;
 async function tick() {
-  const state = loadState();
-  const nowSec = Math.floor(Date.now() / 1000);
-
-  // 1) Hand off the current window for resolution the moment its time
-  //    is up — BEFORE we look at creating the next window. Order
-  //    matters here: the linear ladder must be stepped from the
-  //    outcome of the window that just closed before we size the next
-  //    one, or sizing would lag the true win/loss by one window.
+  if (tickRunning) return; // never overlap async ticks — a slow network call
+  tickRunning = true;
   try {
-    if (state.currentWindow && nowSec >= state.currentWindow.windowEnd) {
-      state.pendingResolutions.push(state.currentWindow);
-      log(`Window ${state.currentWindow.windowStart} closed -> pending resolution`);
-      state.currentWindow = null;
+    const state = loadState();
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    // 1) Hand off the current window for resolution the moment its time
+    //    is up — BEFORE we look at creating the next window.
+    try {
+      if (state.currentWindow && nowSec >= state.currentWindow.windowEnd) {
+        state.pendingResolutions.push(state.currentWindow);
+        log(`Window ${state.currentWindow.windowStart} closed -> pending resolution`);
+        state.currentWindow = null;
+      }
+    } catch (e) {
+      log('ERROR handing off closed window:', e.message);
+      state.lastError = e.message;
     }
-  } catch (e) {
-    log('ERROR handing off closed window:', e.message);
-    state.lastError = e.message;
-  }
 
-  // 2) Resolution pass — runs before any new-window sizing decision.
-  //    Isolated in its own try/catch so a hiccup here can't block the
-  //    rest of the tick.
-  try {
-    const stillPending = [];
-    for (const win of state.pendingResolutions) {
-      const resolved = await resolveWindow(win, state);
-      if (!resolved) stillPending.push(win);
+    // 2) Resolution pass — isolated in its own try/catch so a hiccup
+    //    here can't block the rest of the tick.
+    try {
+      const stillPending = [];
+      for (const win of state.pendingResolutions) {
+        const resolved = await resolveWindow(win, state);
+        if (!resolved) stillPending.push(win);
+      }
+      state.pendingResolutions = stillPending;
+      if (!state.lastError) state.lastError = null;
+    } catch (e) {
+      log('ERROR in resolution pass:', e.message);
+      state.lastError = e.message;
     }
-    state.pendingResolutions = stillPending;
-    if (!state.lastError) state.lastError = null;
-  } catch (e) {
-    log('ERROR in resolution pass:', e.message);
-    state.lastError = e.message;
-  }
 
-  // 3) Market snapshot, new-window creation (sizing now reflects
-  //    whatever the resolution pass above just settled), and immediate
-  //    entry firing.
-  try {
-    const found = await polymarket.getCurrentUpDownMarket(config.ASSET, config.WINDOW_MINUTES);
+    // 3) Market snapshot, new-window creation, and scheduled entries.
+    try {
+      const found = await polymarket.getCurrentUpDownMarket(config.ASSET, config.WINDOW_MINUTES);
 
-    if (found) {
-      const { market, windowStart, windowEnd } = found;
-      const { upTokenId, downTokenId } = polymarket.parseTokens(market);
+      if (found) {
+        const { market, windowStart, windowEnd } = found;
+        const { upTokenId, downTokenId } = polymarket.parseTokens(market);
 
-      if (!state.currentWindow || state.currentWindow.windowStart !== windowStart) {
-        // Safety net: if for some reason step 1 didn't already catch
-        // a stale window (e.g. windowStart changed without our local
-        // clock yet reading past windowEnd), hand it off here too.
-        if (state.currentWindow) {
-          state.pendingResolutions.push(state.currentWindow);
-          log(`Window ${state.currentWindow.windowStart} closed -> pending resolution (late detection)`);
+        if (!state.currentWindow || state.currentWindow.windowStart !== windowStart) {
+          // Safety net: if for some reason step 1 didn't already catch
+          // a stale window, hand it off here too.
+          if (state.currentWindow) {
+            state.pendingResolutions.push(state.currentWindow);
+            log(`Window ${state.currentWindow.windowStart} closed -> pending resolution (late detection)`);
+          }
+
+          state.currentWindow = {
+            windowStart,
+            windowEnd,
+            upTokenId,
+            downTokenId,
+            signal: 'TIME_SCHEDULED_CHEAP_EXPENSIVE',
+            entries: [],  // every 50-share order taken this window
+            fired: [],    // schedule keys already executed: cheap-0/1/2, exp-210/240/270
+            finalUpPrice: null,
+            finalDownPrice: null,
+          };
+
+          log(`Window ${windowStart}: time-scheduled cheap/expensive — CHEAP x${config.CHEAP_BUY_BUCKETS.length} in first 90s, EXPENSIVE @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s, ${config.ORDER_SHARES}sh per order`);
         }
 
-        const { side, patternLabel } = nextPatternSide(state);
-        const notional = currentLadderNotional(state);
+        const [upPrice, downPrice] = await Promise.all([
+          polymarket.getMidpoint(upTokenId),
+          polymarket.getMidpoint(downTokenId),
+        ]);
 
-        state.currentWindow = {
-          windowStart, windowEnd, upTokenId, downTokenId,
-          notional,
-          pattern: patternLabel,
-          signal: 'FIXED_PATTERN_LINEAR_LADDER',
-          side,
-          position: null,
-          skipped: false,
-          skipReason: null,
+        state.lastCheck = {
+          timestamp: new Date().toISOString(),
+          windowStart,
+          windowEnd,
+          secondsRemaining: windowEnd - nowSec,
+          upPrice,
+          downPrice,
         };
 
-        log(`Window ${windowStart}: side ${side} (${patternLabel}), notional $${notional} [ladder]`);
+        const win = state.currentWindow;
+
+        if (win && nowSec < windowEnd) {
+          const elapsed = nowSec - win.windowStart;
+
+          // CHEAP — one 50-share buy per 30-second block in the first 90s.
+          // Side re-evaluated fresh here, so it can flip between blocks.
+          config.CHEAP_BUY_BUCKETS.forEach((bucket, i) => {
+            const key = 'cheap-' + i;
+            if (win.fired.includes(key)) return;
+            if (elapsed >= bucket.start && elapsed < bucket.end) {
+              const side = cheapSide(upPrice, downPrice);
+              win.fired.push(key);
+              fireEntry(win, side, config.ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
+                `cheap buy #${i + 1} — t ${bucket.start}-${bucket.end}s (${side} is cheap at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
+            }
+          });
+
+          // EXPENSIVE — one 50-share buy at each scheduled second. Side
+          // re-evaluated fresh at each tick, so it can flip between buys.
+          config.EXPENSIVE_BUY_AT_SECS.forEach((sec) => {
+            const key = 'exp-' + sec;
+            if (win.fired.includes(key)) return;
+            if (elapsed >= sec) {
+              const side = expensiveSide(upPrice, downPrice);
+              win.fired.push(key);
+              fireEntry(win, side, config.ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
+                `expensive buy @ t=${sec}s (${side} is expensive at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
+            }
+          });
+
+          // Snapshot both sides' prices on every tick while the window is
+          // still open. Whichever snapshot ends up closest to windowEnd is
+          // what resolveWindow() treats as "the last second of the window".
+          win.finalUpPrice = upPrice;
+          win.finalDownPrice = downPrice;
+        }
+      } else {
+        log('No live market found for current window yet.');
       }
-
-      const [upPrice, downPrice] = await Promise.all([
-        polymarket.getMidpoint(upTokenId),
-        polymarket.getMidpoint(downTokenId),
-      ]);
-
-      state.lastCheck = {
-        timestamp: new Date().toISOString(),
-        windowStart,
-        windowEnd,
-        secondsRemaining: windowEnd - nowSec,
-        upPrice,
-        downPrice,
-      };
-
-      const win = state.currentWindow;
-
-      if (win.side && !win.position) {
-        const ownPrice = win.side === 'UP' ? upPrice : downPrice;
-        fireEntry(win, ownPrice, upTokenId, downTokenId);
-      }
-
-      // Snapshot both sides' prices on every tick while the window is
-      // still open. Whichever snapshot ends up closest to windowEnd is
-      // what resolveWindow() treats as "the last second of the
-      // window" for immediate-winner detection.
-      if (nowSec < windowEnd) {
-        win.finalUpPrice = upPrice;
-        win.finalDownPrice = downPrice;
-      }
-    } else {
-      log('No live market found for current window yet.');
+    } catch (e) {
+      log('ERROR taking live snapshot / checking current window:', e.message);
+      state.lastError = e.message;
     }
-  } catch (e) {
-    log('ERROR taking live snapshot / checking current window:', e.message);
-    state.lastError = e.message;
-  }
 
-  // 4) Extra safety net: in case the current window's time ran out
-  //    again during step 3 (e.g. a slow network call straddled the
-  //    boundary), catch it here too rather than waiting a full extra
-  //    poll interval.
-  try {
-    if (state.currentWindow && nowSec >= state.currentWindow.windowEnd) {
-      state.pendingResolutions.push(state.currentWindow);
-      state.currentWindow = null;
+    // 4) Extra safety net: in case the current window's time ran out
+    //    again during step 3 (e.g. a slow network call straddled the
+    //    boundary), catch it here too rather than waiting a full extra
+    //    poll interval.
+    try {
+      if (state.currentWindow && nowSec >= state.currentWindow.windowEnd) {
+        state.pendingResolutions.push(state.currentWindow);
+        state.currentWindow = null;
+      }
+    } catch (e) {
+      log('ERROR handing off closed window (late):', e.message);
+      state.lastError = e.message;
     }
-  } catch (e) {
-    log('ERROR handing off closed window (late):', e.message);
-    state.lastError = e.message;
-  }
 
-  saveState(state);
+    saveState(state);
+  } finally {
+    tickRunning = false;
+  }
 }
 
 function startBotLoop() {
-  log(`Bot started (fixed pattern ${config.BET_PATTERN.join('')} + immediate entry, no hedge, no TP — rides to resolution). Bankroll: $${config.STARTING_BANKROLL} | entry fires instantly at window start | resolution win threshold $${config.RESOLUTION_WIN_THRESHOLD} | linear ladder: base/floor $${config.ORDER_NOTIONAL_USD}, step $${config.LINEAR_STEP_USD} (+step on loss, -step on win)`);
+  log(`Bot started (time-scheduled cheap/expensive, ${config.WINDOW_MINUTES}-min window). Bankroll: $${config.STARTING_BANKROLL} | ${config.ORDER_SHARES}sh per order | CHEAP: ${config.CHEAP_BUY_BUCKETS.length} buys in first 90s (${config.CHEAP_BUY_BUCKETS.map((b) => b.start + '-' + b.end).join(' / ')}) | EXPENSIVE: ${config.EXPENSIVE_BUY_AT_SECS.length} buys @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s | rides to resolution, no TP`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
