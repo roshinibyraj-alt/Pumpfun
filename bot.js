@@ -9,15 +9,16 @@
 //     t = 90s      -> buy CHEAP, 50 shares
 //
 //   EXPENSIVE side (the side with the HIGHER midpoint), one
-//   50-share buy at each of:
-//     t = 210s     -> buy EXPENSIVE, 50 shares
-//     t = 240s     -> buy EXPENSIVE, 50 shares
-//     t = 270s     -> buy EXPENSIVE, 50 shares
+//   100-share buy at each of:
+//     t = 210s     -> buy EXPENSIVE, 100 shares
+//     t = 240s     -> buy EXPENSIVE, 100 shares
+//     t = 270s     -> buy EXPENSIVE, 100 shares
 //
 // Cheap/expensive is re-evaluated FRESH at each scheduled tick
 // from the live midpoints — sides may flip mid-window and each
 // order simply follows whichever side is cheap/expensive right
-// then. Every order is exactly config.ORDER_SHARES (50) shares
+// then. Cheap buys are exactly config.CHEAP_ORDER_SHARES (50) shares,
+// expensive buys exactly config.EXPENSIVE_ORDER_SHARES (100) shares,
 // regardless of cost — no ladder, no pattern, no hedge.
 //
 // FEES & REBATES (docs.polymarket.com/trading/fees + maker-rebates):
@@ -59,7 +60,8 @@ function expensiveSide(upPrice, downPrice) { return upPrice >= downPrice ? 'UP' 
 
 // Builds an ALREADY-FILLED entry at the moment a scheduled buy fires.
 // Entries fill at the current midpoint; size is always exactly
-// config.ORDER_SHARES shares. Fee/rebate follow config.ENTRY_IS_MAKER
+// config.CHEAP_ORDER_SHARES / config.EXPENSIVE_ORDER_SHARES shares.
+// Fee/rebate follow config.ENTRY_IS_MAKER
 // (see the header comment — taker default, maker opt-in).
 function makeEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
@@ -288,7 +290,7 @@ async function tick() {
             finalDownPrice: null,
           };
 
-          log(`Window ${windowStart}: CHEAP @ ${config.CHEAP_BUY_AT_SECS.join('/')}s, EXPENSIVE @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s, ${config.ORDER_SHARES}sh per order | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
+          log(`Window ${windowStart}: CHEAP ${config.CHEAP_ORDER_SHARES}sh @ ${config.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${config.EXPENSIVE_ORDER_SHARES}sh @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
         }
 
         const [upPrice, downPrice] = await Promise.all([
@@ -320,7 +322,7 @@ async function tick() {
             if (elapsed >= sec && elapsed < sec + 30) {
               const side = cheapSide(upPrice, downPrice);
               win.fired.push(key);
-              fireEntry(win, side, config.ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
+              fireEntry(win, side, config.CHEAP_ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
                 `cheap buy #${i + 1} — t=${sec}s (${side} is cheap at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
             }
           });
@@ -333,7 +335,7 @@ async function tick() {
             if (elapsed >= sec && elapsed < sec + 30) {
               const side = expensiveSide(upPrice, downPrice);
               win.fired.push(key);
-              fireEntry(win, side, config.ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
+              fireEntry(win, side, config.EXPENSIVE_ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
                 `expensive buy @ t=${sec}s (${side} is expensive at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
             }
           });
@@ -373,7 +375,7 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (time-scheduled cheap/expensive, ${config.WINDOW_MINUTES}-min window). Bankroll: $${config.STARTING_BANKROLL} | ${config.ORDER_SHARES}sh per order | CHEAP @ ${config.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'} | rides to resolution, no TP`);
+  log(`Bot started (time-scheduled cheap/expensive, ${config.WINDOW_MINUTES}-min window). Bankroll: $${config.STARTING_BANKROLL} | CHEAP ${config.CHEAP_ORDER_SHARES}sh @ ${config.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${config.EXPENSIVE_ORDER_SHARES}sh @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'} | rides to resolution, no TP`);
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }

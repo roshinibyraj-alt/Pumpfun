@@ -3,8 +3,8 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v16 — time-scheduled cheap/expensive buys, 5-minute
-// window, fixed 50 shares per order):
+// STRATEGY (v17 — time-scheduled cheap/expensive buys, 5-minute
+// window, fixed share sizes per side):
 //   1. Every 5-minute Polymarket UP/DOWN window is traded.
 //   2. CHEAP side (the side with the LOWER midpoint) is bought
 //      once at each of these seconds after window start:
@@ -13,15 +13,16 @@
 //        t = 90s    -> buy CHEAP, 50 shares
 //   3. EXPENSIVE side (the side with the HIGHER midpoint) is
 //      bought once at each of:
-//        t = 210s   -> buy EXPENSIVE, 50 shares
-//        t = 240s   -> buy EXPENSIVE, 50 shares
-//        t = 270s   -> buy EXPENSIVE, 50 shares
+//        t = 210s   -> buy EXPENSIVE, 100 shares
+//        t = 240s   -> buy EXPENSIVE, 100 shares
+//        t = 270s   -> buy EXPENSIVE, 100 shares
 //   4. Cheap/expensive is re-evaluated FRESH at each scheduled
 //      tick from the live midpoints — the sides may flip mid-
 //      window and each order simply follows whichever side is
 //      cheap/expensive right then.
-//   5. Every order is exactly ORDER_SHARES (50) shares regardless
-//      of cost. No ladder, no pattern, no hedge.
+//   5. Every cheap buy is exactly CHEAP_ORDER_SHARES (50) shares and
+//      every expensive buy is exactly EXPENSIVE_ORDER_SHARES (100)
+//      shares, regardless of cost. No ladder, no pattern, no hedge.
 //   6. Fees/rebates (per docs.polymarket.com/trading/fees and
 //      docs.polymarket.com/programs/maker-rebates):
 //        - Crypto category: taker fee rate = 0.07
@@ -55,7 +56,9 @@ module.exports = {
   // ---- Order size ----
   // Every scheduled buy is exactly this many shares, regardless of
   // what the price/cost is. No scaling, no ladder.
-  ORDER_SHARES: 50,
+  // CHEAP side: 50 shares per buy. EXPENSIVE side: 100 shares per buy.
+  CHEAP_ORDER_SHARES: 50,
+  EXPENSIVE_ORDER_SHARES: 100,
 
   // ---- Cheap-side schedule ----
   // One 50-share buy on the cheaper side at each of these seconds
@@ -63,7 +66,7 @@ module.exports = {
   CHEAP_BUY_AT_SECS: [30, 60, 90],
 
   // ---- Expensive-side schedule (late window) ----
-  // One 50-share buy on the expensive side at each of these seconds.
+  // One 100-share buy on the expensive side at each of these seconds.
   EXPENSIVE_BUY_AT_SECS: [210, 240, 270],
 
   // ---- Fees & rebates (Polymarket docs, Crypto category) ----
