@@ -1,18 +1,18 @@
 // ============================================================
-// bot.js — time-scheduled cheap/expensive buys, v16. Per 5-minute
-// window (300 seconds):
+// bot.js — time-scheduled cheap/expensive buys, v17. Per 15-minute
+// window (900 seconds), schedule scaled ×3 from the 5-minute version:
 //
 //   CHEAP side (the side with the LOWER midpoint), one 50-share
 //   buy at each of:
-//     t = 30s      -> buy CHEAP, 50 shares
-//     t = 60s      -> buy CHEAP, 50 shares
 //     t = 90s      -> buy CHEAP, 50 shares
+//     t = 180s     -> buy CHEAP, 50 shares
+//     t = 270s     -> buy CHEAP, 50 shares
 //
 //   EXPENSIVE side (the side with the HIGHER midpoint), one
 //   100-share buy at each of:
-//     t = 210s     -> buy EXPENSIVE, 100 shares
-//     t = 240s     -> buy EXPENSIVE, 100 shares
-//     t = 270s     -> buy EXPENSIVE, 100 shares
+//     t = 630s     -> buy EXPENSIVE, 100 shares
+//     t = 720s     -> buy EXPENSIVE, 100 shares
+//     t = 810s     -> buy EXPENSIVE, 100 shares
 //
 // Cheap/expensive is re-evaluated FRESH at each scheduled tick
 // from the live midpoints — sides may flip mid-window and each
@@ -285,7 +285,7 @@ async function tick() {
             downTokenId,
             signal: 'TIME_SCHEDULED_CHEAP_EXPENSIVE',
             entries: [],  // every 50-share order taken this window
-            fired: [],    // schedule keys already executed: cheap-30/60/90, exp-210/240/270
+            fired: [],    // schedule keys already executed: cheap-90/180/270, exp-630/720/810
             finalUpPrice: null,
             finalDownPrice: null,
           };
@@ -313,13 +313,14 @@ async function tick() {
           const elapsed = nowSec - win.windowStart;
 
           // CHEAP — one 50-share buy at each scheduled second. Each has a
-          // 30s validity window (sec .. sec+30) so a mid-window restart
-          // doesn't dump all missed cheap buys at once. Side re-evaluated
-          // fresh here, so it can flip between buys.
+          // BUY_FIRE_VALIDITY_SECS validity window (sec .. sec+validity)
+          // so a mid-window restart doesn't dump all missed cheap buys at
+          // once. Side re-evaluated fresh here, so it can flip between
+          // buys.
           config.CHEAP_BUY_AT_SECS.forEach((sec, i) => {
             const key = 'cheap-' + sec;
             if (win.fired.includes(key)) return;
-            if (elapsed >= sec && elapsed < sec + 30) {
+            if (elapsed >= sec && elapsed < sec + config.BUY_FIRE_VALIDITY_SECS) {
               const side = cheapSide(upPrice, downPrice);
               win.fired.push(key);
               fireEntry(win, side, config.CHEAP_ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
@@ -327,12 +328,13 @@ async function tick() {
             }
           });
 
-          // EXPENSIVE — one 50-share buy at each scheduled second. Each
-          // also gets a 30s validity window. Side re-evaluated fresh.
+          // EXPENSIVE — one 100-share buy at each scheduled second. Each
+          // also gets a BUY_FIRE_VALIDITY_SECS validity window. Side
+          // re-evaluated fresh.
           config.EXPENSIVE_BUY_AT_SECS.forEach((sec) => {
             const key = 'exp-' + sec;
             if (win.fired.includes(key)) return;
-            if (elapsed >= sec && elapsed < sec + 30) {
+            if (elapsed >= sec && elapsed < sec + config.BUY_FIRE_VALIDITY_SECS) {
               const side = expensiveSide(upPrice, downPrice);
               win.fired.push(key);
               fireEntry(win, side, config.EXPENSIVE_ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,

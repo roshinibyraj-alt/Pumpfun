@@ -314,7 +314,7 @@
       const cheapN = (cfg.CHEAP_BUY_AT_SECS && cfg.CHEAP_BUY_AT_SECS.length) || 3;
       const expN = (cfg.EXPENSIVE_BUY_AT_SECS && cfg.EXPENSIVE_BUY_AT_SECS.length) || 3;
       const totalBuys = cheapN + expN;
-      $('patternChip').textContent = win ? 'CHEAP @ ' + (cfg.CHEAP_BUY_AT_SECS || [30,60,90]).join('/') + 's' : '— — —';
+      $('patternChip').textContent = win ? 'CHEAP @ ' + (cfg.CHEAP_BUY_AT_SECS || [90,180,270]).join('/') + 's' : '— — —';
       const sigEl = $('signalChip');
       sigEl.textContent = win ? ((win.entries || []).length) + ' / ' + totalBuys + ' buys placed' : '—';
       sigEl.className = 'signal-chip';
@@ -354,7 +354,7 @@
       $('feesPaid').textContent = '$' + (s.totalFees || 0).toFixed(2);
       $('rebates').textContent = '$' + (s.totalRebates || 0).toFixed(2);
       const cfgS = s.config || {};
-      $('schedule').textContent = (cfgS.CHEAP_BUY_AT_SECS || [30,60,90]).join('/') + 's → ' + (cfgS.EXPENSIVE_BUY_AT_SECS || [210,240,270]).join('/') + 's';
+      $('schedule').textContent = (cfgS.CHEAP_BUY_AT_SECS || [90,180,270]).join('/') + 's → ' + (cfgS.EXPENSIVE_BUY_AT_SECS || [630,720,810]).join('/') + 's';
       $('entryMode').textContent = cfgS.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER';
     } catch (e) { console.error('extra chips render failed', e); }
 

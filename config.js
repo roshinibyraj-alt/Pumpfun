@@ -3,19 +3,21 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v17 — time-scheduled cheap/expensive buys, 5-minute
+// STRATEGY (v18 — time-scheduled cheap/expensive buys, 15-minute
 // window, fixed share sizes per side):
-//   1. Every 5-minute Polymarket UP/DOWN window is traded.
+//   1. Every 15-minute Polymarket UP/DOWN window is traded.
+//      (Changed from 5-minute: all buy timings scaled ×3, bet sizes
+//      unchanged.)
 //   2. CHEAP side (the side with the LOWER midpoint) is bought
 //      once at each of these seconds after window start:
-//        t = 30s    -> buy CHEAP, 50 shares
-//        t = 60s    -> buy CHEAP, 50 shares
 //        t = 90s    -> buy CHEAP, 50 shares
+//        t = 180s   -> buy CHEAP, 50 shares
+//        t = 270s   -> buy CHEAP, 50 shares
 //   3. EXPENSIVE side (the side with the HIGHER midpoint) is
 //      bought once at each of:
-//        t = 210s   -> buy EXPENSIVE, 100 shares
-//        t = 240s   -> buy EXPENSIVE, 100 shares
-//        t = 270s   -> buy EXPENSIVE, 100 shares
+//        t = 630s   -> buy EXPENSIVE, 100 shares
+//        t = 720s   -> buy EXPENSIVE, 100 shares
+//        t = 810s   -> buy EXPENSIVE, 100 shares
 //   4. Cheap/expensive is re-evaluated FRESH at each scheduled
 //      tick from the live midpoints — the sides may flip mid-
 //      window and each order simply follows whichever side is
@@ -51,7 +53,7 @@ module.exports = {
 
   // ---- Market ----
   ASSET: 'btc', // 'btc' or 'eth' — must match Polymarket's slug prefix
-  WINDOW_MINUTES: 5, // always 5-minute windows
+  WINDOW_MINUTES: 15, // 15-minute windows (was 5 — timings scaled ×3)
 
   // ---- Order size ----
   // Every scheduled buy is exactly this many shares, regardless of
@@ -62,12 +64,20 @@ module.exports = {
 
   // ---- Cheap-side schedule ----
   // One 50-share buy on the cheaper side at each of these seconds
-  // after window start (NOT at t=0 — first buy is at the 30th sec).
-  CHEAP_BUY_AT_SECS: [30, 60, 90],
+  // after window start (NOT at t=0 — first buy is at the 90th sec).
+  // Scaled ×3 from the 5-minute schedule [30, 60, 90].
+  CHEAP_BUY_AT_SECS: [90, 180, 270],
 
   // ---- Expensive-side schedule (late window) ----
   // One 100-share buy on the expensive side at each of these seconds.
-  EXPENSIVE_BUY_AT_SECS: [210, 240, 270],
+  // Scaled ×3 from the 5-minute schedule [210, 240, 270].
+  EXPENSIVE_BUY_AT_SECS: [630, 720, 810],
+
+  // ---- Buy fire validity ----
+  // Each scheduled buy may fire during this many seconds after its
+  // scheduled second, so a mid-window restart doesn't dump all missed
+  // buys at once. Scaled ×3 with the window (was 30s on 5-minute).
+  BUY_FIRE_VALIDITY_SECS: 90,
 
   // ---- Fees & rebates (Polymarket docs, Crypto category) ----
   // Taker fee = shares x BASE_TAKER_FEE_RATE x price x (1 - price).

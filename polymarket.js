@@ -1,5 +1,5 @@
 // ============================================================
-// polymarket.js — finds the currently-live BTC/ETH 5-min
+// polymarket.js — finds the currently-live BTC/ETH 15-min
 // up/down market and reads its prices, using Polymarket's
 // public, keyless APIs (Gamma for market info, CLOB for prices).
 // ============================================================
