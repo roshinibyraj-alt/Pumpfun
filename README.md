@@ -1,123 +1,78 @@
-# pump.fun Demo Trending Bot (Paper Trading — No Real Money)
+# Polymarket BTC/ETH UP/DOWN — 15-Minute Paper Trading Bot
 
-This bot watches live pump.fun trade activity and, when a coin crosses your
-"trending" thresholds, it **logs a simulated buy**. It never touches a real
-wallet, private key, or real funds. It's for testing whether your strategy
-even makes sense before you risk anything.
+Time-scheduled cheap/expensive buys on Polymarket's **15-minute** BTC (or ETH)
+UP/DOWN markets. **Paper trading only** — the bot reads live midpoint prices
+and simulates fills; it never holds a wallet, private key, or real funds.
 
----
+## How it works
 
-## Step 0 — Required: get a PumpPortal API key (do this first)
+Every 15-minute window (aligned to :00/:15/:30/:45) the bot places up to 6
+simulated taker buys:
 
-Token-creation events are free with no key. But the actual **trade data**
-(needed to detect anything "trending" and trigger a simulated buy) requires
-a PumpPortal API key tied to a wallet funded with a small amount of real SOL:
+| When (sec after window open) | Side | Size |
+|---|---|---|
+| 90 / 180 / 270 | CHEAP (the side with the LOWER midpoint) | 50 shares each |
+| 630 / 720 / 810 | EXPENSIVE (the side with the HIGHER midpoint) | 100 shares each |
 
-1. Go to https://pumpportal.fun and create a free account.
-2. Generate an API key from your dashboard.
-3. Send **0.02 SOL** (a few dollars) to the wallet linked to that key. This
-   money is NOT used to buy any coins — it only covers PumpPortal's tiny
-   metering fee for streaming trade data (0.01 SOL per 10,000 messages,
-   which is pennies per day). The bot still never touches this wallet to
-   place trades.
-4. In Railway, go to your service → **Variables** tab → add a new variable:
-   - Name: `PUMPPORTAL_API_KEY`
-   - Value: (paste your key)
-5. Railway will automatically redeploy with the key available.
+- "Cheap/expensive" is re-evaluated fresh from the live midpoints at each
+  scheduled tick, so the side can flip between buys within a window.
+- Every buy is modeled as a taker fill at the current midpoint:
+  `cost = shares × price + fee`, with `fee = shares × 0.07 × price × (1 − price)`
+  (Polymarket Crypto category).
+- Positions ride naked to real resolution — win = **$1/share**, lose = **$0**.
+  No take-profit exits.
+- A window resolves as soon as one side's price is ≥ 0.90 on the last tick
+  before close; otherwise the bot polls the real market after close until it
+  converges.
 
-Without this, the dashboard and logs will show tokens being discovered, but
-"Trades Processed" will stay at 0 forever and no buy will ever trigger — this
-is a PumpPortal requirement, not a bug in the bot.
+The schedule was scaled ×3 from the original 5-minute version (cheap 30/60/90s,
+expensive 210/240/270s); **bet sizes are unchanged** (50/100 shares).
 
----
+## Bankroll
 
-## Step 1 — Put this code on GitHub
+- Starts at **$1,000 virtual** (`STARTING_BANKROLL` in `config.js`).
+- One shared bankroll across all windows, persisted to `state.json`.
+- Railway's filesystem is ephemeral — state resets on redeploy unless you add
+  a persistent volume.
 
-1. Go to https://github.com and log in.
-2. Click the **+** icon (top right) → **New repository**.
-3. Name it something like `pumpfun-demo-bot`. Keep it **Private** if you don't
-   want it public. Click **Create repository**.
-4. On the next page, click **uploading an existing file**.
-5. Drag in all the files from this project: `bot.js`, `config.js`,
-   `package.json`, `railway.json`, `.gitignore`, `README.md`.
-6. Scroll down, click **Commit changes**.
+## Configuration (`config.js`)
 
-You now have the code safely on GitHub.
+Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
 
----
+- `ASSET`: `'btc'` or `'eth'`
+- `WINDOW_MINUTES`: `15`
+- `CHEAP_ORDER_SHARES` / `EXPENSIVE_ORDER_SHARES`: bet sizes (default 50/100)
+- `CHEAP_BUY_AT_SECS` / `EXPENSIVE_BUY_AT_SECS`: buy schedule
+- `BUY_FIRE_VALIDITY_SECS`: how long after its scheduled second a buy may fire
+  (so a mid-window restart doesn't dump all missed buys at once)
+- `BASE_TAKER_FEE_RATE` / `MAKER_REBATE_RATE` / `ENTRY_IS_MAKER`: fee model
+- `RESOLUTION_WIN_THRESHOLD` / `RESOLUTION_LOSS_THRESHOLD`
+- `STARTING_BANKROLL`
 
-## Step 2 — Deploy it on Railway
+## Run locally
 
-1. Go to https://railway.app and log in with your account.
-2. Click **New Project** → **Deploy from GitHub repo**.
-3. Authorize Railway to access your GitHub if asked, then select the
-   `pumpfun-demo-bot` repo you just created.
-4. Railway will detect it's a Node.js project and start building automatically
-   (it reads `railway.json`, which tells it to run `node bot.js`).
-5. Click into the new service → **Deployments** tab → wait for the build to
-   finish (usually under a minute).
-6. Click **View Logs**. You should start seeing lines like:
-   ```
-   === pump.fun DEMO trending bot starting ===
-   DEMO_MODE = true (true = safe, no real money is ever used)
-   Connecting to wss://pumpportal.fun/api/data ...
-   Connected. Subscribing to new token + trade streams...
-   Bot is live in DEMO (paper trading) mode. Watching for trending coins...
-   🆕 New token: SOMECOIN (mint address...)
-   ```
-7. When a coin crosses your thresholds, you'll see a block like:
-   ```
-   🟢 SIMULATED BUY (no real funds used)
-      Token: DOGEWIF
-      Mint address: ABC123...
-      Fake spend: 0.1 SOL
-      Trigger stats: 18 trades / 9 unique buyers / 6.40 SOL volume in last 60s
-      pump.fun link: https://pump.fun/ABC123...
-   ---
-   ```
-   That's the bot telling you "if this were live, I would have bought here."
+```bash
+npm install
+npm start        # or: node server.js
+```
 
-**That's it — it's now running 24/7 in the cloud, in safe demo mode.**
+Dashboard: http://localhost:3000 (set `PORT` to change).
 
----
+## Deploy on Railway
 
-## Step 3 — Tune the strategy (optional)
+1. Push this repo to GitHub.
+2. Railway → New Project → Deploy from GitHub repo.
+3. Builds with Nixpacks; start command is `node server.js` (see `railway.json`).
+4. Every push auto-redeploys with the new code.
 
-Open `config.js` in GitHub (click the file → pencil icon to edit) and change
-the numbers, for example:
+## Dashboard
 
-- `MIN_TRADES_IN_WINDOW`: raise this to require more activity before it
-  "trending"
-- `WINDOW_SECONDS`: shorten to catch faster moves, lengthen to filter noise
-- `FAKE_BUY_SIZE_SOL`: just cosmetic, doesn't spend anything
+Shows live bankroll, current window state, scheduled vs placed buys, unrealized
+P&L on open positions, resolution history, and the bot log.
 
-Every time you edit and commit a file on GitHub, Railway automatically
-redeploys with the new settings within a minute or two.
+## Status / safety
 
----
-
-## Step 4 — Watch it for a while before doing anything else
-
-Let it run for at least a few days. Keep notes on:
-- How many "simulated buys" per day it triggers
-- Whether those coins actually kept climbing afterward, or dumped right after
-  your trigger fired (very common on pump.fun)
-
-This is the only way to know if the "trending = buy" idea is actually
-survivable *before* any real money is involved.
-
----
-
-## What this bot does NOT do (on purpose)
-
-- It does **not** hold a wallet or private key.
-- It does **not** place real trades.
-- It does **not** guarantee catching every notification pump.fun's app shows
-  you — it approximates the same signals (trade frequency, buyer count,
-  volume) from the public data feed.
-
-If you later want to move to real execution, that's a separate, much higher
-stakes step (real wallet key, real funds, real slippage/latency risk) — happy
-to help with that specifically when/if you get there, but I'd want you to
-have watched demo logs for a while first so you know what you're actually
-turning on.
+- `DEMO_MODE: true` (default) — paper trading only.
+- There is **no live order-placement path** in this codebase yet. Going real
+  is a separate, higher-stakes step: real wallet, real funds, and real
+  slippage/latency risk.

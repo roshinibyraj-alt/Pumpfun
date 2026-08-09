@@ -1,7 +1,7 @@
 {
   "name": "btc-fairvalue-bot",
   "version": "1.0.0",
-  "description": "Polymarket BTC 15-min up/down paper trading bot using a fair-value drift model",
+  "description": "Polymarket BTC/ETH 15-min up/down paper trading bot — time-scheduled cheap/expensive buys",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
