@@ -1,40 +1,35 @@
-# Polymarket BTC/ETH UP/DOWN — Dual-Engine (5m + 15m) Paper Trading Bot
+# Polymarket BTC/ETH UP/DOWN — Dual-Engine Dip-Recovery Paper Trading Bot
 
-Time-scheduled cheap/expensive buys on Polymarket's **5-minute and 15-minute**
-BTC (or ETH) UP/DOWN markets, running as **two independent engines with
-separate capital**. **Paper trading only** — the bot reads live midpoint prices
-and simulates fills; it never holds a wallet, private key, or real funds.
+Runs **two independent engines** (5-minute and 15-minute BTC/ETH UP/DOWN
+windows) with **separate capital**, following the same dip-recovery rule on
+their own window length. **Paper trading only** — the bot reads live midpoint
+prices and simulates fills; it never holds a wallet, private key, or real
+funds.
 
 ## How it works
 
-Two engines run at the same time, each on its own bankroll, schedule, and
-history:
+| Engine | Window | Monitor phase | Entry trigger | Size | Stop loss |
+|---|---|---|---|---|---|
+| 5m | 5 minutes | first 120s | after 120s | $100 worth | $0.20 |
+| 15m | 15 minutes | first 420s | after 420s | $100 worth | $0.20 |
 
-| Engine | Window | CHEAP side (lower midpoint) | EXPENSIVE side (higher midpoint) |
-|---|---|---|---|
-| 5m | 5 minutes | 50 shares @ 30s / 60s / 90s | 100 shares @ flip / +30s / +60s (fallback 150s / 180s / 210s) |
-| 15m | 15 minutes | 50 shares @ 90s / 180s / 270s | 100 shares @ flip / +90s / +180s (fallback 570s / 660s / 750s) |
+Per window, each engine:
 
-- **Flip-timed expensive buys:** after all 3 cheap buys are done, the bot
-  watches the live sides. If the side that was cheap becomes the expensive
-  side (a role flip), the expensive clock starts at **that flip moment** and
-  the 3 buys fire at `flip`, `flip + interval`, `flip + 2 × interval` — the
-  interval (5m: 30s, 15m: 90s) is counted from the **first expensive
-  position**. If no flip happens, the fixed fallback times are used.
-- "Cheap/expensive" is re-evaluated fresh from the live midpoints at each
-  scheduled tick, so the side can flip between buys within a window.
-- **Expensive-side price gate:** an expensive-side buy only fires while that
-  side's midpoint is **below 0.90** (`EXPENSIVE_BUY_MAX_PRICE`). The bot keeps
-  checking every tick through the buy's validity window; if the price never
-  drops below 0.90, the buy is skipped for good — never chased at a bad price.
-- Every buy is modeled as a taker fill at the current midpoint:
-  `cost = shares × price + fee`, with `fee = shares × 0.07 × price × (1 − price)`
-  (Polymarket Crypto category).
-- Positions ride naked to real resolution — win = **$1/share**, lose = **$0**.
-  No take-profit exits.
-- A window resolves as soon as one side's price is ≥ 0.90 on the last tick
-  before close; otherwise the bot polls the real market after close until it
-  converges.
+1. **Monitors** both sides continuously during the monitor phase and records
+   the LAST moment each side's midpoint is below `DIP_LEVEL` (0.50).
+2. **Picks the target** — the side whose most recent sub-0.50 dip happened the
+   latest. If neither side ever dips below 0.50, no trade that window.
+3. **Enters** — any time after the monitor phase, once the target side's price
+   comes back to `RETURN_LEVEL` (0.50), it buys **$100 worth** of shares:
+   `shares = floor($100 / price)` filled at the current mid. One buy per
+   window. If the target never returns to 0.50, no trade.
+4. **Stop loss** — if the bought side's price hits `STOP_LOSS_LEVEL` (0.20),
+   the bot exits at 0.20 and realizes the loss immediately. Otherwise the
+   position rides to real resolution (win = **$1/share**, lose = **$0**).
+
+Every fill is modeled as a taker fill at the current midpoint:
+`cost = shares × price + fee`, with `fee = shares × 0.07 × price × (1 − price)`
+(Polymarket Crypto category). Stops exit at exactly 0.20.
 
 ## Bankroll
 
@@ -54,15 +49,11 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
 - `ENGINES`: one block per engine (`'5m'` and `'15m'`), each with:
   - `WINDOW_MINUTES`: window length for that engine
   - `CAPITAL`: that engine's starting bankroll (independent)
-  - `CHEAP_ORDER_SHARES` / `EXPENSIVE_ORDER_SHARES`: bet sizes (default 50/100)
-  - `CHEAP_BUY_AT_SECS` / `EXPENSIVE_BUY_AT_SECS`: buy schedule per engine
-    (`EXPENSIVE_BUY_AT_SECS` doubles as the fixed fallback when no flip occurs)
-  - `EXPENSIVE_BUY_INTERVAL_SECS`: spacing between the 3 expensive buys,
-    counted from the first expensive position (flip moment)
-  - `BUY_FIRE_VALIDITY_SECS`: how long after its scheduled second a buy may
-    fire (so a mid-window restart doesn't dump all missed buys at once)
-  - `EXPENSIVE_BUY_MAX_PRICE`: expensive-side buys only fire below this price
-    (default 0.90)
+  - `MONITOR_SECS`: monitor phase length (5m: 120s, 15m: 420s)
+  - `DIP_LEVEL`: a side "dipped" while its price is below this (0.50)
+  - `RETURN_LEVEL`: buy when the target returns to this (0.50)
+  - `BUY_AMOUNT`: notional size of the single buy ($100)
+  - `STOP_LOSS_LEVEL`: exit price if the position moves against you (0.20)
 - `BASE_TAKER_FEE_RATE` / `MAKER_REBATE_RATE` / `ENTRY_IS_MAKER`: fee model
 - `RESOLUTION_WIN_THRESHOLD` / `RESOLUTION_LOSS_THRESHOLD`
 - `POLL_INTERVAL_MS`, `STATE_FILE`
@@ -86,8 +77,8 @@ Dashboard: http://localhost:3000 (set `PORT` to change).
 ## Dashboard
 
 Shows each engine separately: its own bankroll/return/equity, live UP/DOWN
-prices, countdown, scheduled vs placed vs skipped buys, unrealized P&L on open
-positions, and per-engine resolution history.
+prices, monitor phase status, target side, entry status, stop-loss state,
+unrealized P&L on open positions, and per-engine resolution history.
 
 ## Status / safety
 

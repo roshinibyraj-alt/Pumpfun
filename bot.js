@@ -1,40 +1,21 @@
 // ============================================================
-// bot.js — dual-engine time-scheduled cheap/expensive buys, v19.
-// Runs TWO independent engines at the same time:
+// bot.js — dip-recovery strategy, v20. Runs TWO independent engines
+// (5m and 15m), each with its own bankroll, current window, pending
+// resolutions, and history. Same rule per engine, own window length:
 //
 //   5m engine  (300s windows):
-//     CHEAP (side with the LOWER midpoint), CHEAP_ORDER_SHARES each:
-//       t = 30s  -> buy CHEAP
-//       t = 60s  -> buy CHEAP
-//       t = 90s  -> buy CHEAP
-//     EXPENSIVE (side with the HIGHER midpoint), EXPENSIVE_ORDER_SHARES
-//     each — FLIP-TIMED:
-//       - Once all 3 cheap buys are done, if the side that was cheap
-//         becomes the expensive side (a role flip), the expensive
-//         clock starts at that flip moment: buys at flip,
-//         flip + 30s, flip + 60s.
-//       - No flip? Fixed fallback: t = 150s / 180s / 210s.
+//     MONITOR  : first 120s — record the LAST moment each side is
+//                below DIP_LEVEL (0.50).
+//     TARGET   : at end of monitor phase, the side whose most recent
+//                sub-0.50 dip was LATEST. No dip at all -> no trade.
+//     ENTRY    : after 120s, once the target side's price comes back
+//                to RETURN_LEVEL (0.50), buy BUY_AMOUNT ($100) worth
+//                of shares: shares = floor($100 / price) at the mid.
+//     STOP LOSS: if the bought side's price hits 0.20, exit at 0.20.
+//                Otherwise ride to real resolution ($1 win / $0 lose).
 //
 //   15m engine (900s windows):
-//     CHEAP: t = 90s / 180s / 270s
-//     EXPENSIVE (same flip timing): flip / flip + 90s / flip + 180s,
-//     fixed fallback t = 570s / 660s / 750s.
-//
-// Each engine has its OWN bankroll, current window, pending
-// resolutions, and history — money is never shared between them.
-//
-// Cheap/expensive is re-evaluated FRESH at each scheduled tick
-// from the live midpoints — sides may flip mid-window and each
-// order simply follows whichever side is cheap/expensive right
-// then. Cheap buys are exactly CHEAP_ORDER_SHARES, expensive buys
-// exactly EXPENSIVE_ORDER_SHARES, regardless of cost — no ladder,
-// no pattern, no hedge.
-//
-// EXPENSIVE PRICE GATE: an expensive-side buy only fires while the
-// expensive side's midpoint is BELOW EXPENSIVE_BUY_MAX_PRICE (0.90).
-// The bot keeps checking every tick through the buy's validity
-// window; if the price never drops below 0.90 by the end, the buy
-// is skipped for good (never chased at a bad price).
+//     Same rule with MONITOR_SECS = 420s (first 7 minutes).
 //
 // FEES & REBATES (docs.polymarket.com/trading/fees + maker-rebates):
 //   Crypto: taker fee = shares x 0.07 x price x (1 - price).
@@ -42,13 +23,6 @@
 //   fee-equivalent, only for resting (maker) fills.
 //   config.ENTRY_IS_MAKER=false -> taker fills: fee charged,
 //   rebate 0. true -> maker fills: fee 0, 20% rebate credited.
-//
-// Filled entries ride naked to real resolution (win = $1/share,
-// lose = $0, no take-profit exit). Resolution: whichever side's
-// price is at/above RESOLUTION_WIN_THRESHOLD in the LAST tick
-// sampled before close is declared the winner immediately;
-// otherwise fall back to polling the real market price until it
-// converges. All filled entries for the window settle together.
 //
 // Live marks: every tick we snapshot both sides' midpoints; the
 // dashboard uses them (via computeUnrealized) to show real-time
@@ -69,80 +43,9 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function priceOf(side, upPrice, downPrice) {
   return side === 'UP' ? upPrice : downPrice;
 }
-// Cheap = lower midpoint, Expensive = higher midpoint.
-function cheapSide(upPrice, downPrice) { return upPrice <= downPrice ? 'UP' : 'DOWN'; }
-function expensiveSide(upPrice, downPrice) { return upPrice >= downPrice ? 'UP' : 'DOWN'; }
 
-// Fixed expensive schedule: one buy at each configured second after
-// window open (used when no flip is detected).
-function fixedExpensiveSchedule(engineCfg) {
-  return engineCfg.EXPENSIVE_BUY_AT_SECS.map((s) => ({ key: 'exp-' + s, sec: s }));
-}
-
-// Flip-timed expensive schedule: 3 buys at anchor, anchor+interval,
-// anchor+2*interval — the interval counted from the FIRST expensive
-// position (the flip moment).
-function flipExpensiveSchedule(anchorSec, engineCfg) {
-  const interval = engineCfg.EXPENSIVE_BUY_INTERVAL_SECS || 0;
-  return engineCfg.EXPENSIVE_BUY_AT_SECS.map((_, i) => ({
-    key: 'exp-flip-' + (i + 1),
-    sec: anchorSec + i * interval,
-  }));
-}
-
-// Decides which expensive schedule is active for this tick and locks it
-// in place the first time a decision is possible:
-//   - Before the first FIXED expensive second, if the side that was
-//     cheap when the cheap phase ended becomes the expensive side (a
-//     role flip), lock the FLIP schedule: buys at flip, flip+interval,
-//     flip+2*interval.
-//   - Otherwise, once the first fixed expensive second is reached (or
-//     a fixed buy has already resolved), lock the FIXED schedule.
-// Returns the active schedule's {key, sec} list — empty while the
-// decision is still open. Mutates win.expLocked / win.expSched /
-// win.flipAtSec.
-function activeExpensiveSchedule(win, engineCfg, elapsed, upPrice, downPrice) {
-  const firstFixed = engineCfg.EXPENSIVE_BUY_AT_SECS[0];
-
-  if (win.expLocked) {
-    return win.expSched === 'flip'
-      ? flipExpensiveSchedule(win.flipAtSec, engineCfg)
-      : fixedExpensiveSchedule(engineCfg);
-  }
-
-  const anyExpResolved =
-    win.fired.some((k) => k.startsWith('exp-')) ||
-    win.skipped.some((k) => k.startsWith('exp-'));
-
-  if (!win.cheapPhaseDone || win.flipRefSide == null) {
-    if (elapsed >= firstFixed || anyExpResolved) {
-      win.expLocked = true;
-      win.expSched = 'fixed';
-      return fixedExpensiveSchedule(engineCfg);
-    }
-    return [];
-  }
-
-  // Cheap phase is over — look for the flip first, then the fixed lock.
-  if (cheapSide(upPrice, downPrice) !== win.flipRefSide) {
-    win.expLocked = true;
-    win.expSched = 'flip';
-    win.flipAtSec = elapsed;
-    return flipExpensiveSchedule(elapsed, engineCfg);
-  }
-  if (elapsed >= firstFixed || anyExpResolved) {
-    win.expLocked = true;
-    win.expSched = 'fixed';
-    return fixedExpensiveSchedule(engineCfg);
-  }
-  return [];
-}
-
-// Builds an ALREADY-FILLED entry at the moment a scheduled buy fires.
-// Entries fill at the current midpoint; size is always exactly
-// CHEAP_ORDER_SHARES / EXPENSIVE_ORDER_SHARES shares.
-// Fee/rebate follow config.ENTRY_IS_MAKER
-// (see the header comment — taker default, maker opt-in).
+// Builds an ALREADY-FILLED entry at the moment the buy fires. Entries
+// fill at the current midpoint; size is BUY_AMOUNT worth of shares.
 function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
   const feeEquiv = shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice);
@@ -156,8 +59,9 @@ function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
     fillRebate: isMaker ? round5(feeEquiv * config.MAKER_REBATE_RATE) : 0,
     filledAt: new Date().toISOString(),
     entryReason: reason,
-    status: 'filled', // filled -> resolved_win | resolved_loss
+    status: 'filled', // filled -> stopped_out | resolved_win | resolved_loss
     resolvedWon: null,
+    exitPrice: null,
     cost: null,
     payout: null,
     pnl: null,
@@ -165,18 +69,16 @@ function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
   };
 }
 
-// Records a scheduled taker/maker buy on win.entries.
+// Records the single scheduled buy on win.entries.
 function fireEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const entry = makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason);
   win.entries.push(entry);
-  log(`[${win.engine || '?'}] ENTRY: ${side} ${shares}sh @ $${fillPrice.toFixed(2)} | fee $${entry.fillFee.toFixed(4)} | rebate $${entry.fillRebate.toFixed(4)} — ${reason}`);
+  log(`[${win.engine || '?'}] ENTRY: ${side} ${shares}sh @ $${fillPrice.toFixed(2)} ($${(shares * fillPrice).toFixed(2)} notional) | fee $${entry.fillFee.toFixed(4)} | rebate $${entry.fillRebate.toFixed(4)} — ${reason}`);
 }
 
 // Checks whether the window's LAST observed tick (closest snapshot to
 // windowEnd — see win.finalUpPrice/finalDownPrice, updated every tick
 // in tick() below) already shows a side at/above the win threshold.
-// If so we can declare that side the winner immediately instead of
-// waiting for the real market to fully settle.
 function immediateWinnerFromLastTick(win) {
   if (win.finalUpPrice != null && win.finalUpPrice >= config.RESOLUTION_WIN_THRESHOLD) return 'UP';
   if (win.finalDownPrice != null && win.finalDownPrice >= config.RESOLUTION_WIN_THRESHOLD) return 'DOWN';
@@ -188,8 +90,12 @@ function immediateWinnerFromLastTick(win) {
 // RESOLUTION_WIN_THRESHOLD — if so, that side is declared the winner
 // immediately with no extra network call. Otherwise falls back to
 // polling the real market price (no fallback beyond that — waits if
-// still ambiguous). Settles ALL filled entries of the window together
-// (win = $1/share, lose = $0; rebate credited to payout when present).
+// still ambiguous).
+//
+// Entries already stopped out (status 'stopped_out') were settled and
+// credited to the bankroll when the stop hit — only still-'filled'
+// entries are settled here (win = $1/share, lose = $0; rebate credited
+// to payout when present). The window totals include every entry.
 // Returns true if resolved this call, false if still waiting.
 async function resolveWindow(engine, win) {
   let wonSide = immediateWinnerFromLastTick(win);
@@ -209,26 +115,34 @@ async function resolveWindow(engine, win) {
   }
 
   const entries = win.entries || [];
-  let cost = 0, payout = 0, fees = 0, rebates = 0;
+  let cost = 0, payout = 0, fees = 0, rebates = 0, settleCredit = 0;
   const traded = entries.length > 0;
 
   for (const pos of entries) {
     const f = pos.fillFee || 0;
     const r = pos.fillRebate || 0;
-    cost += pos.shares * pos.fillPrice + f;
-    payout += (pos.side === wonSide ? pos.shares * 1 : 0) + r;
     fees += f;
     rebates += r;
-    pos.resolvedWon = pos.side === wonSide;
-    pos.status = pos.resolvedWon ? 'resolved_win' : 'resolved_loss';
-    pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
-    pos.payout = Math.round((pos.side === wonSide ? pos.shares : 0) * 100000) / 100000 + r;
-    pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
-    pos.settledAt = new Date().toISOString();
+
+    if (pos.pnl == null) {
+      // Not settled yet (stop loss never hit) — settle against wonSide.
+      pos.resolvedWon = pos.side === wonSide;
+      pos.status = pos.resolvedWon ? 'resolved_win' : 'resolved_loss';
+      pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
+      pos.payout = Math.round((pos.resolvedWon ? pos.shares : 0) * 100000) / 100000 + r;
+      pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
+      pos.settledAt = new Date().toISOString();
+      settleCredit += pos.pnl;
+    }
+    cost += pos.cost;
+    payout += pos.payout;
+  }
+
+  if (settleCredit !== 0) {
+    engine.bankroll = Math.round((engine.bankroll + settleCredit) * 100) / 100;
   }
 
   const pnl = Math.round((payout - cost) * 100) / 100;
-  engine.bankroll = Math.round((engine.bankroll + pnl) * 100) / 100;
   const isLoss = traded ? pnl < 0 : null;
 
   engine.windowHistory.push({
@@ -259,8 +173,9 @@ async function resolveWindow(engine, win) {
 }
 
 // Computes live unrealized P&L for one engine's open window using the
-// latest midpoint snapshot (engine.lastCheck). Used by the dashboard's
-// /api/state so positions are marked to market in real time.
+// latest midpoint snapshot (engine.lastCheck). Only still-'filled'
+// entries are marked to market; stopped-out entries carry their final
+// realized pnl. Used by the dashboard's /api/state.
 function computeUnrealized(engine) {
   const win = engine.currentWindow;
   const lc = engine.lastCheck || {};
@@ -280,25 +195,44 @@ function computeUnrealized(engine) {
     const cur = e.side === 'UP' ? lc.upPrice : lc.downPrice;
     const fee = e.fillFee || 0;
     const rebate = e.fillRebate || 0;
-    const cost = e.shares * e.fillPrice + fee;
-    const value = cur != null ? e.shares * cur : cost;
-    out.costBasis += cost;
-    out.currentValue += value;
-    out.unrealizedPnl += value - cost;
-    out.fees += fee;
-    out.rebates += rebate;
-    out.entries.push({
-      side: e.side,
-      shares: e.shares,
-      fillPrice: e.fillPrice,
-      currentPrice: cur != null ? cur : null,
-      fee: round5(fee),
-      rebate: round5(rebate),
-      cost: round5(cost),
-      value: round5(value),
-      unrealizedPnl: cur != null ? round5(value - cost) : null,
-      entryReason: e.entryReason,
-    });
+
+    if (e.status === 'filled') {
+      const cost = e.shares * e.fillPrice + fee;
+      const value = cur != null ? e.shares * cur : cost;
+      out.costBasis += cost;
+      out.currentValue += value;
+      out.unrealizedPnl += value - cost;
+      out.fees += fee;
+      out.rebates += rebate;
+      out.entries.push({
+        side: e.side,
+        shares: e.shares,
+        fillPrice: e.fillPrice,
+        currentPrice: cur != null ? cur : null,
+        fee: round5(fee),
+        rebate: round5(rebate),
+        cost: round5(cost),
+        value: round5(value),
+        unrealizedPnl: cur != null ? round5(value - cost) : null,
+        entryReason: e.entryReason,
+        status: e.status,
+      });
+    } else {
+      // stopped_out — realized already; surface the final numbers.
+      out.entries.push({
+        side: e.side,
+        shares: e.shares,
+        fillPrice: e.fillPrice,
+        currentPrice: e.exitPrice,
+        fee: round5(fee),
+        rebate: round5(rebate),
+        cost: e.cost,
+        value: e.payout,
+        unrealizedPnl: e.pnl,
+        entryReason: e.entryReason,
+        status: e.status,
+      });
+    }
   }
   out.costBasis = round2(out.costBasis);
   out.currentValue = round2(out.currentValue);
@@ -309,7 +243,7 @@ function computeUnrealized(engine) {
 }
 
 // One full pass over a single engine: hand off closed windows, resolve
-// pendings, find the live market, place scheduled buys, snapshot prices.
+// pendings, find the live market, run the dip-recovery rule.
 async function engineTick(state, engineKey, engineCfg, nowSec) {
   const engine = state.engines[engineKey];
   const tag = `[${engineKey}]`;
@@ -342,7 +276,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
     state.lastError = e.message;
   }
 
-  // 3) Market snapshot, new-window creation, and scheduled entries.
+  // 3) Market snapshot, new-window creation, and the dip-recovery rule.
   try {
     const found = await polymarket.getCurrentUpDownMarket(config.ASSET, engineCfg.WINDOW_MINUTES);
 
@@ -365,21 +299,19 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           windowEnd,
           upTokenId,
           downTokenId,
-          signal: `TIME_SCHEDULED_CHEAP_EXPENSIVE_${engineKey}`,
+          signal: `DIP_RECOVERY_${engineKey}`,
           entries: [],
-          fired: [],    // schedule keys already executed: cheap-30/..., exp-150/..., exp-flip-1...
-          skipped: [],  // schedule keys missed (expensive price gate / validity expired)
-          cheapPhaseDone: false, // true once all 3 cheap keys fired/skipped
-          cheapPhaseDoneAt: null, // window-relative second the cheap phase ended
-          flipRefSide: null,      // cheap side at cheap-phase end — flip watch reference
-          flipAtSec: null,        // window-relative second the flip was detected (if any)
-          expLocked: false,       // expensive schedule decided and locked
-          expSched: null,         // 'flip' | 'fixed'
+          monitoringDone: false,
+          lastDipSec: { UP: null, DOWN: null }, // last second each side was below DIP_LEVEL
+          targetSide: null,   // side chosen at end of monitoring
+          entryFired: false,  // the $100 buy has been placed
+          entrySkipped: false, // no trade (no target / never returned)
+          stoppedOut: false,  // stop loss triggered
           finalUpPrice: null,
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart}: CHEAP ${engineCfg.CHEAP_ORDER_SHARES}sh @ ${engineCfg.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${engineCfg.EXPENSIVE_ORDER_SHARES}sh @ flip/+${engineCfg.EXPENSIVE_BUY_INTERVAL_SECS}s/+${2 * engineCfg.EXPENSIVE_BUY_INTERVAL_SECS}s (fallback ${engineCfg.EXPENSIVE_BUY_AT_SECS.join('/')}s, < $${engineCfg.EXPENSIVE_BUY_MAX_PRICE}) | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
+        log(`${tag} Window ${windowStart}: MONITOR ${engineCfg.MONITOR_SECS}s (dip < $${engineCfg.DIP_LEVEL}) | ENTRY $${engineCfg.BUY_AMOUNT} when target returns to $${engineCfg.RETURN_LEVEL} | STOP LOSS $${engineCfg.STOP_LOSS_LEVEL} | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -400,74 +332,75 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
 
       if (win && nowSec < windowEnd) {
         const elapsed = nowSec - win.windowStart;
-        const validity = engineCfg.BUY_FIRE_VALIDITY_SECS;
 
-        // CHEAP — one buy at each scheduled second. Each has a validity
-        // window (sec .. sec+validity) so a mid-window restart doesn't
-        // dump all missed cheap buys at once. Side re-evaluated fresh.
-        engineCfg.CHEAP_BUY_AT_SECS.forEach((sec, i) => {
-          const key = 'cheap-' + sec;
-          if (win.fired.includes(key) || win.skipped.includes(key)) return;
-          if (elapsed >= sec && elapsed < sec + validity) {
-            const side = cheapSide(upPrice, downPrice);
-            win.fired.push(key);
-            fireEntry(win, side, engineCfg.CHEAP_ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
-              `cheap buy #${i + 1} — t=${sec}s (${side} is cheap at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
-          } else if (elapsed >= sec + validity) {
-            win.skipped.push(key);
-            log(`${tag} SKIP cheap buy t=${sec}s — validity window passed`);
+        // ---- MONITOR phase: record the last moment each side is
+        // below DIP_LEVEL. Finalize the target side once the monitor
+        // phase is over.
+        if (!win.monitoringDone) {
+          if (elapsed <= engineCfg.MONITOR_SECS) {
+            if (upPrice < engineCfg.DIP_LEVEL) win.lastDipSec.UP = elapsed;
+            if (downPrice < engineCfg.DIP_LEVEL) win.lastDipSec.DOWN = elapsed;
           }
-        });
-
-        // Cheap phase complete = every cheap key has fired or been
-        // skipped. Once done, snapshot the current cheap side — that
-        // becomes the reference for flip detection: if IT becomes the
-        // expensive side later, the expensive clock starts there.
-        if (!win.cheapPhaseDone) {
-          const cheapKeys = engineCfg.CHEAP_BUY_AT_SECS.map((s) => 'cheap-' + s);
-          if (cheapKeys.every((k) => win.fired.includes(k) || win.skipped.includes(k))) {
-            win.cheapPhaseDone = true;
-            win.cheapPhaseDoneAt = elapsed;
-            win.flipRefSide = cheapSide(upPrice, downPrice);
-            log(`${tag} Cheap phase complete at t=${elapsed}s — watching ${win.flipRefSide} for a flip to expensive`);
-          }
-        }
-
-        // EXPENSIVE — FLIP-TIMED schedule, gated: only fires while the
-        // expensive side's price is below EXPENSIVE_BUY_MAX_PRICE.
-        // activeExpensiveSchedule() picks the schedule:
-        //   - flip detected (cheap side became expensive after the
-        //     cheap phase) -> buys at flip, flip+interval, flip+2*interval
-        //   - otherwise -> fixed times (5m: 150/180/210, 15m: 570/660/750)
-        // Each buy keeps checking every tick until its validity window
-        // closes; if the price never drops below, the buy is skipped.
-        const prevExpSched = win.expSched;
-        const expSched = activeExpensiveSchedule(win, engineCfg, elapsed, upPrice, downPrice);
-        if (win.expSched === 'flip' && prevExpSched !== 'flip') {
-          log(`${tag} FLIP DETECTED at t=${elapsed}s — ${win.flipRefSide} became expensive; expensive buys at t=${elapsed}s/+${engineCfg.EXPENSIVE_BUY_INTERVAL_SECS}s/+${2 * engineCfg.EXPENSIVE_BUY_INTERVAL_SECS}s`);
-        }
-        for (const { key, sec } of expSched) {
-          if (win.fired.includes(key) || win.skipped.includes(key)) continue;
-          if (elapsed >= sec && elapsed < sec + validity) {
-            const side = expensiveSide(upPrice, downPrice);
-            const px = priceOf(side, upPrice, downPrice);
-            if (px < engineCfg.EXPENSIVE_BUY_MAX_PRICE) {
-              win.fired.push(key);
-              fireEntry(win, side, engineCfg.EXPENSIVE_ORDER_SHARES, px, upTokenId, downTokenId,
-                `expensive buy ${key} @ t=${sec}s (${side} is expensive at $${px.toFixed(2)})`);
+          if (elapsed >= engineCfg.MONITOR_SECS) {
+            win.monitoringDone = true;
+            const upDip = win.lastDipSec.UP;
+            const downDip = win.lastDipSec.DOWN;
+            if (upDip == null && downDip == null) {
+              win.targetSide = null;
+              log(`${tag} Monitor complete at t=${elapsed}s — neither side dipped below $${engineCfg.DIP_LEVEL}; NO TRADE this window`);
+            } else if (downDip != null && (upDip == null || downDip > upDip)) {
+              win.targetSide = 'DOWN';
+              log(`${tag} Monitor complete at t=${elapsed}s — target DOWN (last dip t=${downDip}s below $${engineCfg.DIP_LEVEL}); waiting for return to $${engineCfg.RETURN_LEVEL}`);
+            } else if (upDip != null && (downDip == null || upDip > downDip)) {
+              win.targetSide = 'UP';
+              log(`${tag} Monitor complete at t=${elapsed}s — target UP (last dip t=${upDip}s below $${engineCfg.DIP_LEVEL}); waiting for return to $${engineCfg.RETURN_LEVEL}`);
             } else {
-              // Price still too rich — keep waiting, but only log the
-              // hold every 5s so the log stays readable.
-              const holdKey = engineKey + ':' + key;
-              const nowMs = Date.now();
-              if (!lastHoldLogAt[holdKey] || nowMs - lastHoldLogAt[holdKey] >= 5000) {
-                lastHoldLogAt[holdKey] = nowMs;
-                log(`${tag} HOLD expensive buy ${key} t=${sec}s — ${side} at $${px.toFixed(2)} ≥ $${engineCfg.EXPENSIVE_BUY_MAX_PRICE}, waiting for a better price`);
+              // Exact tie (both dipped at the same second) — pick the
+              // currently cheaper side.
+              win.targetSide = upPrice <= downPrice ? 'UP' : 'DOWN';
+              log(`${tag} Monitor complete at t=${elapsed}s — dip tie, target ${win.targetSide} (cheaper now); waiting for return to $${engineCfg.RETURN_LEVEL}`);
+            }
+          }
+        }
+
+        // ---- ENTRY: after the monitor phase, buy $100 worth once the
+        // target side comes back to RETURN_LEVEL.
+        if (win.monitoringDone && !win.entryFired && !win.entrySkipped) {
+          if (win.targetSide == null) {
+            win.entrySkipped = true;
+            log(`${tag} No target side — no entry for window ${win.windowStart}`);
+          } else {
+            const px = priceOf(win.targetSide, upPrice, downPrice);
+            if (px >= engineCfg.RETURN_LEVEL) {
+              const shares = Math.floor(engineCfg.BUY_AMOUNT / px);
+              if (shares > 0) {
+                win.entryFired = true;
+                fireEntry(win, win.targetSide, shares, px, upTokenId, downTokenId,
+                  `dip-recovery buy — ${win.targetSide} back to $${px.toFixed(2)} after t=${engineCfg.MONITOR_SECS}s; $${engineCfg.BUY_AMOUNT} worth (${shares} shares)`);
+              } else {
+                win.entrySkipped = true;
+                log(`${tag} Entry skipped — price $${px.toFixed(2)} too high for $${engineCfg.BUY_AMOUNT}`);
               }
             }
-          } else if (elapsed >= sec + validity) {
-            win.skipped.push(key);
-            log(`${tag} SKIP expensive buy ${key} t=${sec}s — never below $${engineCfg.EXPENSIVE_BUY_MAX_PRICE} in time`);
+          }
+        }
+
+        // ---- STOP LOSS: if the bought side's price hits 0.20, exit
+        // at 0.20 and realize the loss immediately.
+        if (win.entryFired && !win.stoppedOut) {
+          const pos = win.entries[win.entries.length - 1];
+          const cur = priceOf(pos.side, upPrice, downPrice);
+          if (cur <= engineCfg.STOP_LOSS_LEVEL) {
+            win.stoppedOut = true;
+            pos.status = 'stopped_out';
+            pos.exitPrice = engineCfg.STOP_LOSS_LEVEL;
+            const f = pos.fillFee || 0;
+            pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
+            pos.payout = Math.round((pos.shares * pos.exitPrice) * 100000) / 100000;
+            pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
+            pos.settledAt = new Date().toISOString();
+            engine.bankroll = Math.round((engine.bankroll + pos.pnl) * 100) / 100;
+            log(`${tag} STOP LOSS @ t=${elapsed}s — ${pos.side} hit $${cur.toFixed(2)} ≤ $${engineCfg.STOP_LOSS_LEVEL}; exited ${pos.shares}sh @ $${pos.exitPrice.toFixed(2)} | pnl $${pos.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
           }
         }
 
@@ -502,9 +435,6 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
 }
 
 const engineNoMarketSuppressedAt = {};
-// Last time we logged a HOLD (expensive price gate) for a given
-// engine+buy key — used to avoid spamming the log every poll.
-const lastHoldLogAt = {};
 
 let tickRunning = false;
 async function tick() {
@@ -531,10 +461,10 @@ async function tick() {
 
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | CHEAP ${cfg.CHEAP_ORDER_SHARES}sh @ ${cfg.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${cfg.EXPENSIVE_ORDER_SHARES}sh @ ${cfg.EXPENSIVE_BUY_AT_SECS.join('/')}s (< $${cfg.EXPENSIVE_BUY_MAX_PRICE}) | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'} | rides to resolution, no TP`);
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | MONITOR ${cfg.MONITOR_SECS}s (dip < $${cfg.DIP_LEVEL}) | ENTRY $${cfg.BUY_AMOUNT} @ return to $${cfg.RETURN_LEVEL} | STOP LOSS $${cfg.STOP_LOSS_LEVEL} | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'}`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
 
-module.exports = { startBotLoop, tick, computeUnrealized, __test: { activeExpensiveSchedule, cheapSide, expensiveSide } };
+module.exports = { startBotLoop, tick, computeUnrealized };

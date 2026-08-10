@@ -3,52 +3,38 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v19 — dual engines: 5m + 15m, independent capital):
-//   1. The bot runs TWO independent engines at the same time:
-//        - 5m  engine: every 5-minute  UP/DOWN window, own bankroll
-//        - 15m engine: every 15-minute UP/DOWN window, own bankroll
-//      Each engine has its own schedule, bankroll, history, and
-//      pending resolutions — one never touches the other's money.
-//   2. CHEAP side (the side with the LOWER midpoint) is bought
-//      once per scheduled second (5m: 30/60/90s, 15m: 90/180/270s)
-//      at CHEAP_ORDER_SHARES per buy.
-//   3. EXPENSIVE side (the side with the HIGHER midpoint) is bought
-//      EXPENSIVE_ORDER_SHARES per buy, on a FLIP-TIMED schedule:
-//        - After all 3 cheap buys are done, the bot watches the live
-//          sides. If the side that was cheap becomes the expensive
-//          side (a role flip), the expensive clock starts AT that
-//          flip moment and the 3 buys fire at flip, flip + interval,
-//          flip + 2 x interval (interval: 5m = 30s, 15m = 90s — the
-//          spacing counted from the FIRST expensive position).
-//        - If no flip happens, the fixed times are used as fallback
-//          (5m: 150s / 180s / 210s, 15m: 570s / 660s / 750s).
-//   4. EXPENSIVE-side buys only fire while the expensive side's
-//      midpoint is BELOW EXPENSIVE_BUY_MAX_PRICE (default 0.90).
-//      If the price stays at/above 0.90 for the whole validity
-//      window, that buy is skipped (never chased at a bad price).
-//   5. Cheap/expensive is re-evaluated FRESH at each scheduled
-//      tick from the live midpoints — the sides may flip mid-
-//      window and each order simply follows whichever side is
-//      cheap/expensive right then.
-//   6. Every cheap buy is exactly CHEAP_ORDER_SHARES and every
-//      expensive buy is exactly EXPENSIVE_ORDER_SHARES shares,
-//      regardless of cost. No ladder, no pattern, no hedge.
-//   7. Fees/rebates (per docs.polymarket.com/trading/fees and
-//      docs.polymarket.com/programs/maker-rebates):
-//        - Crypto category: taker fee rate = 0.07
-//        - Makers are never charged fees; taker fee formula is
-//          fee = shares x feeRate x price x (1 - price)
-//        - Crypto maker rebate = 20% of the fee-equivalent,
-//          paid to resting (maker) fills only
-//        - ENTRY_IS_MAKER=false (default) models our entries as
-//          taker fills at the current mid: fee applies, rebate 0.
-//          Flip it to true to model resting maker fills instead:
-//          no fee, 20% rebate credited.
-//   8. Filled entries ride naked to real resolution — no take-
-//      profit exit. Resolution: whichever side is at/above the win
-//      threshold in the last tick before close is declared the
-//      winner immediately; otherwise fall back to polling the real
-//      market price until it converges.
+// STRATEGY (v20 — dip-recovery entry, $100 notional, stop loss 0.20):
+//   Both engines follow the SAME rule, on their own window length and
+//   their own independent bankroll:
+//
+//   1. MONITOR phase — 5m: first 120 seconds. 15m: first 420 seconds.
+//      The bot watches UP and DOWN midpoints continuously and records
+//      the LAST moment each side was below DIP_LEVEL (0.50).
+//   2. TARGET side — when the monitor phase ends, the side whose most
+//      recent dip below 0.50 happened the LATEST wins. If neither side
+//      ever dipped below 0.50, no trade this window.
+//   3. ENTRY — any time after the monitor phase (after 120s / 420s),
+//      once the target side's price comes back to RETURN_LEVEL (0.50),
+//      buy BUY_AMOUNT ($100) worth of shares:
+//        shares = floor($100 / price), filled at the current mid.
+//      One buy per window. If the target never returns to 0.50, no
+//      trade.
+//   4. STOP LOSS — both windows: if the bought side's price hits
+//      STOP_LOSS_LEVEL (0.20), exit at 0.20 and realize the loss.
+//      Otherwise the position rides to real resolution (win =
+//      $1/share, lose = $0).
+//
+//   Fees/rebates (per docs.polymarket.com/trading/fees and
+//   docs.polymarket.com/programs/maker-rebates):
+//     - Crypto category: taker fee rate = 0.07
+//     - Makers are never charged fees; taker fee formula is
+//       fee = shares x feeRate x price x (1 - price)
+//     - Crypto maker rebate = 20% of the fee-equivalent, paid to
+//       resting (maker) fills only
+//     - ENTRY_IS_MAKER=false (default) models our entries as taker
+//       fills at the current mid: fee applies, rebate 0. Flip it to
+//       true to model resting maker fills instead: no fee, 20%
+//       rebate credited.
 // ============================================================
 
 module.exports = {
@@ -65,44 +51,35 @@ module.exports = {
 
   // ---- Engines ----
   // Each engine runs on its own window length with its OWN bankroll,
-  // schedule, history, and pending resolutions. Keys are the engine
-  // ids ('5m' / '15m') used everywhere in state and the dashboard.
+  // current window, and history. Keys ('5m' / '15m') are used
+  // everywhere in state and the dashboard.
   ENGINES: {
     '5m': {
       label: '5m',
       WINDOW_MINUTES: 5,
       CAPITAL: 1000, // this engine's starting bankroll (independent)
-      CHEAP_ORDER_SHARES: 50,
-      EXPENSIVE_ORDER_SHARES: 100,
-      // CHEAP: one buy at each of these seconds after window open.
-      CHEAP_BUY_AT_SECS: [30, 60, 90],
-      // EXPENSIVE (flip-timed): 3 buys at flip, flip+30s, flip+60s,
-      // where "flip" = the moment the cheap side becomes the expensive
-      // side after the cheap phase. Fixed fallback: 150s / 180s / 210s.
-      EXPENSIVE_BUY_AT_SECS: [150, 180, 210],
-      // Spacing between the 3 expensive buys, counted from the FIRST
-      // expensive position (the flip moment).
-      EXPENSIVE_BUY_INTERVAL_SECS: 30,
-      // Each scheduled buy may fire during this many seconds after
-      // its scheduled second (so a mid-window restart doesn't dump
-      // all missed buys at once).
-      BUY_FIRE_VALIDITY_SECS: 30,
-      // EXPENSIVE-side buys only fire while the expensive side's
-      // midpoint is below this price. If it never drops below during
-      // the validity window, that buy is skipped.
-      EXPENSIVE_BUY_MAX_PRICE: 0.90,
+      // Monitor phase length: watch both sides this long for a dip.
+      MONITOR_SECS: 120, // first 2 minutes
+      // A side "dipped" while its price is below this level.
+      DIP_LEVEL: 0.50,
+      // Buy trigger: target side's price comes back to this level
+      // any time after the monitor phase.
+      RETURN_LEVEL: 0.50,
+      // Notional size of the single buy: $100 worth of shares.
+      BUY_AMOUNT: 100,
+      // Stop loss: if the bought side's price hits this level, exit
+      // at this price and realize the loss.
+      STOP_LOSS_LEVEL: 0.20,
     },
     '15m': {
       label: '15m',
       WINDOW_MINUTES: 15,
       CAPITAL: 1000,
-      CHEAP_ORDER_SHARES: 50,
-      EXPENSIVE_ORDER_SHARES: 100,
-      CHEAP_BUY_AT_SECS: [90, 180, 270],
-      EXPENSIVE_BUY_AT_SECS: [570, 660, 750],
-      EXPENSIVE_BUY_INTERVAL_SECS: 90,
-      BUY_FIRE_VALIDITY_SECS: 90,
-      EXPENSIVE_BUY_MAX_PRICE: 0.90,
+      MONITOR_SECS: 420, // first 7 minutes
+      DIP_LEVEL: 0.50,
+      RETURN_LEVEL: 0.50,
+      BUY_AMOUNT: 100,
+      STOP_LOSS_LEVEL: 0.20,
     },
   },
 
@@ -119,7 +96,7 @@ module.exports = {
   ENTRY_IS_MAKER: false,
 
   // ---- Resolution ----
-  // Positions ride naked to real resolution — no take-profit exit.
+  // Positions that weren't stopped out ride to real resolution.
   // If either side's price is observed at/above RESOLUTION_WIN_THRESHOLD
   // in the last tick sampled before the window closes, that side is
   // declared the winner immediately. Otherwise resolution falls back

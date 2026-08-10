@@ -96,6 +96,8 @@
   .position-box.resolved_win { border-color: rgba(52,211,153,0.35); }
   .position-box.resolved_loss .status-pill { color: var(--loss); background: rgba(248,113,113,0.14); }
   .position-box.resolved_loss { border-color: rgba(248,113,113,0.35); }
+  .position-box.stopped_out .status-pill { color: var(--loss); background: rgba(248,113,113,0.14); }
+  .position-box.stopped_out { border-color: rgba(248,113,113,0.35); }
 
   .side-tag { display: inline-block; font-family: var(--font-data); font-size: 11px; font-weight: 700; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 5px; background: var(--surface-raised); border: 1px solid var(--border); }
   .side-tag.up { color: var(--up); background: var(--up-dim); border-color: rgba(45,212,191,0.35); }
@@ -162,16 +164,29 @@
     return iso ? new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
   }
 
-  function scheduleState(win, skipped) {
-    let mode = 'no window';
-    if (win) {
-      if (win.expSched === 'flip') mode = 'flip-timed @ t=' + win.flipAtSec + 's';
-      else if (win.expSched === 'fixed') mode = 'fixed expensive schedule';
-      else if (win.cheapPhaseDone) mode = 'watching for flip';
-      else mode = 'cheap phase in progress';
-      if (skipped) mode += ' · ' + skipped + ' skipped';
+  function strategyState(win, cfg, lc) {
+    if (!win) return 'no window';
+    const windowSec = (cfg.WINDOW_MINUTES || 5) * 60;
+    const elapsed = lc && lc.secondsRemaining != null ? Math.max(0, windowSec - lc.secondsRemaining) : null;
+    const mon = cfg.MONITOR_SECS != null ? cfg.MONITOR_SECS : 120;
+    const ret = cfg.RETURN_LEVEL != null ? cfg.RETURN_LEVEL : 0.50;
+    const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
+    if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
+    if (win.entryFired) {
+      const pos = (win.entries || [])[win.entries.length - 1];
+      return 'in position — ' + (pos ? pos.side : '?') + ' riding to resolution';
     }
-    return mode;
+    if (win.entrySkipped || win.targetSide == null) return 'no trade this window';
+    if (!win.monitoringDone) return 'monitoring… t=' + (elapsed != null ? elapsed + 's' : '?') + ' of ' + mon + 's';
+    return 'target ' + win.targetSide + ' — waiting for ≥ $' + ret.toFixed(2);
+  }
+
+  function patternText(win, placed, totalBuys, ret, sl) {
+    if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
+    if (win.entryFired) return placed + ' / ' + totalBuys + ' entry placed';
+    if (win.entrySkipped || win.targetSide == null) return 'no entry this window';
+    if (!win.monitoringDone) return 'monitoring…';
+    return 'waiting: ' + win.targetSide + ' → $' + ret.toFixed(2);
   }
 
   function enginePill(key) {
@@ -180,6 +195,7 @@
 
   function positionStatusLabel(pos) {
     if (pos.status === 'filled') return 'filled (taker) @ $' + pos.fillPrice.toFixed(2) + ' · riding to resolution';
+    if (pos.status === 'stopped_out') return 'stopped out @ $' + (pos.exitPrice != null ? pos.exitPrice.toFixed(2) : '0.20');
     if (pos.status === 'resolved_win') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · won @ resolution';
     if (pos.status === 'resolved_loss') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · lost @ resolution';
     return pos.status;
@@ -188,7 +204,7 @@
   function renderPositionArea(win, live) {
     if (!win) return '<div class="empty-state">No open window.</div>';
     const entries = win.entries || [];
-    if (entries.length === 0) return '<div class="no-trade-box">watching for scheduled buys…</div>';
+    if (entries.length === 0) return '<div class="no-trade-box">no entry yet this window</div>';
     const lv = (live && live.entries) || [];
     const summary = live
       ? '<div class="live-summary">' +
@@ -256,18 +272,14 @@
     for (const w of traded) for (const x of (w.entries || [])) if (x.fillPrice != null) fills.push(x.fillPrice);
     const win = e.currentWindow;
     const lc = e.lastCheck || {};
-    const cheapN = (cfg.CHEAP_BUY_AT_SECS || []).length;
-    const expN = (cfg.EXPENSIVE_BUY_AT_SECS || []).length;
-    const totalBuys = cheapN + expN;
+    const mon = cfg.MONITOR_SECS != null ? cfg.MONITOR_SECS : 120;
+    const dip = cfg.DIP_LEVEL != null ? cfg.DIP_LEVEL : 0.50;
+    const ret = cfg.RETURN_LEVEL != null ? cfg.RETURN_LEVEL : 0.50;
+    const amt = cfg.BUY_AMOUNT != null ? cfg.BUY_AMOUNT : 100;
+    const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
     const placed = win ? (win.entries || []).length : 0;
-    const skipped = win ? (win.skipped || []).length : 0;
-
-    const expTimes = cfg.EXPENSIVE_BUY_AT_SECS || [];
-    const expInt = cfg.EXPENSIVE_BUY_INTERVAL_SECS != null
-      ? cfg.EXPENSIVE_BUY_INTERVAL_SECS
-      : (expTimes.length > 1 ? expTimes[1] - expTimes[0] : 30);
-    const flipLabel = expTimes.map((_, i) => (i === 0 ? 'flip' : '+' + (i * expInt) + 's')).join('/');
-    const schedule = 'CHEAP ' + (cfg.CHEAP_ORDER_SHARES || 50) + 'sh @ ' + (cfg.CHEAP_BUY_AT_SECS || []).join('/') + 's · EXPENSIVE ' + (cfg.EXPENSIVE_ORDER_SHARES || 100) + 'sh @ ' + flipLabel + ' (fallback ' + expTimes.join('/') + 's, < $' + (cfg.EXPENSIVE_BUY_MAX_PRICE != null ? cfg.EXPENSIVE_BUY_MAX_PRICE : 0.90) + ')';
+    const totalBuys = 1;
+    const schedule = 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' @ ≥ $' + ret.toFixed(2) + ' · SL $' + sl.toFixed(2);
 
     return '<div class="engine">' +
       '<div class="engine-head">' +
@@ -293,8 +305,8 @@
         '<div class="chip"><div class="k">Win Rate</div><div class="v">' + (traded.length ? wins.length + ' / ' + traded.length : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Avg Fill</div><div class="v">' + (fills.length ? '$' + (fills.reduce((a, b) => a + b, 0) / fills.length).toFixed(2) : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Pending</div><div class="v">' + (e.pendingResolutions || []).length + '</div></div>' +
-        '<div class="chip"><div class="k">Buys Placed</div><div class="v">' + (win ? placed + ' / ' + totalBuys : '—') + '</div></div>' +
-        '<div class="chip"><div class="k">Skipped</div><div class="v">' + (win ? skipped : '—') + '</div></div>' +
+        '<div class="chip"><div class="k">Entries</div><div class="v">' + (win ? placed + ' / ' + totalBuys : '—') + '</div></div>' +
+        '<div class="chip"><div class="k">Stop Loss</div><div class="v">$' + sl.toFixed(2) + '</div></div>' +
         '<div class="chip"><div class="k">Fees / Rebates</div><div class="v" style="font-size:11px">$' + (e.totalFees || 0).toFixed(1) + ' / $' + (e.totalRebates || 0).toFixed(1) + '</div></div>' +
       '</div>' +
 
@@ -302,8 +314,8 @@
         '<div class="card-title"><span>Current Window</span>' +
           '<span class="countdown">' + (lc.secondsRemaining != null ? (lc.secondsRemaining > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—') + '</span></div>' +
         '<div class="pattern-row">' +
-          '<span class="pattern-chip">' + (win ? placed + ' / ' + totalBuys + ' buys placed' : '— — —') + '</span>' +
-          '<span class="signal-chip">' + (win ? scheduleState(win, skipped) : 'no window') + '</span>' +
+          '<span class="pattern-chip">' + (win ? patternText(win, placed, totalBuys, ret, sl) : '— — —') + '</span>' +
+          '<span class="signal-chip">' + strategyState(win, cfg, lc) + '</span>' +
         '</div>' +
         renderPositionArea(win, live) +
       '</div>' +
