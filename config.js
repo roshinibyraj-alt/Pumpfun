@@ -13,10 +13,15 @@
 //      once per scheduled second (5m: 30/60/90s, 15m: 90/180/270s)
 //      at CHEAP_ORDER_SHARES per buy.
 //   3. EXPENSIVE side (the side with the HIGHER midpoint) is bought
-//      once per scheduled second:
-//        - 5m:  150s / 180s / 210s
-//        - 15m: 570s / 660s / 750s
-//      at EXPENSIVE_ORDER_SHARES per buy.
+//      EXPENSIVE_ORDER_SHARES per buy, on a FLIP-TIMED schedule:
+//        - After all 3 cheap buys are done, the bot watches the live
+//          sides. If the side that was cheap becomes the expensive
+//          side (a role flip), the expensive clock starts AT that
+//          flip moment and the 3 buys fire at flip, flip + interval,
+//          flip + 2 x interval (interval: 5m = 30s, 15m = 90s — the
+//          spacing counted from the FIRST expensive position).
+//        - If no flip happens, the fixed times are used as fallback
+//          (5m: 150s / 180s / 210s, 15m: 570s / 660s / 750s).
 //   4. EXPENSIVE-side buys only fire while the expensive side's
 //      midpoint is BELOW EXPENSIVE_BUY_MAX_PRICE (default 0.90).
 //      If the price stays at/above 0.90 for the whole validity
@@ -71,8 +76,13 @@ module.exports = {
       EXPENSIVE_ORDER_SHARES: 100,
       // CHEAP: one buy at each of these seconds after window open.
       CHEAP_BUY_AT_SECS: [30, 60, 90],
-      // EXPENSIVE: one buy at each of these seconds after window open.
+      // EXPENSIVE (flip-timed): 3 buys at flip, flip+30s, flip+60s,
+      // where "flip" = the moment the cheap side becomes the expensive
+      // side after the cheap phase. Fixed fallback: 150s / 180s / 210s.
       EXPENSIVE_BUY_AT_SECS: [150, 180, 210],
+      // Spacing between the 3 expensive buys, counted from the FIRST
+      // expensive position (the flip moment).
+      EXPENSIVE_BUY_INTERVAL_SECS: 30,
       // Each scheduled buy may fire during this many seconds after
       // its scheduled second (so a mid-window restart doesn't dump
       // all missed buys at once).
@@ -90,6 +100,7 @@ module.exports = {
       EXPENSIVE_ORDER_SHARES: 100,
       CHEAP_BUY_AT_SECS: [90, 180, 270],
       EXPENSIVE_BUY_AT_SECS: [570, 660, 750],
+      EXPENSIVE_BUY_INTERVAL_SECS: 90,
       BUY_FIRE_VALIDITY_SECS: 90,
       EXPENSIVE_BUY_MAX_PRICE: 0.90,
     },

@@ -8,14 +8,17 @@
 //       t = 60s  -> buy CHEAP
 //       t = 90s  -> buy CHEAP
 //     EXPENSIVE (side with the HIGHER midpoint), EXPENSIVE_ORDER_SHARES
-//     each — only if that side's price is < EXPENSIVE_BUY_MAX_PRICE:
-//       t = 150s -> buy EXPENSIVE
-//       t = 180s -> buy EXPENSIVE
-//       t = 210s -> buy EXPENSIVE
+//     each — FLIP-TIMED:
+//       - Once all 3 cheap buys are done, if the side that was cheap
+//         becomes the expensive side (a role flip), the expensive
+//         clock starts at that flip moment: buys at flip,
+//         flip + 30s, flip + 60s.
+//       - No flip? Fixed fallback: t = 150s / 180s / 210s.
 //
 //   15m engine (900s windows):
 //     CHEAP: t = 90s / 180s / 270s
-//     EXPENSIVE (gated the same way): t = 570s / 660s / 750s
+//     EXPENSIVE (same flip timing): flip / flip + 90s / flip + 180s,
+//     fixed fallback t = 570s / 660s / 750s.
 //
 // Each engine has its OWN bankroll, current window, pending
 // resolutions, and history — money is never shared between them.
@@ -69,6 +72,71 @@ function priceOf(side, upPrice, downPrice) {
 // Cheap = lower midpoint, Expensive = higher midpoint.
 function cheapSide(upPrice, downPrice) { return upPrice <= downPrice ? 'UP' : 'DOWN'; }
 function expensiveSide(upPrice, downPrice) { return upPrice >= downPrice ? 'UP' : 'DOWN'; }
+
+// Fixed expensive schedule: one buy at each configured second after
+// window open (used when no flip is detected).
+function fixedExpensiveSchedule(engineCfg) {
+  return engineCfg.EXPENSIVE_BUY_AT_SECS.map((s) => ({ key: 'exp-' + s, sec: s }));
+}
+
+// Flip-timed expensive schedule: 3 buys at anchor, anchor+interval,
+// anchor+2*interval — the interval counted from the FIRST expensive
+// position (the flip moment).
+function flipExpensiveSchedule(anchorSec, engineCfg) {
+  const interval = engineCfg.EXPENSIVE_BUY_INTERVAL_SECS || 0;
+  return engineCfg.EXPENSIVE_BUY_AT_SECS.map((_, i) => ({
+    key: 'exp-flip-' + (i + 1),
+    sec: anchorSec + i * interval,
+  }));
+}
+
+// Decides which expensive schedule is active for this tick and locks it
+// in place the first time a decision is possible:
+//   - Before the first FIXED expensive second, if the side that was
+//     cheap when the cheap phase ended becomes the expensive side (a
+//     role flip), lock the FLIP schedule: buys at flip, flip+interval,
+//     flip+2*interval.
+//   - Otherwise, once the first fixed expensive second is reached (or
+//     a fixed buy has already resolved), lock the FIXED schedule.
+// Returns the active schedule's {key, sec} list — empty while the
+// decision is still open. Mutates win.expLocked / win.expSched /
+// win.flipAtSec.
+function activeExpensiveSchedule(win, engineCfg, elapsed, upPrice, downPrice) {
+  const firstFixed = engineCfg.EXPENSIVE_BUY_AT_SECS[0];
+
+  if (win.expLocked) {
+    return win.expSched === 'flip'
+      ? flipExpensiveSchedule(win.flipAtSec, engineCfg)
+      : fixedExpensiveSchedule(engineCfg);
+  }
+
+  const anyExpResolved =
+    win.fired.some((k) => k.startsWith('exp-')) ||
+    win.skipped.some((k) => k.startsWith('exp-'));
+
+  if (!win.cheapPhaseDone || win.flipRefSide == null) {
+    if (elapsed >= firstFixed || anyExpResolved) {
+      win.expLocked = true;
+      win.expSched = 'fixed';
+      return fixedExpensiveSchedule(engineCfg);
+    }
+    return [];
+  }
+
+  // Cheap phase is over — look for the flip first, then the fixed lock.
+  if (cheapSide(upPrice, downPrice) !== win.flipRefSide) {
+    win.expLocked = true;
+    win.expSched = 'flip';
+    win.flipAtSec = elapsed;
+    return flipExpensiveSchedule(elapsed, engineCfg);
+  }
+  if (elapsed >= firstFixed || anyExpResolved) {
+    win.expLocked = true;
+    win.expSched = 'fixed';
+    return fixedExpensiveSchedule(engineCfg);
+  }
+  return [];
+}
 
 // Builds an ALREADY-FILLED entry at the moment a scheduled buy fires.
 // Entries fill at the current midpoint; size is always exactly
@@ -299,13 +367,19 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           downTokenId,
           signal: `TIME_SCHEDULED_CHEAP_EXPENSIVE_${engineKey}`,
           entries: [],
-          fired: [],    // schedule keys already executed: cheap-30/..., exp-150/...
+          fired: [],    // schedule keys already executed: cheap-30/..., exp-150/..., exp-flip-1...
           skipped: [],  // schedule keys missed (expensive price gate / validity expired)
+          cheapPhaseDone: false, // true once all 3 cheap keys fired/skipped
+          cheapPhaseDoneAt: null, // window-relative second the cheap phase ended
+          flipRefSide: null,      // cheap side at cheap-phase end — flip watch reference
+          flipAtSec: null,        // window-relative second the flip was detected (if any)
+          expLocked: false,       // expensive schedule decided and locked
+          expSched: null,         // 'flip' | 'fixed'
           finalUpPrice: null,
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart}: CHEAP ${engineCfg.CHEAP_ORDER_SHARES}sh @ ${engineCfg.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${engineCfg.EXPENSIVE_ORDER_SHARES}sh @ ${engineCfg.EXPENSIVE_BUY_AT_SECS.join('/')}s (< $${engineCfg.EXPENSIVE_BUY_MAX_PRICE}) | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
+        log(`${tag} Window ${windowStart}: CHEAP ${engineCfg.CHEAP_ORDER_SHARES}sh @ ${engineCfg.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${engineCfg.EXPENSIVE_ORDER_SHARES}sh @ flip/+${engineCfg.EXPENSIVE_BUY_INTERVAL_SECS}s/+${2 * engineCfg.EXPENSIVE_BUY_INTERVAL_SECS}s (fallback ${engineCfg.EXPENSIVE_BUY_AT_SECS.join('/')}s, < $${engineCfg.EXPENSIVE_BUY_MAX_PRICE}) | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -345,21 +419,42 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           }
         });
 
-        // EXPENSIVE — one buy at each scheduled second, gated: only
-        // fires while the expensive side's price is below
-        // EXPENSIVE_BUY_MAX_PRICE. Keeps checking every tick until the
-        // validity window closes; if the price never drops below, the
-        // buy is skipped for good.
-        engineCfg.EXPENSIVE_BUY_AT_SECS.forEach((sec) => {
-          const key = 'exp-' + sec;
-          if (win.fired.includes(key) || win.skipped.includes(key)) return;
+        // Cheap phase complete = every cheap key has fired or been
+        // skipped. Once done, snapshot the current cheap side — that
+        // becomes the reference for flip detection: if IT becomes the
+        // expensive side later, the expensive clock starts there.
+        if (!win.cheapPhaseDone) {
+          const cheapKeys = engineCfg.CHEAP_BUY_AT_SECS.map((s) => 'cheap-' + s);
+          if (cheapKeys.every((k) => win.fired.includes(k) || win.skipped.includes(k))) {
+            win.cheapPhaseDone = true;
+            win.cheapPhaseDoneAt = elapsed;
+            win.flipRefSide = cheapSide(upPrice, downPrice);
+            log(`${tag} Cheap phase complete at t=${elapsed}s — watching ${win.flipRefSide} for a flip to expensive`);
+          }
+        }
+
+        // EXPENSIVE — FLIP-TIMED schedule, gated: only fires while the
+        // expensive side's price is below EXPENSIVE_BUY_MAX_PRICE.
+        // activeExpensiveSchedule() picks the schedule:
+        //   - flip detected (cheap side became expensive after the
+        //     cheap phase) -> buys at flip, flip+interval, flip+2*interval
+        //   - otherwise -> fixed times (5m: 150/180/210, 15m: 570/660/750)
+        // Each buy keeps checking every tick until its validity window
+        // closes; if the price never drops below, the buy is skipped.
+        const prevExpSched = win.expSched;
+        const expSched = activeExpensiveSchedule(win, engineCfg, elapsed, upPrice, downPrice);
+        if (win.expSched === 'flip' && prevExpSched !== 'flip') {
+          log(`${tag} FLIP DETECTED at t=${elapsed}s — ${win.flipRefSide} became expensive; expensive buys at t=${elapsed}s/+${engineCfg.EXPENSIVE_BUY_INTERVAL_SECS}s/+${2 * engineCfg.EXPENSIVE_BUY_INTERVAL_SECS}s`);
+        }
+        for (const { key, sec } of expSched) {
+          if (win.fired.includes(key) || win.skipped.includes(key)) continue;
           if (elapsed >= sec && elapsed < sec + validity) {
             const side = expensiveSide(upPrice, downPrice);
             const px = priceOf(side, upPrice, downPrice);
             if (px < engineCfg.EXPENSIVE_BUY_MAX_PRICE) {
               win.fired.push(key);
               fireEntry(win, side, engineCfg.EXPENSIVE_ORDER_SHARES, px, upTokenId, downTokenId,
-                `expensive buy @ t=${sec}s (${side} is expensive at $${px.toFixed(2)})`);
+                `expensive buy ${key} @ t=${sec}s (${side} is expensive at $${px.toFixed(2)})`);
             } else {
               // Price still too rich — keep waiting, but only log the
               // hold every 5s so the log stays readable.
@@ -367,14 +462,14 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
               const nowMs = Date.now();
               if (!lastHoldLogAt[holdKey] || nowMs - lastHoldLogAt[holdKey] >= 5000) {
                 lastHoldLogAt[holdKey] = nowMs;
-                log(`${tag} HOLD expensive buy t=${sec}s — ${side} at $${px.toFixed(2)} ≥ $${engineCfg.EXPENSIVE_BUY_MAX_PRICE}, waiting for a better price`);
+                log(`${tag} HOLD expensive buy ${key} t=${sec}s — ${side} at $${px.toFixed(2)} ≥ $${engineCfg.EXPENSIVE_BUY_MAX_PRICE}, waiting for a better price`);
               }
             }
           } else if (elapsed >= sec + validity) {
             win.skipped.push(key);
-            log(`${tag} SKIP expensive buy t=${sec}s — never below $${engineCfg.EXPENSIVE_BUY_MAX_PRICE} in time`);
+            log(`${tag} SKIP expensive buy ${key} t=${sec}s — never below $${engineCfg.EXPENSIVE_BUY_MAX_PRICE} in time`);
           }
-        });
+        }
 
         // Snapshot both sides' prices on every tick while the window is
         // still open. Whichever snapshot ends up closest to windowEnd is
@@ -442,4 +537,4 @@ function startBotLoop() {
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
 
-module.exports = { startBotLoop, tick, computeUnrealized };
+module.exports = { startBotLoop, tick, computeUnrealized, __test: { activeExpensiveSchedule, cheapSide, expensiveSide } };

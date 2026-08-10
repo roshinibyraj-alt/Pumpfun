@@ -12,9 +12,15 @@ history:
 
 | Engine | Window | CHEAP side (lower midpoint) | EXPENSIVE side (higher midpoint) |
 |---|---|---|---|
-| 5m | 5 minutes | 50 shares @ 30s / 60s / 90s | 100 shares @ 150s / 180s / 210s |
-| 15m | 15 minutes | 50 shares @ 90s / 180s / 270s | 100 shares @ 570s / 660s / 750s |
+| 5m | 5 minutes | 50 shares @ 30s / 60s / 90s | 100 shares @ flip / +30s / +60s (fallback 150s / 180s / 210s) |
+| 15m | 15 minutes | 50 shares @ 90s / 180s / 270s | 100 shares @ flip / +90s / +180s (fallback 570s / 660s / 750s) |
 
+- **Flip-timed expensive buys:** after all 3 cheap buys are done, the bot
+  watches the live sides. If the side that was cheap becomes the expensive
+  side (a role flip), the expensive clock starts at **that flip moment** and
+  the 3 buys fire at `flip`, `flip + interval`, `flip + 2 × interval` — the
+  interval (5m: 30s, 15m: 90s) is counted from the **first expensive
+  position**. If no flip happens, the fixed fallback times are used.
 - "Cheap/expensive" is re-evaluated fresh from the live midpoints at each
   scheduled tick, so the side can flip between buys within a window.
 - **Expensive-side price gate:** an expensive-side buy only fires while that
@@ -50,6 +56,9 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
   - `CAPITAL`: that engine's starting bankroll (independent)
   - `CHEAP_ORDER_SHARES` / `EXPENSIVE_ORDER_SHARES`: bet sizes (default 50/100)
   - `CHEAP_BUY_AT_SECS` / `EXPENSIVE_BUY_AT_SECS`: buy schedule per engine
+    (`EXPENSIVE_BUY_AT_SECS` doubles as the fixed fallback when no flip occurs)
+  - `EXPENSIVE_BUY_INTERVAL_SECS`: spacing between the 3 expensive buys,
+    counted from the first expensive position (flip moment)
   - `BUY_FIRE_VALIDITY_SECS`: how long after its scheduled second a buy may
     fire (so a mid-window restart doesn't dump all missed buys at once)
   - `EXPENSIVE_BUY_MAX_PRICE`: expensive-side buys only fire below this price
