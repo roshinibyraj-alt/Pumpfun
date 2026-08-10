@@ -171,9 +171,10 @@
     const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
 
     if (cfg.STRATEGY === 'EXPENSIVE_RECOVERY') {
-      if (win.recoveryStoppedOut) return 'recovery stopped out @ $' + sl.toFixed(2) + ' — loss rolls into carry';
-      if (win.carryRecoveryPlaced) return 'carry-recovery ' + win.carryRecoverySide + ' riding (target $' + (win.carryRecoveryTarget != null ? win.carryRecoveryTarget.toFixed(2) : '?') + ') + main entry';
-      if (win.recoveryPlaced) return 'recovery bet on ' + win.recoverySide + ' riding to resolution';
+      if (win.recovery2StoppedOut) return 'recovery 2 stopped out @ $' + sl.toFixed(2) + ' — loss accepted (no carry)';
+      if (win.recovery2Placed) return 'recovery 2 ' + win.recovery2Side + ' riding (target $' + (win.recovery2Target != null ? win.recovery2Target.toFixed(2) : '?') + ')';
+      if (win.recoveryStoppedOut) return 'recovery 1 stopped out @ $' + sl.toFixed(2) + ' — recovery 2 pending';
+      if (win.recoveryPlaced) return 'recovery 1 ' + win.recoverySide + ' riding (target $' + (win.recoveryTarget != null ? win.recoveryTarget.toFixed(2) : '?') + ')';
       if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2) + ' — recovery pending';
       if (win.entryFired) {
         const pos = (win.entries || [])[0];
@@ -196,9 +197,9 @@
 
   function patternText(win, placed, totalBuys, ret, sl, cfg) {
     if (cfg.STRATEGY === 'EXPENSIVE_RECOVERY') {
-      if (win.recoveryStoppedOut) return 'recovery stopped out @ $' + sl.toFixed(2) + ' (' + placed + ' / ' + totalBuys + ' entries)';
-      if (win.carryRecoveryPlaced) return 'carry-recovery placed (' + placed + ' / ' + totalBuys + ' entries)';
-      if (win.recoveryPlaced) return 'recovery bet placed (' + placed + ' / ' + totalBuys + ' entries)';
+      if (win.recovery2StoppedOut || win.recovery2Placed) return 'recovery 2 placed (' + placed + ' / ' + totalBuys + ' entries)';
+      if (win.recoveryStoppedOut) return 'recovery 1 stopped (' + placed + ' / ' + totalBuys + ' entries)';
+      if (win.recoveryPlaced) return 'recovery 1 placed (' + placed + ' / ' + totalBuys + ' entries)';
       if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
       if (win.entryFired) return placed + ' / 1 entry placed';
       return 'waiting for entry @ t=' + (cfg.ENTRY_AFTER_SECS != null ? cfg.ENTRY_AFTER_SECS : 420) + 's';
@@ -299,10 +300,10 @@
     const amt = cfg.BUY_AMOUNT != null ? cfg.BUY_AMOUNT : 100;
     const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
     const placed = win ? (win.entries || []).length : 0;
-    const totalBuys = cfg.STRATEGY === 'EXPENSIVE_RECOVERY' ? 2 : 1;
-    const carry = (e.recoveryCarry != null ? e.recoveryCarry : 0);
+    const totalBuys = cfg.STRATEGY === 'EXPENSIVE_RECOVERY' ? 3 : 1;
+    const extra = cfg.RECOVERY_EXTRA_SHARES != null ? cfg.RECOVERY_EXTRA_SHARES : 50;
     const schedule = cfg.STRATEGY === 'EXPENSIVE_RECOVERY'
-      ? 'After ' + (cfg.ENTRY_AFTER_SECS != null ? cfg.ENTRY_AFTER_SECS : 420) + 's · ' + (cfg.ENTRY_SHARES != null ? cfg.ENTRY_SHARES : 300) + 'sh expensive (any price) · SL $' + sl.toFixed(2) + ' on ALL bets · carry $' + carry.toFixed(2) + ' · carry-recovery @420s on signal side'
+      ? 'After ' + (cfg.ENTRY_AFTER_SECS != null ? cfg.ENTRY_AFTER_SECS : 420) + 's · ' + (cfg.ENTRY_SHARES != null ? cfg.ENTRY_SHARES : 300) + 'sh expensive (any price) · SL $' + sl.toFixed(2) + ' all bets · up to 3 bets · +' + extra + 'sh per recovery · no carry'
       : 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' @ ≥ $' + ret.toFixed(2) + ' · SL $' + sl.toFixed(2);
 
     return '<div class="engine">' +

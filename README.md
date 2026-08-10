@@ -19,12 +19,11 @@ never holds a wallet, private key, or real funds.
 | Step | Rule |
 |---|---|
 | Entry | at/after 420s (7 min), buy **300 shares** on the **expensive side at any price** |
-| Stop loss | 0.40 — exit at 0.40 if hit |
+| Stop loss | **0.40 on every bet** — exit at 0.40 if hit; the 0.40 point is also the trigger for the next recovery |
 | Loss calc | right after entry: `L = (fill − 0.40) × 300 + fee` |
-| SL recovery | if a window has **no carry owed**, the moment SL hits buy the **opposite side**, sized so a win recovers `L` plus any carried amount: `shares = ceil((carry + L) / ((1 − p) × (1 − 0.07p)))` |
-| Carry recovery | if a carry is still owed when the next 420s signal arrives, the bot **also** buys a recovery on the **signal side** (the expensive side) — the signal logic itself runs exactly as normal. Sized to recover the carry: `shares = ceil(carry / ((1 − p) × (1 − 0.07p)))`. One recovery bet per window. |
-| Stop loss on all bets | **every** 15m bet — main entry, in-window SL recovery, and carry-recovery — has the same **0.40 stop loss**. If a recovery is stopped out, its loss is realized immediately and the full loss rolls into the carry. |
-| Carry | a recovery **wins** → carry cleared (window ≈ breakeven). A recovery **loses or is stopped out** → `carry = pre-carry + all losses this window` rolls into the next window and is re-targeted at the next 420s signal, so the recovery amount is always correct. A main-bet win leaves the carry untouched. |
+| Recovery 1 | the moment the main hits 0.40, exit it and buy the **opposite side**, sized from the main's SL loss **+ 50 extra shares**: `shares = ceil(L / ((1 − p) × (1 − 0.07p))) + 50` |
+| Recovery 2 | the moment recovery 1 hits 0.40, exit it and buy the **opposite side**, sized **only from recovery 1's loss** + 50 extra shares (never the main or earlier bets) |
+| No carry | if recovery 2 also loses, the loss is **accepted** — nothing carries to the next window; every 15m window starts fresh with a new main entry. Max 3 bets per window. |
 
 Every fill is modeled as a taker fill at the current midpoint:
 `cost = shares × price + fee`, with `fee = shares × 0.07 × price × (1 − price)`
@@ -35,8 +34,8 @@ Every fill is modeled as a taker fill at the current midpoint:
 - Each engine starts with its own **$1,000 virtual** bankroll (`CAPITAL` in
   `config.js` under `ENGINES`). Money is never shared between the 5m and 15m
   engines.
-- The 15m engine also tracks `recoveryCarry` (the unrecovered deficit rolled
-  between windows) in state.
+- The 15m engine's `recoveryCarry` field is kept at 0 (losses are accepted
+  inside the window; nothing rolls between windows).
 - Per-engine state (bankroll, open window, pending resolutions, history) is
   persisted to `state.json`.
 - Railway's filesystem is ephemeral — state resets on redeploy unless you add
@@ -53,7 +52,8 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
   - `CAPITAL`: that engine's starting bankroll (independent)
   - 5m: `MONITOR_SECS`, `DIP_LEVEL`, `RETURN_LEVEL`, `BUY_AMOUNT`,
     `STOP_LOSS_LEVEL`
-  - 15m: `ENTRY_AFTER_SECS`, `ENTRY_SHARES`, `STOP_LOSS_LEVEL`
+  - 15m: `ENTRY_AFTER_SECS`, `ENTRY_SHARES`, `STOP_LOSS_LEVEL`,
+    `RECOVERY_EXTRA_SHARES` (extra shares added to every recovery)
 - `BASE_TAKER_FEE_RATE` / `MAKER_REBATE_RATE` / `ENTRY_IS_MAKER`: fee model
 - `RESOLUTION_WIN_THRESHOLD` / `RESOLUTION_LOSS_THRESHOLD`
 - `POLL_INTERVAL_MS`, `STATE_FILE`
@@ -77,7 +77,7 @@ Dashboard: http://localhost:3000 (set `PORT` to change).
 ## Dashboard
 
 Shows each engine separately: bankroll/return/equity, live UP/DOWN prices,
-strategy state (monitor/target for 5m; entry/SL/recovery + carry for 15m),
+strategy state (monitor/target for 5m; entry/SL/recovery 1/2 for 15m),
 unrealized P&L on open positions, and per-engine resolution history.
 
 ## Status / safety

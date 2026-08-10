@@ -41,6 +41,7 @@ app.get('/api/state', (req, res) => {
         ENTRY_AFTER_SECS: cfg.ENTRY_AFTER_SECS,
         ENTRY_SHARES: cfg.ENTRY_SHARES,
         STOP_LOSS_LEVEL: cfg.STOP_LOSS_LEVEL,
+        RECOVERY_EXTRA_SHARES: cfg.RECOVERY_EXTRA_SHARES,
       },
       liveWindow: live,
       totalFees: fees,
