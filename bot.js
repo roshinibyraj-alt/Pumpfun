@@ -1,25 +1,37 @@
 // ============================================================
-// bot.js — time-scheduled cheap/expensive buys, v17. Per 15-minute
-// window (900 seconds), schedule scaled ×3 from the 5-minute version:
+// bot.js — dual-engine time-scheduled cheap/expensive buys, v19.
+// Runs TWO independent engines at the same time:
 //
-//   CHEAP side (the side with the LOWER midpoint), one 50-share
-//   buy at each of:
-//     t = 90s      -> buy CHEAP, 50 shares
-//     t = 180s     -> buy CHEAP, 50 shares
-//     t = 270s     -> buy CHEAP, 50 shares
+//   5m engine  (300s windows):
+//     CHEAP (side with the LOWER midpoint), CHEAP_ORDER_SHARES each:
+//       t = 30s  -> buy CHEAP
+//       t = 60s  -> buy CHEAP
+//       t = 90s  -> buy CHEAP
+//     EXPENSIVE (side with the HIGHER midpoint), EXPENSIVE_ORDER_SHARES
+//     each — only if that side's price is < EXPENSIVE_BUY_MAX_PRICE:
+//       t = 150s -> buy EXPENSIVE
+//       t = 180s -> buy EXPENSIVE
+//       t = 210s -> buy EXPENSIVE
 //
-//   EXPENSIVE side (the side with the HIGHER midpoint), one
-//   100-share buy at each of:
-//     t = 630s     -> buy EXPENSIVE, 100 shares
-//     t = 720s     -> buy EXPENSIVE, 100 shares
-//     t = 810s     -> buy EXPENSIVE, 100 shares
+//   15m engine (900s windows):
+//     CHEAP: t = 90s / 180s / 270s
+//     EXPENSIVE (gated the same way): t = 570s / 660s / 750s
+//
+// Each engine has its OWN bankroll, current window, pending
+// resolutions, and history — money is never shared between them.
 //
 // Cheap/expensive is re-evaluated FRESH at each scheduled tick
 // from the live midpoints — sides may flip mid-window and each
 // order simply follows whichever side is cheap/expensive right
-// then. Cheap buys are exactly config.CHEAP_ORDER_SHARES (50) shares,
-// expensive buys exactly config.EXPENSIVE_ORDER_SHARES (100) shares,
-// regardless of cost — no ladder, no pattern, no hedge.
+// then. Cheap buys are exactly CHEAP_ORDER_SHARES, expensive buys
+// exactly EXPENSIVE_ORDER_SHARES, regardless of cost — no ladder,
+// no pattern, no hedge.
+//
+// EXPENSIVE PRICE GATE: an expensive-side buy only fires while the
+// expensive side's midpoint is BELOW EXPENSIVE_BUY_MAX_PRICE (0.90).
+// The bot keeps checking every tick through the buy's validity
+// window; if the price never drops below 0.90 by the end, the buy
+// is skipped for good (never chased at a bad price).
 //
 // FEES & REBATES (docs.polymarket.com/trading/fees + maker-rebates):
 //   Crypto: taker fee = shares x 0.07 x price x (1 - price).
@@ -37,7 +49,7 @@
 //
 // Live marks: every tick we snapshot both sides' midpoints; the
 // dashboard uses them (via computeUnrealized) to show real-time
-// unrealized P&L on every open position.
+// unrealized P&L on every open position, per engine.
 // ============================================================
 
 const config = require('./config');
@@ -60,10 +72,10 @@ function expensiveSide(upPrice, downPrice) { return upPrice >= downPrice ? 'UP' 
 
 // Builds an ALREADY-FILLED entry at the moment a scheduled buy fires.
 // Entries fill at the current midpoint; size is always exactly
-// config.CHEAP_ORDER_SHARES / config.EXPENSIVE_ORDER_SHARES shares.
+// CHEAP_ORDER_SHARES / EXPENSIVE_ORDER_SHARES shares.
 // Fee/rebate follow config.ENTRY_IS_MAKER
 // (see the header comment — taker default, maker opt-in).
-function makeEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
+function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
   const feeEquiv = shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice);
   const isMaker = !!config.ENTRY_IS_MAKER;
@@ -87,9 +99,9 @@ function makeEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason)
 
 // Records a scheduled taker/maker buy on win.entries.
 function fireEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
-  const entry = makeEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason);
+  const entry = makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason);
   win.entries.push(entry);
-  log(`ENTRY: ${side} ${shares}sh @ $${fillPrice.toFixed(2)} | fee $${entry.fillFee.toFixed(4)} | rebate $${entry.fillRebate.toFixed(4)} — ${reason}`);
+  log(`[${win.engine || '?'}] ENTRY: ${side} ${shares}sh @ $${fillPrice.toFixed(2)} | fee $${entry.fillFee.toFixed(4)} | rebate $${entry.fillRebate.toFixed(4)} — ${reason}`);
 }
 
 // Checks whether the window's LAST observed tick (closest snapshot to
@@ -111,7 +123,7 @@ function immediateWinnerFromLastTick(win) {
 // still ambiguous). Settles ALL filled entries of the window together
 // (win = $1/share, lose = $0; rebate credited to payout when present).
 // Returns true if resolved this call, false if still waiting.
-async function resolveWindow(win, state) {
+async function resolveWindow(engine, win) {
   let wonSide = immediateWinnerFromLastTick(win);
 
   if (!wonSide) {
@@ -148,10 +160,12 @@ async function resolveWindow(win, state) {
   }
 
   const pnl = Math.round((payout - cost) * 100) / 100;
-  state.bankroll = Math.round((state.bankroll + pnl) * 100) / 100;
+  engine.bankroll = Math.round((engine.bankroll + pnl) * 100) / 100;
   const isLoss = traded ? pnl < 0 : null;
 
-  state.windowHistory.push({
+  engine.windowHistory.push({
+    engine: win.engine,
+    windowMinutes: win.windowMinutes,
     windowStart: win.windowStart,
     windowEnd: win.windowEnd,
     signal: win.signal,
@@ -166,22 +180,22 @@ async function resolveWindow(win, state) {
     cost: Math.round(cost * 100) / 100,
     pnl,
     isLoss,
-    bankrollAfter: state.bankroll,
+    bankrollAfter: engine.bankroll,
     resolvedAt: new Date().toISOString(),
   });
 
   log(
-    `WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | ${entries.length} entries (${entries.map((e) => e.side).join(', ') || 'none'}) | payout $${payout.toFixed(2)} | cost $${cost.toFixed(2)} | fees $${fees.toFixed(5)} | rebates $${rebates.toFixed(5)} | pnl $${pnl.toFixed(2)} | bankroll $${state.bankroll}`
+    `[${win.engine}] WINDOW ${win.windowStart} RESOLVED: ${wonSide} won | ${entries.length} entries (${entries.map((e) => e.side).join(', ') || 'none'}) | payout $${payout.toFixed(2)} | cost $${cost.toFixed(2)} | fees $${fees.toFixed(5)} | rebates $${rebates.toFixed(5)} | pnl $${pnl.toFixed(2)} | bankroll $${engine.bankroll}`
   );
   return true;
 }
 
-// Computes live unrealized P&L for the open window using the latest
-// midpoint snapshot (state.lastCheck). Used by the dashboard's
+// Computes live unrealized P&L for one engine's open window using the
+// latest midpoint snapshot (engine.lastCheck). Used by the dashboard's
 // /api/state so positions are marked to market in real time.
-function computeUnrealized(state) {
-  const win = state.currentWindow;
-  const lc = state.lastCheck || {};
+function computeUnrealized(engine) {
+  const win = engine.currentWindow;
+  const lc = engine.lastCheck || {};
   const out = {
     upPrice: lc.upPrice != null ? lc.upPrice : null,
     downPrice: lc.downPrice != null ? lc.downPrice : null,
@@ -226,6 +240,177 @@ function computeUnrealized(state) {
   return out;
 }
 
+// One full pass over a single engine: hand off closed windows, resolve
+// pendings, find the live market, place scheduled buys, snapshot prices.
+async function engineTick(state, engineKey, engineCfg, nowSec) {
+  const engine = state.engines[engineKey];
+  const tag = `[${engineKey}]`;
+
+  // 1) Hand off the current window for resolution the moment its time
+  //    is up — BEFORE we look at creating the next window.
+  try {
+    if (engine.currentWindow && nowSec >= engine.currentWindow.windowEnd) {
+      engine.pendingResolutions.push(engine.currentWindow);
+      log(`${tag} Window ${engine.currentWindow.windowStart} closed -> pending resolution`);
+      engine.currentWindow = null;
+    }
+  } catch (e) {
+    log(`${tag} ERROR handing off closed window:`, e.message);
+    state.lastError = e.message;
+  }
+
+  // 2) Resolution pass — isolated in its own try/catch so a hiccup
+  //    here can't block the rest of the engine tick.
+  try {
+    const stillPending = [];
+    for (const win of engine.pendingResolutions) {
+      const resolved = await resolveWindow(engine, win);
+      if (!resolved) stillPending.push(win);
+    }
+    engine.pendingResolutions = stillPending;
+    if (!state.lastError) state.lastError = null;
+  } catch (e) {
+    log(`${tag} ERROR in resolution pass:`, e.message);
+    state.lastError = e.message;
+  }
+
+  // 3) Market snapshot, new-window creation, and scheduled entries.
+  try {
+    const found = await polymarket.getCurrentUpDownMarket(config.ASSET, engineCfg.WINDOW_MINUTES);
+
+    if (found) {
+      const { market, windowStart, windowEnd } = found;
+      const { upTokenId, downTokenId } = polymarket.parseTokens(market);
+
+      if (!engine.currentWindow || engine.currentWindow.windowStart !== windowStart) {
+        // Safety net: if for some reason step 1 didn't already catch
+        // a stale window, hand it off here too.
+        if (engine.currentWindow) {
+          engine.pendingResolutions.push(engine.currentWindow);
+          log(`${tag} Window ${engine.currentWindow.windowStart} closed -> pending resolution (late detection)`);
+        }
+
+        engine.currentWindow = {
+          engine: engineKey,
+          windowMinutes: engineCfg.WINDOW_MINUTES,
+          windowStart,
+          windowEnd,
+          upTokenId,
+          downTokenId,
+          signal: `TIME_SCHEDULED_CHEAP_EXPENSIVE_${engineKey}`,
+          entries: [],
+          fired: [],    // schedule keys already executed: cheap-30/..., exp-150/...
+          skipped: [],  // schedule keys missed (expensive price gate / validity expired)
+          finalUpPrice: null,
+          finalDownPrice: null,
+        };
+
+        log(`${tag} Window ${windowStart}: CHEAP ${engineCfg.CHEAP_ORDER_SHARES}sh @ ${engineCfg.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${engineCfg.EXPENSIVE_ORDER_SHARES}sh @ ${engineCfg.EXPENSIVE_BUY_AT_SECS.join('/')}s (< $${engineCfg.EXPENSIVE_BUY_MAX_PRICE}) | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
+      }
+
+      const [upPrice, downPrice] = await Promise.all([
+        polymarket.getMidpoint(upTokenId),
+        polymarket.getMidpoint(downTokenId),
+      ]);
+
+      engine.lastCheck = {
+        timestamp: new Date().toISOString(),
+        windowStart,
+        windowEnd,
+        secondsRemaining: windowEnd - nowSec,
+        upPrice,
+        downPrice,
+      };
+
+      const win = engine.currentWindow;
+
+      if (win && nowSec < windowEnd) {
+        const elapsed = nowSec - win.windowStart;
+        const validity = engineCfg.BUY_FIRE_VALIDITY_SECS;
+
+        // CHEAP — one buy at each scheduled second. Each has a validity
+        // window (sec .. sec+validity) so a mid-window restart doesn't
+        // dump all missed cheap buys at once. Side re-evaluated fresh.
+        engineCfg.CHEAP_BUY_AT_SECS.forEach((sec, i) => {
+          const key = 'cheap-' + sec;
+          if (win.fired.includes(key) || win.skipped.includes(key)) return;
+          if (elapsed >= sec && elapsed < sec + validity) {
+            const side = cheapSide(upPrice, downPrice);
+            win.fired.push(key);
+            fireEntry(win, side, engineCfg.CHEAP_ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
+              `cheap buy #${i + 1} — t=${sec}s (${side} is cheap at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
+          } else if (elapsed >= sec + validity) {
+            win.skipped.push(key);
+            log(`${tag} SKIP cheap buy t=${sec}s — validity window passed`);
+          }
+        });
+
+        // EXPENSIVE — one buy at each scheduled second, gated: only
+        // fires while the expensive side's price is below
+        // EXPENSIVE_BUY_MAX_PRICE. Keeps checking every tick until the
+        // validity window closes; if the price never drops below, the
+        // buy is skipped for good.
+        engineCfg.EXPENSIVE_BUY_AT_SECS.forEach((sec) => {
+          const key = 'exp-' + sec;
+          if (win.fired.includes(key) || win.skipped.includes(key)) return;
+          if (elapsed >= sec && elapsed < sec + validity) {
+            const side = expensiveSide(upPrice, downPrice);
+            const px = priceOf(side, upPrice, downPrice);
+            if (px < engineCfg.EXPENSIVE_BUY_MAX_PRICE) {
+              win.fired.push(key);
+              fireEntry(win, side, engineCfg.EXPENSIVE_ORDER_SHARES, px, upTokenId, downTokenId,
+                `expensive buy @ t=${sec}s (${side} is expensive at $${px.toFixed(2)})`);
+            } else {
+              // Price still too rich — keep waiting, but only log the
+              // hold every 5s so the log stays readable.
+              const holdKey = engineKey + ':' + key;
+              const nowMs = Date.now();
+              if (!lastHoldLogAt[holdKey] || nowMs - lastHoldLogAt[holdKey] >= 5000) {
+                lastHoldLogAt[holdKey] = nowMs;
+                log(`${tag} HOLD expensive buy t=${sec}s — ${side} at $${px.toFixed(2)} ≥ $${engineCfg.EXPENSIVE_BUY_MAX_PRICE}, waiting for a better price`);
+              }
+            }
+          } else if (elapsed >= sec + validity) {
+            win.skipped.push(key);
+            log(`${tag} SKIP expensive buy t=${sec}s — never below $${engineCfg.EXPENSIVE_BUY_MAX_PRICE} in time`);
+          }
+        });
+
+        // Snapshot both sides' prices on every tick while the window is
+        // still open. Whichever snapshot ends up closest to windowEnd is
+        // what resolveWindow() treats as "the last second of the window".
+        win.finalUpPrice = upPrice;
+        win.finalDownPrice = downPrice;
+      }
+    } else if (!engineNoMarketSuppressedAt[engineKey] || nowSec - engineNoMarketSuppressedAt[engineKey] >= 60) {
+      engineNoMarketSuppressedAt[engineKey] = nowSec;
+      log(`${tag} No live ${engineCfg.WINDOW_MINUTES}m market found for current window yet.`);
+    }
+  } catch (e) {
+    log(`${tag} ERROR taking live snapshot / checking current window:`, e.message);
+    state.lastError = e.message;
+  }
+
+  // 4) Extra safety net: in case the current window's time ran out
+  //    again during step 3 (e.g. a slow network call straddled the
+  //    boundary), catch it here too rather than waiting a full extra
+  //    poll interval.
+  try {
+    if (engine.currentWindow && nowSec >= engine.currentWindow.windowEnd) {
+      engine.pendingResolutions.push(engine.currentWindow);
+      engine.currentWindow = null;
+    }
+  } catch (e) {
+    log(`${tag} ERROR handing off closed window (late):`, e.message);
+    state.lastError = e.message;
+  }
+}
+
+const engineNoMarketSuppressedAt = {};
+// Last time we logged a HOLD (expensive price gate) for a given
+// engine+buy key — used to avoid spamming the log every poll.
+const lastHoldLogAt = {};
+
 let tickRunning = false;
 async function tick() {
   if (tickRunning) return; // never overlap async ticks — a slow network call
@@ -234,140 +419,13 @@ async function tick() {
     const state = loadState();
     const nowSec = Math.floor(Date.now() / 1000);
 
-    // 1) Hand off the current window for resolution the moment its time
-    //    is up — BEFORE we look at creating the next window.
-    try {
-      if (state.currentWindow && nowSec >= state.currentWindow.windowEnd) {
-        state.pendingResolutions.push(state.currentWindow);
-        log(`Window ${state.currentWindow.windowStart} closed -> pending resolution`);
-        state.currentWindow = null;
+    for (const [key, cfg] of Object.entries(config.ENGINES)) {
+      try {
+        await engineTick(state, key, cfg, nowSec);
+      } catch (e) {
+        log(`[${key}] ERROR in engine tick:`, e.message);
+        state.lastError = e.message;
       }
-    } catch (e) {
-      log('ERROR handing off closed window:', e.message);
-      state.lastError = e.message;
-    }
-
-    // 2) Resolution pass — isolated in its own try/catch so a hiccup
-    //    here can't block the rest of the tick.
-    try {
-      const stillPending = [];
-      for (const win of state.pendingResolutions) {
-        const resolved = await resolveWindow(win, state);
-        if (!resolved) stillPending.push(win);
-      }
-      state.pendingResolutions = stillPending;
-      if (!state.lastError) state.lastError = null;
-    } catch (e) {
-      log('ERROR in resolution pass:', e.message);
-      state.lastError = e.message;
-    }
-
-    // 3) Market snapshot, new-window creation, and scheduled entries.
-    try {
-      const found = await polymarket.getCurrentUpDownMarket(config.ASSET, config.WINDOW_MINUTES);
-
-      if (found) {
-        const { market, windowStart, windowEnd } = found;
-        const { upTokenId, downTokenId } = polymarket.parseTokens(market);
-
-        if (!state.currentWindow || state.currentWindow.windowStart !== windowStart) {
-          // Safety net: if for some reason step 1 didn't already catch
-          // a stale window, hand it off here too.
-          if (state.currentWindow) {
-            state.pendingResolutions.push(state.currentWindow);
-            log(`Window ${state.currentWindow.windowStart} closed -> pending resolution (late detection)`);
-          }
-
-          state.currentWindow = {
-            windowStart,
-            windowEnd,
-            upTokenId,
-            downTokenId,
-            signal: 'TIME_SCHEDULED_CHEAP_EXPENSIVE',
-            entries: [],  // every 50-share order taken this window
-            fired: [],    // schedule keys already executed: cheap-90/180/270, exp-630/720/810
-            finalUpPrice: null,
-            finalDownPrice: null,
-          };
-
-          log(`Window ${windowStart}: CHEAP ${config.CHEAP_ORDER_SHARES}sh @ ${config.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${config.EXPENSIVE_ORDER_SHARES}sh @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
-        }
-
-        const [upPrice, downPrice] = await Promise.all([
-          polymarket.getMidpoint(upTokenId),
-          polymarket.getMidpoint(downTokenId),
-        ]);
-
-        state.lastCheck = {
-          timestamp: new Date().toISOString(),
-          windowStart,
-          windowEnd,
-          secondsRemaining: windowEnd - nowSec,
-          upPrice,
-          downPrice,
-        };
-
-        const win = state.currentWindow;
-
-        if (win && nowSec < windowEnd) {
-          const elapsed = nowSec - win.windowStart;
-
-          // CHEAP — one 50-share buy at each scheduled second. Each has a
-          // BUY_FIRE_VALIDITY_SECS validity window (sec .. sec+validity)
-          // so a mid-window restart doesn't dump all missed cheap buys at
-          // once. Side re-evaluated fresh here, so it can flip between
-          // buys.
-          config.CHEAP_BUY_AT_SECS.forEach((sec, i) => {
-            const key = 'cheap-' + sec;
-            if (win.fired.includes(key)) return;
-            if (elapsed >= sec && elapsed < sec + config.BUY_FIRE_VALIDITY_SECS) {
-              const side = cheapSide(upPrice, downPrice);
-              win.fired.push(key);
-              fireEntry(win, side, config.CHEAP_ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
-                `cheap buy #${i + 1} — t=${sec}s (${side} is cheap at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
-            }
-          });
-
-          // EXPENSIVE — one 100-share buy at each scheduled second. Each
-          // also gets a BUY_FIRE_VALIDITY_SECS validity window. Side
-          // re-evaluated fresh.
-          config.EXPENSIVE_BUY_AT_SECS.forEach((sec) => {
-            const key = 'exp-' + sec;
-            if (win.fired.includes(key)) return;
-            if (elapsed >= sec && elapsed < sec + config.BUY_FIRE_VALIDITY_SECS) {
-              const side = expensiveSide(upPrice, downPrice);
-              win.fired.push(key);
-              fireEntry(win, side, config.EXPENSIVE_ORDER_SHARES, priceOf(side, upPrice, downPrice), upTokenId, downTokenId,
-                `expensive buy @ t=${sec}s (${side} is expensive at $${priceOf(side, upPrice, downPrice).toFixed(2)})`);
-            }
-          });
-
-          // Snapshot both sides' prices on every tick while the window is
-          // still open. Whichever snapshot ends up closest to windowEnd is
-          // what resolveWindow() treats as "the last second of the window".
-          win.finalUpPrice = upPrice;
-          win.finalDownPrice = downPrice;
-        }
-      } else {
-        log('No live market found for current window yet.');
-      }
-    } catch (e) {
-      log('ERROR taking live snapshot / checking current window:', e.message);
-      state.lastError = e.message;
-    }
-
-    // 4) Extra safety net: in case the current window's time ran out
-    //    again during step 3 (e.g. a slow network call straddled the
-    //    boundary), catch it here too rather than waiting a full extra
-    //    poll interval.
-    try {
-      if (state.currentWindow && nowSec >= state.currentWindow.windowEnd) {
-        state.pendingResolutions.push(state.currentWindow);
-        state.currentWindow = null;
-      }
-    } catch (e) {
-      log('ERROR handing off closed window (late):', e.message);
-      state.lastError = e.message;
     }
 
     saveState(state);
@@ -377,7 +435,9 @@ async function tick() {
 }
 
 function startBotLoop() {
-  log(`Bot started (time-scheduled cheap/expensive, ${config.WINDOW_MINUTES}-min window). Bankroll: $${config.STARTING_BANKROLL} | CHEAP ${config.CHEAP_ORDER_SHARES}sh @ ${config.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${config.EXPENSIVE_ORDER_SHARES}sh @ ${config.EXPENSIVE_BUY_AT_SECS.join('/')}s | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'} | rides to resolution, no TP`);
+  for (const [key, cfg] of Object.entries(config.ENGINES)) {
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | CHEAP ${cfg.CHEAP_ORDER_SHARES}sh @ ${cfg.CHEAP_BUY_AT_SECS.join('/')}s | EXPENSIVE ${cfg.EXPENSIVE_ORDER_SHARES}sh @ ${cfg.EXPENSIVE_BUY_AT_SECS.join('/')}s (< $${cfg.EXPENSIVE_BUY_MAX_PRICE}) | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'} | rides to resolution, no TP`);
+  }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }

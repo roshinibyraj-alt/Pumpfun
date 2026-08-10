@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Pattern Terminal</title>
+<title>Dual Engine Terminal</title>
 <style>
   :root {
     --void: #0a0e17;
@@ -18,10 +18,12 @@
     --down-dim: rgba(245,166,35,0.14);
     --win: #34d399;
     --loss: #f87171;
-    --chop: #a78bfa;
-    --chop-dim: rgba(167,139,250,0.14);
     --tp: #60a5fa;
     --tp-dim: rgba(96,165,250,0.14);
+    --e5m: #38bdf8;
+    --e5m-dim: rgba(56,189,248,0.14);
+    --e15m: #a78bfa;
+    --e15m-dim: rgba(167,139,250,0.14);
     --font-data: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
     --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
@@ -30,7 +32,7 @@
   body {
     margin: 0; background: var(--void); color: var(--text);
     font-family: var(--font-ui); padding: 16px 14px 40px;
-    max-width: 560px; margin-inline: auto;
+    max-width: 640px; margin-inline: auto;
     animation: fadeIn 0.4s ease;
   }
   @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
@@ -41,30 +43,48 @@
   .brand .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--tp); animation: pulse 2s infinite; flex-shrink: 0; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
   .brand h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: 0.2px; }
-  .live-price { font-family: var(--font-data); font-size: 13px; color: var(--text-dim); }
+  .live-price { font-family: var(--font-data); font-size: 12px; color: var(--text-dim); text-align: right; }
   .live-price b { color: var(--text); font-weight: 600; }
+  .live-price .sep { color: var(--border); }
 
-  .hero { margin-bottom: 16px; }
-  .hero .label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-bottom: 6px; }
+  .engine { margin-bottom: 26px; }
+  .engine-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .engine-title { font-size: 14px; font-weight: 700; letter-spacing: 0.3px; display: flex; align-items: center; gap: 8px; }
+  .engine-title .pill { font-size: 9px; text-transform: uppercase; letter-spacing: 0.6px; padding: 2px 8px; border-radius: 20px; }
+  .pill.e5m { color: var(--e5m); background: var(--e5m-dim); }
+  .pill.e15m { color: var(--e15m); background: var(--e15m-dim); }
+  .engine-sub { font-size: 11px; color: var(--text-dim); font-weight: 400; }
+  .engine-schedule { font-family: var(--font-data); font-size: 10.5px; color: var(--text-dim); }
+
+  .hero { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; margin-bottom: 10px; }
   .hero .row { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-  .hero .bankroll { font-family: var(--font-data); font-size: 40px; font-weight: 600; letter-spacing: -0.5px; }
-  .hero .return { font-family: var(--font-data); font-size: 15px; font-weight: 600; padding: 3px 9px; border-radius: 20px; }
+  .hero .bankroll { font-family: var(--font-data); font-size: 30px; font-weight: 600; letter-spacing: -0.5px; }
+  .hero .return { font-family: var(--font-data); font-size: 13px; font-weight: 600; padding: 3px 9px; border-radius: 20px; }
   .hero .return.pos { color: var(--win); background: rgba(52,211,153,0.12); }
   .hero .return.neg { color: var(--loss); background: rgba(248,113,113,0.12); }
-  .sparkline { margin-top: 10px; width: 100%; height: 48px; display: block; }
+  .hero .pnl-line { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--text-dim); flex-wrap: wrap; }
+  .hero .pnl-line b { font-family: var(--font-data); color: var(--text); font-weight: 600; }
 
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 12px; }
+  .chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 10px; }
+  .chip { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; min-width: 0; }
+  .chip .k { font-size: 9px; text-transform: uppercase; letter-spacing: 0.7px; color: var(--text-dim); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip .v { font-family: var(--font-data); font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip .v.pos { color: var(--win); }
+  .chip .v.neg { color: var(--loss); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 10px; }
   .card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
   .countdown { font-family: var(--font-data); color: var(--text); background: var(--surface-raised); padding: 2px 8px; border-radius: 6px; font-size: 11px; }
 
   .pattern-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
-  .pattern-chip { font-family: var(--font-data); font-size: 13px; font-weight: 700; padding: 6px 12px; border-radius: 8px; background: var(--surface-raised); border: 1px solid var(--border); letter-spacing: 1px; }
+  .pattern-chip { font-family: var(--font-data); font-size: 12px; font-weight: 700; padding: 6px 12px; border-radius: 8px; background: var(--surface-raised); border: 1px solid var(--border); letter-spacing: 1px; }
   .signal-chip { font-family: var(--font-data); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; padding: 3px 9px; border-radius: 6px; background: rgba(255,255,255,0.05); color: var(--text-dim); }
   .signal-chip.up { color: var(--up); background: var(--up-dim); }
   .signal-chip.down { color: var(--down); background: var(--down-dim); }
-  .signal-chip.chop { color: var(--chop); background: var(--chop-dim); }
 
-  .position-box { padding: 12px; border-radius: 10px; font-family: var(--font-data); font-size: 12px; background: var(--surface-raised); border: 1px solid var(--border); }
+  .live-summary { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); margin-bottom: 10px; }
+  .live-summary b { font-family: var(--font-data); color: var(--text); }
+  .position-box { padding: 12px; border-radius: 10px; font-family: var(--font-data); font-size: 12px; background: var(--surface-raised); border: 1px solid var(--border); margin-bottom: 8px; }
   .position-box .side-line { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
   .position-box .price-row { display: flex; justify-content: space-between; padding: 3px 0; }
   .position-box .price-row .lbl { color: var(--text-dim); font-size: 10px; text-transform: uppercase; }
@@ -76,48 +96,39 @@
   .position-box.resolved_win { border-color: rgba(52,211,153,0.35); }
   .position-box.resolved_loss .status-pill { color: var(--loss); background: rgba(248,113,113,0.14); }
   .position-box.resolved_loss { border-color: rgba(248,113,113,0.35); }
-  .no-trade-box { padding: 14px; border-radius: 10px; background: var(--surface-raised); border: 1px dashed var(--border); color: var(--text-dim); font-size: 12px; text-align: center; }
 
-  .chips { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
-  .chip { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 8px; text-align: center; }
-  .chip .k { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
-  .chip .v { font-family: var(--font-data); font-size: 17px; font-weight: 700; }
-  .chip .v.warn { color: var(--loss); }
+  .side-tag { display: inline-block; font-family: var(--font-data); font-size: 11px; font-weight: 700; letter-spacing: 0.5px; padding: 2px 8px; border-radius: 5px; background: var(--surface-raised); border: 1px solid var(--border); }
+  .side-tag.up { color: var(--up); background: var(--up-dim); border-color: rgba(45,212,191,0.35); }
+  .side-tag.down { color: var(--down); background: var(--down-dim); border-color: rgba(245,166,35,0.35); }
+  .side-tag.skip { color: var(--text-dim); }
 
-  .entry { padding: 10px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
-  .entry:last-child { border-bottom: none; }
-  .entry .row1 { display: flex; align-items: center; gap: 10px; }
-  .entry .result-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .entry .result-dot.win { background: var(--win); } .entry .result-dot.loss { background: var(--loss); } .entry .result-dot.skip { background: var(--text-dim); }
-  .entry .mid { flex: 1; min-width: 0; }
-  .entry .mid .top { font-size: 13px; font-weight: 600; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-  .entry .mid .bottom { font-family: var(--font-data); font-size: 11px; color: var(--text-dim); margin-top: 2px; }
-  .entry .pnl { font-family: var(--font-data); font-size: 14px; font-weight: 700; text-align: right; flex-shrink: 0; }
-  .entry .pnl.win { color: var(--win); } .entry .pnl.loss { color: var(--loss); } .entry .pnl.skip { color: var(--text-dim); }
-  .entry .pnl .margin { display: block; font-size: 10px; font-weight: 500; color: var(--text-dim); margin-top: 1px; }
-  .side-tag { font-family: var(--font-data); font-size: 10px; padding: 2px 7px; border-radius: 5px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
-  .side-tag.up { color: var(--up); background: var(--up-dim); }
-  .side-tag.down { color: var(--down); background: var(--down-dim); }
-  .side-tag.skip { color: var(--text-dim); background: rgba(255,255,255,0.05); }
-  .fill-badge { font-family: var(--font-data); font-size: 10px; padding: 1px 6px; border-radius: 5px; color: var(--text-dim); background: rgba(255,255,255,0.05); }
-  .fill-badge.tp { color: var(--tp); background: var(--tp-dim); }
-  .empty-state { color: var(--text-dim); font-size: 13px; text-align: center; padding: 18px 0; }
-  .entry-detail { display: none; margin-top: 10px; padding: 10px; background: var(--surface-raised); border-radius: 8px; border: 1px solid var(--border); }
-  .entry-detail.open { display: block; }
-  .entry-detail .drow { display: flex; justify-content: space-between; font-family: var(--font-data); font-size: 11px; padding: 3px 0; border-bottom: 1px solid var(--border); gap: 10px; }
-  .entry-detail .drow span:last-child { text-align: right; }
-  .entry-detail .drow:last-child { border-bottom: none; }
-
-  .pnl-line { display: flex; justify-content: space-between; gap: 10px; font-family: var(--font-data); font-size: 11px; color: var(--text-dim); margin: 8px 0 4px; }
-  .pnl-line b { font-weight: 700; }
-  .live-summary { display: flex; justify-content: space-between; gap: 8px; font-family: var(--font-data); font-size: 11px; padding: 10px 12px; border-radius: 10px; background: var(--surface-raised); border: 1px solid var(--border); margin-bottom: 8px; }
-  .live-summary span { color: var(--text-dim); }
-  .live-summary b { color: var(--text); font-weight: 700; }
-  .pnl-pos { color: var(--win) !important; }
-  .pnl-neg { color: var(--loss) !important; }
-  .upnl { font-family: var(--font-data); font-weight: 700; }
+  .upnl { font-weight: 600; }
   .upnl.pos { color: var(--win); }
   .upnl.neg { color: var(--loss); }
+
+  .entry { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; background: var(--surface-raised); cursor: pointer; }
+  .entry .row1 { display: flex; align-items: center; gap: 10px; }
+  .entry .result-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .result-dot.win { background: var(--win); }
+  .result-dot.loss { background: var(--loss); }
+  .result-dot.skip { background: var(--text-dim); }
+  .entry .mid { flex: 1; min-width: 0; }
+  .entry .top { font-size: 12px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .entry .bottom { font-size: 10.5px; color: var(--text-dim); margin-top: 3px; }
+  .entry .pnl { font-family: var(--font-data); font-size: 13px; font-weight: 700; text-align: right; flex-shrink: 0; }
+  .entry .pnl.win { color: var(--win); }
+  .entry .pnl.loss { color: var(--loss); }
+  .entry .pnl.skip { color: var(--text-dim); }
+  .entry .margin { display: block; font-size: 9px; font-weight: 500; color: var(--text-dim); }
+  .entry .entry-detail { display: none; margin-top: 8px; border-top: 1px dashed var(--border); padding-top: 8px; font-size: 10.5px; color: var(--text-dim); }
+  .entry .entry-detail.open { display: block; }
+  .entry .drow { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+  .entry .drow span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .entry .drow span:last-child { font-family: var(--font-data); color: var(--text); text-align: right; }
+
+  .empty-state { color: var(--text-dim); font-size: 12px; text-align: center; padding: 18px 0; }
+  .no-trade-box { color: var(--text-dim); font-size: 12px; text-align: center; padding: 16px 0; border: 1px dashed var(--border); border-radius: 10px; }
+
   footer { text-align: center; color: var(--text-dim); font-size: 11px; margin-top: 20px; font-family: var(--font-data); }
 </style>
 </head>
@@ -126,104 +137,33 @@
   <div class="statusbar">
     <div class="brand">
       <span class="dot"></span>
-      <h1>Scheduled Terminal</h1>
+      <h1>Dual Engine Terminal</h1>
     </div>
     <div class="live-price" id="livePrice">— —</div>
   </div>
 
-  <div class="hero">
-    <div class="label">Bankroll (realized)</div>
-    <div class="row">
-      <div class="bankroll" id="bankroll">$—</div>
-      <div class="return" id="returnPct">—</div>
-    </div>
-    <div class="pnl-line">
-      <span>Unrealized <b id="unrealizedPnl">$—</b></span>
-      <span>Total Equity <b id="totalEquity">$—</b></span>
-    </div>
-    <svg class="sparkline" id="sparkline" preserveAspectRatio="none"></svg>
-  </div>
-
-  <div class="chips">
-    <div class="chip"><div class="k">Windows Resolved</div><div class="v" id="windowsResolved">—</div></div>
-    <div class="chip"><div class="k">Total PnL</div><div class="v" id="totalPnl">—</div></div>
-    <div class="chip"><div class="k">Avg PnL/Trade</div><div class="v" id="avgPnl">—</div></div>
-    <div class="chip"><div class="k">Pending</div><div class="v" id="pendingCount">—</div></div>
-  </div>
-  <div class="chips">
-    <div class="chip"><div class="k">Win Rate</div><div class="v" id="winRate">—</div></div>
-    <div class="chip"><div class="k">Order Shares</div><div class="v" id="notional">—</div></div>
-    <div class="chip"><div class="k">Trade Rate</div><div class="v" id="tradeRate">—</div></div>
-    <div class="chip"><div class="k">Avg Fill Price</div><div class="v" id="avgFill">—</div></div>
-  </div>
-  <div class="chips">
-    <div class="chip"><div class="k">Fees Paid</div><div class="v" id="feesPaid">—</div></div>
-    <div class="chip"><div class="k">Rebates</div><div class="v" id="rebates">—</div></div>
-    <div class="chip"><div class="k">Schedule</div><div class="v" id="schedule" style="font-size:12px">—</div></div>
-    <div class="chip"><div class="k">Entry Mode</div><div class="v" id="entryMode" style="font-size:12px">—</div></div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">
-      <span>Current Window</span>
-      <span class="countdown" id="countdown">—</span>
-    </div>
-    <div class="pattern-row">
-      <span class="pattern-chip" id="patternChip">— — —</span>
-      <span class="signal-chip" id="signalChip">—</span>
-    </div>
-    <div id="positionArea"></div>
-  </div>
-
-  <div class="card">
-    <div class="card-title"><span>Resolved Windows</span></div>
-    <div id="completedLog"><div class="empty-state">No windows resolved yet.</div></div>
-  </div>
+  <div id="engines"></div>
 
   <footer id="footer">—</footer>
 
 <script>
   const $ = (id) => document.getElementById(id);
   const fmt$ = (n) => '$' + Number(n).toFixed(2);
-  const fmtPct = (n, digits=2) => (n * 100).toFixed(digits) + '%';
+  const fmtPct = (n, digits = 2) => (n * 100).toFixed(digits) + '%';
 
   function fmtCountdown(sec) {
     if (sec == null) return '—';
     if (sec < 0) sec = 0;
     const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
-    return m + ':' + String(s).padStart(2,'0');
+    return m + ':' + String(s).padStart(2, '0');
   }
 
-  function buildSparkline(points) {
-    const svg = $('sparkline');
-    if (points.length < 2) { svg.innerHTML = ''; return; }
-    const w = 500, h = 48, pad = 3;
-    const min = Math.min(...points), max = Math.max(...points);
-    const range = (max - min) || 1;
-    const stepX = (w - pad*2) / (points.length - 1);
-    const coords = points.map((p, i) => {
-      const x = pad + i*stepX;
-      const y = pad + (h - pad*2) * (1 - (p - min) / range);
-      return [x, y];
-    });
-    const path = coords.map((c,i) => (i===0?'M':'L') + c[0].toFixed(1) + ',' + c[1].toFixed(1)).join(' ');
-    const areaPath = path + ' L' + coords[coords.length-1][0].toFixed(1) + ',' + h + ' L' + coords[0][0].toFixed(1) + ',' + h + ' Z';
-    const up = points[points.length-1] >= points[0];
-    const stroke = up ? '#34d399' : '#f87171';
-    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-    svg.innerHTML = '<defs><linearGradient id="sgrad" x1="0" y1="0" x2="0" y2="1">' +
-      '<stop offset="0%" stop-color="' + stroke + '" stop-opacity="0.25"/>' +
-      '<stop offset="100%" stop-color="' + stroke + '" stop-opacity="0"/>' +
-      '</linearGradient></defs>' +
-      '<path d="' + areaPath + '" fill="url(#sgrad)" stroke="none"/>' +
-      '<path d="' + path + '" fill="none" stroke="' + stroke + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+  function fmtTime(iso) {
+    return iso ? new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—';
   }
 
-  function signalClass(signal) {
-    if (signal === 'MOMENTUM_UP' || signal === 'REVERSAL_UP') return 'up';
-    if (signal === 'MOMENTUM_DOWN' || signal === 'REVERSAL_DOWN') return 'down';
-    if (signal === 'CHOP') return 'chop';
-    return '';
+  function enginePill(key) {
+    return '<span class="pill ' + (key === '5m' ? 'e5m' : 'e15m') + '">' + key + '</span>';
   }
 
   function positionStatusLabel(pos) {
@@ -233,23 +173,19 @@
     return pos.status;
   }
 
-  function renderPositionArea(win, cfg, secondsRemaining, live) {
-    const el = $('positionArea');
-    if (!win) { el.innerHTML = '<div class="empty-state">—</div>'; return; }
+  function renderPositionArea(win, live) {
+    if (!win) return '<div class="empty-state">No open window.</div>';
     const entries = win.entries || [];
-    if (entries.length === 0) {
-      el.innerHTML = '<div class="no-trade-box">watching for scheduled buys…</div>';
-      return;
-    }
+    if (entries.length === 0) return '<div class="no-trade-box">watching for scheduled buys…</div>';
     const lv = (live && live.entries) || [];
     const summary = live
       ? '<div class="live-summary">' +
           '<span>Cost <b>$' + (live.costBasis || 0).toFixed(2) + '</b></span>' +
           '<span>Value <b>$' + (live.currentValue || 0).toFixed(2) + '</b></span>' +
-          '<span>Unrealized <b class="' + ((live.unrealizedPnl || 0) >= 0 ? 'pnl-pos' : 'pnl-neg') + '">' + ((live.unrealizedPnl || 0) >= 0 ? '+' : '') + (live.unrealizedPnl || 0).toFixed(2) + '</b></span>' +
+          '<span>Unrealized <b class="' + ((live.unrealizedPnl || 0) >= 0 ? 'upnl pos' : 'upnl neg') + '">' + ((live.unrealizedPnl || 0) >= 0 ? '+' : '') + (live.unrealizedPnl || 0).toFixed(2) + '</b></span>' +
         '</div>'
       : '';
-    el.innerHTML = summary + entries.slice().reverse().map((pos, ri) => {
+    return summary + entries.slice().reverse().map((pos, ri) => {
       const l = lv[entries.length - 1 - ri] || {};
       const upnl = l.unrealizedPnl;
       const upnlStr = upnl != null ? ((upnl >= 0 ? '+' : '') + upnl.toFixed(2)) : '—';
@@ -266,6 +202,102 @@
     }).join('');
   }
 
+  function renderHistory(hist) {
+    if (!hist || hist.length === 0) return '<div class="empty-state">No windows resolved yet.</div>';
+    return hist.slice().reverse().slice(0, 30).map((w) => {
+      const cls = !w.traded ? 'skip' : (w.pnl >= 0 ? 'win' : 'loss');
+      const marginPct = w.cost > 0 ? (w.pnl / w.cost) * 100 : 0;
+      const sides = w.sides || [];
+      const sideTag = w.traded
+        ? '<span class="side-tag ' + (sides.length === 1 ? sides[0].toLowerCase() : '') + '">' + (sides.length ? sides.join('/') : '?') + '</span>'
+        : '<span class="side-tag skip">no trade</span>';
+      let detailRows = '<div class="drow"><span>Schedule</span><span>' + (w.signal || '(none)') + '</span></div>' +
+        '<div class="drow"><span>Entries</span><span>' + (w.entryCount || 0) + ' orders' + (w.entryCount === 0 ? '' : '') + '</span></div>';
+      (w.entries || []).forEach((p, i) => {
+        detailRows += '<div class="drow"><span>#' + (i + 1) + ' ' + p.side + ' @ $' + p.fillPrice.toFixed(2) + ' (fee $' + (p.fillFee || 0).toFixed(3) + ', reb $' + (p.fillRebate || 0).toFixed(3) + ')</span><span>pnl $' + (p.pnl != null ? p.pnl.toFixed(2) : '—') + '</span></div>';
+      });
+      return '<div class="entry" onclick="this.querySelector(\'.entry-detail\').classList.toggle(\'open\')">' +
+        '<div class="row1">' +
+          '<span class="result-dot ' + cls + '"></span>' +
+          '<div class="mid">' +
+            '<div class="top">' + sideTag + ' <span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + ' won</span></div>' +
+            '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' (fees $' + (w.totalFees || 0).toFixed(4) + ', rebates +$' + (w.totalRebates || 0).toFixed(4) + ') · ' + fmtTime(w.resolvedAt) + '</div>' +
+          '</div>' +
+          '<div class="pnl ' + cls + '">' + (w.traded ? (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) : '—') + (w.traded ? '<span class="margin">' + (marginPct >= 0 ? '+' : '') + marginPct.toFixed(2) + '%</span>' : '') + '</div>' +
+        '</div>' +
+        '<div class="entry-detail">' + detailRows + '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  function renderEngine(key, e) {
+    const cfg = e.config || {};
+    const live = e.liveWindow || { unrealizedPnl: 0 };
+    const upnl = live.unrealizedPnl || 0;
+    const equity = e.bankroll + upnl;
+    const retPct = (equity - e.startingBankroll) / e.startingBankroll;
+    const hist = e.windowHistory || [];
+    const traded = hist.filter(w => w.traded);
+    const totalPnl = hist.reduce((a, w) => a + w.pnl, 0) + upnl;
+    const wins = traded.filter(w => w.pnl >= 0);
+    const fills = [];
+    for (const w of traded) for (const x of (w.entries || [])) if (x.fillPrice != null) fills.push(x.fillPrice);
+    const win = e.currentWindow;
+    const lc = e.lastCheck || {};
+    const cheapN = (cfg.CHEAP_BUY_AT_SECS || []).length;
+    const expN = (cfg.EXPENSIVE_BUY_AT_SECS || []).length;
+    const totalBuys = cheapN + expN;
+    const placed = win ? (win.entries || []).length : 0;
+    const skipped = win ? (win.skipped || []).length : 0;
+
+    const schedule = 'CHEAP ' + (cfg.CHEAP_ORDER_SHARES || 50) + 'sh @ ' + (cfg.CHEAP_BUY_AT_SECS || []).join('/') + 's · EXPENSIVE ' + (cfg.EXPENSIVE_ORDER_SHARES || 100) + 'sh @ ' + (cfg.EXPENSIVE_BUY_AT_SECS || []).join('/') + 's (< $' + (cfg.EXPENSIVE_BUY_MAX_PRICE != null ? cfg.EXPENSIVE_BUY_MAX_PRICE : 0.90) + ')';
+
+    return '<div class="engine">' +
+      '<div class="engine-head">' +
+        '<div class="engine-title">' + enginePill(key) + ' ' + key + ' Engine <span class="engine-sub">' + (cfg.WINDOW_MINUTES || '?') + '-min windows</span></div>' +
+        '<div class="engine-schedule">' + schedule + '</div>' +
+      '</div>' +
+
+      '<div class="hero">' +
+        '<div class="row">' +
+          '<div class="bankroll">' + fmt$(e.bankroll) + '</div>' +
+          '<div class="return ' + (retPct >= 0 ? 'pos' : 'neg') + '">' + (retPct >= 0 ? '+' : '') + fmtPct(retPct) + '</div>' +
+        '</div>' +
+        '<div class="pnl-line">' +
+          '<span>Unrealized <b class="' + (upnl >= 0 ? 'upnl pos' : 'upnl neg') + '">' + (upnl >= 0 ? '+' : '') + upnl.toFixed(2) + '</b></span>' +
+          '<span>Equity <b>' + fmt$(equity) + '</b></span>' +
+          '<span>Live UP <b>' + (lc.upPrice != null ? '$' + lc.upPrice.toFixed(2) : '—') + '</b> · DOWN <b>' + (lc.downPrice != null ? '$' + lc.downPrice.toFixed(2) : '—') + '</b></span>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="chips">' +
+        '<div class="chip"><div class="k">Windows Resolved</div><div class="v">' + hist.length + '</div></div>' +
+        '<div class="chip"><div class="k">Total PnL</div><div class="v ' + (totalPnl >= 0 ? 'pos' : 'neg') + '">' + fmt$(totalPnl) + '</div></div>' +
+        '<div class="chip"><div class="k">Win Rate</div><div class="v">' + (traded.length ? wins.length + ' / ' + traded.length : '—') + '</div></div>' +
+        '<div class="chip"><div class="k">Avg Fill</div><div class="v">' + (fills.length ? '$' + (fills.reduce((a, b) => a + b, 0) / fills.length).toFixed(2) : '—') + '</div></div>' +
+        '<div class="chip"><div class="k">Pending</div><div class="v">' + (e.pendingResolutions || []).length + '</div></div>' +
+        '<div class="chip"><div class="k">Buys Placed</div><div class="v">' + (win ? placed + ' / ' + totalBuys : '—') + '</div></div>' +
+        '<div class="chip"><div class="k">Skipped</div><div class="v">' + (win ? skipped : '—') + '</div></div>' +
+        '<div class="chip"><div class="k">Fees / Rebates</div><div class="v" style="font-size:11px">$' + (e.totalFees || 0).toFixed(1) + ' / $' + (e.totalRebates || 0).toFixed(1) + '</div></div>' +
+      '</div>' +
+
+      '<div class="card">' +
+        '<div class="card-title"><span>Current Window</span>' +
+          '<span class="countdown">' + (lc.secondsRemaining != null ? (lc.secondsRemaining > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—') + '</span></div>' +
+        '<div class="pattern-row">' +
+          '<span class="pattern-chip">' + (win ? placed + ' / ' + totalBuys + ' buys placed' : '— — —') + '</span>' +
+          '<span class="signal-chip">' + (win ? (skipped ? skipped + ' skipped' : 'schedule running') : 'no window') + '</span>' +
+        '</div>' +
+        renderPositionArea(win, live) +
+      '</div>' +
+
+      '<div class="card">' +
+        '<div class="card-title"><span>Resolved Windows</span></div>' +
+        renderHistory(hist) +
+      '</div>' +
+    '</div>';
+  }
+
   async function refresh() {
     let s;
     try {
@@ -277,123 +309,29 @@
       return;
     }
 
+    const engines = s.engines || {};
+    const keys = Object.keys(engines);
+
     try {
-      const lc = s.lastCheck;
-      $('livePrice').innerHTML = lc
-        ? 'UP <b>$' + lc.upPrice.toFixed(2) + '</b> · DOWN <b>$' + lc.downPrice.toFixed(2) + '</b>'
-        : '— —';
-      $('countdown').textContent = lc ? (Math.max(0, lc.secondsRemaining) > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—';
+      const priceParts = keys.map((k) => {
+        const lc = engines[k].lastCheck || {};
+        return '<span>' + k + ' UP <b>' + (lc.upPrice != null ? '$' + lc.upPrice.toFixed(2) : '—') + '</b> · DOWN <b>' + (lc.downPrice != null ? '$' + lc.downPrice.toFixed(2) : '—') + '</b></span>';
+      });
+      $('livePrice').innerHTML = priceParts.length ? priceParts.join('<span class="sep">|</span>') : '— —';
     } catch (e) { console.error('header render failed', e); }
 
     try {
-      const live = s.liveWindow || { unrealizedPnl: 0 };
-      const upnl = live.unrealizedPnl || 0;
-      const equity = s.bankroll + upnl;
-      $('bankroll').textContent = fmt$(s.bankroll);
-      const retPct = (equity - s.startingBankroll) / s.startingBankroll;
-      const retEl = $('returnPct');
-      retEl.textContent = (retPct >= 0 ? '+' : '') + fmtPct(retPct, 2);
-      retEl.className = 'return ' + (retPct >= 0 ? 'pos' : 'neg');
-      const upEl = $('unrealizedPnl');
-      upEl.textContent = (upnl >= 0 ? '+' : '') + upnl.toFixed(2);
-      upEl.style.color = upnl >= 0 ? 'var(--win)' : 'var(--loss)';
-      $('totalEquity').textContent = fmt$(equity);
-      $('totalEquity').style.color = equity >= s.startingBankroll ? 'var(--win)' : 'var(--loss)';
-    } catch (e) { console.error('bankroll render failed', e); }
+      $('engines').innerHTML = keys.map((k) => renderEngine(k, engines[k])).join('');
+    } catch (e) { console.error('engines render failed', e); }
 
-    try {
-      const curve = [s.startingBankroll];
-      for (const w of s.windowHistory) curve.push(w.bankrollAfter);
-      if (s.liveWindow) curve.push(s.bankroll + (s.liveWindow.unrealizedPnl || 0));
-      buildSparkline(curve);
-    } catch (e) { console.error('sparkline render failed', e); }
-
-    try {
-      const win = s.currentWindow;
-      const cfg = s.config || {};
-      const cheapN = (cfg.CHEAP_BUY_AT_SECS && cfg.CHEAP_BUY_AT_SECS.length) || 3;
-      const expN = (cfg.EXPENSIVE_BUY_AT_SECS && cfg.EXPENSIVE_BUY_AT_SECS.length) || 3;
-      const totalBuys = cheapN + expN;
-      $('patternChip').textContent = win ? 'CHEAP @ ' + (cfg.CHEAP_BUY_AT_SECS || [90,180,270]).join('/') + 's' : '— — —';
-      const sigEl = $('signalChip');
-      sigEl.textContent = win ? ((win.entries || []).length) + ' / ' + totalBuys + ' buys placed' : '—';
-      sigEl.className = 'signal-chip';
-      renderPositionArea(win, cfg, win ? win.windowEnd : null, s.liveWindow);
-    } catch (e) { console.error('current window render failed', e); }
-
-    try {
-      const hist = s.windowHistory;
-      $('windowsResolved').textContent = hist.length;
-      const totalPnl = hist.reduce((a,w) => a+w.pnl, 0) + ((s.liveWindow && s.liveWindow.unrealizedPnl) || 0);
-      $('totalPnl').textContent = fmt$(totalPnl);
-      $('totalPnl').style.color = totalPnl >= 0 ? 'var(--win)' : 'var(--loss)';
-      const traded = hist.filter(w => w.traded);
-      $('avgPnl').textContent = traded.length ? fmt$(traded.reduce((a,w)=>a+w.pnl,0)/traded.length) : '—';
-      $('pendingCount').textContent = s.pendingResolutions.length;
-    } catch (e) { console.error('chips render failed', e); }
-
-    try {
-      const hist = s.windowHistory;
-      $('notional').textContent = (s.config && s.config.CHEAP_ORDER_SHARES != null) ? s.config.CHEAP_ORDER_SHARES + '/' + s.config.EXPENSIVE_ORDER_SHARES + ' shares' : '—';
-      if (hist.length) {
-        const traded = hist.filter(w => w.traded);
-        $('tradeRate').textContent = traded.length + ' / ' + hist.length;
-        const wins = traded.filter(w => w.pnl >= 0);
-        $('winRate').textContent = traded.length ? wins.length + ' / ' + traded.length : '—';
-        const fills = [];
-        for (const w of traded) for (const e of (w.entries || [])) if (e.fillPrice != null) fills.push(e.fillPrice);
-        $('avgFill').textContent = fills.length ? '$' + (fills.reduce((a,b)=>a+b,0)/fills.length).toFixed(2) : '—';
-      } else {
-        $('tradeRate').textContent = '—';
-        $('winRate').textContent = '—';
-        $('avgFill').textContent = '—';
-      }
-    } catch (e) { console.error('martingale chips render failed', e); }
-
-    try {
-      $('feesPaid').textContent = '$' + (s.totalFees || 0).toFixed(2);
-      $('rebates').textContent = '$' + (s.totalRebates || 0).toFixed(2);
-      const cfgS = s.config || {};
-      $('schedule').textContent = (cfgS.CHEAP_BUY_AT_SECS || [90,180,270]).join('/') + 's → ' + (cfgS.EXPENSIVE_BUY_AT_SECS || [630,720,810]).join('/') + 's';
-      $('entryMode').textContent = cfgS.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER';
-    } catch (e) { console.error('extra chips render failed', e); }
-
-    try {
-      const logEl = $('completedLog');
-      const all = s.windowHistory.slice().reverse().slice(0, 40);
-      if (all.length === 0) {
-        logEl.innerHTML = '<div class="empty-state">No windows resolved yet.</div>';
-      } else {
-        const fmtTime = (iso) => iso ? new Date(iso).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
-        logEl.innerHTML = all.map((w) => {
-          const cls = !w.traded ? 'skip' : (w.pnl >= 0 ? 'win' : 'loss');
-          const marginPct = w.cost > 0 ? (w.pnl / w.cost) * 100 : 0;
-          const sides = w.sides || [];
-          const sideTag = w.traded
-            ? '<span class="side-tag ' + (sides.length === 1 ? sides[0].toLowerCase() : '') + '">' + (sides.length ? sides.join('/') : '?') + '</span>'
-            : '<span class="side-tag skip">no trade</span>';
-          let detailRows = '<div class="drow"><span>Schedule</span><span>' + (w.signal || '(none)') + '</span></div>' +
-            '<div class="drow"><span>Entries</span><span>' + (w.entryCount || 0) + ' orders</span></div>';
-          (w.entries || []).forEach((p, i) => {
-            detailRows += '<div class="drow"><span>#' + (i + 1) + ' ' + p.side + ' @ $' + p.fillPrice.toFixed(2) + ' (fee $' + (p.fillFee || 0).toFixed(3) + ', reb $' + (p.fillRebate || 0).toFixed(3) + ')</span><span>pnl $' + (p.pnl != null ? p.pnl.toFixed(2) : '—') + '</span></div>';
-          });
-          return '<div class="entry" onclick="this.querySelector(\'.entry-detail\').classList.toggle(\'open\')">' +
-            '<div class="row1">' +
-              '<span class="result-dot ' + cls + '"></span>' +
-              '<div class="mid">' +
-                '<div class="top">' + sideTag + ' <span class="side-tag ' + w.wonSide.toLowerCase() + '">' + w.wonSide + ' won</span></div>' +
-                '<div class="bottom">payout $' + w.payout.toFixed(2) + ' − cost $' + w.cost.toFixed(2) + ' (fees $' + (w.totalFees || 0).toFixed(4) + ', est. rebates +$' + (w.totalRebates || 0).toFixed(4) + ') · ' + fmtTime(w.resolvedAt) + '</div>' +
-              '</div>' +
-              '<div class="pnl ' + cls + '">' + (w.traded ? (w.pnl >= 0 ? '+' : '') + w.pnl.toFixed(2) : '—') + (w.traded ? '<span class="margin">' + (marginPct >= 0 ? '+' : '') + marginPct.toFixed(2) + '%</span>' : '') + '</div>' +
-            '</div>' +
-            '<div class="entry-detail">' + detailRows + '</div>' +
-          '</div>';
-        }).join('');
-      }
-    } catch (e) { console.error('completed log render failed', e); }
-
+    let lastTs = null;
+    for (const k of keys) {
+      const ts = engines[k].lastCheck && engines[k].lastCheck.timestamp;
+      if (ts && (!lastTs || new Date(ts).getTime() < new Date(lastTs).getTime())) lastTs = ts;
+    }
     $('footer').textContent = 'updated ' + new Date().toLocaleTimeString() + ' · polling every 1s' +
-      (s.lastCheck ? ' · bot last ticked ' + Math.max(0, Math.floor((Date.now() - new Date(s.lastCheck.timestamp).getTime())/1000)) + 's ago' : '');
+      (lastTs ? ' · bot last ticked ' + Math.max(0, Math.floor((Date.now() - new Date(lastTs).getTime()) / 1000)) + 's ago' : '') +
+      (s.lastError ? ' · ⚠ ' + s.lastError : '');
   }
 
   refresh();

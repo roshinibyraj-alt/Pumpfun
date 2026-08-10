@@ -1,13 +1,19 @@
 // ============================================================
 // state.js — reads/writes state.json.
 //
-// currentWindow: the window still open, placing/filling rungs.
-// pendingResolutions: windows that have closed but haven't yet
-//   resolved (Polymarket settlement lags ~2 min after close) —
-//   kept separate so we can keep checking them every tick without
-//   blocking the new window's ladder.
-// windowHistory: fully resolved windows with their aggregate
-//   UP/DOWN totals and final pnl, most recent last, capped.
+// State is organized per ENGINE ('5m' and '15m'). Each engine has:
+//   bankroll / startingBankroll: its own independent capital.
+//   currentWindow: the window still open, placing/filling orders.
+//   pendingResolutions: windows that have closed but haven't yet
+//     resolved (Polymarket settlement lags ~2 min after close) —
+//     kept separate so we can keep checking them every tick without
+//     blocking the new window's schedule.
+//   windowHistory: fully resolved windows with their aggregate
+//     UP/DOWN totals and final pnl, most recent last, capped.
+//
+// loadState() migrates the OLD single-engine flat shape (one shared
+// bankroll/currentWindow/pendingResolutions/windowHistory) into the
+// 15m engine, which is where the old 15-minute strategy lived.
 //
 // IMPORTANT (Railway note): filesystem is ephemeral, resets on
 // redeploy. Fine for now; ask if you want a persistent volume.
@@ -16,23 +22,64 @@
 const fs = require('fs');
 const config = require('./config');
 
-function defaultState() {
+function engineDefault(engineKey, engineCfg) {
+  const capital = engineCfg.CAPITAL != null ? engineCfg.CAPITAL : config.STARTING_BANKROLL;
   return {
-    bankroll: config.STARTING_BANKROLL,
-    startingBankroll: config.STARTING_BANKROLL,
+    label: engineCfg.label || engineKey,
+    windowMinutes: engineCfg.WINDOW_MINUTES,
+    bankroll: capital,
+    startingBankroll: capital,
     currentWindow: null,
     pendingResolutions: [],
     windowHistory: [],
     lastCheck: null,
+  };
+}
+
+function defaultState() {
+  const engines = {};
+  for (const [key, cfg] of Object.entries(config.ENGINES)) {
+    engines[key] = engineDefault(key, cfg);
+  }
+  return {
+    engines,
     lastError: null,
     startedAt: new Date().toISOString(),
   };
 }
 
+function migrateLegacy(raw) {
+  // Old single-engine shape had flat bankroll/currentWindow/
+  // pendingResolutions/windowHistory. It ran 15-minute windows, so we
+  // fold it into the '15m' engine.
+  const state = defaultState();
+  const eng = state.engines['15m'];
+  if (raw.bankroll != null) {
+    eng.bankroll = raw.bankroll;
+    eng.startingBankroll = raw.startingBankroll != null ? raw.startingBankroll : eng.startingBankroll;
+  }
+  if (Array.isArray(raw.pendingResolutions)) eng.pendingResolutions = raw.pendingResolutions;
+  if (Array.isArray(raw.windowHistory)) eng.windowHistory = raw.windowHistory;
+  if (raw.currentWindow) eng.currentWindow = raw.currentWindow;
+  if (raw.lastCheck) eng.lastCheck = raw.lastCheck;
+  if (raw.lastError) state.lastError = raw.lastError;
+  return state;
+}
+
 function loadState() {
   try {
-    const raw = fs.readFileSync(config.STATE_FILE, 'utf8');
-    return JSON.parse(raw);
+    const raw = JSON.parse(fs.readFileSync(config.STATE_FILE, 'utf8'));
+    if (!raw || !raw.engines) {
+      return migrateLegacy(raw || {});
+    }
+    // Fill any engine that's missing (e.g. new engine added later).
+    for (const [key, cfg] of Object.entries(config.ENGINES)) {
+      if (!raw.engines[key]) raw.engines[key] = engineDefault(key, cfg);
+    }
+    for (const key of Object.keys(raw.engines)) {
+      if (!config.ENGINES[key]) delete raw.engines[key];
+    }
+    return raw;
   } catch (e) {
     const fresh = defaultState();
     saveState(fresh);
@@ -41,8 +88,10 @@ function loadState() {
 }
 
 function saveState(state) {
-  if (state.windowHistory && state.windowHistory.length > 200) {
-    state.windowHistory = state.windowHistory.slice(-200);
+  for (const eng of Object.values(state.engines || {})) {
+    if (eng.windowHistory && eng.windowHistory.length > 200) {
+      eng.windowHistory = eng.windowHistory.slice(-200);
+    }
   }
   fs.writeFileSync(config.STATE_FILE, JSON.stringify(state, null, 2));
 }

@@ -15,28 +15,53 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/state', (req, res) => {
   const state = loadState();
-  const liveWindow = computeUnrealized(state);
-  const histFees = (state.windowHistory || []).reduce((a, w) => a + (w.totalFees || 0), 0);
-  const histRebates = (state.windowHistory || []).reduce((a, w) => a + (w.totalRebates || 0), 0);
+
+  // Per-engine live marks + aggregates.
+  const engines = {};
+  let totalFees = 0;
+  let totalRebates = 0;
+  for (const [key, cfg] of Object.entries(config.ENGINES)) {
+    const eng = state.engines[key] || { bankroll: 0, startingBankroll: 0, currentWindow: null, pendingResolutions: [], windowHistory: [] };
+    const live = computeUnrealized(eng);
+    const histFees = (eng.windowHistory || []).reduce((a, w) => a + (w.totalFees || 0), 0);
+    const histRebates = (eng.windowHistory || []).reduce((a, w) => a + (w.totalRebates || 0), 0);
+    const fees = Math.round((histFees + live.fees) * 100) / 100;
+    const rebates = Math.round((histRebates + live.rebates) * 100) / 100;
+    totalFees += fees;
+    totalRebates += rebates;
+    engines[key] = {
+      ...eng,
+      config: {
+        WINDOW_MINUTES: cfg.WINDOW_MINUTES,
+        CHEAP_ORDER_SHARES: cfg.CHEAP_ORDER_SHARES,
+        EXPENSIVE_ORDER_SHARES: cfg.EXPENSIVE_ORDER_SHARES,
+        CHEAP_BUY_AT_SECS: cfg.CHEAP_BUY_AT_SECS,
+        EXPENSIVE_BUY_AT_SECS: cfg.EXPENSIVE_BUY_AT_SECS,
+        BUY_FIRE_VALIDITY_SECS: cfg.BUY_FIRE_VALIDITY_SECS,
+        EXPENSIVE_BUY_MAX_PRICE: cfg.EXPENSIVE_BUY_MAX_PRICE,
+      },
+      liveWindow: live,
+      totalFees: fees,
+      totalRebates: rebates,
+    };
+  }
+
   res.json({
     config: {
       DEMO_MODE: config.DEMO_MODE,
       TRADING_ENABLED: config.TRADING_ENABLED,
       ASSET: config.ASSET,
-      WINDOW_MINUTES: config.WINDOW_MINUTES,
-      CHEAP_ORDER_SHARES: config.CHEAP_ORDER_SHARES,
-      EXPENSIVE_ORDER_SHARES: config.EXPENSIVE_ORDER_SHARES,
-      CHEAP_BUY_AT_SECS: config.CHEAP_BUY_AT_SECS,
-      EXPENSIVE_BUY_AT_SECS: config.EXPENSIVE_BUY_AT_SECS,
+      STARTING_BANKROLL: config.STARTING_BANKROLL,
       BASE_TAKER_FEE_RATE: config.BASE_TAKER_FEE_RATE,
       MAKER_REBATE_RATE: config.MAKER_REBATE_RATE,
       ENTRY_IS_MAKER: config.ENTRY_IS_MAKER,
       RESOLUTION_WIN_THRESHOLD: config.RESOLUTION_WIN_THRESHOLD,
     },
-    ...state,
-    liveWindow,
-    totalFees: Math.round((histFees + liveWindow.fees) * 100) / 100,
-    totalRebates: Math.round((histRebates + liveWindow.rebates) * 100) / 100,
+    engines,
+    totalFees: Math.round(totalFees * 100) / 100,
+    totalRebates: Math.round(totalRebates * 100) / 100,
+    lastError: state.lastError,
+    startedAt: state.startedAt,
   });
 });
 
