@@ -168,9 +168,20 @@
     if (!win) return 'no window';
     const windowSec = (cfg.WINDOW_MINUTES || 5) * 60;
     const elapsed = lc && lc.secondsRemaining != null ? Math.max(0, windowSec - lc.secondsRemaining) : null;
+    const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
+
+    if (cfg.STRATEGY === 'EXPENSIVE_RECOVERY') {
+      if (win.recoveryPlaced) return 'recovery bet on ' + win.recoverySide + ' riding to resolution';
+      if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2) + ' — recovery pending';
+      if (win.entryFired) {
+        const pos = (win.entries || [])[0];
+        return 'in position — ' + (pos ? pos.side : '?') + ' ' + (cfg.ENTRY_SHARES || 300) + 'sh (SL $' + sl.toFixed(2) + ')';
+      }
+      return 'waiting for t=' + (cfg.ENTRY_AFTER_SECS != null ? cfg.ENTRY_AFTER_SECS : 420) + 's entry (elapsed ' + (elapsed != null ? elapsed + 's' : '?') + ')';
+    }
+
     const mon = cfg.MONITOR_SECS != null ? cfg.MONITOR_SECS : 120;
     const ret = cfg.RETURN_LEVEL != null ? cfg.RETURN_LEVEL : 0.50;
-    const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
     if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
     if (win.entryFired) {
       const pos = (win.entries || [])[win.entries.length - 1];
@@ -181,7 +192,13 @@
     return 'target ' + win.targetSide + ' — waiting for ≥ $' + ret.toFixed(2);
   }
 
-  function patternText(win, placed, totalBuys, ret, sl) {
+  function patternText(win, placed, totalBuys, ret, sl, cfg) {
+    if (cfg.STRATEGY === 'EXPENSIVE_RECOVERY') {
+      if (win.recoveryPlaced) return 'recovery bet placed (' + placed + ' / ' + totalBuys + ' entries)';
+      if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
+      if (win.entryFired) return placed + ' / 1 entry placed';
+      return 'waiting for entry @ t=' + (cfg.ENTRY_AFTER_SECS != null ? cfg.ENTRY_AFTER_SECS : 420) + 's';
+    }
     if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
     if (win.entryFired) return placed + ' / ' + totalBuys + ' entry placed';
     if (win.entrySkipped || win.targetSide == null) return 'no entry this window';
@@ -278,8 +295,11 @@
     const amt = cfg.BUY_AMOUNT != null ? cfg.BUY_AMOUNT : 100;
     const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
     const placed = win ? (win.entries || []).length : 0;
-    const totalBuys = 1;
-    const schedule = 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' @ ≥ $' + ret.toFixed(2) + ' · SL $' + sl.toFixed(2);
+    const totalBuys = cfg.STRATEGY === 'EXPENSIVE_RECOVERY' ? 2 : 1;
+    const carry = (e.recoveryCarry != null ? e.recoveryCarry : 0);
+    const schedule = cfg.STRATEGY === 'EXPENSIVE_RECOVERY'
+      ? 'After ' + (cfg.ENTRY_AFTER_SECS != null ? cfg.ENTRY_AFTER_SECS : 420) + 's · ' + (cfg.ENTRY_SHARES != null ? cfg.ENTRY_SHARES : 300) + 'sh expensive (any price) · SL $' + sl.toFixed(2) + ' · carry $' + carry.toFixed(2) + ' · recovery opposite side'
+      : 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' @ ≥ $' + ret.toFixed(2) + ' · SL $' + sl.toFixed(2);
 
     return '<div class="engine">' +
       '<div class="engine-head">' +
@@ -314,7 +334,7 @@
         '<div class="card-title"><span>Current Window</span>' +
           '<span class="countdown">' + (lc.secondsRemaining != null ? (lc.secondsRemaining > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—') + '</span></div>' +
         '<div class="pattern-row">' +
-          '<span class="pattern-chip">' + (win ? patternText(win, placed, totalBuys, ret, sl) : '— — —') + '</span>' +
+          '<span class="pattern-chip">' + (win ? patternText(win, placed, totalBuys, ret, sl, cfg) : '— — —') + '</span>' +
           '<span class="signal-chip">' + strategyState(win, cfg, lc) + '</span>' +
         '</div>' +
         renderPositionArea(win, live) +

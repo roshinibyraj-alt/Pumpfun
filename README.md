@@ -1,41 +1,40 @@
-# Polymarket BTC/ETH UP/DOWN — Dual-Engine Dip-Recovery Paper Trading Bot
+# Polymarket BTC/ETH UP/DOWN — Dual-Engine Paper Trading Bot (5m dip-recovery + 15m expensive/SL-recovery)
 
 Runs **two independent engines** (5-minute and 15-minute BTC/ETH UP/DOWN
-windows) with **separate capital**, following the same dip-recovery rule on
-their own window length. **Paper trading only** — the bot reads live midpoint
-prices and simulates fills; it never holds a wallet, private key, or real
-funds.
+windows) with **separate capital** and **different strategies**. **Paper
+trading only** — the bot reads live midpoint prices and simulates fills; it
+never holds a wallet, private key, or real funds.
 
-## How it works
+## 5m engine — DIP_RECOVERY
 
-| Engine | Window | Monitor phase | Entry trigger | Size | Stop loss |
-|---|---|---|---|---|---|
-| 5m | 5 minutes | first 120s | after 120s | $100 worth | $0.20 |
-| 15m | 15 minutes | first 420s | after 420s | $100 worth | $0.20 |
+| Step | Rule |
+|---|---|
+| Monitor | first 120s, record the last moment each side is below 0.50 |
+| Target | side whose most recent sub-0.50 dip was latest; no dip → no trade |
+| Entry | after 120s, when the target returns to 0.50 → buy **$100 worth** (`shares = floor($100 / price)`) |
+| Stop loss | 0.20 — exit at 0.20 if hit; otherwise ride to resolution |
 
-Per window, each engine:
+## 15m engine — EXPENSIVE_RECOVERY
 
-1. **Monitors** both sides continuously during the monitor phase and records
-   the LAST moment each side's midpoint is below `DIP_LEVEL` (0.50).
-2. **Picks the target** — the side whose most recent sub-0.50 dip happened the
-   latest. If neither side ever dips below 0.50, no trade that window.
-3. **Enters** — any time after the monitor phase, once the target side's price
-   comes back to `RETURN_LEVEL` (0.50), it buys **$100 worth** of shares:
-   `shares = floor($100 / price)` filled at the current mid. One buy per
-   window. If the target never returns to 0.50, no trade.
-4. **Stop loss** — if the bought side's price hits `STOP_LOSS_LEVEL` (0.20),
-   the bot exits at 0.20 and realizes the loss immediately. Otherwise the
-   position rides to real resolution (win = **$1/share**, lose = **$0**).
+| Step | Rule |
+|---|---|
+| Entry | at/after 420s (7 min), buy **300 shares** on the **expensive side at any price** |
+| Stop loss | 0.40 — exit at 0.40 if hit |
+| Loss calc | right after entry: `L = (fill − 0.40) × 300 + fee` |
+| Recovery | the moment SL hits, immediately buy the **opposite side**, sized so a win recovers `L` plus any carried amount: `shares = ceil((carry + L) / ((1 − p) × (1 − 0.07p)))` |
+| Carry | recovery **wins** → carry cleared (window ≈ breakeven). Recovery **loses** → `carry = target + recovery cost` rolls into the next window; the next recovery bet targets `carry + new L`. A main-bet win leaves the carry untouched. |
 
 Every fill is modeled as a taker fill at the current midpoint:
 `cost = shares × price + fee`, with `fee = shares × 0.07 × price × (1 − price)`
-(Polymarket Crypto category). Stops exit at exactly 0.20.
+(Polymarket Crypto category). Stops exit at exactly their level (0.20 / 0.40).
 
 ## Bankroll
 
 - Each engine starts with its own **$1,000 virtual** bankroll (`CAPITAL` in
   `config.js` under `ENGINES`). Money is never shared between the 5m and 15m
   engines.
+- The 15m engine also tracks `recoveryCarry` (the unrecovered deficit rolled
+  between windows) in state.
 - Per-engine state (bankroll, open window, pending resolutions, history) is
   persisted to `state.json`.
 - Railway's filesystem is ephemeral — state resets on redeploy unless you add
@@ -47,13 +46,12 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
 
 - `ASSET`: `'btc'` or `'eth'`
 - `ENGINES`: one block per engine (`'5m'` and `'15m'`), each with:
+  - `STRATEGY`: `'DIP_RECOVERY'` (5m) or `'EXPENSIVE_RECOVERY'` (15m)
   - `WINDOW_MINUTES`: window length for that engine
   - `CAPITAL`: that engine's starting bankroll (independent)
-  - `MONITOR_SECS`: monitor phase length (5m: 120s, 15m: 420s)
-  - `DIP_LEVEL`: a side "dipped" while its price is below this (0.50)
-  - `RETURN_LEVEL`: buy when the target returns to this (0.50)
-  - `BUY_AMOUNT`: notional size of the single buy ($100)
-  - `STOP_LOSS_LEVEL`: exit price if the position moves against you (0.20)
+  - 5m: `MONITOR_SECS`, `DIP_LEVEL`, `RETURN_LEVEL`, `BUY_AMOUNT`,
+    `STOP_LOSS_LEVEL`
+  - 15m: `ENTRY_AFTER_SECS`, `ENTRY_SHARES`, `STOP_LOSS_LEVEL`
 - `BASE_TAKER_FEE_RATE` / `MAKER_REBATE_RATE` / `ENTRY_IS_MAKER`: fee model
 - `RESOLUTION_WIN_THRESHOLD` / `RESOLUTION_LOSS_THRESHOLD`
 - `POLL_INTERVAL_MS`, `STATE_FILE`
@@ -76,8 +74,8 @@ Dashboard: http://localhost:3000 (set `PORT` to change).
 
 ## Dashboard
 
-Shows each engine separately: its own bankroll/return/equity, live UP/DOWN
-prices, monitor phase status, target side, entry status, stop-loss state,
+Shows each engine separately: bankroll/return/equity, live UP/DOWN prices,
+strategy state (monitor/target for 5m; entry/SL/recovery + carry for 15m),
 unrealized P&L on open positions, and per-engine resolution history.
 
 ## Status / safety

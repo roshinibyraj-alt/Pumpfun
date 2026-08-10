@@ -1,21 +1,21 @@
 // ============================================================
-// bot.js — dip-recovery strategy, v20. Runs TWO independent engines
-// (5m and 15m), each with its own bankroll, current window, pending
-// resolutions, and history. Same rule per engine, own window length:
+// bot.js — v21. TWO independent engines (5m and 15m), each with its
+// own bankroll, current window, pending resolutions, and history.
+// Each engine has its OWN strategy (see config.js):
 //
-//   5m engine  (300s windows):
-//     MONITOR  : first 120s — record the LAST moment each side is
-//                below DIP_LEVEL (0.50).
-//     TARGET   : at end of monitor phase, the side whose most recent
-//                sub-0.50 dip was LATEST. No dip at all -> no trade.
-//     ENTRY    : after 120s, once the target side's price comes back
-//                to RETURN_LEVEL (0.50), buy BUY_AMOUNT ($100) worth
-//                of shares: shares = floor($100 / price) at the mid.
-//     STOP LOSS: if the bought side's price hits 0.20, exit at 0.20.
-//                Otherwise ride to real resolution ($1 win / $0 lose).
+//   5m engine  — DIP_RECOVERY:
+//     MONITOR first 120s, record the last moment each side is below
+//     0.50; TARGET = latest dipper. After 120s, when the target
+//     returns to 0.50, buy $100 worth. STOP LOSS 0.20.
 //
-//   15m engine (900s windows):
-//     Same rule with MONITOR_SECS = 420s (first 7 minutes).
+//   15m engine — EXPENSIVE_RECOVERY:
+//     At/after 420s buy 300 shares on the EXPENSIVE side at any
+//     price. STOP LOSS 0.40. Right after entry compute the SL loss
+//     L = (fill - 0.40) x 300 + fee. When SL hits, IMMEDIATELY place
+//     a recovery bet on the OPPOSITE side sized to recover carry + L
+//     (shares = ceil(target / ((1-p) x (1 - 0.07p)))). Recovery wins
+//     -> carry cleared; recovery loses -> carry = target + cost moves
+//     to the next window. A main-bet win leaves the carry untouched.
 //
 // FEES & REBATES (docs.polymarket.com/trading/fees + maker-rebates):
 //   Crypto: taker fee = shares x 0.07 x price x (1 - price).
@@ -43,9 +43,10 @@ function round5(n) { return Math.round(n * 100000) / 100000; }
 function priceOf(side, upPrice, downPrice) {
   return side === 'UP' ? upPrice : downPrice;
 }
+function expensiveSide(upPrice, downPrice) { return upPrice >= downPrice ? 'UP' : 'DOWN'; }
 
-// Builds an ALREADY-FILLED entry at the moment the buy fires. Entries
-// fill at the current midpoint; size is BUY_AMOUNT worth of shares.
+// Builds an ALREADY-FILLED entry at the moment a buy fires. Entries
+// fill at the current midpoint; size is fixed (shares) per order.
 function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
   const feeEquiv = shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice);
@@ -69,7 +70,7 @@ function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
   };
 }
 
-// Records the single scheduled buy on win.entries.
+// Records a buy on win.entries.
 function fireEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const entry = makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason);
   win.entries.push(entry);
@@ -77,8 +78,8 @@ function fireEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason)
 }
 
 // Checks whether the window's LAST observed tick (closest snapshot to
-// windowEnd — see win.finalUpPrice/finalDownPrice, updated every tick
-// in tick() below) already shows a side at/above the win threshold.
+// windowEnd — see win.finalUpPrice/finalDownPrice, updated every tick)
+// already shows a side at/above the win threshold.
 function immediateWinnerFromLastTick(win) {
   if (win.finalUpPrice != null && win.finalUpPrice >= config.RESOLUTION_WIN_THRESHOLD) return 'UP';
   if (win.finalDownPrice != null && win.finalDownPrice >= config.RESOLUTION_WIN_THRESHOLD) return 'DOWN';
@@ -96,6 +97,10 @@ function immediateWinnerFromLastTick(win) {
 // credited to the bankroll when the stop hit — only still-'filled'
 // entries are settled here (win = $1/share, lose = $0; rebate credited
 // to payout when present). The window totals include every entry.
+//
+// 15m recovery carry: if this window placed a recovery bet, its
+// outcome updates engine.recoveryCarry (win -> 0, lose -> target +
+// recovery cost).
 // Returns true if resolved this call, false if still waiting.
 async function resolveWindow(engine, win) {
   let wonSide = immediateWinnerFromLastTick(win);
@@ -142,6 +147,18 @@ async function resolveWindow(engine, win) {
     engine.bankroll = Math.round((engine.bankroll + settleCredit) * 100) / 100;
   }
 
+  // 15m recovery carry update.
+  if (win.recoveryPlaced && win.recoveryTarget != null) {
+    const recPos = entries.find((e) => e.status === 'resolved_win' || e.status === 'resolved_loss');
+    if (recPos && recPos.status === 'resolved_win') {
+      engine.recoveryCarry = 0;
+      log(`[${win.engine}] RECOVERY WON (${recPos.side} ${recPos.shares}sh @ $${recPos.fillPrice.toFixed(2)}) — carry cleared to $0.00`);
+    } else if (recPos) {
+      engine.recoveryCarry = Math.round((win.recoveryTarget + recPos.cost) * 100) / 100;
+      log(`[${win.engine}] RECOVERY LOST (${recPos.side} ${recPos.shares}sh @ $${recPos.fillPrice.toFixed(2)}) — carry now $${engine.recoveryCarry.toFixed(2)} (target $${win.recoveryTarget.toFixed(2)} + cost $${recPos.cost.toFixed(2)})`);
+    }
+  }
+
   const pnl = Math.round((payout - cost) * 100) / 100;
   const isLoss = traded ? pnl < 0 : null;
 
@@ -163,6 +180,7 @@ async function resolveWindow(engine, win) {
     pnl,
     isLoss,
     bankrollAfter: engine.bankroll,
+    recoveryCarryAfter: engine.recoveryCarry,
     resolvedAt: new Date().toISOString(),
   });
 
@@ -242,8 +260,138 @@ function computeUnrealized(engine) {
   return out;
 }
 
+// ---- 5m engine: DIP_RECOVERY ----
+function dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPrice, upTokenId, downTokenId) {
+  // MONITOR phase: record the last moment each side is below DIP_LEVEL.
+  if (!win.monitoringDone) {
+    if (elapsed <= engineCfg.MONITOR_SECS) {
+      if (upPrice < engineCfg.DIP_LEVEL) win.lastDipSec.UP = elapsed;
+      if (downPrice < engineCfg.DIP_LEVEL) win.lastDipSec.DOWN = elapsed;
+    }
+    if (elapsed >= engineCfg.MONITOR_SECS) {
+      win.monitoringDone = true;
+      const upDip = win.lastDipSec.UP;
+      const downDip = win.lastDipSec.DOWN;
+      if (upDip == null && downDip == null) {
+        win.targetSide = null;
+        log(`${tag} Monitor complete at t=${elapsed}s — neither side dipped below $${engineCfg.DIP_LEVEL}; NO TRADE this window`);
+      } else if (downDip != null && (upDip == null || downDip > upDip)) {
+        win.targetSide = 'DOWN';
+        log(`${tag} Monitor complete at t=${elapsed}s — target DOWN (last dip t=${downDip}s below $${engineCfg.DIP_LEVEL}); waiting for return to $${engineCfg.RETURN_LEVEL}`);
+      } else if (upDip != null && (downDip == null || upDip > downDip)) {
+        win.targetSide = 'UP';
+        log(`${tag} Monitor complete at t=${elapsed}s — target UP (last dip t=${upDip}s below $${engineCfg.DIP_LEVEL}); waiting for return to $${engineCfg.RETURN_LEVEL}`);
+      } else {
+        win.targetSide = upPrice <= downPrice ? 'UP' : 'DOWN';
+        log(`${tag} Monitor complete at t=${elapsed}s — dip tie, target ${win.targetSide} (cheaper now); waiting for return to $${engineCfg.RETURN_LEVEL}`);
+      }
+    }
+  }
+
+  // ENTRY: after the monitor phase, buy $100 worth once the target
+  // side comes back to RETURN_LEVEL.
+  if (win.monitoringDone && !win.entryFired && !win.entrySkipped) {
+    if (win.targetSide == null) {
+      win.entrySkipped = true;
+      log(`${tag} No target side — no entry for window ${win.windowStart}`);
+    } else {
+      const px = priceOf(win.targetSide, upPrice, downPrice);
+      if (px >= engineCfg.RETURN_LEVEL) {
+        const shares = Math.floor(engineCfg.BUY_AMOUNT / px);
+        if (shares > 0) {
+          win.entryFired = true;
+          fireEntry(win, win.targetSide, shares, px, upTokenId, downTokenId,
+            `dip-recovery buy — ${win.targetSide} back to $${px.toFixed(2)} after t=${engineCfg.MONITOR_SECS}s; $${engineCfg.BUY_AMOUNT} worth (${shares} shares)`);
+        } else {
+          win.entrySkipped = true;
+          log(`${tag} Entry skipped — price $${px.toFixed(2)} too high for $${engineCfg.BUY_AMOUNT}`);
+        }
+      }
+    }
+  }
+
+  // STOP LOSS 0.20.
+  if (win.entryFired && !win.stoppedOut) {
+    const pos = win.entries[win.entries.length - 1];
+    const cur = priceOf(pos.side, upPrice, downPrice);
+    if (cur <= engineCfg.STOP_LOSS_LEVEL) {
+      win.stoppedOut = true;
+      pos.status = 'stopped_out';
+      pos.exitPrice = engineCfg.STOP_LOSS_LEVEL;
+      const f = pos.fillFee || 0;
+      pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
+      pos.payout = Math.round((pos.shares * pos.exitPrice) * 100000) / 100000;
+      pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
+      pos.settledAt = new Date().toISOString();
+      engine.bankroll = Math.round((engine.bankroll + pos.pnl) * 100) / 100;
+      log(`${tag} STOP LOSS @ t=${elapsed}s — ${pos.side} hit $${cur.toFixed(2)} ≤ $${engineCfg.STOP_LOSS_LEVEL}; exited ${pos.shares}sh @ $${pos.exitPrice.toFixed(2)} | pnl $${pos.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
+    }
+  }
+}
+
+// ---- 15m engine: EXPENSIVE_RECOVERY ----
+function expensiveRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPrice, upTokenId, downTokenId) {
+  // 1) ENTRY: after ENTRY_AFTER_SECS, buy ENTRY_SHARES on the expensive
+  //    side at ANY price. Compute the potential SL loss right away.
+  if (!win.entryFired) {
+    if (elapsed >= engineCfg.ENTRY_AFTER_SECS) {
+      const side = expensiveSide(upPrice, downPrice);
+      const px = priceOf(side, upPrice, downPrice);
+      win.entryFired = true;
+      fireEntry(win, side, engineCfg.ENTRY_SHARES, px, upTokenId, downTokenId,
+        `expensive entry after t=${engineCfg.ENTRY_AFTER_SECS}s — ${side} @ $${px.toFixed(2)} (${engineCfg.ENTRY_SHARES} shares, any price)`);
+      const pos = win.entries[0];
+      const f = pos.fillFee || 0;
+      win.potentialSlLoss = Math.round(((pos.fillPrice - engineCfg.STOP_LOSS_LEVEL) * pos.shares + f) * 100) / 100;
+      log(`${tag} Potential SL loss if hit: $${win.potentialSlLoss.toFixed(2)} (fill $${px.toFixed(2)} - SL $${engineCfg.STOP_LOSS_LEVEL}) x ${pos.shares}sh + fee $${f.toFixed(4)}`);
+    }
+  }
+
+  // 2) STOP LOSS 0.40 -> exit, then IMMEDIATELY place the recovery bet
+  //    on the OPPOSITE side, sized to recover carry + SL loss.
+  if (win.entryFired && !win.stoppedOut && !win.recoveryPlaced) {
+    const pos = win.entries[0];
+    const cur = priceOf(pos.side, upPrice, downPrice);
+    if (cur <= engineCfg.STOP_LOSS_LEVEL) {
+      win.stoppedOut = true;
+      pos.status = 'stopped_out';
+      pos.exitPrice = engineCfg.STOP_LOSS_LEVEL;
+      const f = pos.fillFee || 0;
+      pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
+      pos.payout = Math.round((pos.shares * pos.exitPrice) * 100000) / 100000;
+      pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
+      pos.settledAt = new Date().toISOString();
+      engine.bankroll = Math.round((engine.bankroll + pos.pnl) * 100) / 100;
+      log(`${tag} STOP LOSS @ t=${elapsed}s — ${pos.side} hit $${cur.toFixed(2)} ≤ $${engineCfg.STOP_LOSS_LEVEL}; exited ${pos.shares}sh @ $${pos.exitPrice.toFixed(2)} | pnl $${pos.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
+
+      // Recovery bet on the opposite side.
+      const recSide = pos.side === 'UP' ? 'DOWN' : 'UP';
+      const recPx = priceOf(recSide, upPrice, downPrice);
+      const target = Math.round((engine.recoveryCarry + win.potentialSlLoss) * 100) / 100;
+      // Net profit per share if recSide wins, after taker fee:
+      // (1 - p) - 0.07*p*(1-p) = (1 - p) x (1 - 0.07p).
+      const netPerShare = (1 - recPx) * (1 - config.BASE_TAKER_FEE_RATE * recPx);
+      if (netPerShare > 0) {
+        const shares = Math.ceil(target / netPerShare);
+        if (shares > 0) {
+          win.recoveryPlaced = true;
+          win.recoveryTarget = target;
+          win.recoverySide = recSide;
+          fireEntry(win, recSide, shares, recPx, upTokenId, downTokenId,
+            `recovery bet — recover $${target.toFixed(2)} (SL loss $${win.potentialSlLoss.toFixed(2)} + carry $${engine.recoveryCarry.toFixed(2)}) via ${recSide} @ $${recPx.toFixed(2)}`);
+          log(`${tag} Recovery placed: target $${target.toFixed(2)} -> ${shares}sh ${recSide} @ $${recPx.toFixed(2)} (net/share $${netPerShare.toFixed(4)})`);
+        } else {
+          log(`${tag} Recovery skipped — $${target.toFixed(2)} needs more than 0 shares at $${recPx.toFixed(2)}`);
+        }
+      } else {
+        log(`${tag} Recovery skipped — ${recSide} at $${recPx.toFixed(2)} leaves no profit margin`);
+      }
+    }
+  }
+}
+
 // One full pass over a single engine: hand off closed windows, resolve
-// pendings, find the live market, run the dip-recovery rule.
+// pendings, find the live market, run the engine's strategy.
 async function engineTick(state, engineKey, engineCfg, nowSec) {
   const engine = state.engines[engineKey];
   const tag = `[${engineKey}]`;
@@ -276,7 +424,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
     state.lastError = e.message;
   }
 
-  // 3) Market snapshot, new-window creation, and the dip-recovery rule.
+  // 3) Market snapshot, new-window creation, and the strategy step.
   try {
     const found = await polymarket.getCurrentUpDownMarket(config.ASSET, engineCfg.WINDOW_MINUTES);
 
@@ -295,23 +443,33 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
         engine.currentWindow = {
           engine: engineKey,
           windowMinutes: engineCfg.WINDOW_MINUTES,
+          strategy: engineCfg.STRATEGY,
           windowStart,
           windowEnd,
           upTokenId,
           downTokenId,
-          signal: `DIP_RECOVERY_${engineKey}`,
+          signal: `${engineCfg.STRATEGY}_${engineKey}`,
           entries: [],
+          // DIP_RECOVERY fields
           monitoringDone: false,
-          lastDipSec: { UP: null, DOWN: null }, // last second each side was below DIP_LEVEL
-          targetSide: null,   // side chosen at end of monitoring
-          entryFired: false,  // the $100 buy has been placed
-          entrySkipped: false, // no trade (no target / never returned)
-          stoppedOut: false,  // stop loss triggered
+          lastDipSec: { UP: null, DOWN: null },
+          targetSide: null,
+          entrySkipped: false,
+          // EXPENSIVE_RECOVERY fields
+          potentialSlLoss: null,
+          recoveryPlaced: false,
+          recoveryTarget: null,
+          recoverySide: null,
+          // shared
+          entryFired: false,
+          stoppedOut: false,
           finalUpPrice: null,
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart}: MONITOR ${engineCfg.MONITOR_SECS}s (dip < $${engineCfg.DIP_LEVEL}) | ENTRY $${engineCfg.BUY_AMOUNT} when target returns to $${engineCfg.RETURN_LEVEL} | STOP LOSS $${engineCfg.STOP_LOSS_LEVEL} | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
+        log(`${tag} Window ${windowStart}: ${engineCfg.STRATEGY === 'EXPENSIVE_RECOVERY'
+          ? `ENTRY ${engineCfg.ENTRY_SHARES}sh expensive after t=${engineCfg.ENTRY_AFTER_SECS}s (any price) | SL $${engineCfg.STOP_LOSS_LEVEL} | recovery on opposite side`
+          : `MONITOR ${engineCfg.MONITOR_SECS}s (dip < $${engineCfg.DIP_LEVEL}) | ENTRY $${engineCfg.BUY_AMOUNT} when target returns to $${engineCfg.RETURN_LEVEL} | SL $${engineCfg.STOP_LOSS_LEVEL}`} | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -333,75 +491,10 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
       if (win && nowSec < windowEnd) {
         const elapsed = nowSec - win.windowStart;
 
-        // ---- MONITOR phase: record the last moment each side is
-        // below DIP_LEVEL. Finalize the target side once the monitor
-        // phase is over.
-        if (!win.monitoringDone) {
-          if (elapsed <= engineCfg.MONITOR_SECS) {
-            if (upPrice < engineCfg.DIP_LEVEL) win.lastDipSec.UP = elapsed;
-            if (downPrice < engineCfg.DIP_LEVEL) win.lastDipSec.DOWN = elapsed;
-          }
-          if (elapsed >= engineCfg.MONITOR_SECS) {
-            win.monitoringDone = true;
-            const upDip = win.lastDipSec.UP;
-            const downDip = win.lastDipSec.DOWN;
-            if (upDip == null && downDip == null) {
-              win.targetSide = null;
-              log(`${tag} Monitor complete at t=${elapsed}s — neither side dipped below $${engineCfg.DIP_LEVEL}; NO TRADE this window`);
-            } else if (downDip != null && (upDip == null || downDip > upDip)) {
-              win.targetSide = 'DOWN';
-              log(`${tag} Monitor complete at t=${elapsed}s — target DOWN (last dip t=${downDip}s below $${engineCfg.DIP_LEVEL}); waiting for return to $${engineCfg.RETURN_LEVEL}`);
-            } else if (upDip != null && (downDip == null || upDip > downDip)) {
-              win.targetSide = 'UP';
-              log(`${tag} Monitor complete at t=${elapsed}s — target UP (last dip t=${upDip}s below $${engineCfg.DIP_LEVEL}); waiting for return to $${engineCfg.RETURN_LEVEL}`);
-            } else {
-              // Exact tie (both dipped at the same second) — pick the
-              // currently cheaper side.
-              win.targetSide = upPrice <= downPrice ? 'UP' : 'DOWN';
-              log(`${tag} Monitor complete at t=${elapsed}s — dip tie, target ${win.targetSide} (cheaper now); waiting for return to $${engineCfg.RETURN_LEVEL}`);
-            }
-          }
-        }
-
-        // ---- ENTRY: after the monitor phase, buy $100 worth once the
-        // target side comes back to RETURN_LEVEL.
-        if (win.monitoringDone && !win.entryFired && !win.entrySkipped) {
-          if (win.targetSide == null) {
-            win.entrySkipped = true;
-            log(`${tag} No target side — no entry for window ${win.windowStart}`);
-          } else {
-            const px = priceOf(win.targetSide, upPrice, downPrice);
-            if (px >= engineCfg.RETURN_LEVEL) {
-              const shares = Math.floor(engineCfg.BUY_AMOUNT / px);
-              if (shares > 0) {
-                win.entryFired = true;
-                fireEntry(win, win.targetSide, shares, px, upTokenId, downTokenId,
-                  `dip-recovery buy — ${win.targetSide} back to $${px.toFixed(2)} after t=${engineCfg.MONITOR_SECS}s; $${engineCfg.BUY_AMOUNT} worth (${shares} shares)`);
-              } else {
-                win.entrySkipped = true;
-                log(`${tag} Entry skipped — price $${px.toFixed(2)} too high for $${engineCfg.BUY_AMOUNT}`);
-              }
-            }
-          }
-        }
-
-        // ---- STOP LOSS: if the bought side's price hits 0.20, exit
-        // at 0.20 and realize the loss immediately.
-        if (win.entryFired && !win.stoppedOut) {
-          const pos = win.entries[win.entries.length - 1];
-          const cur = priceOf(pos.side, upPrice, downPrice);
-          if (cur <= engineCfg.STOP_LOSS_LEVEL) {
-            win.stoppedOut = true;
-            pos.status = 'stopped_out';
-            pos.exitPrice = engineCfg.STOP_LOSS_LEVEL;
-            const f = pos.fillFee || 0;
-            pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
-            pos.payout = Math.round((pos.shares * pos.exitPrice) * 100000) / 100000;
-            pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
-            pos.settledAt = new Date().toISOString();
-            engine.bankroll = Math.round((engine.bankroll + pos.pnl) * 100) / 100;
-            log(`${tag} STOP LOSS @ t=${elapsed}s — ${pos.side} hit $${cur.toFixed(2)} ≤ $${engineCfg.STOP_LOSS_LEVEL}; exited ${pos.shares}sh @ $${pos.exitPrice.toFixed(2)} | pnl $${pos.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
-          }
+        if (engineCfg.STRATEGY === 'EXPENSIVE_RECOVERY') {
+          expensiveRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPrice, upTokenId, downTokenId);
+        } else {
+          dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPrice, upTokenId, downTokenId);
         }
 
         // Snapshot both sides' prices on every tick while the window is
@@ -461,7 +554,10 @@ async function tick() {
 
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | MONITOR ${cfg.MONITOR_SECS}s (dip < $${cfg.DIP_LEVEL}) | ENTRY $${cfg.BUY_AMOUNT} @ return to $${cfg.RETURN_LEVEL} | STOP LOSS $${cfg.STOP_LOSS_LEVEL} | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'}`);
+    const summary = cfg.STRATEGY === 'EXPENSIVE_RECOVERY'
+      ? `ENTRY ${cfg.ENTRY_SHARES}sh expensive after t=${cfg.ENTRY_AFTER_SECS}s (any price) | SL $${cfg.STOP_LOSS_LEVEL} | recovery on opposite side`
+      : `MONITOR ${cfg.MONITOR_SECS}s (dip < $${cfg.DIP_LEVEL}) | ENTRY $${cfg.BUY_AMOUNT} @ return to $${cfg.RETURN_LEVEL} | SL $${cfg.STOP_LOSS_LEVEL}`;
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | ${summary} | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'}`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);

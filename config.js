@@ -3,26 +3,34 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v20 — dip-recovery entry, $100 notional, stop loss 0.20):
-//   Both engines follow the SAME rule, on their own window length and
-//   their own independent bankroll:
+// STRATEGY (v21 — two different engines):
 //
-//   1. MONITOR phase — 5m: first 120 seconds. 15m: first 420 seconds.
-//      The bot watches UP and DOWN midpoints continuously and records
-//      the LAST moment each side was below DIP_LEVEL (0.50).
-//   2. TARGET side — when the monitor phase ends, the side whose most
-//      recent dip below 0.50 happened the LATEST wins. If neither side
-//      ever dipped below 0.50, no trade this window.
-//   3. ENTRY — any time after the monitor phase (after 120s / 420s),
-//      once the target side's price comes back to RETURN_LEVEL (0.50),
-//      buy BUY_AMOUNT ($100) worth of shares:
-//        shares = floor($100 / price), filled at the current mid.
-//      One buy per window. If the target never returns to 0.50, no
-//      trade.
-//   4. STOP LOSS — both windows: if the bought side's price hits
-//      STOP_LOSS_LEVEL (0.20), exit at 0.20 and realize the loss.
-//      Otherwise the position rides to real resolution (win =
-//      $1/share, lose = $0).
+//   5m engine  — DIP_RECOVERY (unchanged from v20):
+//     1. MONITOR first 120s, record the last moment each side is
+//        below DIP_LEVEL (0.50).
+//     2. TARGET = the side whose most recent sub-0.50 dip was latest.
+//        No dip at all -> no trade.
+//     3. After 120s, once the target returns to RETURN_LEVEL (0.50),
+//        buy BUY_AMOUNT ($100) worth: shares = floor($100 / price).
+//     4. STOP LOSS 0.20; otherwise ride to resolution.
+//
+//   15m engine — EXPENSIVE_RECOVERY:
+//     1. At/after ENTRY_AFTER_SECS (420s / 7 min), buy ENTRY_SHARES
+//        (300) on the EXPENSIVE side at ANY price.
+//     2. STOP LOSS 0.40. Right after entry the bot computes the loss
+//        that an SL hit would realize:
+//          L = (fill - 0.40) x 300 + fee
+//     3. When SL hits, immediately place a RECOVERY bet on the
+//        OPPOSITE side, sized so a win recovers L plus any carried
+//        amount from previous windows:
+//          shares = ceil((carry + L) / ((1 - p) x (1 - 0.07p)))
+//        The recovery bet rides to resolution (no SL on it).
+//     4. Recovery wins  -> carry cleared, window ~breakeven.
+//        Recovery loses -> carry = target + recovery cost carries to
+//        the next window, and the next recovery is sized to cover
+//        carry + that window's L.
+//     5. A main-bet win (no SL) leaves the carry untouched — the
+//        carry only clears when a recovery bet wins.
 //
 //   Fees/rebates (per docs.polymarket.com/trading/fees and
 //   docs.polymarket.com/programs/maker-rebates):
@@ -56,6 +64,7 @@ module.exports = {
   ENGINES: {
     '5m': {
       label: '5m',
+      STRATEGY: 'DIP_RECOVERY',
       WINDOW_MINUTES: 5,
       CAPITAL: 1000, // this engine's starting bankroll (independent)
       // Monitor phase length: watch both sides this long for a dip.
@@ -73,13 +82,16 @@ module.exports = {
     },
     '15m': {
       label: '15m',
+      STRATEGY: 'EXPENSIVE_RECOVERY',
       WINDOW_MINUTES: 15,
       CAPITAL: 1000,
-      MONITOR_SECS: 420, // first 7 minutes
-      DIP_LEVEL: 0.50,
-      RETURN_LEVEL: 0.50,
-      BUY_AMOUNT: 100,
-      STOP_LOSS_LEVEL: 0.20,
+      // Entry: at/after this many seconds, buy the expensive side at
+      // any price.
+      ENTRY_AFTER_SECS: 420, // 7 minutes
+      // Fixed share size for the main entry.
+      ENTRY_SHARES: 300,
+      // Stop loss for the main entry.
+      STOP_LOSS_LEVEL: 0.40,
     },
   },
 

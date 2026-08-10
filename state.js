@@ -33,6 +33,9 @@ function engineDefault(engineKey, engineCfg) {
     pendingResolutions: [],
     windowHistory: [],
     lastCheck: null,
+    // 15m engine: unrecovered deficit carried between windows (martingale
+    // recovery target). 0 for engines that don't use recovery.
+    recoveryCarry: 0,
   };
 }
 
@@ -75,6 +78,7 @@ function loadState() {
     // Fill any engine that's missing (e.g. new engine added later).
     for (const [key, cfg] of Object.entries(config.ENGINES)) {
       if (!raw.engines[key]) raw.engines[key] = engineDefault(key, cfg);
+      else if (raw.engines[key].recoveryCarry == null) raw.engines[key].recoveryCarry = 0;
     }
     for (const key of Object.keys(raw.engines)) {
       if (!config.ENGINES[key]) delete raw.engines[key];

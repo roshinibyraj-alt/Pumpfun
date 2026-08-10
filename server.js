@@ -32,11 +32,14 @@ app.get('/api/state', (req, res) => {
     engines[key] = {
       ...eng,
       config: {
+        STRATEGY: cfg.STRATEGY,
         WINDOW_MINUTES: cfg.WINDOW_MINUTES,
         MONITOR_SECS: cfg.MONITOR_SECS,
         DIP_LEVEL: cfg.DIP_LEVEL,
         RETURN_LEVEL: cfg.RETURN_LEVEL,
         BUY_AMOUNT: cfg.BUY_AMOUNT,
+        ENTRY_AFTER_SECS: cfg.ENTRY_AFTER_SECS,
+        ENTRY_SHARES: cfg.ENTRY_SHARES,
         STOP_LOSS_LEVEL: cfg.STOP_LOSS_LEVEL,
       },
       liveWindow: live,
