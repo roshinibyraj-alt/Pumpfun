@@ -171,6 +171,8 @@
     const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
 
     if (cfg.STRATEGY === 'EXPENSIVE_RECOVERY') {
+      if (win.recoveryStoppedOut) return 'recovery stopped out @ $' + sl.toFixed(2) + ' — loss rolls into carry';
+      if (win.carryRecoveryPlaced) return 'carry-recovery ' + win.carryRecoverySide + ' riding (target $' + (win.carryRecoveryTarget != null ? win.carryRecoveryTarget.toFixed(2) : '?') + ') + main entry';
       if (win.recoveryPlaced) return 'recovery bet on ' + win.recoverySide + ' riding to resolution';
       if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2) + ' — recovery pending';
       if (win.entryFired) {
@@ -194,6 +196,8 @@
 
   function patternText(win, placed, totalBuys, ret, sl, cfg) {
     if (cfg.STRATEGY === 'EXPENSIVE_RECOVERY') {
+      if (win.recoveryStoppedOut) return 'recovery stopped out @ $' + sl.toFixed(2) + ' (' + placed + ' / ' + totalBuys + ' entries)';
+      if (win.carryRecoveryPlaced) return 'carry-recovery placed (' + placed + ' / ' + totalBuys + ' entries)';
       if (win.recoveryPlaced) return 'recovery bet placed (' + placed + ' / ' + totalBuys + ' entries)';
       if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
       if (win.entryFired) return placed + ' / 1 entry placed';
@@ -298,7 +302,7 @@
     const totalBuys = cfg.STRATEGY === 'EXPENSIVE_RECOVERY' ? 2 : 1;
     const carry = (e.recoveryCarry != null ? e.recoveryCarry : 0);
     const schedule = cfg.STRATEGY === 'EXPENSIVE_RECOVERY'
-      ? 'After ' + (cfg.ENTRY_AFTER_SECS != null ? cfg.ENTRY_AFTER_SECS : 420) + 's · ' + (cfg.ENTRY_SHARES != null ? cfg.ENTRY_SHARES : 300) + 'sh expensive (any price) · SL $' + sl.toFixed(2) + ' · carry $' + carry.toFixed(2) + ' · recovery opposite side'
+      ? 'After ' + (cfg.ENTRY_AFTER_SECS != null ? cfg.ENTRY_AFTER_SECS : 420) + 's · ' + (cfg.ENTRY_SHARES != null ? cfg.ENTRY_SHARES : 300) + 'sh expensive (any price) · SL $' + sl.toFixed(2) + ' on ALL bets · carry $' + carry.toFixed(2) + ' · carry-recovery @420s on signal side'
       : 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' @ ≥ $' + ret.toFixed(2) + ' · SL $' + sl.toFixed(2);
 
     return '<div class="engine">' +

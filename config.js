@@ -20,17 +20,21 @@
 //     2. STOP LOSS 0.40. Right after entry the bot computes the loss
 //        that an SL hit would realize:
 //          L = (fill - 0.40) x 300 + fee
-//     3. When SL hits, immediately place a RECOVERY bet on the
-//        OPPOSITE side, sized so a win recovers L plus any carried
-//        amount from previous windows:
+//     3. If a carry is still owed at the 420s signal, ALSO place a
+//        CARRY-RECOVERY bet on the SIGNAL side (the expensive side)
+//        sized to recover the carry; the signal logic runs as normal.
+//     4. When SL hits (and no carry-recovery is riding this window),
+//        immediately place a RECOVERY bet on the OPPOSITE side, sized
+//        so a win recovers L plus any carried amount from previous
+//        windows:
 //          shares = ceil((carry + L) / ((1 - p) x (1 - 0.07p)))
-//        The recovery bet rides to resolution (no SL on it).
-//     4. Recovery wins  -> carry cleared, window ~breakeven.
-//        Recovery loses -> carry = target + recovery cost carries to
-//        the next window, and the next recovery is sized to cover
-//        carry + that window's L.
-//     5. A main-bet win (no SL) leaves the carry untouched — the
-//        carry only clears when a recovery bet wins.
+//     5. EVERY bet (main, in-window recovery, carry-recovery) carries
+//        STOP LOSS 0.40. A stopped-out recovery realizes its loss
+//        immediately and the full loss rolls into the carry.
+//     6. Recovery wins  -> carry cleared. Recovery loses or is stopped
+//        out -> carry = pre-carry + all losses this window, and the
+//        next 420s signal places a carry-recovery for it. A main-bet
+//        win leaves the carry untouched — only a recovery win clears it.
 //
 //   Fees/rebates (per docs.polymarket.com/trading/fees and
 //   docs.polymarket.com/programs/maker-rebates):

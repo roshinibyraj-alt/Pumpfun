@@ -21,8 +21,10 @@ never holds a wallet, private key, or real funds.
 | Entry | at/after 420s (7 min), buy **300 shares** on the **expensive side at any price** |
 | Stop loss | 0.40 — exit at 0.40 if hit |
 | Loss calc | right after entry: `L = (fill − 0.40) × 300 + fee` |
-| Recovery | the moment SL hits, immediately buy the **opposite side**, sized so a win recovers `L` plus any carried amount: `shares = ceil((carry + L) / ((1 − p) × (1 − 0.07p)))` |
-| Carry | recovery **wins** → carry cleared (window ≈ breakeven). Recovery **loses** → `carry = target + recovery cost` rolls into the next window; the next recovery bet targets `carry + new L`. A main-bet win leaves the carry untouched. |
+| SL recovery | if a window has **no carry owed**, the moment SL hits buy the **opposite side**, sized so a win recovers `L` plus any carried amount: `shares = ceil((carry + L) / ((1 − p) × (1 − 0.07p)))` |
+| Carry recovery | if a carry is still owed when the next 420s signal arrives, the bot **also** buys a recovery on the **signal side** (the expensive side) — the signal logic itself runs exactly as normal. Sized to recover the carry: `shares = ceil(carry / ((1 − p) × (1 − 0.07p)))`. One recovery bet per window. |
+| Stop loss on all bets | **every** 15m bet — main entry, in-window SL recovery, and carry-recovery — has the same **0.40 stop loss**. If a recovery is stopped out, its loss is realized immediately and the full loss rolls into the carry. |
+| Carry | a recovery **wins** → carry cleared (window ≈ breakeven). A recovery **loses or is stopped out** → `carry = pre-carry + all losses this window` rolls into the next window and is re-targeted at the next 420s signal, so the recovery amount is always correct. A main-bet win leaves the carry untouched. |
 
 Every fill is modeled as a taker fill at the current midpoint:
 `cost = shares × price + fee`, with `fee = shares × 0.07 × price × (1 − price)`
