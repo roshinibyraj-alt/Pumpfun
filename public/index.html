@@ -181,7 +181,9 @@
   }
 
   function patternText(win, placed, ret) {
-    if (win.entryFired) return placed + ' / 1 entry placed';
+    if (win.entryFired) {
+      return placed + ' / 1 entry · ' + (win.bucketWager > 0 ? 'mini $' + win.bucketWager.toFixed(2) + ' wagered' : 'no mini wagered');
+    }
     if (win.entrySkipped || win.targetSide == null) return 'no entry this window';
     if (!win.monitoringDone) return 'monitoring…';
     return 'waiting: ' + win.targetSide + ' → $' + ret.toFixed(2);
@@ -362,13 +364,15 @@
     const ret = cfg.RETURN_LEVEL != null ? cfg.RETURN_LEVEL : 0.50;
     const amt = cfg.BUY_AMOUNT != null ? cfg.BUY_AMOUNT : 100;
     const placed = win ? (win.entries || []).length : 0;
+    const bucket = (e.bucket != null ? e.bucket : 0);
+    const mini = (e.miniBucket != null ? e.miniBucket : 0);
     const streak = e.streak || { wins: 0, losses: 0 };
     const peak = e.peakBankroll != null ? e.peakBankroll : e.startingBankroll;
     const maxDD = e.maxDrawdown != null ? e.maxDrawdown : 0;
     const maxDDPct = e.maxDrawdownPct != null ? e.maxDrawdownPct : 0;
     const currDD = Math.max(0, peak - equity);
     const currDDPct = peak > 0 ? currDD / peak : 0;
-    const schedule = 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' @ ≥ $' + ret.toFixed(2) + ' · no SL, rides to resolution';
+    const schedule = 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' + mini $' + mini.toFixed(2) + ' @ ≥ $' + ret.toFixed(2) + ' · no SL · main $' + bucket.toFixed(2);
 
     return '<div class="engine">' +
       '<div class="engine-head">' +
@@ -395,6 +399,8 @@
         '<div class="chip"><div class="k">Avg Fill</div><div class="v">' + (fills.length ? '$' + (fills.reduce((a, b) => a + b, 0) / fills.length).toFixed(2) : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Pending</div><div class="v">' + (e.pendingResolutions || []).length + '</div></div>' +
         '<div class="chip"><div class="k">Entries</div><div class="v">' + (win ? placed + ' / 1' : '—') + '</div></div>' +
+        '<div class="chip"><div class="k">Main Bucket</div><div class="v ' + (bucket > 0 ? 'neg' : '') + '">' + fmt$(bucket) + '</div></div>' +
+        '<div class="chip"><div class="k">Mini (÷' + (cfg.BUCKET_DIVISOR || 2) + ')</div><div class="v ' + (mini > 0 ? 'neg' : '') + '">' + fmt$(mini) + '</div></div>' +
         '<div class="chip"><div class="k">Win Streak</div><div class="v ' + (streak.wins > 0 ? 'pos' : '') + '">W' + streak.wins + '</div></div>' +
         '<div class="chip"><div class="k">Loss Streak</div><div class="v ' + (streak.losses > 0 ? 'neg' : '') + '">L' + streak.losses + '</div></div>' +
         '<div class="chip"><div class="k">Peak Capital</div><div class="v">' + fmt$(peak) + '</div></div>' +

@@ -3,22 +3,29 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v23 — pure dip signal, no stop loss, no bucket):
+// STRATEGY (v24 — dip signal + bucket filter, no stop loss):
 //
 //   BOTH engines (5m and 15m) run the SAME DIP_RECOVERY logic,
 //   the 15m being a proportional mirror of the 5m:
 //     1. MONITOR the first MONITOR_SECS (5m: 90s, 15m: 270s), record
-//        the last moment each side is below DIP_LEVEL (0.30).
-//     2. TARGET = the side whose most recent sub-0.30 dip was latest.
-//        A shallow dip (e.g. to 0.35) does NOT qualify. No qualifying
-//        dip at all -> no trade.
+//        the last moment each side is below DIP_LEVEL (0.50).
+//     2. TARGET = the side whose most recent sub-0.50 dip was latest.
+//        No dip at all -> no trade.
 //     3. After the monitor phase, once the target returns to
-//        RETURN_LEVEL (0.50), buy BUY_AMOUNT worth:
-//          shares = floor(BUY_AMOUNT / px)
+//        RETURN_LEVEL (0.50), buy BUY_AMOUNT worth PLUS the mini
+//        bucket installment:
+//          shares = floor(BUY_AMOUNT / px) + floor(miniBucket / px)
 //     4. NO STOP LOSS — every position rides to resolution.
 //
-//   There is NO bucket / recovery system. Every window is an
-//   independent bet: win the $1/share payout, or lose the cost.
+//   BUCKET FILTER (main + mini):
+//     - Every loss adds its FULL dollar loss to that engine's MAIN
+//       bucket, then re-splits: miniBucket = bucket / BUCKET_DIVISOR.
+//     - The next window bets base + miniBucket.
+//     - ONE win of a mini-bucket bet clears the WHOLE bucket (main and
+//       mini go to 0). A loss adds its full loss to main and re-splits
+//       by BUCKET_DIVISOR again.
+//     - The 5m and 15m engines each have their OWN independent
+//       main/mini buckets and their own capital.
 //
 //   Fees/rebates (per docs.polymarket.com/trading/fees and
 //   docs.polymarket.com/programs/maker-rebates):
@@ -45,6 +52,15 @@ module.exports = {
   // Used when an engine doesn't set its own CAPITAL.
   STARTING_BANKROLL: 1000,
 
+  // ---- Bucket filter ----
+  // After a loss, the full lost amount goes into the per-engine MAIN
+  // bucket and is re-split into a mini installment:
+  //   miniBucket = bucket / BUCKET_DIVISOR
+  // The next window bets base + miniBucket. ONE win clears the whole
+  // bucket; a loss adds its full loss to main and re-splits again.
+  // Both engines use the same divisor.
+  BUCKET_DIVISOR: 2,
+
   // ---- Engines ----
   // Each engine runs on its own window length with its OWN bankroll,
   // current window, and history. Keys ('5m' / '15m') are used
@@ -57,12 +73,13 @@ module.exports = {
       CAPITAL: 1000, // this engine's starting bankroll (independent)
       // Monitor phase length: watch both sides this long for a dip.
       MONITOR_SECS: 90, // first 1.5 minutes
-      // The latest qualifying dip must go below this level (deep dip).
-      DIP_LEVEL: 0.30,
+      // A side "dipped" while its price is below this level.
+      DIP_LEVEL: 0.50,
       // Buy trigger: target side's price comes back to this level
       // any time after the monitor phase.
       RETURN_LEVEL: 0.50,
-      // Notional size of the single buy: $100 worth of shares.
+      // Notional size of the base buy: $100 worth of shares (the
+      // mini bucket installment is added on top).
       BUY_AMOUNT: 100,
     },
     '15m': {
@@ -73,10 +90,10 @@ module.exports = {
       // Proportional mirror of the 5m engine (3x the time -> 3x the
       // monitor length and 3x the base buy size).
       MONITOR_SECS: 270, // 3 x 90s (first 4.5 minutes of a 15m window)
-      // The latest qualifying dip must go below this level (deep dip).
-      DIP_LEVEL: 0.30,
+      // A side "dipped" while its price is below this level.
+      DIP_LEVEL: 0.50,
       RETURN_LEVEL: 0.50,
-      BUY_AMOUNT: 300, // 3 x $100 base notional
+      BUY_AMOUNT: 300, // 3 x $100 base notional (mini added on top)
     },
   },
 
