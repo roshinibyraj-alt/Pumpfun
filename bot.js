@@ -1,23 +1,22 @@
 // ============================================================
-// bot.js — v22. ONE unified engine shape (5m and 15m), each with its
-// own bankroll, own bucket, current window, pending resolutions, and
-// history. Both engines run the SAME DIP_RECOVERY strategy — the 15m
-// is a proportional mirror of the 5m (see config.js):
+// bot.js — v23. ONE unified engine shape (5m and 15m), each with its
+// own bankroll, current window, pending resolutions, and history.
+// Both engines run the SAME DIP_RECOVERY strategy — the 15m is a
+// proportional mirror of the 5m (see config.js):
 //
 //   5m / 15m — DIP_RECOVERY:
 //     MONITOR the first MONITOR_SECS (5m 90s / 15m 270s), record the
 //     last moment each side is below 0.50; TARGET = latest dipper.
 //     After the monitor phase, when the target returns to 0.50, buy
-//     BUY_AMOUNT (5m $100 / 15m $300) PLUS the fixed mini installment.
-//     STOP LOSS 0.20 on every position for both engines.
+//     BUY_AMOUNT (5m $100 / 15m $300) worth. NO STOP LOSS and NO
+//     bucket/recovery — every position rides to resolution, win or
+//     lose.
 //
-//   BUCKET FILTER (main + mini):
-//     - Every stopped-out or resolution loss adds its FULL dollar
-//       loss to that engine's MAIN bucket, then re-splits it:
-//       miniBucket = bucket / BUCKET_DIVISOR (fixed installment).
-//     - The next window bets base + miniBucket. The mini stays FIXED
-//       across wins — each win deducts one mini from the main bucket,
-//       so 3 consecutive wins clear it. A new loss re-splits again.
+//   TRACKERS (per engine):
+//     - streak: current consecutive wins / losses.
+//     - peakBankroll / maxDrawdown / maxDrawdownPct: all-time peak
+//       capital and the worst peak-to-trough decline recorded.
+//     - equityCurve: one realized-equity point per resolved window.
 //
 // FEES & REBATES (docs.polymarket.com/trading/fees + maker-rebates):
 //   Crypto: taker fee = shares x 0.07 x price x (1 - price).
@@ -99,11 +98,8 @@ function immediateWinnerFromLastTick(win) {
 // entries are settled here (win = $1/share, lose = $0; rebate credited
 // to payout when present). The window totals include every entry.
 //
-// BUCKET FILTER: a loss settled here (no SL) adds its full loss to
-// engine.bucket and re-splits engine.miniBucket; a win deducts exactly
-// one fixed mini (win.bucketWager) from engine.bucket — 3 consecutive
-// wins clear it. SL losses already grew the bucket in the tick, so
-// they are not touched again here.
+// After settling, the streak, peak capital / max drawdown, and equity
+// curve trackers are updated.
 // Returns true if resolved this call, false if still waiting.
 async function resolveWindow(engine, win) {
   let wonSide = immediateWinnerFromLastTick(win);
@@ -142,17 +138,7 @@ async function resolveWindow(engine, win) {
       pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
       pos.settledAt = new Date().toISOString();
       settleCredit += pos.pnl;
-
-      // Bucket filter: a resolution loss (no SL) adds its full loss to
-      // the main bucket and re-splits the mini; a win marks this window
-      // as a winner.
-      if (pos.pnl < 0) {
-        engine.bucket = Math.round((engine.bucket + Math.abs(pos.pnl)) * 100) / 100;
-        engine.miniBucket = Math.round((engine.bucket / config.BUCKET_DIVISOR) * 100) / 100;
-        log(`[${win.engine}] BUCKET + $${Math.abs(pos.pnl).toFixed(2)} (${pos.side} lost at resolution) -> main $${engine.bucket.toFixed(2)} | mini $${engine.miniBucket.toFixed(2)}`);
-      } else {
-        resolvedWin = true;
-      }
+      if (pos.pnl >= 0) resolvedWin = true;
     }
     cost += pos.cost;
     payout += pos.payout;
@@ -177,21 +163,15 @@ async function resolveWindow(engine, win) {
     }
   }
 
-  // Bucket filter: a winning window deducts exactly ONE fixed mini
-  // installment from the main bucket (the amount wagered). The mini
-  // stays fixed so 3 consecutive wins clear the main bucket; it only
-  // re-splits on a new loss. When the main bucket hits 0, record the
-  // clear and how many consecutive wins it took.
-  if (resolvedWin && win.bucketWager != null && win.bucketWager > 0) {
-    const before = engine.bucket;
-    engine.bucket = Math.max(0, Math.round((engine.bucket - win.bucketWager) * 100) / 100);
-    if (engine.bucket === 0) {
-      engine.miniBucket = 0;
-      engine.bucketClears += 1;
-      engine.lastClearWins = engine.streak.wins;
-      log(`[${win.engine}] BUCKET CLEARED after ${engine.streak.wins} consecutive win(s) — total clears ${engine.bucketClears}`);
-    }
-    log(`[${win.engine}] BUCKET - $${win.bucketWager.toFixed(2)} (won, one mini deducted) -> main $${before.toFixed(2)} -> $${engine.bucket.toFixed(2)} | mini $${engine.miniBucket.toFixed(2)}`);
+  // Peak capital + max drawdown trackers (resolved bankroll only).
+  if (engine.bankroll > engine.peakBankroll) {
+    engine.peakBankroll = Math.round(engine.bankroll * 100) / 100;
+  }
+  const dd = Math.max(0, engine.peakBankroll - engine.bankroll);
+  if (dd > engine.maxDrawdown) {
+    engine.maxDrawdown = Math.round(dd * 100) / 100;
+    engine.maxDrawdownPct = Math.round((dd / engine.peakBankroll) * 10000) / 10000;
+    log(`[${win.engine}] MAX DRAWDOWN ${engine.maxDrawdownPct * 100}% ($${engine.maxDrawdown.toFixed(2)}) from peak $${engine.peakBankroll.toFixed(2)}`);
   }
 
   // Equity curve: one realized-equity point per resolved window.
@@ -220,12 +200,10 @@ async function resolveWindow(engine, win) {
     pnl,
     isLoss,
     bankrollAfter: engine.bankroll,
-    bucketWager: win.bucketWager,
-    bucketAfter: engine.bucket,
-    miniBucketAfter: engine.miniBucket,
+    peakBankrollAfter: engine.peakBankroll,
+    maxDrawdownAfter: engine.maxDrawdown,
+    maxDrawdownPctAfter: engine.maxDrawdownPct,
     streakAfter: { wins: engine.streak.wins, losses: engine.streak.losses },
-    bucketClearsAfter: engine.bucketClears,
-    lastClearWinsAfter: engine.lastClearWins,
     resolvedAt: new Date().toISOString(),
   });
 
@@ -305,7 +283,7 @@ function computeUnrealized(engine) {
   return out;
 }
 
-// ---- engines (5m & 15m): DIP_RECOVERY with bucket filter ----
+// ---- engines (5m // ---- engines (5m & 15m): DIP_RECOVERY with bucket filter ---- 15m): DIP_RECOVERY (pure dip signal, no SL) ----
 function dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPrice, upTokenId, downTokenId) {
   // MONITOR phase: record the last moment each side is below DIP_LEVEL.
   if (!win.monitoringDone) {
@@ -333,11 +311,9 @@ function dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPric
     }
   }
 
-  // ENTRY: after the monitor phase, buy BUY_AMOUNT worth PLUS the
-  // FIXED mini bucket once the target side comes back to RETURN_LEVEL:
-  //   baseShares  = floor(BUY_AMOUNT / px)
-  //   extraShares = floor(engine.miniBucket / px)   (mini stays fixed
-  //                 across wins until a loss re-splits it)
+  // ENTRY: after the monitor phase, buy BUY_AMOUNT worth once the
+  // target side comes back to RETURN_LEVEL. NO STOP LOSS — the
+  // position rides to resolution.
   if (win.monitoringDone && !win.entryFired && !win.entrySkipped) {
     if (win.targetSide == null) {
       win.entrySkipped = true;
@@ -345,40 +321,16 @@ function dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPric
     } else {
       const px = priceOf(win.targetSide, upPrice, downPrice);
       if (px >= engineCfg.RETURN_LEVEL) {
-        win.bucketWager = Math.max(0, engine.miniBucket || 0);
-        const baseShares = Math.floor(engineCfg.BUY_AMOUNT / px);
-        const extraShares = win.bucketWager > 0 ? Math.floor(win.bucketWager / px) : 0;
-        const shares = baseShares + extraShares;
+        const shares = Math.floor(engineCfg.BUY_AMOUNT / px);
         if (shares > 0) {
           win.entryFired = true;
-          win.bucketThirdShares = extraShares;
           fireEntry(win, win.targetSide, shares, px, upTokenId, downTokenId,
-            `dip-recovery buy — ${win.targetSide} back to $${px.toFixed(2)} after t=${engineCfg.MONITOR_SECS}s; base $${engineCfg.BUY_AMOUNT} (${baseShares}sh) + mini $${win.bucketWager.toFixed(2)} (${extraShares}sh) = ${shares}sh`);
+            `dip-recovery buy — ${win.targetSide} back to $${px.toFixed(2)} after t=${engineCfg.MONITOR_SECS}s; $${engineCfg.BUY_AMOUNT} worth (${shares} shares), rides to resolution`);
         } else {
           win.entrySkipped = true;
           log(`${tag} Entry skipped — price $${px.toFixed(2)} too high for $${engineCfg.BUY_AMOUNT}`);
         }
       }
-    }
-  }
-
-  // STOP LOSS 0.20 — the FULL realized loss goes into the bucket.
-  if (win.entryFired && !win.stoppedOut) {
-    const pos = win.entries[win.entries.length - 1];
-    const cur = priceOf(pos.side, upPrice, downPrice);
-    if (cur <= engineCfg.STOP_LOSS_LEVEL) {
-      win.stoppedOut = true;
-      pos.status = 'stopped_out';
-      pos.exitPrice = engineCfg.STOP_LOSS_LEVEL;
-      const f = pos.fillFee || 0;
-      pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
-      pos.payout = Math.round((pos.shares * pos.exitPrice) * 100000) / 100000;
-      pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
-      pos.settledAt = new Date().toISOString();
-      engine.bankroll = Math.round((engine.bankroll + pos.pnl) * 100) / 100;
-      engine.bucket = Math.round((engine.bucket + Math.abs(pos.pnl)) * 100) / 100;
-      engine.miniBucket = Math.round((engine.bucket / config.BUCKET_DIVISOR) * 100) / 100;
-      log(`${tag} STOP LOSS @ t=${elapsed}s — ${pos.side} hit $${cur.toFixed(2)} ≤ $${engineCfg.STOP_LOSS_LEVEL}; exited ${pos.shares}sh @ $${pos.exitPrice.toFixed(2)} | pnl $${pos.pnl.toFixed(2)} | bankroll $${engine.bankroll} | BUCKET + $${Math.abs(pos.pnl).toFixed(2)} -> main $${engine.bucket.toFixed(2)} | mini $${engine.miniBucket.toFixed(2)}`);
     }
   }
 }
@@ -448,17 +400,11 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           targetSide: null,
           entrySkipped: false,
           entryFired: false,
-          stoppedOut: false,
-          // Bucket filter: the fixed mini installment wagered on this
-          // window's entry (recorded at fill time; a win deducts it
-          // from the main bucket once).
-          bucketWager: null,
-          bucketThirdShares: 0,
           finalUpPrice: null,
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart}: MONITOR ${engineCfg.MONITOR_SECS}s (dip < $${engineCfg.DIP_LEVEL}) | ENTRY $${engineCfg.BUY_AMOUNT} (+ mini $${engine.miniBucket.toFixed(2)}) when target returns to $${engineCfg.RETURN_LEVEL} | SL $${engineCfg.STOP_LOSS_LEVEL} | main $${engine.bucket.toFixed(2)} | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
+        log(`${tag} Window ${windowStart}: MONITOR ${engineCfg.MONITOR_SECS}s (dip < $${engineCfg.DIP_LEVEL}) | ENTRY $${engineCfg.BUY_AMOUNT} when target returns to $${engineCfg.RETURN_LEVEL} | no SL, rides to resolution | peak $${engine.peakBankroll.toFixed(2)} | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -539,7 +485,7 @@ async function tick() {
 
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
-    const summary = `MONITOR ${cfg.MONITOR_SECS}s (dip < $${cfg.DIP_LEVEL}) | ENTRY $${cfg.BUY_AMOUNT} (+ mini = main/${config.BUCKET_DIVISOR}) @ return to $${cfg.RETURN_LEVEL} | SL $${cfg.STOP_LOSS_LEVEL}`;
+    const summary = `MONITOR ${cfg.MONITOR_SECS}s (dip < $${cfg.DIP_LEVEL}) | ENTRY $${cfg.BUY_AMOUNT} @ return to $${cfg.RETURN_LEVEL} | no SL, no bucket`;
     log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | ${summary} | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'}`);
   }
   tick();

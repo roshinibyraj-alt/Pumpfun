@@ -169,24 +169,19 @@
     if (!win) return 'no window';
     const windowSec = (cfg.WINDOW_MINUTES || 5) * 60;
     const elapsed = lc && lc.secondsRemaining != null ? Math.max(0, windowSec - lc.secondsRemaining) : null;
-    const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
     const mon = cfg.MONITOR_SECS != null ? cfg.MONITOR_SECS : 90;
     const ret = cfg.RETURN_LEVEL != null ? cfg.RETURN_LEVEL : 0.50;
-    if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
     if (win.entryFired) {
       const pos = (win.entries || [])[win.entries.length - 1];
-      return 'in position — ' + (pos ? pos.side : '?') + ' ' + pos.shares + 'sh riding to resolution (SL $' + sl.toFixed(2) + ')';
+      return 'in position — ' + (pos ? pos.side : '?') + ' ' + pos.shares + 'sh riding to resolution';
     }
     if (win.entrySkipped || win.targetSide == null) return 'no trade this window';
     if (!win.monitoringDone) return 'monitoring… t=' + (elapsed != null ? elapsed + 's' : '?') + ' of ' + mon + 's';
     return 'target ' + win.targetSide + ' — waiting for ≥ $' + ret.toFixed(2);
   }
 
-  function patternText(win, placed, ret, sl) {
-    if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
-    if (win.entryFired) {
-      return placed + ' / 1 entry · ' + (win.bucketWager > 0 ? 'mini $' + win.bucketWager.toFixed(2) + ' wagered' : 'no mini wagered');
-    }
+  function patternText(win, placed, ret) {
+    if (win.entryFired) return placed + ' / 1 entry placed';
     if (win.entrySkipped || win.targetSide == null) return 'no entry this window';
     if (!win.monitoringDone) return 'monitoring…';
     return 'waiting: ' + win.targetSide + ' → $' + ret.toFixed(2);
@@ -198,7 +193,6 @@
 
   function positionStatusLabel(pos) {
     if (pos.status === 'filled') return 'filled (taker) @ $' + pos.fillPrice.toFixed(2) + ' · riding to resolution';
-    if (pos.status === 'stopped_out') return 'stopped out @ $' + (pos.exitPrice != null ? pos.exitPrice.toFixed(2) : '0.20');
     if (pos.status === 'resolved_win') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · won @ resolution';
     if (pos.status === 'resolved_loss') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · lost @ resolution';
     return pos.status;
@@ -367,14 +361,14 @@
     const dip = cfg.DIP_LEVEL != null ? cfg.DIP_LEVEL : 0.50;
     const ret = cfg.RETURN_LEVEL != null ? cfg.RETURN_LEVEL : 0.50;
     const amt = cfg.BUY_AMOUNT != null ? cfg.BUY_AMOUNT : 100;
-    const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
     const placed = win ? (win.entries || []).length : 0;
-    const bucket = (e.bucket != null ? e.bucket : 0);
-    const mini = (e.miniBucket != null ? e.miniBucket : 0);
     const streak = e.streak || { wins: 0, losses: 0 };
-    const bucketClears = e.bucketClears != null ? e.bucketClears : 0;
-    const lastClearWins = e.lastClearWins != null ? e.lastClearWins : null;
-    const schedule = 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' + mini $' + mini.toFixed(2) + ' @ ≥ $' + ret.toFixed(2) + ' · SL $' + sl.toFixed(2) + ' · main $' + bucket.toFixed(2);
+    const peak = e.peakBankroll != null ? e.peakBankroll : e.startingBankroll;
+    const maxDD = e.maxDrawdown != null ? e.maxDrawdown : 0;
+    const maxDDPct = e.maxDrawdownPct != null ? e.maxDrawdownPct : 0;
+    const currDD = Math.max(0, peak - equity);
+    const currDDPct = peak > 0 ? currDD / peak : 0;
+    const schedule = 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' @ ≥ $' + ret.toFixed(2) + ' · no SL, rides to resolution';
 
     return '<div class="engine">' +
       '<div class="engine-head">' +
@@ -401,12 +395,11 @@
         '<div class="chip"><div class="k">Avg Fill</div><div class="v">' + (fills.length ? '$' + (fills.reduce((a, b) => a + b, 0) / fills.length).toFixed(2) : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Pending</div><div class="v">' + (e.pendingResolutions || []).length + '</div></div>' +
         '<div class="chip"><div class="k">Entries</div><div class="v">' + (win ? placed + ' / 1' : '—') + '</div></div>' +
-        '<div class="chip"><div class="k">Main Bucket</div><div class="v ' + (bucket > 0 ? 'neg' : '') + '">' + fmt$(bucket) + '</div></div>' +
-        '<div class="chip"><div class="k">Mini</div><div class="v ' + (mini > 0 ? 'neg' : '') + '">' + fmt$(mini) + '</div></div>' +
         '<div class="chip"><div class="k">Win Streak</div><div class="v ' + (streak.wins > 0 ? 'pos' : '') + '">W' + streak.wins + '</div></div>' +
         '<div class="chip"><div class="k">Loss Streak</div><div class="v ' + (streak.losses > 0 ? 'neg' : '') + '">L' + streak.losses + '</div></div>' +
-        '<div class="chip"><div class="k">Bucket Clears</div><div class="v">' + bucketClears + (lastClearWins != null ? ' <span style="font-size:9px;color:var(--text-dim)">last W' + lastClearWins + '</span>' : '') + '</div></div>' +
-        '<div class="chip"><div class="k">Stop Loss</div><div class="v">$' + sl.toFixed(2) + '</div></div>' +
+        '<div class="chip"><div class="k">Peak Capital</div><div class="v">' + fmt$(peak) + '</div></div>' +
+        '<div class="chip"><div class="k">Max DD</div><div class="v ' + (maxDD > 0 ? 'neg' : '') + '">' + fmt$(maxDD) + ' (' + fmtPct(maxDDPct) + ')</div></div>' +
+        '<div class="chip"><div class="k">Curr DD</div><div class="v ' + (currDD > 0 ? 'neg' : '') + '">' + fmt$(currDD) + ' (' + fmtPct(currDDPct) + ')</div></div>' +
         '<div class="chip"><div class="k">Fees / Rebates</div><div class="v" style="font-size:11px">$' + (e.totalFees || 0).toFixed(1) + ' / $' + (e.totalRebates || 0).toFixed(1) + '</div></div>' +
       '</div>' +
 
@@ -420,7 +413,7 @@
         '<div class="card-title"><span>Current Window</span>' +
           '<span class="countdown">' + (lc.secondsRemaining != null ? (lc.secondsRemaining > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—') + '</span></div>' +
         '<div class="pattern-row">' +
-          '<span class="pattern-chip">' + (win ? patternText(win, placed, ret, sl) : '— — —') + '</span>' +
+          '<span class="pattern-chip">' + (win ? patternText(win, placed, ret) : '— — —') + '</span>' +
           '<span class="signal-chip">' + strategyState(win, cfg, lc) + '</span>' +
         '</div>' +
         renderPositionArea(win, live) +
