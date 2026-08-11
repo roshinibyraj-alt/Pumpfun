@@ -14,8 +14,8 @@ to resolution, win or lose.
 
 | Step | 5m engine | 15m engine |
 |---|---|---|
-| Monitor | first **90s**, record the last moment each side is below 0.50 | first **270s** (3×), same rule |
-| Target | side whose most recent sub-0.50 dip was latest; no dip → no trade | same |
+| Monitor | first **90s**, record the last moment each side is below **0.30** (deep dip) | first **270s** (3×), same rule |
+| Target | side whose most recent **sub-0.30** dip was latest; shallow dips (e.g. 0.35) don't qualify; no deep dip → no trade | same |
 | Entry | after monitor, when target returns to 0.50 → buy **$100** worth | buy **$300** worth (3×) |
 | Exit | rides to resolution (win $1/share, or lose the cost) | same |
 
@@ -58,7 +58,8 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
   - `WINDOW_MINUTES`: window length for that engine
   - `CAPITAL`: that engine's starting bankroll (independent)
   - `MONITOR_SECS`: monitor phase (5m: 90, 15m: 270)
-  - `DIP_LEVEL` / `RETURN_LEVEL`: dip threshold and re-entry level (0.50)
+  - `DIP_LEVEL` / `RETURN_LEVEL`: deep-dip threshold (0.30) and re-entry
+  level (0.50)
   - `BUY_AMOUNT`: base notional (5m: $100, 15m: $300)
 - `BASE_TAKER_FEE_RATE` / `MAKER_REBATE_RATE` / `ENTRY_IS_MAKER`: fee model
 - `RESOLUTION_WIN_THRESHOLD` / `RESOLUTION_LOSS_THRESHOLD`

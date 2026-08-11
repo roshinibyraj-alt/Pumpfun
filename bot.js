@@ -6,7 +6,9 @@
 //
 //   5m / 15m — DIP_RECOVERY:
 //     MONITOR the first MONITOR_SECS (5m 90s / 15m 270s), record the
-//     last moment each side is below 0.50; TARGET = latest dipper.
+//     last moment each side is below DIP_LEVEL (0.30 — a deep dip;
+//     shallow dips like 0.35 don't qualify). TARGET = side whose most
+//     recent sub-0.30 dip was latest; no qualifying dip -> no trade.
 //     After the monitor phase, when the target returns to 0.50, buy
 //     BUY_AMOUNT (5m $100 / 15m $300) worth. NO STOP LOSS and NO
 //     bucket/recovery — every position rides to resolution, win or
@@ -283,9 +285,10 @@ function computeUnrealized(engine) {
   return out;
 }
 
-// ---- engines (5m // ---- engines (5m & 15m): DIP_RECOVERY with bucket filter ---- 15m): DIP_RECOVERY (pure dip signal, no SL) ----
+// ---- engines (5m & 15m): DIP_RECOVERY (pure dip signal, no SL) ----
 function dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPrice, upTokenId, downTokenId) {
-  // MONITOR phase: record the last moment each side is below DIP_LEVEL.
+  // MONITOR phase: record the last moment each side is below DIP_LEVEL
+  // (0.30 — the latest dip must come from below 0.30 to qualify).
   if (!win.monitoringDone) {
     if (elapsed <= engineCfg.MONITOR_SECS) {
       if (upPrice < engineCfg.DIP_LEVEL) win.lastDipSec.UP = elapsed;

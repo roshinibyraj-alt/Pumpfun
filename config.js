@@ -8,9 +8,10 @@
 //   BOTH engines (5m and 15m) run the SAME DIP_RECOVERY logic,
 //   the 15m being a proportional mirror of the 5m:
 //     1. MONITOR the first MONITOR_SECS (5m: 90s, 15m: 270s), record
-//        the last moment each side is below DIP_LEVEL (0.50).
-//     2. TARGET = the side whose most recent sub-0.50 dip was latest.
-//        No dip at all -> no trade.
+//        the last moment each side is below DIP_LEVEL (0.30).
+//     2. TARGET = the side whose most recent sub-0.30 dip was latest.
+//        A shallow dip (e.g. to 0.35) does NOT qualify. No qualifying
+//        dip at all -> no trade.
 //     3. After the monitor phase, once the target returns to
 //        RETURN_LEVEL (0.50), buy BUY_AMOUNT worth:
 //          shares = floor(BUY_AMOUNT / px)
@@ -56,8 +57,8 @@ module.exports = {
       CAPITAL: 1000, // this engine's starting bankroll (independent)
       // Monitor phase length: watch both sides this long for a dip.
       MONITOR_SECS: 90, // first 1.5 minutes
-      // A side "dipped" while its price is below this level.
-      DIP_LEVEL: 0.50,
+      // The latest qualifying dip must go below this level (deep dip).
+      DIP_LEVEL: 0.30,
       // Buy trigger: target side's price comes back to this level
       // any time after the monitor phase.
       RETURN_LEVEL: 0.50,
@@ -72,7 +73,8 @@ module.exports = {
       // Proportional mirror of the 5m engine (3x the time -> 3x the
       // monitor length and 3x the base buy size).
       MONITOR_SECS: 270, // 3 x 90s (first 4.5 minutes of a 15m window)
-      DIP_LEVEL: 0.50,
+      // The latest qualifying dip must go below this level (deep dip).
+      DIP_LEVEL: 0.30,
       RETURN_LEVEL: 0.50,
       BUY_AMOUNT: 300, // 3 x $100 base notional
     },
