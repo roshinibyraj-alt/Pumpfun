@@ -13,22 +13,24 @@
 //        No dip at all -> no trade.
 //     3. After the monitor phase, once the target returns to
 //        RETURN_LEVEL (0.50), buy BUY_AMOUNT (5m: $100, 15m: $300)
-//        worth PLUS the bucket third:
-//          shares = floor(BUY_AMOUNT / px) + floor((bucket/3) / px)
+//        worth PLUS the fixed mini installment:
+//          shares = floor(BUY_AMOUNT / px) + floor(miniBucket / px)
 //     4. STOP LOSS 0.20 on every position for both engines; otherwise
 //        ride to resolution.
 //
-//   BUCKET FILTER (the main money filter):
+//   BUCKET FILTER (main + mini — the money filter):
 //     - When a bet is stopped out or resolves as a loss, the FULL
-//       dollar loss goes into that engine's bucket.
-//     - The next window's bet is base + bucket ÷ BUCKET_DIVISOR (3).
-//     - If that bet loses again, its full loss is added to the bucket
-//       and the next bet is again base + bucket ÷ 3.
-//     - If a bucket bet WINS, the bucket shrinks by the bucket third
-//       that was wagered (the amount that bet recovered) — it does
-//       NOT reset to zero; it shrinks until clear.
+//       dollar loss goes into that engine's MAIN bucket and is
+//       re-split: miniBucket = bucket ÷ BUCKET_DIVISOR (3).
+//     - The next window's bet is base + miniBucket. The mini is a
+//       FIXED installment: a win deducts one mini from the main
+//       bucket and the mini stays the same, so 3 consecutive wins
+//       clear the main bucket.
+//     - If a bucket bet loses, its full loss goes back into the main
+//       bucket and the mini is re-split (bucket ÷ 3) for the next
+//       window.
 //     - The 5m and 15m engines each have their OWN independent
-//       bucket and their own capital.
+//       main/mini buckets and their own capital.
 //
 //   Fees/rebates (per docs.polymarket.com/trading/fees and
 //   docs.polymarket.com/programs/maker-rebates):
@@ -56,10 +58,13 @@ module.exports = {
   STARTING_BANKROLL: 1000,
 
   // ---- Bucket filter ----
-  // After a loss, the lost amount goes into a per-engine bucket. The
-  // next window bets base + bucket / BUCKET_DIVISOR. Wins shrink the
-  // bucket by the bucket third wagered; losses grow it by the full
-  // loss. Both engines use the same divisor.
+  // After a loss, the full lost amount goes into the per-engine MAIN
+  // bucket and is re-split into a FIXED mini installment:
+  //   miniBucket = bucket / BUCKET_DIVISOR
+  // The next window bets base + miniBucket. A win deducts one mini
+  // from the main bucket (mini stays fixed -> 3 wins clear it); a
+  // loss adds its full loss to the main bucket and re-splits.
+  // Both engines use the same divisor.
   BUCKET_DIVISOR: 3,
 
   // ---- Engines ----
@@ -80,7 +85,7 @@ module.exports = {
       // any time after the monitor phase.
       RETURN_LEVEL: 0.50,
       // Notional size of the base buy: $100 worth of shares (the
-      // bucket third is added on top).
+      // fixed mini installment is added on top).
       BUY_AMOUNT: 100,
       // Stop loss: if the bought side's price hits this level, exit
       // at this price and realize the loss.

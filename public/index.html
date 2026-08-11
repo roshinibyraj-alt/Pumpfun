@@ -184,7 +184,7 @@
   function patternText(win, placed, ret, sl) {
     if (win.stoppedOut) return 'stopped out @ $' + sl.toFixed(2);
     if (win.entryFired) {
-      return placed + ' / 1 entry · ' + (win.bucketWager > 0 ? 'bucket third $' + win.bucketWager.toFixed(2) + ' wagered' : 'no bucket third');
+      return placed + ' / 1 entry · ' + (win.bucketWager > 0 ? 'mini $' + win.bucketWager.toFixed(2) + ' wagered' : 'no mini wagered');
     }
     if (win.entrySkipped || win.targetSide == null) return 'no entry this window';
     if (!win.monitoringDone) return 'monitoring…';
@@ -281,7 +281,8 @@
     const sl = cfg.STOP_LOSS_LEVEL != null ? cfg.STOP_LOSS_LEVEL : 0.20;
     const placed = win ? (win.entries || []).length : 0;
     const bucket = (e.bucket != null ? e.bucket : 0);
-    const schedule = 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' + bucket/' + (cfg.BUCKET_DIVISOR || 3) + ' @ ≥ $' + ret.toFixed(2) + ' · SL $' + sl.toFixed(2) + ' · bucket $' + bucket.toFixed(2);
+    const mini = (e.miniBucket != null ? e.miniBucket : 0);
+    const schedule = 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' + mini $' + mini.toFixed(2) + ' @ ≥ $' + ret.toFixed(2) + ' · SL $' + sl.toFixed(2) + ' · main $' + bucket.toFixed(2);
 
     return '<div class="engine">' +
       '<div class="engine-head">' +
@@ -308,7 +309,8 @@
         '<div class="chip"><div class="k">Avg Fill</div><div class="v">' + (fills.length ? '$' + (fills.reduce((a, b) => a + b, 0) / fills.length).toFixed(2) : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Pending</div><div class="v">' + (e.pendingResolutions || []).length + '</div></div>' +
         '<div class="chip"><div class="k">Entries</div><div class="v">' + (win ? placed + ' / 1' : '—') + '</div></div>' +
-        '<div class="chip"><div class="k">Bucket</div><div class="v ' + (bucket > 0 ? 'neg' : '') + '">' + fmt$(bucket) + '</div></div>' +
+        '<div class="chip"><div class="k">Main Bucket</div><div class="v ' + (bucket > 0 ? 'neg' : '') + '">' + fmt$(bucket) + '</div></div>' +
+        '<div class="chip"><div class="k">Mini</div><div class="v ' + (mini > 0 ? 'neg' : '') + '">' + fmt$(mini) + '</div></div>' +
         '<div class="chip"><div class="k">Stop Loss</div><div class="v">$' + sl.toFixed(2) + '</div></div>' +
         '<div class="chip"><div class="k">Fees / Rebates</div><div class="v" style="font-size:11px">$' + (e.totalFees || 0).toFixed(1) + ' / $' + (e.totalRebates || 0).toFixed(1) + '</div></div>' +
       '</div>' +
