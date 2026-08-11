@@ -10,15 +10,12 @@
 //
 //   15m engine — EXPENSIVE_RECOVERY:
 //     At/after 420s buy 300 shares on the EXPENSIVE side at any
-//     price. EVERY bet carries STOP LOSS 0.40 and nothing ever carries
-//     to the next window. Up to 3 bets per window:
-//       1. MAIN 300sh @ 420s.
-//       2. RECOVERY 1 on the OPPOSITE side when the main hits 0.40.
-//       3. RECOVERY 2 on the OPPOSITE side when recovery 1 hits 0.40.
-//     Each recovery is sized ONLY from the immediately-previous bet's
-//     SL loss + extra shares (RECOVERY_EXTRA_SHARES):
-//       shares = ceil(target / ((1-p) x (1 - 0.07p))) + extra
-//     If recovery 2 also loses, the loss is accepted — no carry.
+//     price. STOP LOSS 0.40. Right after entry compute the SL loss
+//     L = (fill - 0.40) x 300 + fee. When SL hits, IMMEDIATELY place
+//     a recovery bet on the OPPOSITE side sized to recover carry + L
+//     (shares = ceil(target / ((1-p) x (1 - 0.07p)))). Recovery wins
+//     -> carry cleared; recovery loses -> carry = target + cost moves
+//     to the next window. A main-bet win leaves the carry untouched.
 //
 // FEES & REBATES (docs.polymarket.com/trading/fees + maker-rebates):
 //   Crypto: taker fee = shares x 0.07 x price x (1 - price).
@@ -47,13 +44,6 @@ function priceOf(side, upPrice, downPrice) {
   return side === 'UP' ? upPrice : downPrice;
 }
 function expensiveSide(upPrice, downPrice) { return upPrice >= downPrice ? 'UP' : 'DOWN'; }
-function recoveryShares(target, px) {
-  // Net profit per share if px-side wins, after taker fee:
-  // (1 - p) - 0.07*p*(1-p) = (1 - p) x (1 - 0.07p).
-  const netPerShare = (1 - px) * (1 - config.BASE_TAKER_FEE_RATE * px);
-  if (netPerShare <= 0) return 0;
-  return Math.ceil(target / netPerShare);
-}
 
 // Builds an ALREADY-FILLED entry at the moment a buy fires. Entries
 // fill at the current midpoint; size is fixed (shares) per order.
@@ -155,6 +145,18 @@ async function resolveWindow(engine, win) {
 
   if (settleCredit !== 0) {
     engine.bankroll = Math.round((engine.bankroll + settleCredit) * 100) / 100;
+  }
+
+  // 15m recovery carry update.
+  if (win.recoveryPlaced && win.recoveryTarget != null) {
+    const recPos = entries.find((e) => e.status === 'resolved_win' || e.status === 'resolved_loss');
+    if (recPos && recPos.status === 'resolved_win') {
+      engine.recoveryCarry = 0;
+      log(`[${win.engine}] RECOVERY WON (${recPos.side} ${recPos.shares}sh @ $${recPos.fillPrice.toFixed(2)}) — carry cleared to $0.00`);
+    } else if (recPos) {
+      engine.recoveryCarry = Math.round((win.recoveryTarget + recPos.cost) * 100) / 100;
+      log(`[${win.engine}] RECOVERY LOST (${recPos.side} ${recPos.shares}sh @ $${recPos.fillPrice.toFixed(2)}) — carry now $${engine.recoveryCarry.toFixed(2)} (target $${win.recoveryTarget.toFixed(2)} + cost $${recPos.cost.toFixed(2)})`);
+    }
   }
 
   const pnl = Math.round((payout - cost) * 100) / 100;
@@ -328,47 +330,6 @@ function dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPric
 }
 
 // ---- 15m engine: EXPENSIVE_RECOVERY ----
-function stopOutEntry(engine, entry, slLevel, elapsed, tag, label) {
-  entry.status = 'stopped_out';
-  entry.exitPrice = slLevel;
-  const f = entry.fillFee || 0;
-  entry.cost = Math.round((entry.shares * entry.fillPrice + f) * 100000) / 100000;
-  entry.payout = Math.round((entry.shares * entry.exitPrice) * 100000) / 100000;
-  entry.pnl = Math.round((entry.payout - entry.cost) * 100000) / 100000;
-  entry.settledAt = new Date().toISOString();
-  engine.bankroll = Math.round((engine.bankroll + entry.pnl) * 100) / 100;
-  log(`${tag} ${label} STOP LOSS @ t=${elapsed}s — ${entry.side} hit ≤ $${slLevel.toFixed(2)}; exited ${entry.shares}sh @ $${entry.exitPrice.toFixed(2)} | pnl $${entry.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
-}
-
-// Places the next recovery on the OPPOSITE side of the base bet that
-// just hit the 0.40 trigger. Sized ONLY from that base bet's loss (the
-// latest bet — never the cumulative earlier bets) + extra shares.
-function placeRecovery(win, engine, engineCfg, tag, target, baseSide, upPrice, downPrice, upTokenId, downTokenId, label, level) {
-  const recSide = baseSide === 'UP' ? 'DOWN' : 'UP';
-  const recPx = priceOf(recSide, upPrice, downPrice);
-  const extra = engineCfg.RECOVERY_EXTRA_SHARES != null ? engineCfg.RECOVERY_EXTRA_SHARES : 0;
-  const shares = recoveryShares(target, recPx) + extra;
-  if (shares <= 0) {
-    log(`${tag} ${label} skipped — target $${target.toFixed(2)} at $${recPx.toFixed(2)}`);
-    return;
-  }
-  const entry = makeEntry(recSide, shares, recPx, upTokenId, downTokenId,
-    `${label} — recover $${target.toFixed(2)} (${baseSide} SL loss) via ${recSide} @ $${recPx.toFixed(2)} (+${extra}sh, SL $${engineCfg.STOP_LOSS_LEVEL})`);
-  if (level === 1) entry.isSlRecovery = true;
-  else entry.isSlRecovery2 = true;
-  win.entries.push(entry);
-  if (level === 1) {
-    win.recoveryPlaced = true;
-    win.recoveryTarget = target;
-    win.recoverySide = recSide;
-  } else {
-    win.recovery2Placed = true;
-    win.recovery2Target = target;
-    win.recovery2Side = recSide;
-  }
-  log(`${tag} ${label} placed: target $${target.toFixed(2)} -> ${shares}sh ${recSide} @ $${recPx.toFixed(2)} (+${extra} extra shares)`);
-}
-
 function expensiveRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPrice, upTokenId, downTokenId) {
   // 1) ENTRY: after ENTRY_AFTER_SECS, buy ENTRY_SHARES on the expensive
   //    side at ANY price. Compute the potential SL loss right away.
@@ -386,43 +347,44 @@ function expensiveRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, do
     }
   }
 
-  // 2) MAIN STOP LOSS 0.40 -> exit, then place RECOVERY 1 on the
-  //    OPPOSITE side (+50 shares), sized from the main's SL loss.
-  if (win.entryFired && !win.stoppedOut) {
+  // 2) STOP LOSS 0.40 -> exit, then IMMEDIATELY place the recovery bet
+  //    on the OPPOSITE side, sized to recover carry + SL loss.
+  if (win.entryFired && !win.stoppedOut && !win.recoveryPlaced) {
     const pos = win.entries[0];
     const cur = priceOf(pos.side, upPrice, downPrice);
     if (cur <= engineCfg.STOP_LOSS_LEVEL) {
       win.stoppedOut = true;
-      stopOutEntry(engine, pos, engineCfg.STOP_LOSS_LEVEL, elapsed, tag, 'MAIN');
-      placeRecovery(win, engine, engineCfg, tag, win.potentialSlLoss, pos.side, upPrice, downPrice, upTokenId, downTokenId, 'Recovery 1', 1);
-    }
-  }
+      pos.status = 'stopped_out';
+      pos.exitPrice = engineCfg.STOP_LOSS_LEVEL;
+      const f = pos.fillFee || 0;
+      pos.cost = Math.round((pos.shares * pos.fillPrice + f) * 100000) / 100000;
+      pos.payout = Math.round((pos.shares * pos.exitPrice) * 100000) / 100000;
+      pos.pnl = Math.round((pos.payout - pos.cost) * 100000) / 100000;
+      pos.settledAt = new Date().toISOString();
+      engine.bankroll = Math.round((engine.bankroll + pos.pnl) * 100) / 100;
+      log(`${tag} STOP LOSS @ t=${elapsed}s — ${pos.side} hit $${cur.toFixed(2)} ≤ $${engineCfg.STOP_LOSS_LEVEL}; exited ${pos.shares}sh @ $${pos.exitPrice.toFixed(2)} | pnl $${pos.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
 
-  // 3) RECOVERY 1 STOP LOSS 0.40 -> exit, then place RECOVERY 2 on the
-  //    OPPOSITE side (+50 shares), sized ONLY from recovery 1's loss.
-  if (win.recoveryPlaced && !win.recoveryStoppedOut && !win.recovery2Placed) {
-    const rec1 = win.entries[1];
-    if (rec1 && rec1.status === 'filled') {
-      const cur = priceOf(rec1.side, upPrice, downPrice);
-      if (cur <= engineCfg.STOP_LOSS_LEVEL) {
-        win.recoveryStoppedOut = true;
-        stopOutEntry(engine, rec1, engineCfg.STOP_LOSS_LEVEL, elapsed, tag, 'RECOVERY 1');
-        const target = Math.round(Math.abs(rec1.pnl) * 100) / 100;
-        placeRecovery(win, engine, engineCfg, tag, target, rec1.side, upPrice, downPrice, upTokenId, downTokenId, 'Recovery 2', 2);
-      }
-    }
-  }
-
-  // 4) RECOVERY 2 STOP LOSS 0.40 -> exit and ACCEPT the loss. Max 3
-  //    bets per window; nothing carries to the next window.
-  if (win.recovery2Placed && !win.recovery2StoppedOut) {
-    const rec2 = win.entries[2];
-    if (rec2 && rec2.status === 'filled') {
-      const cur = priceOf(rec2.side, upPrice, downPrice);
-      if (cur <= engineCfg.STOP_LOSS_LEVEL) {
-        win.recovery2StoppedOut = true;
-        stopOutEntry(engine, rec2, engineCfg.STOP_LOSS_LEVEL, elapsed, tag, 'RECOVERY 2');
-        log(`${tag} No more recoveries this window — loss accepted, nothing carries to the next window`);
+      // Recovery bet on the opposite side.
+      const recSide = pos.side === 'UP' ? 'DOWN' : 'UP';
+      const recPx = priceOf(recSide, upPrice, downPrice);
+      const target = Math.round((engine.recoveryCarry + win.potentialSlLoss) * 100) / 100;
+      // Net profit per share if recSide wins, after taker fee:
+      // (1 - p) - 0.07*p*(1-p) = (1 - p) x (1 - 0.07p).
+      const netPerShare = (1 - recPx) * (1 - config.BASE_TAKER_FEE_RATE * recPx);
+      if (netPerShare > 0) {
+        const shares = Math.ceil(target / netPerShare);
+        if (shares > 0) {
+          win.recoveryPlaced = true;
+          win.recoveryTarget = target;
+          win.recoverySide = recSide;
+          fireEntry(win, recSide, shares, recPx, upTokenId, downTokenId,
+            `recovery bet — recover $${target.toFixed(2)} (SL loss $${win.potentialSlLoss.toFixed(2)} + carry $${engine.recoveryCarry.toFixed(2)}) via ${recSide} @ $${recPx.toFixed(2)}`);
+          log(`${tag} Recovery placed: target $${target.toFixed(2)} -> ${shares}sh ${recSide} @ $${recPx.toFixed(2)} (net/share $${netPerShare.toFixed(4)})`);
+        } else {
+          log(`${tag} Recovery skipped — $${target.toFixed(2)} needs more than 0 shares at $${recPx.toFixed(2)}`);
+        }
+      } else {
+        log(`${tag} Recovery skipped — ${recSide} at $${recPx.toFixed(2)} leaves no profit margin`);
       }
     }
   }
@@ -498,11 +460,6 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           recoveryPlaced: false,
           recoveryTarget: null,
           recoverySide: null,
-          recoveryStoppedOut: false,
-          recovery2Placed: false,
-          recovery2Target: null,
-          recovery2Side: null,
-          recovery2StoppedOut: false,
           // shared
           entryFired: false,
           stoppedOut: false,
@@ -511,7 +468,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
         };
 
         log(`${tag} Window ${windowStart}: ${engineCfg.STRATEGY === 'EXPENSIVE_RECOVERY'
-          ? `ENTRY ${engineCfg.ENTRY_SHARES}sh expensive after t=${engineCfg.ENTRY_AFTER_SECS}s (any price) | SL $${engineCfg.STOP_LOSS_LEVEL} on all bets | up to 3 bets | +${engineCfg.RECOVERY_EXTRA_SHARES != null ? engineCfg.RECOVERY_EXTRA_SHARES : 0}sh per recovery | no carry`
+          ? `ENTRY ${engineCfg.ENTRY_SHARES}sh expensive after t=${engineCfg.ENTRY_AFTER_SECS}s (any price) | SL $${engineCfg.STOP_LOSS_LEVEL} | recovery on opposite side`
           : `MONITOR ${engineCfg.MONITOR_SECS}s (dip < $${engineCfg.DIP_LEVEL}) | ENTRY $${engineCfg.BUY_AMOUNT} when target returns to $${engineCfg.RETURN_LEVEL} | SL $${engineCfg.STOP_LOSS_LEVEL}`} | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
       }
 
@@ -598,7 +555,7 @@ async function tick() {
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
     const summary = cfg.STRATEGY === 'EXPENSIVE_RECOVERY'
-      ? `ENTRY ${cfg.ENTRY_SHARES}sh expensive after t=${cfg.ENTRY_AFTER_SECS}s (any price) | SL $${cfg.STOP_LOSS_LEVEL} on all bets | up to 3 bets | +${cfg.RECOVERY_EXTRA_SHARES != null ? cfg.RECOVERY_EXTRA_SHARES : 0}sh per recovery | no carry`
+      ? `ENTRY ${cfg.ENTRY_SHARES}sh expensive after t=${cfg.ENTRY_AFTER_SECS}s (any price) | SL $${cfg.STOP_LOSS_LEVEL} | recovery on opposite side`
       : `MONITOR ${cfg.MONITOR_SECS}s (dip < $${cfg.DIP_LEVEL}) | ENTRY $${cfg.BUY_AMOUNT} @ return to $${cfg.RETURN_LEVEL} | SL $${cfg.STOP_LOSS_LEVEL}`;
     log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | ${summary} | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'}`);
   }

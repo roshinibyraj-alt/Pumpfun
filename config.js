@@ -17,18 +17,20 @@
 //   15m engine — EXPENSIVE_RECOVERY:
 //     1. At/after ENTRY_AFTER_SECS (420s / 7 min), buy ENTRY_SHARES
 //        (300) on the EXPENSIVE side at ANY price.
-//     2. Up to 3 bets per window, EVERY one with STOP LOSS 0.40 and
-//        nothing carrying to the next window:
-//          MAIN       300sh @ 420s
-//          RECOVERY 1 opposite side when the main hits 0.40
-//          RECOVERY 2 opposite side when recovery 1 hits 0.40
-//     3. Each recovery is sized ONLY from the immediately-previous
-//        bet's SL loss, plus RECOVERY_EXTRA_SHARES (50):
-//          shares = ceil(target / ((1 - p) x (1 - 0.07p))) + 50
-//        Recovery 2 is sized from recovery 1's loss only — never the
-//        main or the earlier recovery.
-//     4. If recovery 2 also loses, the loss is ACCEPTED (no carry to
-//        the next window — each window starts fresh).
+//     2. STOP LOSS 0.40. Right after entry the bot computes the loss
+//        that an SL hit would realize:
+//          L = (fill - 0.40) x 300 + fee
+//     3. When SL hits, immediately place a RECOVERY bet on the
+//        OPPOSITE side, sized so a win recovers L plus any carried
+//        amount from previous windows:
+//          shares = ceil((carry + L) / ((1 - p) x (1 - 0.07p)))
+//        The recovery bet rides to resolution (no SL on it).
+//     4. Recovery wins  -> carry cleared, window ~breakeven.
+//        Recovery loses -> carry = target + recovery cost carries to
+//        the next window, and the next recovery is sized to cover
+//        carry + that window's L.
+//     5. A main-bet win (no SL) leaves the carry untouched — the
+//        carry only clears when a recovery bet wins.
 //
 //   Fees/rebates (per docs.polymarket.com/trading/fees and
 //   docs.polymarket.com/programs/maker-rebates):
@@ -90,8 +92,6 @@ module.exports = {
       ENTRY_SHARES: 300,
       // Stop loss for the main entry.
       STOP_LOSS_LEVEL: 0.40,
-      // Extra shares added on top of every calculated recovery size.
-      RECOVERY_EXTRA_SHARES: 50,
     },
   },
 

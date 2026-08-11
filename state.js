@@ -78,9 +78,7 @@ function loadState() {
     // Fill any engine that's missing (e.g. new engine added later).
     for (const [key, cfg] of Object.entries(config.ENGINES)) {
       if (!raw.engines[key]) raw.engines[key] = engineDefault(key, cfg);
-      // Recovery carry is no longer used (losses are accepted inside the
-      // window); keep the field at 0 so stale persisted carries vanish.
-      else raw.engines[key].recoveryCarry = 0;
+      else if (raw.engines[key].recoveryCarry == null) raw.engines[key].recoveryCarry = 0;
     }
     for (const key of Object.keys(raw.engines)) {
       if (!config.ENGINES[key]) delete raw.engines[key];
