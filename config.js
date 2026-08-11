@@ -1,36 +1,34 @@
 // ============================================================
-// CONFIG — every knob you'd want to tune lives here.
+// CONFIG — every knob you'd like to tune lives here.
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v21 — two different engines):
+// STRATEGY (v22 — one unified engine shape, bucket filter):
 //
-//   5m engine  — DIP_RECOVERY (unchanged from v20):
-//     1. MONITOR first 120s, record the last moment each side is
-//        below DIP_LEVEL (0.50).
+//   BOTH engines (5m and 15m) run the SAME DIP_RECOVERY logic,
+//   the 15m being a proportional mirror of the 5m:
+//     1. MONITOR the first MONITOR_SECS (5m: 90s, 15m: 270s), record
+//        the last moment each side is below DIP_LEVEL (0.50).
 //     2. TARGET = the side whose most recent sub-0.50 dip was latest.
 //        No dip at all -> no trade.
-//     3. After 120s, once the target returns to RETURN_LEVEL (0.50),
-//        buy BUY_AMOUNT ($100) worth: shares = floor($100 / price).
-//     4. STOP LOSS 0.20; otherwise ride to resolution.
+//     3. After the monitor phase, once the target returns to
+//        RETURN_LEVEL (0.50), buy BUY_AMOUNT (5m: $100, 15m: $300)
+//        worth PLUS the bucket third:
+//          shares = floor(BUY_AMOUNT / px) + floor((bucket/3) / px)
+//     4. STOP LOSS 0.20 on every position for both engines; otherwise
+//        ride to resolution.
 //
-//   15m engine — EXPENSIVE_RECOVERY:
-//     1. At/after ENTRY_AFTER_SECS (420s / 7 min), buy ENTRY_SHARES
-//        (300) on the EXPENSIVE side at ANY price.
-//     2. STOP LOSS 0.40. Right after entry the bot computes the loss
-//        that an SL hit would realize:
-//          L = (fill - 0.40) x 300 + fee
-//     3. When SL hits, immediately place a RECOVERY bet on the
-//        OPPOSITE side, sized so a win recovers L plus any carried
-//        amount from previous windows:
-//          shares = ceil((carry + L) / ((1 - p) x (1 - 0.07p)))
-//        The recovery bet rides to resolution (no SL on it).
-//     4. Recovery wins  -> carry cleared, window ~breakeven.
-//        Recovery loses -> carry = target + recovery cost carries to
-//        the next window, and the next recovery is sized to cover
-//        carry + that window's L.
-//     5. A main-bet win (no SL) leaves the carry untouched — the
-//        carry only clears when a recovery bet wins.
+//   BUCKET FILTER (the main money filter):
+//     - When a bet is stopped out or resolves as a loss, the FULL
+//       dollar loss goes into that engine's bucket.
+//     - The next window's bet is base + bucket ÷ BUCKET_DIVISOR (3).
+//     - If that bet loses again, its full loss is added to the bucket
+//       and the next bet is again base + bucket ÷ 3.
+//     - If a bucket bet WINS, the bucket shrinks by the bucket third
+//       that was wagered (the amount that bet recovered) — it does
+//       NOT reset to zero; it shrinks until clear.
+//     - The 5m and 15m engines each have their OWN independent
+//       bucket and their own capital.
 //
 //   Fees/rebates (per docs.polymarket.com/trading/fees and
 //   docs.polymarket.com/programs/maker-rebates):
@@ -57,10 +55,17 @@ module.exports = {
   // Used when an engine doesn't set its own CAPITAL.
   STARTING_BANKROLL: 1000,
 
+  // ---- Bucket filter ----
+  // After a loss, the lost amount goes into a per-engine bucket. The
+  // next window bets base + bucket / BUCKET_DIVISOR. Wins shrink the
+  // bucket by the bucket third wagered; losses grow it by the full
+  // loss. Both engines use the same divisor.
+  BUCKET_DIVISOR: 3,
+
   // ---- Engines ----
   // Each engine runs on its own window length with its OWN bankroll,
-  // current window, and history. Keys ('5m' / '15m') are used
-  // everywhere in state and the dashboard.
+  // own bucket, current window, and history. Keys ('5m' / '15m') are
+  // used everywhere in state and the dashboard.
   ENGINES: {
     '5m': {
       label: '5m',
@@ -68,13 +73,14 @@ module.exports = {
       WINDOW_MINUTES: 5,
       CAPITAL: 1000, // this engine's starting bankroll (independent)
       // Monitor phase length: watch both sides this long for a dip.
-      MONITOR_SECS: 120, // first 2 minutes
+      MONITOR_SECS: 90, // first 1.5 minutes
       // A side "dipped" while its price is below this level.
       DIP_LEVEL: 0.50,
       // Buy trigger: target side's price comes back to this level
       // any time after the monitor phase.
       RETURN_LEVEL: 0.50,
-      // Notional size of the single buy: $100 worth of shares.
+      // Notional size of the base buy: $100 worth of shares (the
+      // bucket third is added on top).
       BUY_AMOUNT: 100,
       // Stop loss: if the bought side's price hits this level, exit
       // at this price and realize the loss.
@@ -82,16 +88,16 @@ module.exports = {
     },
     '15m': {
       label: '15m',
-      STRATEGY: 'EXPENSIVE_RECOVERY',
+      STRATEGY: 'DIP_RECOVERY',
       WINDOW_MINUTES: 15,
       CAPITAL: 1000,
-      // Entry: at/after this many seconds, buy the expensive side at
-      // any price.
-      ENTRY_AFTER_SECS: 420, // 7 minutes
-      // Fixed share size for the main entry.
-      ENTRY_SHARES: 300,
-      // Stop loss for the main entry.
-      STOP_LOSS_LEVEL: 0.40,
+      // Proportional mirror of the 5m engine (3x the time -> 3x the
+      // monitor length and 3x the base buy size).
+      MONITOR_SECS: 270, // 3 x 90s (first 4.5 minutes of a 15m window)
+      DIP_LEVEL: 0.50,
+      RETURN_LEVEL: 0.50,
+      BUY_AMOUNT: 300, // 3 x $100 base notional
+      STOP_LOSS_LEVEL: 0.20, // same stop loss as the 5m engine
     },
   },
 

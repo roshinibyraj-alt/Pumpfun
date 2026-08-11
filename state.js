@@ -33,9 +33,11 @@ function engineDefault(engineKey, engineCfg) {
     pendingResolutions: [],
     windowHistory: [],
     lastCheck: null,
-    // 15m engine: unrecovered deficit carried between windows (martingale
-    // recovery target). 0 for engines that don't use recovery.
-    recoveryCarry: 0,
+    // Bucket filter: the full dollar loss of every stopped-out / lost
+    // bet is added here. The next window bets base + bucket / 3; a win
+    // shrinks the bucket by the wagered third, a loss grows it by the
+    // full loss. Per-engine (5m and 15m are independent).
+    bucket: 0,
   };
 }
 
@@ -78,7 +80,7 @@ function loadState() {
     // Fill any engine that's missing (e.g. new engine added later).
     for (const [key, cfg] of Object.entries(config.ENGINES)) {
       if (!raw.engines[key]) raw.engines[key] = engineDefault(key, cfg);
-      else if (raw.engines[key].recoveryCarry == null) raw.engines[key].recoveryCarry = 0;
+      else if (raw.engines[key].bucket == null) raw.engines[key].bucket = 0;
     }
     for (const key of Object.keys(raw.engines)) {
       if (!config.ENGINES[key]) delete raw.engines[key];
