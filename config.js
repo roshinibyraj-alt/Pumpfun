@@ -7,7 +7,7 @@
 //
 //   BOTH engines (5m and 15m) run the SAME DIP_RECOVERY logic,
 //   the 15m being a proportional mirror of the 5m:
-//     1. MONITOR the first MONITOR_SECS (5m: 90s, 15m: 270s), record
+//     1. MONITOR the first MONITOR_SECS (5m: 120s, 15m: 420s), record
 //        the last moment each side is below DIP_LEVEL (0.50).
 //     2. TARGET = the side whose most recent sub-0.50 dip was latest.
 //        No dip at all -> no trade.
@@ -72,7 +72,7 @@ module.exports = {
       WINDOW_MINUTES: 5,
       CAPITAL: 1000, // this engine's starting bankroll (independent)
       // Monitor phase length: watch both sides this long for a dip.
-      MONITOR_SECS: 90, // first 1.5 minutes
+      MONITOR_SECS: 120, // first 2 minutes
       // A side "dipped" while its price is below this level.
       DIP_LEVEL: 0.50,
       // Buy trigger: target side's price comes back to this level
@@ -87,9 +87,9 @@ module.exports = {
       STRATEGY: 'DIP_RECOVERY',
       WINDOW_MINUTES: 15,
       CAPITAL: 1000,
-      // Proportional mirror of the 5m engine (3x the time -> 3x the
-      // monitor length and 3x the base buy size).
-      MONITOR_SECS: 270, // 3 x 90s (first 4.5 minutes of a 15m window)
+      // Monitor length set to 7 minutes (per the 15m schedule; base
+      // buy size stays 3x the 5m).
+      MONITOR_SECS: 420, // first 7 minutes
       // A side "dipped" while its price is below this level.
       DIP_LEVEL: 0.50,
       RETURN_LEVEL: 0.50,

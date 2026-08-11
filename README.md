@@ -13,7 +13,7 @@ There is **no stop loss** — every entry rides to resolution, win or lose.
 
 | Step | 5m engine | 15m engine |
 |---|---|---|
-| Monitor | first **90s**, record the last moment each side is below 0.50 | first **270s** (3×), same rule |
+| Monitor | first **120s** (2 min), record the last moment each side is below 0.50 | first **420s** (7 min), same rule |
 | Target | side whose most recent sub-0.50 dip was latest; no dip → no trade | same |
 | Entry | after monitor, when target returns to 0.50 → buy **$100** base + mini | buy **$300** base + mini (3×) |
 | Exit | rides to resolution (win $1/share, or lose the cost) | same |
@@ -67,7 +67,7 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
 - `ENGINES`: one block per engine (`'5m'` and `'15m'`), each with:
   - `WINDOW_MINUTES`: window length for that engine
   - `CAPITAL`: that engine's starting bankroll (independent)
-  - `MONITOR_SECS`: monitor phase (5m: 90, 15m: 270)
+  - `MONITOR_SECS`: monitor phase (5m: 120, 15m: 420)
   - `DIP_LEVEL` / `RETURN_LEVEL`: dip threshold (0.50) and re-entry level
   (0.50)
 - `BUCKET_DIVISOR`: 2 — the main bucket is split into this-sized mini

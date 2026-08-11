@@ -5,7 +5,7 @@
 // is a proportional mirror of the 5m (see config.js):
 //
 //   5m / 15m — DIP_RECOVERY:
-//     MONITOR the first MONITOR_SECS (5m 90s / 15m 270s), record the
+//     MONITOR the first MONITOR_SECS (5m 120s / 15m 420s), record the
 //     last moment each side is below DIP_LEVEL (0.50); TARGET = latest
 //     dipper; no dip -> no trade. After the monitor phase, when the
 //     target returns to 0.50, buy BUY_AMOUNT (5m $100 / 15m $300)
