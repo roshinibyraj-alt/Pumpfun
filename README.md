@@ -36,6 +36,12 @@ shares = floor(BUY_AMOUNT / px) + floor((bucket / 3) / px)
   `main = main + loss; mini = main ÷ 3`.
 - No-trade windows leave both buckets untouched.
 - The **5m and 15m buckets are fully independent** of each other.
+- Tracked live per engine: current **win/loss streak** (consecutive,
+  only traded windows count), **bucket clears** (how many times the main
+  bucket fully cleared), and the **consecutive wins it took** for the most
+  recent clear.
+- A full **equity curve** (one realized-equity point per resolved window)
+  is recorded per engine and charted on the dashboard.
 
 ## Bankroll
 
@@ -87,7 +93,8 @@ Dashboard: http://localhost:3000 (set `PORT` to change).
 
 Shows each engine separately: bankroll/return/equity, live UP/DOWN prices,
 strategy state (monitor/target/entry), the per-engine **main bucket + mini
-installment**, unrealized P&L on open positions, and per-engine resolution
+installment**, win/loss streaks + bucket-clear stats, an **equity curve
+chart**, unrealized P&L on open positions, and per-engine resolution
 history.
 
 ## Status / safety

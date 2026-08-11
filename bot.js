@@ -162,19 +162,45 @@ async function resolveWindow(engine, win) {
     engine.bankroll = Math.round((engine.bankroll + settleCredit) * 100) / 100;
   }
 
+  const pnl = Math.round((payout - cost) * 100) / 100;
+  const isLoss = traded ? pnl < 0 : null;
+
+  // Streak tracker: consecutive wins / losses (only traded windows
+  // count; no-trade windows leave the streak untouched).
+  if (traded) {
+    if (pnl >= 0) {
+      engine.streak.wins += 1;
+      engine.streak.losses = 0;
+    } else {
+      engine.streak.losses += 1;
+      engine.streak.wins = 0;
+    }
+  }
+
   // Bucket filter: a winning window deducts exactly ONE fixed mini
   // installment from the main bucket (the amount wagered). The mini
   // stays fixed so 3 consecutive wins clear the main bucket; it only
-  // re-splits on a new loss.
+  // re-splits on a new loss. When the main bucket hits 0, record the
+  // clear and how many consecutive wins it took.
   if (resolvedWin && win.bucketWager != null && win.bucketWager > 0) {
     const before = engine.bucket;
     engine.bucket = Math.max(0, Math.round((engine.bucket - win.bucketWager) * 100) / 100);
-    if (engine.bucket === 0) engine.miniBucket = 0;
+    if (engine.bucket === 0) {
+      engine.miniBucket = 0;
+      engine.bucketClears += 1;
+      engine.lastClearWins = engine.streak.wins;
+      log(`[${win.engine}] BUCKET CLEARED after ${engine.streak.wins} consecutive win(s) — total clears ${engine.bucketClears}`);
+    }
     log(`[${win.engine}] BUCKET - $${win.bucketWager.toFixed(2)} (won, one mini deducted) -> main $${before.toFixed(2)} -> $${engine.bucket.toFixed(2)} | mini $${engine.miniBucket.toFixed(2)}`);
   }
 
-  const pnl = Math.round((payout - cost) * 100) / 100;
-  const isLoss = traded ? pnl < 0 : null;
+  // Equity curve: one realized-equity point per resolved window.
+  engine.equityCurve.push({
+    windowStart: win.windowStart,
+    bankroll: engine.bankroll,
+    resolvedAt: new Date().toISOString(),
+  });
+  if (engine.equityCurve.length > 10000) engine.equityCurve = engine.equityCurve.slice(-10000);
 
   engine.windowHistory.push({
     engine: win.engine,
@@ -197,6 +223,9 @@ async function resolveWindow(engine, win) {
     bucketWager: win.bucketWager,
     bucketAfter: engine.bucket,
     miniBucketAfter: engine.miniBucket,
+    streakAfter: { wins: engine.streak.wins, losses: engine.streak.losses },
+    bucketClearsAfter: engine.bucketClears,
+    lastClearWinsAfter: engine.lastClearWins,
     resolvedAt: new Date().toISOString(),
   });
 

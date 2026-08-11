@@ -74,6 +74,7 @@
 
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; margin-bottom: 10px; }
   .card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+  .equity-canvas { width: 100%; height: 110px; display: block; }
   .countdown { font-family: var(--font-data); color: var(--text); background: var(--surface-raised); padding: 2px 8px; border-radius: 6px; font-size: 11px; }
 
   .pattern-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
@@ -260,6 +261,91 @@
     }).join('');
   }
 
+  function drawEquity(key, e) {
+    const canvas = document.getElementById('eq-' + key);
+    if (!canvas) return;
+    const pts = (e && e.equityCurve) || [];
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 280;
+    const h = 110;
+    canvas.width = Math.max(1, Math.round(w * dpr));
+    canvas.height = Math.round(h * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    if (pts.length < 2) {
+      ctx.fillStyle = 'rgba(124,134,156,0.85)';
+      ctx.font = '11px ' + getComputedStyle(document.body).getPropertyValue('--font-ui');
+      ctx.textAlign = 'center';
+      ctx.fillText('collecting data…', w / 2, h / 2);
+      return;
+    }
+
+    const start = (e && e.startingBankroll) || pts[0].bankroll;
+    let min = start, max = start;
+    for (const p of pts) {
+      if (p.bankroll < min) min = p.bankroll;
+      if (p.bankroll > max) max = p.bankroll;
+    }
+    const span = max - min;
+    if (span < 1) { max += 1; min -= 1; }
+    else { min -= span * 0.08; max += span * 0.08; }
+
+    const pad = 8;
+    const X = (i) => pad + (i / (pts.length - 1)) * (w - pad * 2);
+    const Y = (v) => h - pad - ((v - min) / (max - min)) * (h - pad * 2);
+
+    // baseline at starting bankroll
+    ctx.strokeStyle = 'rgba(124,134,156,0.4)';
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pad, Y(start));
+    ctx.lineTo(w - pad, Y(start));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // area fill
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, 'rgba(45,212,191,0.22)');
+    grad.addColorStop(1, 'rgba(45,212,191,0.02)');
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const x = X(i), y = Y(pts[i].bankroll);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.lineTo(X(pts.length - 1), h - pad);
+    ctx.lineTo(X(0), h - pad);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // line
+    ctx.strokeStyle = '#2dd4bf';
+    ctx.lineWidth = 1.6;
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const x = X(i), y = Y(pts[i].bankroll);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    // last point marker
+    const lx = X(pts.length - 1), ly = Y(pts[pts.length - 1].bankroll);
+    ctx.fillStyle = '#34d399';
+    ctx.beginPath();
+    ctx.arc(lx, ly, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // min/max labels
+    ctx.fillStyle = 'rgba(124,134,156,0.9)';
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('$' + max.toFixed(0), 2, 9);
+    ctx.fillText('$' + min.toFixed(0), 2, h - 2);
+  }
+
   function renderEngine(key, e) {
     const cfg = e.config || {};
     const live = e.liveWindow || { unrealizedPnl: 0 };
@@ -282,6 +368,9 @@
     const placed = win ? (win.entries || []).length : 0;
     const bucket = (e.bucket != null ? e.bucket : 0);
     const mini = (e.miniBucket != null ? e.miniBucket : 0);
+    const streak = e.streak || { wins: 0, losses: 0 };
+    const bucketClears = e.bucketClears != null ? e.bucketClears : 0;
+    const lastClearWins = e.lastClearWins != null ? e.lastClearWins : null;
     const schedule = 'Monitor ' + mon + 's · dip < $' + dip.toFixed(2) + ' · buy $' + amt + ' + mini $' + mini.toFixed(2) + ' @ ≥ $' + ret.toFixed(2) + ' · SL $' + sl.toFixed(2) + ' · main $' + bucket.toFixed(2);
 
     return '<div class="engine">' +
@@ -311,8 +400,17 @@
         '<div class="chip"><div class="k">Entries</div><div class="v">' + (win ? placed + ' / 1' : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Main Bucket</div><div class="v ' + (bucket > 0 ? 'neg' : '') + '">' + fmt$(bucket) + '</div></div>' +
         '<div class="chip"><div class="k">Mini</div><div class="v ' + (mini > 0 ? 'neg' : '') + '">' + fmt$(mini) + '</div></div>' +
+        '<div class="chip"><div class="k">Win Streak</div><div class="v ' + (streak.wins > 0 ? 'pos' : '') + '">W' + streak.wins + '</div></div>' +
+        '<div class="chip"><div class="k">Loss Streak</div><div class="v ' + (streak.losses > 0 ? 'neg' : '') + '">L' + streak.losses + '</div></div>' +
+        '<div class="chip"><div class="k">Bucket Clears</div><div class="v">' + bucketClears + (lastClearWins != null ? ' <span style="font-size:9px;color:var(--text-dim)">last W' + lastClearWins + '</span>' : '') + '</div></div>' +
         '<div class="chip"><div class="k">Stop Loss</div><div class="v">$' + sl.toFixed(2) + '</div></div>' +
         '<div class="chip"><div class="k">Fees / Rebates</div><div class="v" style="font-size:11px">$' + (e.totalFees || 0).toFixed(1) + ' / $' + (e.totalRebates || 0).toFixed(1) + '</div></div>' +
+      '</div>' +
+
+      '<div class="card">' +
+        '<div class="card-title"><span>Equity Curve</span>' +
+          '<span class="countdown">' + (e.equityCurve || []).length + ' pts · start $' + (e.startingBankroll != null ? e.startingBankroll.toFixed(0) : '?') + '</span></div>' +
+        '<canvas id="eq-' + key + '" class="equity-canvas"></canvas>' +
       '</div>' +
 
       '<div class="card">' +
@@ -356,6 +454,7 @@
 
     try {
       $('engines').innerHTML = keys.map((k) => renderEngine(k, engines[k])).join('');
+      keys.forEach((k) => drawEquity(k, engines[k]));
     } catch (e) { console.error('engines render failed', e); }
 
     let lastTs = null;

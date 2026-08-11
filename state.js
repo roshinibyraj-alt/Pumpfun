@@ -44,6 +44,20 @@ function engineDefault(engineKey, engineCfg) {
     //                 loss re-splits it. Per-engine, independent.
     bucket: 0,
     miniBucket: 0,
+    // Streak / clearing trackers:
+    //   streak        — current consecutive wins and losses (one of
+    //                   the two is always 0; no-trade windows don't
+    //                   change it).
+    //   bucketClears  — how many times the main bucket fully cleared.
+    //   lastClearWins — consecutive wins at the moment of the most
+    //                   recent clear (e.g. 3 = "took 3 straight wins").
+    //   equityCurve   — one { windowStart, bankroll } point per
+    //                   resolved window (most recent last), used by
+    //                   the dashboard's equity chart.
+    streak: { wins: 0, losses: 0 },
+    bucketClears: 0,
+    lastClearWins: null,
+    equityCurve: [],
   };
 }
 
@@ -83,11 +97,37 @@ function loadState() {
     if (!raw || !raw.engines) {
       return migrateLegacy(raw || {});
     }
-    // Fill any engine that's missing (e.g. new engine added later).
+    // Fill any engine that's missing (e.g. new engine added later)
+    // and migrate older state files that predate the streak / equity
+    // curve trackers. When the new fields are absent, they are
+    // backfilled from windowHistory so the dashboard curve and
+    // streaks stay continuous across redeploys.
     for (const [key, cfg] of Object.entries(config.ENGINES)) {
-      if (!raw.engines[key]) raw.engines[key] = engineDefault(key, cfg);
-      else if (raw.engines[key].bucket == null) raw.engines[key].bucket = 0;
-      else if (raw.engines[key].miniBucket == null) raw.engines[key].miniBucket = 0;
+      if (!raw.engines[key]) {
+        raw.engines[key] = engineDefault(key, cfg);
+      } else {
+        const eng = raw.engines[key];
+        if (eng.bucket == null) eng.bucket = 0;
+        if (eng.miniBucket == null) eng.miniBucket = 0;
+
+        const hist = Array.isArray(eng.windowHistory) ? eng.windowHistory : [];
+        if (eng.streak == null || eng.bucketClears == null || eng.lastClearWins == null) {
+          let wins = 0, losses = 0, clears = 0, lastClear = null;
+          for (const w of hist) {
+            if (w.traded) {
+              if ((w.pnl || 0) >= 0) { wins += 1; losses = 0; }
+              else { losses += 1; wins = 0; }
+            }
+            if (w.bucketAfter === 0 && (w.bucketWager || 0) > 0) { clears += 1; lastClear = wins; }
+          }
+          eng.streak = { wins, losses };
+          eng.bucketClears = clears;
+          eng.lastClearWins = lastClear;
+        }
+        if (!Array.isArray(eng.equityCurve) || eng.equityCurve.length === 0) {
+          eng.equityCurve = hist.map((w) => ({ windowStart: w.windowStart, bankroll: w.bankrollAfter }));
+        }
+      }
     }
     for (const key of Object.keys(raw.engines)) {
       if (!config.ENGINES[key]) delete raw.engines[key];
@@ -104,6 +144,9 @@ function saveState(state) {
   for (const eng of Object.values(state.engines || {})) {
     if (eng.windowHistory && eng.windowHistory.length > 200) {
       eng.windowHistory = eng.windowHistory.slice(-200);
+    }
+    if (eng.equityCurve && eng.equityCurve.length > 10000) {
+      eng.equityCurve = eng.equityCurve.slice(-10000);
     }
   }
   fs.writeFileSync(config.STATE_FILE, JSON.stringify(state, null, 2));
