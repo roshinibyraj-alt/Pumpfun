@@ -15,15 +15,17 @@
 //        RETURN_LEVEL (0.50), buy BUY_AMOUNT worth PLUS the mini
 //        bucket installment:
 //          shares = floor(BUY_AMOUNT / px) + floor(miniBucket / px)
-//     4. NO STOP LOSS — every position rides to resolution.
+//     4. NO STOP LOSS — every position rides to resolution. No entry
+//        after 280s into a 5m window / 870s into a 15m window.
 //
 //   BUCKET FILTER (main + mini):
 //     - Every loss adds its FULL dollar loss to that engine's MAIN
 //       bucket, then re-splits: miniBucket = bucket / BUCKET_DIVISOR.
 //     - The next window bets base + miniBucket.
-//     - ONE win of a mini-bucket bet clears the WHOLE bucket (main and
-//       mini go to 0). A loss adds its full loss to main and re-splits
-//       by BUCKET_DIVISOR again.
+//     - The bucket clears (main and mini go to 0) only after TWO
+//       consecutive wins of mini-bucket bets; a single win leaves it
+//       intact. A loss adds its full loss to main and re-splits by
+//       BUCKET_DIVISOR again.
 //     - The 5m and 15m engines each have their OWN independent
 //       main/mini buckets and their own capital.
 //
@@ -56,8 +58,9 @@ module.exports = {
   // After a loss, the full lost amount goes into the per-engine MAIN
   // bucket and is re-split into a mini installment:
   //   miniBucket = bucket / BUCKET_DIVISOR
-  // The next window bets base + miniBucket. ONE win clears the whole
-  // bucket; a loss adds its full loss to main and re-splits again.
+  // The next window bets base + miniBucket. The bucket clears only
+  // after TWO consecutive wins; a single win leaves it intact. A loss
+  // adds its full loss to main and re-splits again.
   // Both engines use the same divisor.
   BUCKET_DIVISOR: 2,
 
@@ -78,9 +81,11 @@ module.exports = {
       // Buy trigger: target side's price comes back to this level
       // any time after the monitor phase.
       RETURN_LEVEL: 0.50,
-      // Notional size of the base buy: $100 worth of shares (the
+      // Notional size of the base buy: $20 worth of shares (the
       // mini bucket installment is added on top).
-      BUY_AMOUNT: 100,
+      BUY_AMOUNT: 20,
+      // No entry after this many seconds into the window.
+      ENTRY_CUTOFF_SECS: 280,
     },
     '15m': {
       label: '15m',
@@ -93,7 +98,9 @@ module.exports = {
       // A side "dipped" while its price is below this level.
       DIP_LEVEL: 0.50,
       RETURN_LEVEL: 0.50,
-      BUY_AMOUNT: 300, // 3 x $100 base notional (mini added on top)
+      BUY_AMOUNT: 20, // same $20 base as the 5m engine (mini added on top)
+      // No entry after this many seconds into the window.
+      ENTRY_CUTOFF_SECS: 870,
     },
   },
 

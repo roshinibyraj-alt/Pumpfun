@@ -8,16 +8,18 @@
 //     MONITOR the first MONITOR_SECS (5m 120s / 15m 420s), record the
 //     last moment each side is below DIP_LEVEL (0.50); TARGET = latest
 //     dipper; no dip -> no trade. After the monitor phase, when the
-//     target returns to 0.50, buy BUY_AMOUNT (5m $100 / 15m $300)
+//     target returns to 0.50, buy BUY_AMOUNT ($20 for both engines)
 //     PLUS the mini bucket installment. NO STOP LOSS — every position
-//     rides to resolution, win or lose.
+//     rides to resolution, win or lose. No entry after 280s into a 5m
+//     window / 870s into a 15m window.
 //
 //   BUCKET FILTER (main + mini):
 //     - Every loss adds its FULL dollar loss to the MAIN bucket, then
 //       re-splits: miniBucket = bucket / BUCKET_DIVISOR.
 //     - The next window bets base + miniBucket.
-//     - ONE win of a mini-bucket bet clears the WHOLE bucket (main and
-//       mini go to 0). A loss re-splits by BUCKET_DIVISOR again.
+//     - The bucket clears (main and mini go to 0) only after TWO
+//       consecutive wins of mini-bucket bets; a single win leaves it
+//       intact. A loss re-splits by BUCKET_DIVISOR again.
 //
 //   TRACKERS (per engine):
 //     - streak: current consecutive wins / losses.
@@ -178,12 +180,13 @@ async function resolveWindow(engine, win) {
     }
   }
 
-  // Bucket filter: ONE win of a mini-bucket bet clears the WHOLE
-  // bucket (main + mini go to 0).
-  if (resolvedWin && win.bucketWager != null && win.bucketWager > 0) {
+  // Bucket filter: the bucket clears (main + mini go to 0) only after
+  // TWO consecutive wins of a mini-bucket bet — a single win leaves it
+  // intact, a loss still re-splits by BUCKET_DIVISOR.
+  if (resolvedWin && win.bucketWager != null && win.bucketWager > 0 && engine.streak.wins >= 2) {
     engine.bucket = 0;
     engine.miniBucket = 0;
-    log(`[${win.engine}] BUCKET CLEARED (won $${win.bucketWager.toFixed(2)} mini bet) — main $0.00 | mini $0.00`);
+    log(`[${win.engine}] BUCKET CLEARED (2nd consecutive win, mini bet $${win.bucketWager.toFixed(2)}) — main $0.00 | mini $0.00`);
   }
 
   // Peak capital + max drawdown trackers (resolved bankroll only).
@@ -345,9 +348,14 @@ function dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPric
   //   extraShares = floor(engine.miniBucket / px)
   // NO STOP LOSS — the position rides to resolution.
   if (win.monitoringDone && !win.entryFired && !win.entrySkipped) {
+    const cutoffSecs = engineCfg.ENTRY_CUTOFF_SECS;
     if (win.targetSide == null) {
       win.entrySkipped = true;
       log(`${tag} No target side — no entry for window ${win.windowStart}`);
+    } else if (cutoffSecs != null && elapsed > cutoffSecs) {
+      // No entry after the cutoff (280s into a 5m / 870s into a 15m).
+      win.entrySkipped = true;
+      log(`${tag} Entry cutoff reached at t=${elapsed}s (> ${cutoffSecs}s) — NO entry for window ${win.windowStart}`);
     } else {
       const px = priceOf(win.targetSide, upPrice, downPrice);
       if (px >= engineCfg.RETURN_LEVEL) {
@@ -442,7 +450,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart}: MONITOR ${engineCfg.MONITOR_SECS}s (dip < $${engineCfg.DIP_LEVEL}) | ENTRY $${engineCfg.BUY_AMOUNT} (+ mini $${engine.miniBucket.toFixed(2)}) when target returns to $${engineCfg.RETURN_LEVEL} | no SL | main $${engine.bucket.toFixed(2)} | peak $${engine.peakBankroll.toFixed(2)} | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
+        log(`${tag} Window ${windowStart}: MONITOR ${engineCfg.MONITOR_SECS}s (dip < $${engineCfg.DIP_LEVEL}) | ENTRY $${engineCfg.BUY_AMOUNT} (+ mini $${engine.miniBucket.toFixed(2)}) when target returns to $${engineCfg.RETURN_LEVEL} | no SL | no entry after ${engineCfg.ENTRY_CUTOFF_SECS}s | main $${engine.bucket.toFixed(2)} | peak $${engine.peakBankroll.toFixed(2)} | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -523,7 +531,7 @@ async function tick() {
 
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
-    const summary = `MONITOR ${cfg.MONITOR_SECS}s (dip < $${cfg.DIP_LEVEL}) | ENTRY $${cfg.BUY_AMOUNT} (+ mini = main/${config.BUCKET_DIVISOR}) @ return to $${cfg.RETURN_LEVEL} | no SL`;
+    const summary = `MONITOR ${cfg.MONITOR_SECS}s (dip < $${cfg.DIP_LEVEL}) | ENTRY $${cfg.BUY_AMOUNT} (+ mini = main/${config.BUCKET_DIVISOR}) @ return to $${cfg.RETURN_LEVEL} | no SL | no entry after ${cfg.ENTRY_CUTOFF_SECS}s`;
     log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | ${summary} | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'}`);
   }
   tick();

@@ -15,7 +15,8 @@ There is **no stop loss** — every entry rides to resolution, win or lose.
 |---|---|---|
 | Monitor | first **120s** (2 min), record the last moment each side is below 0.50 | first **420s** (7 min), same rule |
 | Target | side whose most recent sub-0.50 dip was latest; no dip → no trade | same |
-| Entry | after monitor, when target returns to 0.50 → buy **$100** base + mini | buy **$300** base + mini (3×) |
+| Entry | after monitor, when target returns to 0.50 → buy **$20** base + mini | same |
+| Cutoff | no entry after **280s** into the window | no entry after **870s** |
 | Exit | rides to resolution (win $1/share, or lose the cost) | same |
 
 ```
@@ -29,8 +30,8 @@ shares = floor(BUY_AMOUNT / price) + floor(miniBucket / price)
   `miniBucket = bucket ÷ BUCKET_DIVISOR (2)`.
 - The **next window** bets **base + miniBucket**. Example: a $66 loss →
   main $66, mini $33; the next window wagers base + $33 worth.
-- **ONE win** of a mini-bucket bet **clears the whole bucket** (main and
-  mini go to 0).
+- The bucket **clears only after TWO consecutive wins** of mini-bucket
+  bets (main and mini go to 0); a **single win leaves it intact**.
 - A **loss** adds its full loss to the main bucket and re-splits by 2
   again.
 - No-trade windows leave both buckets untouched.
@@ -71,8 +72,9 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
   - `DIP_LEVEL` / `RETURN_LEVEL`: dip threshold (0.50) and re-entry level
   (0.50)
 - `BUCKET_DIVISOR`: 2 — the main bucket is split into this-sized mini
-  installment; one win clears the whole bucket
-  - `BUY_AMOUNT`: base notional (5m: $100, 15m: $300)
+  installment; the bucket clears only after two consecutive wins
+  - `BUY_AMOUNT`: base notional (**$20 for both engines**)
+  - `ENTRY_CUTOFF_SECS`: no entry after this many seconds (5m: 280, 15m: 870)
 - `BASE_TAKER_FEE_RATE` / `MAKER_REBATE_RATE` / `ENTRY_IS_MAKER`: fee model
 - `RESOLUTION_WIN_THRESHOLD` / `RESOLUTION_LOSS_THRESHOLD`
 - `POLL_INTERVAL_MS`, `STATE_FILE`
