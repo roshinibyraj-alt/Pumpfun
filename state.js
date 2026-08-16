@@ -13,7 +13,7 @@
 //
 // loadState() migrates the OLD single-engine flat shape (one shared
 // bankroll/currentWindow/pendingResolutions/windowHistory) into the
-// 15m engine, which is where the old 15-minute strategy lived.
+// 5m engine, which is where the live strategy lives.
 //
 // IMPORTANT (Railway note): filesystem is ephemeral, resets on
 // redeploy. Fine for now; ask if you want a persistent volume.
@@ -68,10 +68,10 @@ function defaultState() {
 
 function migrateLegacy(raw) {
   // Old single-engine shape had flat bankroll/currentWindow/
-  // pendingResolutions/windowHistory. It ran 15-minute windows, so we
-  // fold it into the '15m' engine.
+  // pendingResolutions/windowHistory. It predates the per-engine
+  // shape, so we fold it into the '5m' engine (the only live one).
   const state = defaultState();
-  const eng = state.engines['15m'];
+  const eng = state.engines['5m'];
   if (raw.bankroll != null) {
     eng.bankroll = raw.bankroll;
     eng.startingBankroll = raw.startingBankroll != null ? raw.startingBankroll : eng.startingBankroll;
@@ -100,7 +100,7 @@ function loadState() {
         raw.engines[key] = engineDefault(key, cfg);
       } else {
         const eng = raw.engines[key];
-        // Bucket-era fields are gone with v25 (DUAL_LADDER strategy).
+        // Bucket-era fields are gone with v25/v26 (LEADER strategy).
         delete eng.bucket;
         delete eng.miniBucket;
         delete eng.bucketClears;

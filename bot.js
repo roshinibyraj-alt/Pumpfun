@@ -1,18 +1,21 @@
 // ============================================================
-// bot.js — v25. ONE unified engine shape (5m and 15m), each with its
-// own bankroll, current window, pending resolutions, and history.
-// Both engines run the SAME DUAL_LADDER strategy (see config.js):
+// bot.js — v26. ONE unified engine shape (5m only, 15m removed).
+// The ONLY live strategy is LEADER (see config.js):
 //
-//   5m / 15m — DUAL_LADDER (resting limit orders only):
-//     As soon as a window opens, place TWO resting buy-limit ladders
-//     immediately — one for UP, one for DOWN — with rungs at 0.40,
-//     0.35, 0.30, 0.25, 0.20, 0.15 and 0.10, 50 fixed shares per
-//     rung (cost = 50 x rung price, filled at the rung price).
-//     CROSS-CANCEL RULE: when a rung fills on one side, the opposite
-//     side's SAME-PRICE rung is cancelled; every other rung stays
-//     live. No monitoring phase, no cutoff — rungs rest until the
-//     window closes. Filled shares ride to resolution: winner pays
-//     $1/share, loser pays $0; unfilled rungs cost nothing.
+//   5m — LEADER (buy the non-dipping side):
+//     When a side's mid price is first observed AT OR BELOW a trigger
+//     level (0.40 -> 0.10), the bot places a buy-limit order on the
+//     OPPOSITE (leader) side at its current mid — 50 fixed shares per
+//     trigger (cost = 50 x limit price). Each side+level can trigger
+//     once per window; triggers stay armed until the window closes
+//     (no cutoff).
+//
+//     FILL CONFIRMATION: fills are NOT assumed. Order placement
+//     latency is measured in ms with a real Polymarket round-trip;
+//     only after that latency has elapsed does the bot check that the
+//     price walked through the order price (leader mid <= limit). The
+//     fill is then confirmed at the limit price as a maker fill.
+//     Orders that never walk through expire unfilled at window close.
 //
 //   TRACKERS (per engine):
 //     - streak: current consecutive wins / losses.
@@ -24,12 +27,12 @@
 //   Crypto: taker fee = shares x 0.07 x price x (1 - price).
 //   Makers never pay fees; crypto maker rebate = 20% of the
 //   fee-equivalent, only for resting (maker) fills.
-//   All ladder fills are RESTING (maker) fills: fee 0, 20% rebate
-//   credited (config.ENTRY_IS_MAKER=true).
+//   Confirmed LEADER fills are RESTING (maker) fills: fee 0, 20%
+//   rebate credited (config.ENTRY_IS_MAKER=true).
 //
 // Live marks: every tick we snapshot both sides' midpoints; the
 // dashboard uses them (via computeUnrealized) to show real-time
-// unrealized P&L on every open position, per engine.
+// unrealized P&L on every open position.
 // ============================================================
 
 const config = require('./config');
@@ -127,6 +130,16 @@ async function resolveWindow(engine, win) {
   let resolvedWin = false; // any entry settled as a win this call
   const traded = entries.length > 0;
 
+  // LEADER: any order that never had its fill confirmed by the time
+  // the window closed is not a position — mark it expired (no cost).
+  for (const o of win.orders || []) {
+    if (o.status === 'placed') {
+      o.status = 'expired';
+      o.expiredAt = new Date().toISOString();
+      log(`[${win.engine}] LEADER ORDER EXPIRED ${o.side} ${o.shares}sh @ $${o.price.toFixed(2)} (${o.triggerSide} dipped to $${o.triggerLevel.toFixed(2)}) — price never walked through the limit`);
+    }
+  }
+
   for (const pos of entries) {
     const f = pos.fillFee || 0;
     const r = pos.fillRebate || 0;
@@ -206,12 +219,8 @@ async function resolveWindow(engine, win) {
     pnl,
     isLoss,
     bankrollAfter: engine.bankroll,
-    ladderFills: entries.length,
-    ladderNotional: Math.round(cost * 100) / 100,
-    // FULL-ROUND WIN (skip-filter learning): all ladder rungs filled
-    // in this window AND the window settled with P&L >= 0.
-    fullRound: traded && entries.length === (config.LADDER_RUNGS || []).length,
-    fullRoundWon: traded && entries.length === (config.LADDER_RUNGS || []).length && pnl >= 0,
+    triggerCount: entries.length,
+    leaderNotional: Math.round(cost * 100) / 100,
     peakBankrollAfter: engine.peakBankroll,
     maxDrawdownAfter: engine.maxDrawdown,
     maxDrawdownPctAfter: engine.maxDrawdownPct,
@@ -293,19 +302,17 @@ function computeUnrealized(engine) {
   out.fees = round2(out.fees);
   out.rebates = round2(out.rebates);
 
-  // Ladder summary for the dashboard (resting rungs + fills).
+  // LEADER trigger summary for the dashboard (placed/confirmed/expired).
   const orders = (win && Array.isArray(win.orders)) ? win.orders : [];
-  out.ladder = {
-    placed: win ? !!win.laddersPlaced : false,
-    total: orders.length,
+  out.triggers = {
+    levels: (config.LADDER_RUNGS || []).length * 2,
+    placed: orders.filter((o) => o.status === 'placed').length,
     filled: orders.filter((o) => o.status === 'filled').length,
-    cancelled: orders.filter((o) => o.status === 'cancelled').length,
-    open: orders.filter((o) => o.status === 'open').length,
-    notionalFilled: round2(orders.filter((o) => o.status === 'filled').reduce((a, o) => a + o.shares * o.price, 0)),
-    rungs: orders
-      .filter((o) => o.status === 'filled' || o.status === 'cancelled')
-      .map((o) => ({ side: o.side, price: o.price, status: o.status }))
-      .sort((a, b) => b.price - a.price || (a.side < b.side ? -1 : 1)),
+    expired: orders.filter((o) => o.status === 'expired').length,
+    lastLatencyMs: win ? win.lastLatencyMs : null,
+    orders: orders
+      .map((o) => ({ side: o.side, triggerSide: o.triggerSide, triggerLevel: o.triggerLevel, price: o.price, shares: o.shares, status: o.status, measuredLatencyMs: o.measuredLatencyMs }))
+      .sort((a, b) => b.triggerLevel - a.triggerLevel || (a.triggerSide < b.triggerSide ? -1 : 1)),
   };
   return out;
 }
@@ -314,80 +321,93 @@ function computeUnrealized(engine) {
 // Places the two resting buy-limit ladders (UP + DOWN) on a fresh
 // window. One order per rung per side; each buys a FIXED number of
 // shares (RUNG_SHARES, default 50), resting at the rung price. Called
-// once, the moment the window is first seen.
-function placeLadders(win, engineCfg) {
-  const rungs = (engineCfg.LADDER_RUNGS && engineCfg.LADDER_RUNGS.length ? engineCfg.LADDER_RUNGS : config.LADDER_RUNGS).slice().sort((a, b) => b - a);
-  const shares = engineCfg.RUNG_SHARES != null ? engineCfg.RUNG_SHARES : config.RUNG_SHARES;
-  win.orders = [];
-  for (const side of ['UP', 'DOWN']) {
-    for (const price of rungs) {
-      win.orders.push({
-        side,
-        price,
-        shares,
-        status: 'open', // open -> filled | cancelled
-        filledAt: null,
-        cancelledAt: null,
-      });
-    }
-  }
-  win.laddersPlaced = true;
-  const maxCost = 2 * shares * rungs.reduce((a, p) => a + p, 0);
-  log(`[${win.engine}] LADDERS PLACED ${win.windowStart} — ${rungs.map((p) => '$' + p.toFixed(2)).join(' / ')} × ${shares}sh × UP+DOWN (${win.orders.length} resting orders, max $${maxCost.toFixed(0)}/window) | maker fills | live until window close`);
+// ---- LEADER engine (5m only): buy the NON-dipping side ----
+// When a side's mid is first observed at or below a trigger level,
+// place a buy-limit order on the OPPOSITE (leader) side at its
+// current mid. Each side+level can trigger once per window. The order
+// placement round-trip is timed with a real Polymarket call (ms) and
+// the fill is only confirmed after that latency once the price has
+// walked through the limit price.
+async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, leaderPx, upTokenId, downTokenId, tag) {
+  const shares = config.RUNG_SHARES;
+  const leaderTokenId = leaderSide === 'UP' ? upTokenId : downTokenId;
+
+  // Measure the order-placement round-trip latency (ms) with a real
+  // Polymarket call — in demo mode the midpoint fetch is the closest
+  // proxy for "how long placing an order takes".
+  const t0 = Date.now();
+  let freshPx = leaderPx;
+  try {
+    freshPx = await polymarket.getMidpoint(leaderTokenId);
+  } catch (_) {}
+  const latencyMs = Date.now() - t0;
+  win.lastLatencyMs = latencyMs;
+
+  const limitPrice = Math.round(freshPx * 100) / 100;
+  const order = {
+    side: leaderSide,
+    triggerSide,
+    triggerLevel: level,
+    price: limitPrice,
+    rawMid: freshPx,
+    shares,
+    status: 'placed', // placed -> filled | expired
+    placedAt: new Date().toISOString(),
+    placedAtMs: Date.now(),
+    measuredLatencyMs: latencyMs,
+    confirmAtMs: Date.now() + Math.max(latencyMs, config.LEADER.CONFIRM_MS_MIN),
+    filledAt: null,
+    expiredAt: null,
+    entryRef: null,
+  };
+  win.orders.push(order);
+  log(`${tag} LEADER ORDER placed — ${triggerSide} dipped to $${level.toFixed(2)} -> buy ${leaderSide} ${shares}sh @ $${limitPrice.toFixed(2)} (mid $${freshPx.toFixed(3)}) | order latency ${latencyMs}ms, fill confirmed after price walks through`);
 }
 
-// One strategy tick for a live window. A resting buy limit at price P
-// fills the moment the observed mid price trades AT or BELOW P; the
-// fill happens AT the limit price P (maker fill). All crossed rungs on
-// a side fill in the same tick (highest price first). Immediately
-// after a fill, the opposite side's SAME-PRICE rung is cancelled.
-// Rungs keep resting until window close — there is no cutoff time.
-function ladderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTokenId, downTokenId) {
-  if (!win.laddersPlaced) placeLadders(win, engineCfg);
+// Marks confirmed fills for orders whose placement latency has elapsed
+// and whose leader-side price has walked through the limit price.
+function confirmLeaderFills(engine, win, tag, upPrice, downPrice, upTokenId, downTokenId) {
+  const nowMs = Date.now();
+  for (const order of win.orders) {
+    if (order.status !== 'placed') continue;
+    if (nowMs < order.confirmAtMs) continue; // placement still settling
+    const cur = priceOf(order.side, upPrice, downPrice);
+    if (cur == null) continue;
+    if (cur > order.price) continue; // price hasn't walked through yet
+    order.status = 'filled';
+    order.filledAt = new Date().toISOString();
+    const entry = fireEntry(win, order.side, order.shares, order.price, upTokenId, downTokenId,
+      `LEADER flip — ${order.triggerSide} dipped to $${order.triggerLevel.toFixed(2)} → buy ${order.side} @ $${order.price.toFixed(2)} (walk-through confirmed, order latency ${order.measuredLatencyMs}ms)`);
+    order.entryRef = entry;
+    log(`${tag} LEADER FILL CONFIRMED ${order.side} ${order.shares}sh @ $${order.price.toFixed(2)} — price walked through the limit (latency ${order.measuredLatencyMs}ms)`);
+  }
+}
 
-  const orderBy = {};
-  for (const o of win.orders) orderBy[o.side + ':' + o.price] = o;
+// One strategy tick for a live window: arm new triggers, then confirm
+// pending fills.
+async function leaderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTokenId, downTokenId) {
+  const rungs = (config.LADDER_RUNGS || []).slice().sort((a, b) => b - a);
+  win.triggered = win.triggered || {};
 
-  // Process UP first, then DOWN; within a side highest rung first, so
-  // the cross-cancel rule resolves deterministically even if both
-  // sides appear fillable in the same tick.
-  for (const side of ['UP', 'DOWN']) {
-    const px = priceOf(side, upPrice, downPrice);
+  // Process UP first, then DOWN; within a side highest level first.
+  for (const triggerSide of ['UP', 'DOWN']) {
+    const px = priceOf(triggerSide, upPrice, downPrice);
     if (px == null) continue;
-    const rungs = win.orders.filter((o) => o.side === side && o.status === 'open').map((o) => o.price).sort((a, b) => b - a);
-    for (const price of rungs) {
-      if (px > price) break; // mid above this rung and all lower ones
-      const order = orderBy[side + ':' + price];
-      if (!order || order.status !== 'open') continue;
-      fillRung(engine, win, order, upTokenId, downTokenId);
+    for (const level of rungs) {
+      if (px > level) break; // above this level and all lower ones
+      const key = triggerSide + ':' + level;
+      if (win.triggered[key]) continue;
+      const leaderSide = triggerSide === 'UP' ? 'DOWN' : 'UP';
+      const leaderPx = priceOf(leaderSide, upPrice, downPrice);
+      if (leaderPx == null) continue;
+      win.triggered[key] = true;
+      await placeLeaderOrder(engine, win, triggerSide, level, leaderSide, leaderPx, upTokenId, downTokenId, tag);
     }
   }
+
+  confirmLeaderFills(engine, win, tag, upPrice, downPrice, upTokenId, downTokenId);
 }
 
-// Fills a rung as a resting maker fill at its limit price, then
-// cancels the opposite side's same-price rung.
-function fillRung(engine, win, order, upTokenId, downTokenId) {
-  const side = order.side;
-  const opposite = side === 'UP' ? 'DOWN' : 'UP';
-  const entry = fireEntry(win, side, order.shares, order.price, upTokenId, downTokenId,
-    `ladder fill — ${side} crossed $${order.price.toFixed(2)} (resting limit, ${order.shares}sh = $${(order.shares * order.price).toFixed(2)} cost, maker fill)`);
-  order.status = 'filled';
-  order.filledAt = new Date().toISOString();
-  order.entryRef = entry;
-  log(`[${win.engine}] LADDER FILL ${side} @ $${order.price.toFixed(2)} — ${order.shares}sh (cost $${(order.shares * order.price).toFixed(2)}) — riding to resolution`);
-
-  const cancelTarget = (win.orders || []).find((o) => o.side === opposite && o.price === order.price && o.status === 'open');
-  if (cancelTarget) {
-    cancelTarget.status = 'cancelled';
-    cancelTarget.cancelledAt = new Date().toISOString();
-    log(`[${win.engine}] LADDER CANCEL ${opposite} @ $${order.price.toFixed(2)} (${side} $${order.price.toFixed(2)} filled — cross-cancel rule)`);
-  }
-}
-
-// One full pass over a single engine: hand off closed windows, resolve
-// pendings, find the live market, run the engine's strategy.
-// One full pass over a single engine: hand off closed windows, resolve
-// pendings, find the live market, run the engine's strategy.
 async function engineTick(state, engineKey, engineCfg, nowSec) {
   const engine = state.engines[engineKey];
   const tag = `[${engineKey}]`;
@@ -446,13 +466,14 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           downTokenId,
           signal: `${engineCfg.STRATEGY}_${engineKey}`,
           entries: [],
-          laddersPlaced: false,
           orders: [],
+          triggered: {},
+          lastLatencyMs: null,
           finalUpPrice: null,
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart} opened — DUAL LADDER: rungs $${(config.LADDER_RUNGS || []).join(', $')} × ${config.RUNG_SHARES}sh × UP+DOWN | cross-cancel same-price rungs | maker fills | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
+        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh @ its mid | fill confirmed after price walks through | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -472,9 +493,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
       const win = engine.currentWindow;
 
       if (win && nowSec < windowEnd) {
-        const elapsed = nowSec - win.windowStart;
-
-        ladderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTokenId, downTokenId);
+        await leaderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTokenId, downTokenId);
 
         // Snapshot both sides' prices on every tick while the window is
         // still open. Whichever snapshot ends up closest to windowEnd is
@@ -531,63 +550,13 @@ async function tick() {
   }
 }
 
-// Replays an engine's resolved windows and computes, per skip filter
-// N (config.SKIP_FILTERS), the P&L the bot WOULD have made if it had
-// skipped the next N windows after N consecutive FULL-ROUND wins
-// (all rungs filled + won). Purely observational — trading logic is
-// untouched. Skipped windows contribute nothing; no-trade windows are
-// ignored; any window that isn't a full-round win breaks the streak.
-function computeSkipFilters(engine) {
-  const hist = (engine && Array.isArray(engine.windowHistory)) ? engine.windowHistory : [];
-  const filters = (config.SKIP_FILTERS || [1, 2, 3, 4]).map((n) => {
-    let streak = 0, skipLeft = 0, pnl = 0, traded = 0, skipped = 0, fullWins = 0;
-    for (const w of hist) {
-      if (!w.traded) continue;
-      if (skipLeft > 0) {
-        skipLeft -= 1;
-        skipped += 1;
-        continue;
-      }
-      traded += 1;
-      pnl += w.pnl || 0;
-      if (w.fullRoundWon) {
-        fullWins += 1;
-        streak += 1;
-        if (streak >= n) {
-          skipLeft = n;
-          streak = 0;
-        }
-      } else {
-        streak = 0;
-      }
-    }
-    return {
-      label: n + 'w' + n + 's',
-      n,
-      traded,
-      skipped,
-      fullWins,
-      pnl: round2(pnl),
-    };
-  });
-  const actual = { label: 'actual', n: 0, traded: 0, skipped: 0, fullWins: 0, pnl: 0 };
-  for (const w of hist) {
-    if (!w.traded) continue;
-    actual.traded += 1;
-    actual.pnl += w.pnl || 0;
-    if (w.fullRoundWon) actual.fullWins += 1;
-  }
-  actual.pnl = round2(actual.pnl);
-  return { actual, filters };
-}
-
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
     const rungs = (config.LADDER_RUNGS || []).map((p) => '$' + p.toFixed(2)).join(' / ');
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | DUAL LADDER: ${rungs} × ${config.RUNG_SHARES}sh × UP+DOWN | cross-cancel same-price rungs | maker fills (20% rebate) | no cutoff — rungs live until window close`);
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh @ mid | fill confirmed after price walks through (latency measured) | maker fills (20% rebate) | no cutoff`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
 
-module.exports = { startBotLoop, tick, computeUnrealized, computeSkipFilters };
+module.exports = { startBotLoop, tick, computeUnrealized };

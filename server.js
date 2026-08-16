@@ -9,7 +9,7 @@ const express = require('express');
 const path = require('path');
 const config = require('./config');
 const { loadState } = require('./state');
-const { startBotLoop, computeUnrealized, computeSkipFilters } = require('./bot');
+const { startBotLoop, computeUnrealized } = require('./bot');
 const { runLearn } = require('./learn');
 
 const app = express();
@@ -40,7 +40,6 @@ app.get('/api/state', (req, res) => {
         RUNG_SHARES: config.RUNG_SHARES,
       },
       liveWindow: live,
-      skipFilters: computeSkipFilters(eng),
       totalFees: fees,
       totalRebates: rebates,
     };

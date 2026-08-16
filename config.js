@@ -3,31 +3,35 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v25 — DUAL LADDER, resting limit orders only):
+// STRATEGY (v26 — LEADER, single 5m engine):
 //
-//   BOTH engines (5m and 15m) run the SAME DUAL_LADDER logic:
-//     1. As soon as a window opens, place TWO resting buy-limit
-//        ladders — one for UP, one for DOWN — immediately, with no
-//        waiting / monitoring phase and no entry cutoff. Rungs live
-//        until the window closes.
-//     2. Each ladder has rungs at LADDER_RUNGS (0.40 down to 0.10);
-//        every rung buys a FIXED RUNG_SHARES (50) shares, regardless
-//        of dollar cost (cost = shares x rung price, filled AT the
-//        rung price as a maker fill).
-//     3. CROSS-CANCEL RULE: the instant a rung fills on one side,
-//        the opposite side's SAME-PRICE rung is cancelled (e.g. UP
-//        0.40 fills -> DOWN 0.40 order is cancelled). All other
-//        rungs on both ladders stay live and are fully independent.
-//     4. At resolution, the winning side pays $1/share; the losing
-//        side pays $0. Unfilled rungs were never positions — they
-//        simply expire with no cost.
+//   The ONLY live strategy is LEADER: when one side's price DIPS to
+//   a trigger level, the bot buys the OPPOSITE (leader) side — the
+//   side that did NOT dip — instead of buying the dip.
 //
-//   Max exposure per window: 2 sides x 7 rungs x 50 shares = 700
-//   shares, up to 100 x sum(rungs) = $175 at the current rung set.
+//   1. One 5-minute window engine only (no 15m). Separate demo
+//      capital, equity curve, drawdown, and streak per engine.
+//   2. Trigger levels at LADDER_RUNGS (0.40 down to 0.10): the first
+//      time a side's mid is observed AT OR BELOW a level in a window,
+//      the bot places a buy-limit order on the opposite side at its
+//      current mid (50 fixed shares, cost = 50 x limit price). Each
+//      side+level can trigger at most once per window. No cutoff —
+//      triggers stay armed until the window closes.
+//   3. FILL CONFIRMATION: fills are NOT assumed. The order is placed
+//      and its placement round-trip latency is measured (ms, real
+//      Polymarket API call). Only AFTER that latency elapses does the
+//      bot check that the price has walked through the order price
+//      (leader mid <= limit) — the fill is then confirmed at the
+//      limit price as a maker fill. Orders that never walk through
+//      expire unfilled at window close (no cost).
+//   4. Resolution: winning side pays $1/share, losing side $0.
+//      Confirmed fills ride to resolution; there is no stop loss.
 //
-//   FEES (per docs.polymarket.com/trading/fees and
-//   docs.polymarket.com/programs/maker-rebates):
-//     - Everything here is a RESTING (maker) limit fill: makers are
+//   Max exposure per window: 2 sides x 7 levels x 50 shares = 700
+//   shares, up to 100 x sum(rungs) = $175 at the current level set.
+//
+//   FEES (per docs.polymarket.com/trading/fees + maker-rebates):
+//     - Confirmed fills are RESTING (maker) limit fills: makers are
 //       never charged fees, and the crypto maker rebate is 20% of
 //       the fee-equivalent, credited on fill.
 //     - ENTRY_IS_MAKER=true models exactly that: fee 0, 20% rebate.
@@ -45,31 +49,34 @@ module.exports = {
   // Used when an engine doesn't set its own CAPITAL.
   STARTING_BANKROLL: 1000,
 
-  // ---- Ladder ----
-  // Buy-limit rungs, highest first. Both engines place one ladder
-  // per side at every one of these prices, immediately at window
-  // open. Rungs live until the window closes (no cutoff).
+  // ---- Trigger levels ----
+  // LEADER: the first time a side's price is observed at or below
+  // one of these levels, buy the opposite (leader) side. Highest
+  // level first; every side+level can trigger once per window.
   LADDER_RUNGS: [0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10],
-  // Shares bought on EACH rung (fixed, regardless of dollar cost).
-  // cost per rung = RUNG_SHARES x rung price (e.g. 50sh @ 0.40 = $20).
+  // Shares bought per trigger (fixed, regardless of dollar cost).
+  // cost per trigger = RUNG_SHARES x leader mid (e.g. 50sh @ 0.60 = $30).
   RUNG_SHARES: 50,
 
+  // ---- Leader fill confirmation ----
+  // Fills are only confirmed AFTER the price walks through the order
+  // price, and only after the measured order-placement latency (a
+  // real Polymarket round-trip, logged per trigger). CONFIRM_MS_MIN
+  // is the floor below which we still wait before checking walk-through.
+  LEADER: {
+    CONFIRM_MS_MIN: 300,
+  },
+
   // ---- Engines ----
-  // Each engine runs on its own window length with its OWN bankroll,
-  // current window, and history. Keys ('5m' / '15m') are used
-  // everywhere in state and the dashboard.
+  // One 5m engine with its own bankroll and history. The 15m engine
+  // was removed in v26 — the backtest proved LEADER works, so it is
+  // now the ONLY live strategy.
   ENGINES: {
     '5m': {
       label: '5m',
-      STRATEGY: 'DUAL_LADDER',
+      STRATEGY: 'LEADER',
       WINDOW_MINUTES: 5,
       CAPITAL: 1000, // this engine's starting bankroll (independent)
-    },
-    '15m': {
-      label: '15m',
-      STRATEGY: 'DUAL_LADDER',
-      WINDOW_MINUTES: 15,
-      CAPITAL: 1000,
     },
   },
 
@@ -80,41 +87,27 @@ module.exports = {
   // Maker rebate = 20% of the fee-equivalent (Crypto category).
   // Only resting (maker) fills earn it.
   MAKER_REBATE_RATE: 0.20,
-  // true = all ladder fills are modeled as resting maker fills:
-  // fee 0, 20% rebate credited. (This strategy ONLY uses resting
-  // limit orders, so this should stay true.)
+  // true = confirmed leader fills are modeled as resting maker fills:
+  // fee 0, 20% rebate credited. (LEADER entries are buy-limits that
+  // fill on walk-through, so this stays true.)
   ENTRY_IS_MAKER: true,
 
   // ---- Resolution ----
-  // Filled rungs ride to resolution. If either side's price is
-  // observed at/above RESOLUTION_WIN_THRESHOLD in the last tick
-  // sampled before the window closes, that side is declared the
-  // winner immediately. Otherwise resolution falls back to polling
-  // the real market price after close until it converges past one
-  // of these thresholds.
+  // If either side's price is observed at/above RESOLUTION_WIN_THRESHOLD
+  // in the last tick sampled before the window closes, that side is
+  // declared the winner immediately. Otherwise resolution falls back
+  // to polling the real market price after close until it converges.
   RESOLUTION_WIN_THRESHOLD: 0.90,
   RESOLUTION_LOSS_THRESHOLD: 0.10,
 
-  // ---- Skip-filter learning (tracking only, bot keeps trading) ----
-  // The dashboard replays resolved windows and shows what P&L would
-  // have been if, after N consecutive FULL-ROUND wins (all 7 rungs
-  // filled and that side won), the bot had skipped the next N
-  // windows. Purely observational — live trading is unaffected.
-  SKIP_FILTERS: [1, 2, 3, 4],
-
   // ---- Learn / backtest (dashboard "Learn" panel — trading unchanged) ----
-  // Replays real Polymarket price history to evaluate the live ladder
-  // strategy against improvement variants:
-  //   timeFilter — deep rungs (DEEP_RUNGS) may only fill before
-  //                TIME_FILTER_FRACTION of the window has elapsed.
-  //   cap        — after CAP_RUNGS fills on one side, its lower rungs
-  //                fill at CAP_TAIL_SHARES instead of the full size.
-  //   tp         — sell a side's shares at TAKE_PROFIT when the mid
-  //                bounces up to it (buy the dip, sell the bounce).
-  // WINDOWS: how many PAST windows to fetch per engine on refresh.
-  // LEARN_ON_BOOT: refresh learn.json in the background on start.
+  // Replays real Polymarket price history to evaluate LEADER (and the
+  // historical ladder variants it replaced) so the dashboard stays
+  // honest about what the strategy is worth. WINDOWS: how many PAST
+  // windows to fetch per engine on refresh. LEARN_ON_BOOT: refresh
+  // learn.json in the background on start.
   LEARN: {
-    WINDOWS: { '5m': 48, '15m': 24 },
+    WINDOWS: { '5m': 48 },
     FIDELITY: 1,
     DEEP_RUNGS: [0.15, 0.10],
     TIME_FILTER_FRACTION: 0.60,
@@ -129,7 +122,7 @@ module.exports = {
   // ---- Loop timing ----
   // Polymarket's own docs confirm /midpoint allows 1,500 req/10s
   // (150/s) per IP. Polling every 500ms uses a small fraction of
-  // that even with two engines x two tokens checked per tick.
+  // that even with one engine x two tokens checked per tick.
   POLL_INTERVAL_MS: 500,
 
   // ---- Files ----

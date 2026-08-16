@@ -1,15 +1,13 @@
 // ============================================================
-// learn.js — backtests the DUAL_LADDER strategy (and improvement
-// variants) against REAL Polymarket price history, then writes
-// learn.json for the dashboard "Learn" panel.
+// learn.js — backtests the LEADER strategy (plus the historical
+// ladder variants it replaced) against REAL Polymarket price history,
+// then writes learn.json for the dashboard "Learn" panel.
 //
 //   npm run learn        — refresh now and print a summary
 //   (server)             — auto-refreshes on boot if LEARN_ON_BOOT
 //
-// Variants evaluated (see config.LEARN):
-//   base, timeFilter, cap, tp, all, plus skip what-ifs 1w1s..4w4s
-//   on the base replay (full-round wins only, same rule as the
-//   live dashboard tracker).
+// Variants evaluated (see config.LEARN): base, timeFilter, cap, tp,
+// all (ladder history) and leader (the live strategy).
 // ============================================================
 
 const fs = require('fs');
@@ -129,30 +127,6 @@ function aggregate(rows, name) {
   };
 }
 
-// Skip what-ifs (1w1s..4w4s) applied to the BASE replay sequence —
-// same rules as the live tracker: full-round win = all rungs filled
-// and pnl >= 0; N consecutive full-round wins -> skip next N.
-function skipFilters(rows) {
-  return (config.SKIP_FILTERS || [1, 2, 3, 4]).map((n) => {
-    let streak = 0, skipLeft = 0, pnl = 0, traded = 0, skipped = 0, fullWins = 0;
-    for (const w of rows) {
-      const v = w.results && w.results.base;
-      if (!v || v.fills.length === 0) continue;
-      if (skipLeft > 0) { skipLeft -= 1; skipped += 1; continue; }
-      traded += 1;
-      pnl += v.pnl;
-      if (v.fullRoundWon) {
-        fullWins += 1;
-        streak += 1;
-        if (streak >= n) { skipLeft = n; streak = 0; }
-      } else {
-        streak = 0;
-      }
-    }
-    return { label: n + 'w' + n + 's', n, traded, skipped, fullWins, pnl: round2(pnl) };
-  });
-}
-
 // Per-rung stats from the BASE replay: how often each level is
 // touched (mid <= level), how often it fills, and how often the
 // filled side actually WON the window (vs the level's implied
@@ -216,7 +190,6 @@ async function runLearn() {
     perTf[tf] = {
       windows: rows.length,
       variants: agg,
-      skips: skipFilters(rows),
       rungs: rungStats(rows, config.LADDER_RUNGS),
     };
   }
@@ -254,10 +227,6 @@ function printSummary(summary) {
         String(v.mixed).padStart(6),
         String(v.sells).padStart(6)
       );
-    }
-    console.log('Skip what-if  P&L      Traded  Skipped FullW');
-    for (const s of e.skips) {
-      console.log(String(s.label).padEnd(13), (s.pnl >= 0 ? '+' : '') + s.pnl.toFixed(2).padStart(8), String(s.traded).padStart(7), String(s.skipped).padStart(8), String(s.fullWins).padStart(5));
     }
     console.log('Rung   Touches Fills  WinRate  Edge   AvgPnl/fill');
     for (const r of e.rungs) {

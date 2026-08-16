@@ -1,7 +1,7 @@
 {
   "name": "btc-fairvalue-bot",
   "version": "1.0.0",
-  "description": "Polymarket BTC/ETH up/down paper bot \u2014 5m + 15m dual-ladder (resting limit) engines",
+  "description": "Polymarket BTC up/down paper bot — 5m LEADER engine (buy the non-dipping side, walk-through fill confirmation)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
