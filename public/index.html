@@ -224,7 +224,7 @@
       if (!o) return '<span class="ladder-cell"></span>';
       if (o.status === 'filled') return '<span class="ladder-cell filled ' + o.side.toLowerCase() + '">FILLED ' + o.shares + 'sh</span>';
       if (o.status === 'cancelled') return '<span class="ladder-cell cancelled">cancelled</span>';
-      return '<span class="ladder-cell open">$' + o.amount + ' resting</span>';
+      return '<span class="ladder-cell open">' + o.shares + 'sh resting</span>';
     };
     return '<div class="ladder">' +
       '<div class="ladder-head"><span>Rung</span><span>UP</span><span>DOWN</span></div>' +
@@ -396,7 +396,7 @@
     const win = e.currentWindow;
     const lc = e.lastCheck || {};
     const rungs = (cfg.LADDER_RUNGS && cfg.LADDER_RUNGS.length) ? cfg.LADDER_RUNGS : [0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10];
-    const rungAmt = cfg.RUNG_AMOUNT != null ? cfg.RUNG_AMOUNT : 10;
+    const rungShares = cfg.RUNG_SHARES != null ? cfg.RUNG_SHARES : 50;
     const placed = win ? (win.entries || []).length : 0;
     const lc2 = ladderCounts(win);
     const streak = e.streak || { wins: 0, losses: 0 };
@@ -405,7 +405,7 @@
     const maxDDPct = e.maxDrawdownPct != null ? e.maxDrawdownPct : 0;
     const currDD = Math.max(0, peak - equity);
     const currDDPct = peak > 0 ? currDD / peak : 0;
-    const schedule = 'DUAL LADDER · ' + rungs.map((p) => '$' + p.toFixed(2)).join(' / ') + ' × $' + rungAmt + ' per rung · maker fills · no cutoff';
+    const schedule = 'DUAL LADDER · ' + rungs.map((p) => '$' + p.toFixed(2)).join(' / ') + ' × ' + rungShares + 'sh per rung · maker fills · no cutoff';
 
     return '<div class="engine">' +
       '<div class="engine-head">' +
@@ -434,7 +434,7 @@
         '<div class="chip"><div class="k">Rungs Filled</div><div class="v ' + ((lc2 && lc2.filled > 0) ? 'pos' : '') + '">' + (win ? lc2.filled + ' / ' + lc2.total : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Rungs Resting</div><div class="v">' + (win ? lc2.open : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Cross-Cancelled</div><div class="v">' + (win ? lc2.cancelled : '—') + '</div></div>' +
-        '<div class="chip"><div class="k">Max Ladder Risk</div><div class="v">' + '$' + (lc2.total * rungAmt).toFixed(0) + '</div></div>' +
+        '<div class="chip"><div class="k">Max Ladder Risk</div><div class="v">' + '$' + (2 * rungShares * rungs.reduce((a, p) => a + p, 0)).toFixed(0) + '</div></div>' +
         '<div class="chip"><div class="k">Win Streak</div><div class="v ' + (streak.wins > 0 ? 'pos' : '') + '">W' + streak.wins + '</div></div>' +
         '<div class="chip"><div class="k">Loss Streak</div><div class="v ' + (streak.losses > 0 ? 'neg' : '') + '">L' + streak.losses + '</div></div>' +
         '<div class="chip"><div class="k">Peak Capital</div><div class="v">' + fmt$(peak) + '</div></div>' +

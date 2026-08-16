@@ -11,9 +11,9 @@
 //        waiting / monitoring phase and no entry cutoff. Rungs live
 //        until the window closes.
 //     2. Each ladder has rungs at LADDER_RUNGS (0.40 down to 0.10);
-//        every rung is sized at RUNG_AMOUNT ($10) worth of shares
-//        (shares = RUNG_AMOUNT / rung price, filled AT the rung
-//        price as a maker fill).
+//        every rung buys a FIXED RUNG_SHARES (50) shares, regardless
+//        of dollar cost (cost = shares x rung price, filled AT the
+//        rung price as a maker fill).
 //     3. CROSS-CANCEL RULE: the instant a rung fills on one side,
 //        the opposite side's SAME-PRICE rung is cancelled (e.g. UP
 //        0.40 fills -> DOWN 0.40 order is cancelled). All other
@@ -22,7 +22,8 @@
 //        side pays $0. Unfilled rungs were never positions — they
 //        simply expire with no cost.
 //
-//   Max exposure per window: 2 sides x 7 rungs x $10 = $140.
+//   Max exposure per window: 2 sides x 7 rungs x 50 shares = 700
+//   shares, up to 100 x sum(rungs) = $175 at the current rung set.
 //
 //   FEES (per docs.polymarket.com/trading/fees and
 //   docs.polymarket.com/programs/maker-rebates):
@@ -49,8 +50,9 @@ module.exports = {
   // per side at every one of these prices, immediately at window
   // open. Rungs live until the window closes (no cutoff).
   LADDER_RUNGS: [0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10],
-  // Notional ($) wagered on EACH rung. shares = RUNG_AMOUNT / price.
-  RUNG_AMOUNT: 10,
+  // Shares bought on EACH rung (fixed, regardless of dollar cost).
+  // cost per rung = RUNG_SHARES x rung price (e.g. 50sh @ 0.40 = $20).
+  RUNG_SHARES: 50,
 
   // ---- Engines ----
   // Each engine runs on its own window length with its OWN bankroll,

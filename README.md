@@ -13,9 +13,9 @@ resolution, and unfilled rungs simply expire at window close.
 
 1. **Immediately at window open**, place **two resting buy-limit ladders** —
    one for **UP**, one for **DOWN** — at rungs **0.40, 0.35, 0.30, 0.25,
-   0.20, 0.15, 0.10**. Each rung rests **$10 notional** worth of shares
-   (`shares = RUNG_AMOUNT ÷ rung price`, filled **at** the rung price as a
-   maker fill).
+   0.20, 0.15, 0.10**. Each rung buys a **fixed 50 shares** regardless of
+   dollar cost (`cost = 50 × rung price`, filled **at** the rung price as
+   a maker fill).
 2. **Fill rule**: a rung fills the moment its side's price trades at or
    below the rung price. All crossed rungs fill (highest first), even in
    the same tick.
@@ -29,11 +29,11 @@ resolution, and unfilled rungs simply expire at window close.
    pays **$0**. Profit = (winning-side shares × $1) − total cost of all
    filled rungs.
 
-Max exposure per window: **2 sides × 7 rungs × $10 = $140**.
+Max exposure per window: **2 sides × 7 rungs × 50 shares = 700 shares**, up to **$175** (100 × Σ rungs) at the current rung set.
 
-Example: UP 0.40 fills (25 shares, $10) and UP 0.30 fills later (33.33
-shares, $10). UP wins → payout 58.33 shares → **+$38.33 profit**; UP loses
-→ **−$20**.
+Example: UP 0.40 fills (50 shares, $20) and UP 0.30 fills later (50
+shares, $15). UP wins → payout 100 shares → **+$65 profit**; UP loses →
+**−$35**.
 
 ## Fees & rebates (Polymarket docs, Crypto category)
 
@@ -71,7 +71,7 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
 
 - `ASSET`: `'btc'` or `'eth'`
 - `LADDER_RUNGS`: rung prices, highest first (default `0.40 … 0.10`)
-- `RUNG_AMOUNT`: notional per rung (**$10**)
+- `RUNG_SHARES`: fixed shares per rung (**50**)
 - `ENGINES`: one block per engine (`'5m'` and `'15m'`), each with:
   - `WINDOW_MINUTES`: window length for that engine
   - `CAPITAL`: that engine's starting bankroll (independent)

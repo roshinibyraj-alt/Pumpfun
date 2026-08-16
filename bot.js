@@ -6,7 +6,8 @@
 //   5m / 15m — DUAL_LADDER (resting limit orders only):
 //     As soon as a window opens, place TWO resting buy-limit ladders
 //     immediately — one for UP, one for DOWN — with rungs at 0.40,
-//     0.35, 0.30, 0.25, 0.20, 0.15 and 0.10, $10 notional per rung.
+//     0.35, 0.30, 0.25, 0.20, 0.15 and 0.10, 50 fixed shares per
+//     rung (cost = 50 x rung price, filled at the rung price).
 //     CROSS-CANCEL RULE: when a rung fills on one side, the opposite
 //     side's SAME-PRICE rung is cancelled; every other rung stays
 //     live. No monitoring phase, no cutoff — rungs rest until the
@@ -307,20 +308,19 @@ function computeUnrealized(engine) {
 
 // ---- engines (5m & 15m): DIP_RECOVERY (pure dip signal, no SL) ----
 // Places the two resting buy-limit ladders (UP + DOWN) on a fresh
-// window. One order per rung per side; each sized at RUNG_AMOUNT
-// dollars of shares, resting at the rung price. Called once, the
-// moment the window is first seen.
+// window. One order per rung per side; each buys a FIXED number of
+// shares (RUNG_SHARES, default 50), resting at the rung price. Called
+// once, the moment the window is first seen.
 function placeLadders(win, engineCfg) {
   const rungs = (engineCfg.LADDER_RUNGS && engineCfg.LADDER_RUNGS.length ? engineCfg.LADDER_RUNGS : config.LADDER_RUNGS).slice().sort((a, b) => b - a);
-  const amount = engineCfg.RUNG_AMOUNT != null ? engineCfg.RUNG_AMOUNT : config.RUNG_AMOUNT;
+  const shares = engineCfg.RUNG_SHARES != null ? engineCfg.RUNG_SHARES : config.RUNG_SHARES;
   win.orders = [];
   for (const side of ['UP', 'DOWN']) {
     for (const price of rungs) {
       win.orders.push({
         side,
         price,
-        amount,
-        shares: round5(amount / price),
+        shares,
         status: 'open', // open -> filled | cancelled
         filledAt: null,
         cancelledAt: null,
@@ -328,7 +328,8 @@ function placeLadders(win, engineCfg) {
     }
   }
   win.laddersPlaced = true;
-  log(`[${win.engine}] LADDERS PLACED ${win.windowStart} — ${rungs.map((p) => '$' + p.toFixed(2)).join(' / ')} × $${amount} × UP+DOWN (${win.orders.length} resting orders, max $${(rungs.length * 2 * amount).toFixed(0)}/window) | maker fills | live until window close`);
+  const maxCost = 2 * shares * rungs.reduce((a, p) => a + p, 0);
+  log(`[${win.engine}] LADDERS PLACED ${win.windowStart} — ${rungs.map((p) => '$' + p.toFixed(2)).join(' / ')} × ${shares}sh × UP+DOWN (${win.orders.length} resting orders, max $${maxCost.toFixed(0)}/window) | maker fills | live until window close`);
 }
 
 // One strategy tick for a live window. A resting buy limit at price P
@@ -365,7 +366,7 @@ function fillRung(engine, win, order, upTokenId, downTokenId) {
   const side = order.side;
   const opposite = side === 'UP' ? 'DOWN' : 'UP';
   const entry = fireEntry(win, side, order.shares, order.price, upTokenId, downTokenId,
-    `ladder fill — ${side} crossed $${order.price.toFixed(2)} (resting limit, $${order.amount.toFixed(2)} notional = ${order.shares}sh, maker fill)`);
+    `ladder fill — ${side} crossed $${order.price.toFixed(2)} (resting limit, ${order.shares}sh = $${(order.shares * order.price).toFixed(2)} cost, maker fill)`);
   order.status = 'filled';
   order.filledAt = new Date().toISOString();
   order.entryRef = entry;
@@ -447,7 +448,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart} opened — DUAL LADDER: rungs $${(config.LADDER_RUNGS || []).join(', $')} × $${config.RUNG_AMOUNT} × UP+DOWN | cross-cancel same-price rungs | maker fills | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
+        log(`${tag} Window ${windowStart} opened — DUAL LADDER: rungs $${(config.LADDER_RUNGS || []).join(', $')} × ${config.RUNG_SHARES}sh × UP+DOWN | cross-cancel same-price rungs | maker fills | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -529,7 +530,7 @@ async function tick() {
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
     const rungs = (config.LADDER_RUNGS || []).map((p) => '$' + p.toFixed(2)).join(' / ');
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | DUAL LADDER: ${rungs} × $${config.RUNG_AMOUNT} × UP+DOWN | cross-cancel same-price rungs | maker fills (20% rebate) | no cutoff — rungs live until window close`);
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | DUAL LADDER: ${rungs} × ${config.RUNG_SHARES}sh × UP+DOWN | cross-cancel same-price rungs | maker fills (20% rebate) | no cutoff — rungs live until window close`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
