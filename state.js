@@ -33,15 +33,6 @@ function engineDefault(engineKey, engineCfg) {
     pendingResolutions: [],
     windowHistory: [],
     lastCheck: null,
-    // Bucket filter (main + mini):
-    //   bucket      — main bucket: the full dollar loss of every lost
-    //                 bet accumulates here.
-    //   miniBucket  — the installment wagered on the next window:
-    //                 bucket / BUCKET_DIVISOR at the moment a loss
-    //                 happens. ONE win of a mini-bucket bet clears the
-    //                 whole bucket; a loss re-splits it.
-    bucket: 0,
-    miniBucket: 0,
     // Streak tracker:
     //   streak — current consecutive wins and losses (one of the two
     //            is always 0; no-trade windows don't change it).
@@ -109,8 +100,9 @@ function loadState() {
         raw.engines[key] = engineDefault(key, cfg);
       } else {
         const eng = raw.engines[key];
-        if (eng.bucket == null) eng.bucket = 0;
-        if (eng.miniBucket == null) eng.miniBucket = 0;
+        // Bucket-era fields are gone with v25 (DUAL_LADDER strategy).
+        delete eng.bucket;
+        delete eng.miniBucket;
         delete eng.bucketClears;
         delete eng.lastClearWins;
 

@@ -1,25 +1,17 @@
 // ============================================================
-// bot.js — v24. ONE unified engine shape (5m and 15m), each with its
-// own bankroll, own bucket, current window, pending resolutions, and
-// history. Both engines run the SAME DIP_RECOVERY strategy — the 15m
-// is a proportional mirror of the 5m (see config.js):
+// bot.js — v25. ONE unified engine shape (5m and 15m), each with its
+// own bankroll, current window, pending resolutions, and history.
+// Both engines run the SAME DUAL_LADDER strategy (see config.js):
 //
-//   5m / 15m — DIP_RECOVERY:
-//     MONITOR the first MONITOR_SECS (5m 120s / 15m 420s), record the
-//     last moment each side is below DIP_LEVEL (0.50); TARGET = latest
-//     dipper; no dip -> no trade. After the monitor phase, when the
-//     target returns to 0.50, buy BUY_AMOUNT ($20 for both engines)
-//     PLUS the mini bucket installment. NO STOP LOSS — every position
-//     rides to resolution, win or lose. No entry after 280s into a 5m
-//     window / 870s into a 15m window.
-//
-//   BUCKET FILTER (main + mini):
-//     - Every loss adds its FULL dollar loss to the MAIN bucket, then
-//       re-splits: miniBucket = bucket / BUCKET_DIVISOR.
-//     - The next window bets base + miniBucket.
-//     - The bucket clears (main and mini go to 0) only after TWO
-//       consecutive wins of mini-bucket bets; a single win leaves it
-//       intact. A loss re-splits by BUCKET_DIVISOR again.
+//   5m / 15m — DUAL_LADDER (resting limit orders only):
+//     As soon as a window opens, place TWO resting buy-limit ladders
+//     immediately — one for UP, one for DOWN — with rungs at 0.40,
+//     0.35, 0.30, 0.25, 0.20, 0.15 and 0.10, $10 notional per rung.
+//     CROSS-CANCEL RULE: when a rung fills on one side, the opposite
+//     side's SAME-PRICE rung is cancelled; every other rung stays
+//     live. No monitoring phase, no cutoff — rungs rest until the
+//     window closes. Filled shares ride to resolution: winner pays
+//     $1/share, loser pays $0; unfilled rungs cost nothing.
 //
 //   TRACKERS (per engine):
 //     - streak: current consecutive wins / losses.
@@ -31,8 +23,8 @@
 //   Crypto: taker fee = shares x 0.07 x price x (1 - price).
 //   Makers never pay fees; crypto maker rebate = 20% of the
 //   fee-equivalent, only for resting (maker) fills.
-//   config.ENTRY_IS_MAKER=false -> taker fills: fee charged,
-//   rebate 0. true -> maker fills: fee 0, 20% rebate credited.
+//   All ladder fills are RESTING (maker) fills: fee 0, 20% rebate
+//   credited (config.ENTRY_IS_MAKER=true).
 //
 // Live marks: every tick we snapshot both sides' midpoints; the
 // dashboard uses them (via computeUnrealized) to show real-time
@@ -54,8 +46,9 @@ function priceOf(side, upPrice, downPrice) {
   return side === 'UP' ? upPrice : downPrice;
 }
 
-// Builds an ALREADY-FILLED entry at the moment a buy fires. Entries
-// fill at the current midpoint; size is fixed (shares) per order.
+// Builds an ALREADY-FILLED entry at the moment a ladder rung fills.
+// Rungs are RESTING buy limits: they fill AT the rung's limit price
+// (not the current midpoint) as maker fills.
 function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
   const feeEquiv = shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice);
@@ -84,6 +77,7 @@ function fireEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason)
   const entry = makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason);
   win.entries.push(entry);
   log(`[${win.engine || '?'}] ENTRY: ${side} ${shares}sh @ $${fillPrice.toFixed(2)} ($${(shares * fillPrice).toFixed(2)} notional) | fee $${entry.fillFee.toFixed(4)} | rebate $${entry.fillRebate.toFixed(4)} — ${reason}`);
+  return entry;
 }
 
 // Checks whether the window's LAST observed tick (closest snapshot to
@@ -149,12 +143,6 @@ async function resolveWindow(engine, win) {
       settleCredit += pos.pnl;
       if (pos.pnl >= 0) {
         resolvedWin = true;
-      } else {
-        // Bucket filter: a resolution loss (no SL) adds its full loss
-        // to the main bucket and re-splits the mini installment.
-        engine.bucket = Math.round((engine.bucket + Math.abs(pos.pnl)) * 100) / 100;
-        engine.miniBucket = Math.round((engine.bucket / config.BUCKET_DIVISOR) * 100) / 100;
-        log(`[${win.engine}] BUCKET + $${Math.abs(pos.pnl).toFixed(2)} (${pos.side} lost at resolution) -> main $${engine.bucket.toFixed(2)} | mini $${engine.miniBucket.toFixed(2)}`);
       }
     }
     cost += pos.cost;
@@ -178,15 +166,6 @@ async function resolveWindow(engine, win) {
       engine.streak.losses += 1;
       engine.streak.wins = 0;
     }
-  }
-
-  // Bucket filter: the bucket clears (main + mini go to 0) only after
-  // TWO consecutive wins of a mini-bucket bet — a single win leaves it
-  // intact, a loss still re-splits by BUCKET_DIVISOR.
-  if (resolvedWin && win.bucketWager != null && win.bucketWager > 0 && engine.streak.wins >= 2) {
-    engine.bucket = 0;
-    engine.miniBucket = 0;
-    log(`[${win.engine}] BUCKET CLEARED (2nd consecutive win, mini bet $${win.bucketWager.toFixed(2)}) — main $0.00 | mini $0.00`);
   }
 
   // Peak capital + max drawdown trackers (resolved bankroll only).
@@ -226,9 +205,8 @@ async function resolveWindow(engine, win) {
     pnl,
     isLoss,
     bankrollAfter: engine.bankroll,
-    bucketWager: win.bucketWager,
-    bucketAfter: engine.bucket,
-    miniBucketAfter: engine.miniBucket,
+    ladderFills: entries.length,
+    ladderNotional: Math.round(cost * 100) / 100,
     peakBankrollAfter: engine.peakBankroll,
     maxDrawdownAfter: engine.maxDrawdown,
     maxDrawdownPctAfter: engine.maxDrawdownPct,
@@ -259,8 +237,7 @@ function computeUnrealized(engine) {
     fees: 0,
     rebates: 0,
   };
-  if (!win || !Array.isArray(win.entries) || win.entries.length === 0) return out;
-
+  if (win && Array.isArray(win.entries)) {
   for (const e of win.entries) {
     const cur = e.side === 'UP' ? lc.upPrice : lc.downPrice;
     const fee = e.fillFee || 0;
@@ -304,79 +281,106 @@ function computeUnrealized(engine) {
       });
     }
   }
+  }
   out.costBasis = round2(out.costBasis);
   out.currentValue = round2(out.currentValue);
   out.unrealizedPnl = round2(out.unrealizedPnl);
   out.fees = round2(out.fees);
   out.rebates = round2(out.rebates);
+
+  // Ladder summary for the dashboard (resting rungs + fills).
+  const orders = (win && Array.isArray(win.orders)) ? win.orders : [];
+  out.ladder = {
+    placed: win ? !!win.laddersPlaced : false,
+    total: orders.length,
+    filled: orders.filter((o) => o.status === 'filled').length,
+    cancelled: orders.filter((o) => o.status === 'cancelled').length,
+    open: orders.filter((o) => o.status === 'open').length,
+    notionalFilled: round2(orders.filter((o) => o.status === 'filled').reduce((a, o) => a + o.shares * o.price, 0)),
+    rungs: orders
+      .filter((o) => o.status === 'filled' || o.status === 'cancelled')
+      .map((o) => ({ side: o.side, price: o.price, status: o.status }))
+      .sort((a, b) => b.price - a.price || (a.side < b.side ? -1 : 1)),
+  };
   return out;
 }
 
 // ---- engines (5m & 15m): DIP_RECOVERY (pure dip signal, no SL) ----
-function dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPrice, upTokenId, downTokenId) {
-  // MONITOR phase: record the last moment each side is below DIP_LEVEL
-  // (0.30 — the latest dip must come from below 0.30 to qualify).
-  if (!win.monitoringDone) {
-    if (elapsed <= engineCfg.MONITOR_SECS) {
-      if (upPrice < engineCfg.DIP_LEVEL) win.lastDipSec.UP = elapsed;
-      if (downPrice < engineCfg.DIP_LEVEL) win.lastDipSec.DOWN = elapsed;
-    }
-    if (elapsed >= engineCfg.MONITOR_SECS) {
-      win.monitoringDone = true;
-      const upDip = win.lastDipSec.UP;
-      const downDip = win.lastDipSec.DOWN;
-      if (upDip == null && downDip == null) {
-        win.targetSide = null;
-        log(`${tag} Monitor complete at t=${elapsed}s — neither side dipped below $${engineCfg.DIP_LEVEL}; NO TRADE this window`);
-      } else if (downDip != null && (upDip == null || downDip > upDip)) {
-        win.targetSide = 'DOWN';
-        log(`${tag} Monitor complete at t=${elapsed}s — target DOWN (last dip t=${downDip}s below $${engineCfg.DIP_LEVEL}); waiting for return to $${engineCfg.RETURN_LEVEL}`);
-      } else if (upDip != null && (downDip == null || upDip > downDip)) {
-        win.targetSide = 'UP';
-        log(`${tag} Monitor complete at t=${elapsed}s — target UP (last dip t=${upDip}s below $${engineCfg.DIP_LEVEL}); waiting for return to $${engineCfg.RETURN_LEVEL}`);
-      } else {
-        win.targetSide = upPrice <= downPrice ? 'UP' : 'DOWN';
-        log(`${tag} Monitor complete at t=${elapsed}s — dip tie, target ${win.targetSide} (cheaper now); waiting for return to $${engineCfg.RETURN_LEVEL}`);
-      }
+// Places the two resting buy-limit ladders (UP + DOWN) on a fresh
+// window. One order per rung per side; each sized at RUNG_AMOUNT
+// dollars of shares, resting at the rung price. Called once, the
+// moment the window is first seen.
+function placeLadders(win, engineCfg) {
+  const rungs = (engineCfg.LADDER_RUNGS && engineCfg.LADDER_RUNGS.length ? engineCfg.LADDER_RUNGS : config.LADDER_RUNGS).slice().sort((a, b) => b - a);
+  const amount = engineCfg.RUNG_AMOUNT != null ? engineCfg.RUNG_AMOUNT : config.RUNG_AMOUNT;
+  win.orders = [];
+  for (const side of ['UP', 'DOWN']) {
+    for (const price of rungs) {
+      win.orders.push({
+        side,
+        price,
+        amount,
+        shares: round5(amount / price),
+        status: 'open', // open -> filled | cancelled
+        filledAt: null,
+        cancelledAt: null,
+      });
     }
   }
+  win.laddersPlaced = true;
+  log(`[${win.engine}] LADDERS PLACED ${win.windowStart} — ${rungs.map((p) => '$' + p.toFixed(2)).join(' / ')} × $${amount} × UP+DOWN (${win.orders.length} resting orders, max $${(rungs.length * 2 * amount).toFixed(0)}/window) | maker fills | live until window close`);
+}
 
-  // ENTRY: after the monitor phase, buy BUY_AMOUNT worth PLUS the
-  // mini bucket installment once the target side comes back to
-  // RETURN_LEVEL:
-  //   baseShares  = floor(BUY_AMOUNT / px)
-  //   extraShares = floor(engine.miniBucket / px)
-  // NO STOP LOSS — the position rides to resolution.
-  if (win.monitoringDone && !win.entryFired && !win.entrySkipped) {
-    const cutoffSecs = engineCfg.ENTRY_CUTOFF_SECS;
-    if (win.targetSide == null) {
-      win.entrySkipped = true;
-      log(`${tag} No target side — no entry for window ${win.windowStart}`);
-    } else if (cutoffSecs != null && elapsed > cutoffSecs) {
-      // No entry after the cutoff (280s into a 5m / 870s into a 15m).
-      win.entrySkipped = true;
-      log(`${tag} Entry cutoff reached at t=${elapsed}s (> ${cutoffSecs}s) — NO entry for window ${win.windowStart}`);
-    } else {
-      const px = priceOf(win.targetSide, upPrice, downPrice);
-      if (px >= engineCfg.RETURN_LEVEL) {
-        win.bucketWager = Math.max(0, engine.miniBucket || 0);
-        const baseShares = Math.floor(engineCfg.BUY_AMOUNT / px);
-        const extraShares = win.bucketWager > 0 ? Math.floor(win.bucketWager / px) : 0;
-        const shares = baseShares + extraShares;
-        if (shares > 0) {
-          win.entryFired = true;
-          win.bucketThirdShares = extraShares;
-          fireEntry(win, win.targetSide, shares, px, upTokenId, downTokenId,
-            `dip-recovery buy — ${win.targetSide} back to $${px.toFixed(2)} after t=${engineCfg.MONITOR_SECS}s; base $${engineCfg.BUY_AMOUNT} (${baseShares}sh) + mini $${win.bucketWager.toFixed(2)} (${extraShares}sh) = ${shares}sh, rides to resolution`);
-        } else {
-          win.entrySkipped = true;
-          log(`${tag} Entry skipped — price $${px.toFixed(2)} too high for $${engineCfg.BUY_AMOUNT}`);
-        }
-      }
+// One strategy tick for a live window. A resting buy limit at price P
+// fills the moment the observed mid price trades AT or BELOW P; the
+// fill happens AT the limit price P (maker fill). All crossed rungs on
+// a side fill in the same tick (highest price first). Immediately
+// after a fill, the opposite side's SAME-PRICE rung is cancelled.
+// Rungs keep resting until window close — there is no cutoff time.
+function ladderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTokenId, downTokenId) {
+  if (!win.laddersPlaced) placeLadders(win, engineCfg);
+
+  const orderBy = {};
+  for (const o of win.orders) orderBy[o.side + ':' + o.price] = o;
+
+  // Process UP first, then DOWN; within a side highest rung first, so
+  // the cross-cancel rule resolves deterministically even if both
+  // sides appear fillable in the same tick.
+  for (const side of ['UP', 'DOWN']) {
+    const px = priceOf(side, upPrice, downPrice);
+    if (px == null) continue;
+    const rungs = win.orders.filter((o) => o.side === side && o.status === 'open').map((o) => o.price).sort((a, b) => b - a);
+    for (const price of rungs) {
+      if (px > price) break; // mid above this rung and all lower ones
+      const order = orderBy[side + ':' + price];
+      if (!order || order.status !== 'open') continue;
+      fillRung(engine, win, order, upTokenId, downTokenId);
     }
   }
 }
 
+// Fills a rung as a resting maker fill at its limit price, then
+// cancels the opposite side's same-price rung.
+function fillRung(engine, win, order, upTokenId, downTokenId) {
+  const side = order.side;
+  const opposite = side === 'UP' ? 'DOWN' : 'UP';
+  const entry = fireEntry(win, side, order.shares, order.price, upTokenId, downTokenId,
+    `ladder fill — ${side} crossed $${order.price.toFixed(2)} (resting limit, $${order.amount.toFixed(2)} notional = ${order.shares}sh, maker fill)`);
+  order.status = 'filled';
+  order.filledAt = new Date().toISOString();
+  order.entryRef = entry;
+  log(`[${win.engine}] LADDER FILL ${side} @ $${order.price.toFixed(2)} — ${order.shares}sh (cost $${(order.shares * order.price).toFixed(2)}) — riding to resolution`);
+
+  const cancelTarget = (win.orders || []).find((o) => o.side === opposite && o.price === order.price && o.status === 'open');
+  if (cancelTarget) {
+    cancelTarget.status = 'cancelled';
+    cancelTarget.cancelledAt = new Date().toISOString();
+    log(`[${win.engine}] LADDER CANCEL ${opposite} @ $${order.price.toFixed(2)} (${side} $${order.price.toFixed(2)} filled — cross-cancel rule)`);
+  }
+}
+
+// One full pass over a single engine: hand off closed windows, resolve
+// pendings, find the live market, run the engine's strategy.
 // One full pass over a single engine: hand off closed windows, resolve
 // pendings, find the live market, run the engine's strategy.
 async function engineTick(state, engineKey, engineCfg, nowSec) {
@@ -437,20 +441,13 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           downTokenId,
           signal: `${engineCfg.STRATEGY}_${engineKey}`,
           entries: [],
-          monitoringDone: false,
-          lastDipSec: { UP: null, DOWN: null },
-          targetSide: null,
-          entrySkipped: false,
-          entryFired: false,
-          // Bucket filter: the mini installment wagered on this
-          // window's entry (a win clears the whole bucket).
-          bucketWager: null,
-          bucketThirdShares: 0,
+          laddersPlaced: false,
+          orders: [],
           finalUpPrice: null,
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart}: MONITOR ${engineCfg.MONITOR_SECS}s (dip < $${engineCfg.DIP_LEVEL}) | ENTRY $${engineCfg.BUY_AMOUNT} (+ mini $${engine.miniBucket.toFixed(2)}) when target returns to $${engineCfg.RETURN_LEVEL} | no SL | no entry after ${engineCfg.ENTRY_CUTOFF_SECS}s | main $${engine.bucket.toFixed(2)} | peak $${engine.peakBankroll.toFixed(2)} | ${config.ENTRY_IS_MAKER ? 'MAKER' : 'TAKER'} fills`);
+        log(`${tag} Window ${windowStart} opened — DUAL LADDER: rungs $${(config.LADDER_RUNGS || []).join(', $')} × $${config.RUNG_AMOUNT} × UP+DOWN | cross-cancel same-price rungs | maker fills | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -472,7 +469,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
       if (win && nowSec < windowEnd) {
         const elapsed = nowSec - win.windowStart;
 
-        dipRecoveryTick(engine, win, engineCfg, tag, elapsed, upPrice, downPrice, upTokenId, downTokenId);
+        ladderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTokenId, downTokenId);
 
         // Snapshot both sides' prices on every tick while the window is
         // still open. Whichever snapshot ends up closest to windowEnd is
@@ -531,8 +528,8 @@ async function tick() {
 
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
-    const summary = `MONITOR ${cfg.MONITOR_SECS}s (dip < $${cfg.DIP_LEVEL}) | ENTRY $${cfg.BUY_AMOUNT} (+ mini = main/${config.BUCKET_DIVISOR}) @ return to $${cfg.RETURN_LEVEL} | no SL | no entry after ${cfg.ENTRY_CUTOFF_SECS}s`;
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | ${summary} | ${config.ENTRY_IS_MAKER ? 'MAKER fills (20% rebate)' : 'TAKER fills (0.07 fee)'}`);
+    const rungs = (config.LADDER_RUNGS || []).map((p) => '$' + p.toFixed(2)).join(' / ');
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | DUAL LADDER: ${rungs} × $${config.RUNG_AMOUNT} × UP+DOWN | cross-cancel same-price rungs | maker fills (20% rebate) | no cutoff — rungs live until window close`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);

@@ -1,54 +1,59 @@
-# Polymarket BTC/ETH UP/DOWN — Dual-Engine Paper Trading Bot (5m + 15m dip + bucket)
+# Polymarket BTC/ETH UP/DOWN — Dual-Engine Ladder Bot (5m + 15m)
 
 Runs **two independent engines** (5-minute and 15-minute BTC/ETH UP/DOWN
-windows) with **separate capital** and **separate buckets**. Both engines
-use the **same dip-signal strategy** — the 15m is a proportional mirror of
-the 5m (3× the window → 3× the monitor time and 3× the base bet). **Paper
-trading only** — the bot reads live midpoint prices and simulates fills; it
-never holds a wallet, private key, or real funds.
+windows) with **separate capital**. Both engines use the **same DUAL_LADDER
+strategy** — every entry is a **resting limit order**. **Paper trading only**
+— the bot reads live midpoint prices and simulates fills; it never holds a
+wallet, private key, or real funds.
 
-There is **no stop loss** — every entry rides to resolution, win or lose.
+There is **no stop loss and no cutoff time** — filled shares ride to
+resolution, and unfilled rungs simply expire at window close.
 
-## Engine logic (identical for 5m and 15m)
+## Strategy (identical for 5m and 15m)
 
-| Step | 5m engine | 15m engine |
-|---|---|---|
-| Monitor | first **120s** (2 min), record the last moment each side is below 0.50 | first **420s** (7 min), same rule |
-| Target | side whose most recent sub-0.50 dip was latest; no dip → no trade | same |
-| Entry | after monitor, when target returns to 0.50 → buy **$20** base + mini | same |
-| Cutoff | no entry after **280s** into the window | no entry after **870s** |
-| Exit | rides to resolution (win $1/share, or lose the cost) | same |
+1. **Immediately at window open**, place **two resting buy-limit ladders** —
+   one for **UP**, one for **DOWN** — at rungs **0.40, 0.35, 0.30, 0.25,
+   0.20, 0.15, 0.10**. Each rung rests **$10 notional** worth of shares
+   (`shares = RUNG_AMOUNT ÷ rung price`, filled **at** the rung price as a
+   maker fill).
+2. **Fill rule**: a rung fills the moment its side's price trades at or
+   below the rung price. All crossed rungs fill (highest first), even in
+   the same tick.
+3. **Cross-cancel rule**: the instant a rung fills on one side, the
+   opposite side's **same-price** rung is cancelled (e.g. UP 0.40 fills →
+   DOWN 0.40 is cancelled). Every other rung on both ladders stays live
+   and independent.
+4. **No cutoff** — rungs rest until the window closes. Unfilled rungs are
+   never positions and cost nothing.
+5. **Resolution** — the winning side pays **$1/share**, the losing side
+   pays **$0**. Profit = (winning-side shares × $1) − total cost of all
+   filled rungs.
 
-```
-shares = floor(BUY_AMOUNT / price) + floor(miniBucket / price)
-```
+Max exposure per window: **2 sides × 7 rungs × $10 = $140**.
 
-## Bucket filter (main + mini)
+Example: UP 0.40 fills (25 shares, $10) and UP 0.30 fills later (33.33
+shares, $10). UP wins → payout 58.33 shares → **+$38.33 profit**; UP loses
+→ **−$20**.
 
-- Every **loss** adds its **full dollar loss** to that engine's **main
-  bucket**, then re-splits it into a mini installment:
-  `miniBucket = bucket ÷ BUCKET_DIVISOR (2)`.
-- The **next window** bets **base + miniBucket**. Example: a $66 loss →
-  main $66, mini $33; the next window wagers base + $33 worth.
-- The bucket **clears only after TWO consecutive wins** of mini-bucket
-  bets (main and mini go to 0); a **single win leaves it intact**.
-- A **loss** adds its full loss to the main bucket and re-splits by 2
-  again.
-- No-trade windows leave both buckets untouched.
-- The **5m and 15m buckets are fully independent** of each other.
+## Fees & rebates (Polymarket docs, Crypto category)
+
+- **All ladder fills are resting (maker) fills**: makers are never charged
+  fees, and the crypto maker rebate is **20% of the fee-equivalent**,
+  credited on fill (`ENTRY_IS_MAKER: true`).
 
 ## Trackers (per engine)
 
 - **Streak** — current consecutive wins / losses (only traded windows
-  count; no-trade windows don't change it).
-- **Peak capital** — the all-time highest resolved bankroll (starts at the
-  starting capital).
-- **Max drawdown** — the worst peak-to-trough decline ever recorded at a
-  resolution, in `$` and `%` of the peak at that time.
+  count).
+- **Peak capital** — all-time highest resolved bankroll.
+- **Max drawdown** — worst peak-to-trough decline ever recorded at a
+  resolution, in `$` and `%` of the peak.
 - **Current drawdown** — live peak-to-equity distance (includes unrealized
-  P&L of the open position).
+  P&L).
 - **Equity curve** — one realized-equity point per resolved window,
   charted on the dashboard.
+- **Ladder view** — live rung grid per engine: filled / resting /
+  cross-cancelled rungs, plus max ladder risk.
 
 ## Bankroll
 
@@ -65,17 +70,13 @@ shares = floor(BUY_AMOUNT / price) + floor(miniBucket / price)
 Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
 
 - `ASSET`: `'btc'` or `'eth'`
+- `LADDER_RUNGS`: rung prices, highest first (default `0.40 … 0.10`)
+- `RUNG_AMOUNT`: notional per rung (**$10**)
 - `ENGINES`: one block per engine (`'5m'` and `'15m'`), each with:
   - `WINDOW_MINUTES`: window length for that engine
   - `CAPITAL`: that engine's starting bankroll (independent)
-  - `MONITOR_SECS`: monitor phase (5m: 120, 15m: 420)
-  - `DIP_LEVEL` / `RETURN_LEVEL`: dip threshold (0.50) and re-entry level
-  (0.50)
-- `BUCKET_DIVISOR`: 2 — the main bucket is split into this-sized mini
-  installment; the bucket clears only after two consecutive wins
-  - `BUY_AMOUNT`: base notional (**$20 for both engines**)
-  - `ENTRY_CUTOFF_SECS`: no entry after this many seconds (5m: 280, 15m: 870)
 - `BASE_TAKER_FEE_RATE` / `MAKER_REBATE_RATE` / `ENTRY_IS_MAKER`: fee model
+  (maker fills: `ENTRY_IS_MAKER: true`)
 - `RESOLUTION_WIN_THRESHOLD` / `RESOLUTION_LOSS_THRESHOLD`
 - `POLL_INTERVAL_MS`, `STATE_FILE`
 
@@ -98,10 +99,10 @@ Dashboard: http://localhost:3000 (set `PORT` to change).
 ## Dashboard
 
 Shows each engine separately: bankroll/return/equity, live UP/DOWN prices,
-strategy state (monitor/target/entry), the per-engine **main bucket + mini
-installment (÷2)**, win/loss streaks, **peak capital, max drawdown and
-current drawdown**, an **equity curve chart**, unrealized P&L on open
-positions, and per-engine resolution history.
+the live **ladder grid** (filled / resting / cross-cancelled rungs per
+side), win/loss streaks, **peak capital, max drawdown and current
+drawdown**, an **equity curve chart**, unrealized P&L on open positions,
+and per-engine resolution history.
 
 ## Status / safety
 

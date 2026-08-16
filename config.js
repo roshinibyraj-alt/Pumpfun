@@ -3,43 +3,33 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v24 — dip signal + bucket filter, no stop loss):
+// STRATEGY (v25 — DUAL LADDER, resting limit orders only):
 //
-//   BOTH engines (5m and 15m) run the SAME DIP_RECOVERY logic,
-//   the 15m being a proportional mirror of the 5m:
-//     1. MONITOR the first MONITOR_SECS (5m: 120s, 15m: 420s), record
-//        the last moment each side is below DIP_LEVEL (0.50).
-//     2. TARGET = the side whose most recent sub-0.50 dip was latest.
-//        No dip at all -> no trade.
-//     3. After the monitor phase, once the target returns to
-//        RETURN_LEVEL (0.50), buy BUY_AMOUNT worth PLUS the mini
-//        bucket installment:
-//          shares = floor(BUY_AMOUNT / px) + floor(miniBucket / px)
-//     4. NO STOP LOSS — every position rides to resolution. No entry
-//        after 280s into a 5m window / 870s into a 15m window.
+//   BOTH engines (5m and 15m) run the SAME DUAL_LADDER logic:
+//     1. As soon as a window opens, place TWO resting buy-limit
+//        ladders — one for UP, one for DOWN — immediately, with no
+//        waiting / monitoring phase and no entry cutoff. Rungs live
+//        until the window closes.
+//     2. Each ladder has rungs at LADDER_RUNGS (0.40 down to 0.10);
+//        every rung is sized at RUNG_AMOUNT ($10) worth of shares
+//        (shares = RUNG_AMOUNT / rung price, filled AT the rung
+//        price as a maker fill).
+//     3. CROSS-CANCEL RULE: the instant a rung fills on one side,
+//        the opposite side's SAME-PRICE rung is cancelled (e.g. UP
+//        0.40 fills -> DOWN 0.40 order is cancelled). All other
+//        rungs on both ladders stay live and are fully independent.
+//     4. At resolution, the winning side pays $1/share; the losing
+//        side pays $0. Unfilled rungs were never positions — they
+//        simply expire with no cost.
 //
-//   BUCKET FILTER (main + mini):
-//     - Every loss adds its FULL dollar loss to that engine's MAIN
-//       bucket, then re-splits: miniBucket = bucket / BUCKET_DIVISOR.
-//     - The next window bets base + miniBucket.
-//     - The bucket clears (main and mini go to 0) only after TWO
-//       consecutive wins of mini-bucket bets; a single win leaves it
-//       intact. A loss adds its full loss to main and re-splits by
-//       BUCKET_DIVISOR again.
-//     - The 5m and 15m engines each have their OWN independent
-//       main/mini buckets and their own capital.
+//   Max exposure per window: 2 sides x 7 rungs x $10 = $140.
 //
-//   Fees/rebates (per docs.polymarket.com/trading/fees and
+//   FEES (per docs.polymarket.com/trading/fees and
 //   docs.polymarket.com/programs/maker-rebates):
-//     - Crypto category: taker fee rate = 0.07
-//     - Makers are never charged fees; taker fee formula is
-//       fee = shares x feeRate x price x (1 - price)
-//     - Crypto maker rebate = 20% of the fee-equivalent, paid to
-//       resting (maker) fills only
-//     - ENTRY_IS_MAKER=false (default) models our entries as taker
-//       fills at the current mid: fee applies, rebate 0. Flip it to
-//       true to model resting maker fills instead: no fee, 20%
-//       rebate credited.
+//     - Everything here is a RESTING (maker) limit fill: makers are
+//       never charged fees, and the crypto maker rebate is 20% of
+//       the fee-equivalent, credited on fill.
+//     - ENTRY_IS_MAKER=true models exactly that: fee 0, 20% rebate.
 // ============================================================
 
 module.exports = {
@@ -54,15 +44,13 @@ module.exports = {
   // Used when an engine doesn't set its own CAPITAL.
   STARTING_BANKROLL: 1000,
 
-  // ---- Bucket filter ----
-  // After a loss, the full lost amount goes into the per-engine MAIN
-  // bucket and is re-split into a mini installment:
-  //   miniBucket = bucket / BUCKET_DIVISOR
-  // The next window bets base + miniBucket. The bucket clears only
-  // after TWO consecutive wins; a single win leaves it intact. A loss
-  // adds its full loss to main and re-splits again.
-  // Both engines use the same divisor.
-  BUCKET_DIVISOR: 2,
+  // ---- Ladder ----
+  // Buy-limit rungs, highest first. Both engines place one ladder
+  // per side at every one of these prices, immediately at window
+  // open. Rungs live until the window closes (no cutoff).
+  LADDER_RUNGS: [0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10],
+  // Notional ($) wagered on EACH rung. shares = RUNG_AMOUNT / price.
+  RUNG_AMOUNT: 10,
 
   // ---- Engines ----
   // Each engine runs on its own window length with its OWN bankroll,
@@ -71,36 +59,15 @@ module.exports = {
   ENGINES: {
     '5m': {
       label: '5m',
-      STRATEGY: 'DIP_RECOVERY',
+      STRATEGY: 'DUAL_LADDER',
       WINDOW_MINUTES: 5,
       CAPITAL: 1000, // this engine's starting bankroll (independent)
-      // Monitor phase length: watch both sides this long for a dip.
-      MONITOR_SECS: 120, // first 2 minutes
-      // A side "dipped" while its price is below this level.
-      DIP_LEVEL: 0.50,
-      // Buy trigger: target side's price comes back to this level
-      // any time after the monitor phase.
-      RETURN_LEVEL: 0.50,
-      // Notional size of the base buy: $20 worth of shares (the
-      // mini bucket installment is added on top).
-      BUY_AMOUNT: 20,
-      // No entry after this many seconds into the window.
-      ENTRY_CUTOFF_SECS: 280,
     },
     '15m': {
       label: '15m',
-      STRATEGY: 'DIP_RECOVERY',
+      STRATEGY: 'DUAL_LADDER',
       WINDOW_MINUTES: 15,
       CAPITAL: 1000,
-      // Monitor length set to 7 minutes (per the 15m schedule; base
-      // buy size stays 3x the 5m).
-      MONITOR_SECS: 420, // first 7 minutes
-      // A side "dipped" while its price is below this level.
-      DIP_LEVEL: 0.50,
-      RETURN_LEVEL: 0.50,
-      BUY_AMOUNT: 20, // same $20 base as the 5m engine (mini added on top)
-      // No entry after this many seconds into the window.
-      ENTRY_CUTOFF_SECS: 870,
     },
   },
 
@@ -111,25 +78,25 @@ module.exports = {
   // Maker rebate = 20% of the fee-equivalent (Crypto category).
   // Only resting (maker) fills earn it.
   MAKER_REBATE_RATE: 0.20,
-  // false = entries are taker fills at the current mid (pay fee,
-  // no rebate). true = entries modeled as maker fills (no fee,
-  // 20% rebate credited). Default false.
-  ENTRY_IS_MAKER: false,
+  // true = all ladder fills are modeled as resting maker fills:
+  // fee 0, 20% rebate credited. (This strategy ONLY uses resting
+  // limit orders, so this should stay true.)
+  ENTRY_IS_MAKER: true,
 
   // ---- Resolution ----
-  // Positions that weren't stopped out ride to real resolution.
-  // If either side's price is observed at/above RESOLUTION_WIN_THRESHOLD
-  // in the last tick sampled before the window closes, that side is
-  // declared the winner immediately. Otherwise resolution falls back
-  // to polling the real market price after close until it converges
-  // past one of these thresholds.
+  // Filled rungs ride to resolution. If either side's price is
+  // observed at/above RESOLUTION_WIN_THRESHOLD in the last tick
+  // sampled before the window closes, that side is declared the
+  // winner immediately. Otherwise resolution falls back to polling
+  // the real market price after close until it converges past one
+  // of these thresholds.
   RESOLUTION_WIN_THRESHOLD: 0.90,
   RESOLUTION_LOSS_THRESHOLD: 0.10,
 
   // ---- Loop timing ----
-  // Polymarket's own docs confirm /midpoint allows 1,500 req/10s (150/s)
-  // per IP. Polling every 500ms uses a small fraction of that even with
-  // two engines x two tokens checked per tick.
+  // Polymarket's own docs confirm /midpoint allows 1,500 req/10s
+  // (150/s) per IP. Polling every 500ms uses a small fraction of
+  // that even with two engines x two tokens checked per tick.
   POLL_INTERVAL_MS: 500,
 
   // ---- Files ----
