@@ -3,13 +3,13 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v26 — LEADER, single 5m engine):
+// STRATEGY (v30 — LEADER, single 15m engine):
 //
 //   The ONLY live strategy is LEADER: when one side's price DIPS to
 //   a trigger level, the bot buys the OPPOSITE (leader) side — the
 //   side that did NOT dip — instead of buying the dip.
 //
-//   1. One 5-minute window engine only (no 15m). Separate demo
+//   1. One 15-minute window engine only (no 5m). Separate demo
 //      capital, equity curve, drawdown, and streak per engine.
 //   2. Trigger levels at LADDER_RUNGS (0.40 down to 0.10): the first
 //      time a side's mid is observed AT OR BELOW a level in a window,
@@ -25,8 +25,14 @@
 //      (leader mid <= limit) — the fill is then confirmed at the
 //      limit price as a maker fill. Orders that never walk through
 //      expire unfilled at window close (no cost).
-//   4. Resolution: winning side pays $1/share, losing side $0.
-//      Confirmed fills ride to resolution; there is no stop loss.
+//   4. STOP LOSS: while the window is open, any filled entry whose
+//      side's mid walks down to LEADER.STOP_LOSS_PRICE (0.50) is sold
+//      at 0.50 immediately (realized, no re-entry). Backtest over the
+//      last 7 days of 15m windows: leaderSL50 = +$36.0k vs +$20.7k
+//      without the stop (the held side that flips usually loses).
+//   5. Resolution: winning side pays $1/share, losing side $0. Only
+//      still-filled entries settle at resolution — stopped-out entries
+//      were already realized when the stop hit.
 //
 //   Max exposure per window: 2 sides x 7 levels x 50 shares = 700
 //   shares, up to 100 x sum(rungs) = $175 at the current level set.
@@ -66,17 +72,20 @@ module.exports = {
   // is the floor below which we still wait before checking walk-through.
   LEADER: {
     CONFIRM_MS_MIN: 300,
+    // Stop loss: sell a filled leader entry at this price the moment
+    // its side's mid walks down to it. null/undefined = no stop.
+    STOP_LOSS_PRICE: 0.50,
   },
 
   // ---- Engines ----
-  // One 5m engine with its own bankroll and history. The 15m engine
-  // was removed in v26 — the backtest proved LEADER works, so it is
-  // now the ONLY live strategy.
+  // One 15m engine with its own bankroll and history. The 5m engine
+  // was removed in v30 — the backtest proved LEADER works on 15m, so
+  // it is now the ONLY live strategy.
   ENGINES: {
-    '5m': {
-      label: '5m',
+    '15m': {
+      label: '15m',
       STRATEGY: 'LEADER',
-      WINDOW_MINUTES: 5,
+      WINDOW_MINUTES: 15,
       CAPITAL: 2000, // this engine's starting bankroll (independent)
     },
   },
@@ -108,7 +117,7 @@ module.exports = {
   // windows to fetch per engine on refresh. LEARN_ON_BOOT: refresh
   // learn.json in the background on start.
   LEARN: {
-    WINDOWS: { '5m': 48 },
+    WINDOWS: { '15m': 48 },
     FIDELITY: 1,
     DEEP_RUNGS: [0.15, 0.10],
     TIME_FILTER_FRACTION: 0.60,

@@ -1,7 +1,7 @@
 // ============================================================
 // state.js — reads/writes state.json.
 //
-// State is organized per ENGINE ('5m' and '15m'). Each engine has:
+// State is organized per ENGINE (currently '15m'). Each engine has:
 //   bankroll / startingBankroll: its own independent capital.
 //   currentWindow: the window still open, placing/filling orders.
 //   pendingResolutions: windows that have closed but haven't yet
@@ -13,7 +13,7 @@
 //
 // loadState() migrates the OLD single-engine flat shape (one shared
 // bankroll/currentWindow/pendingResolutions/windowHistory) into the
-// 5m engine, which is where the live strategy lives.
+// 15m engine, which is where the live strategy lives.
 //
 // IMPORTANT (Railway note): filesystem is ephemeral, resets on
 // redeploy. Fine for now; ask if you want a persistent volume.
@@ -69,9 +69,10 @@ function defaultState() {
 function migrateLegacy(raw) {
   // Old single-engine shape had flat bankroll/currentWindow/
   // pendingResolutions/windowHistory. It predates the per-engine
-  // shape, so we fold it into the '5m' engine (the only live one).
+  // shape, so we fold it into the first configured live engine.
   const state = defaultState();
-  const eng = state.engines['5m'];
+  const engKey = Object.keys(config.ENGINES)[0] || '15m';
+  const eng = state.engines[engKey];
   if (raw.bankroll != null) {
     eng.bankroll = raw.bankroll;
     eng.startingBankroll = raw.startingBankroll != null ? raw.startingBankroll : eng.startingBankroll;

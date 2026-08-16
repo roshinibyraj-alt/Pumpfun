@@ -1,8 +1,8 @@
 // ============================================================
-// bot.js — v26. ONE unified engine shape (5m only, 15m removed).
+// bot.js — v30. ONE unified engine shape (15m only, 5m removed).
 // The ONLY live strategy is LEADER (see config.js):
 //
-//   5m — LEADER (buy the non-dipping side):
+//   15m — LEADER (buy the non-dipping side):
 //     When a side's mid price is first observed AT OR BELOW a trigger
 //     level (0.40 -> 0.10), the bot places a resting buy-limit order
 //     on the OPPOSITE (leader) side at the MIRROR of the dipped level
@@ -17,6 +17,12 @@
 //     price walked through the order price (leader mid <= limit). The
 //     fill is then confirmed at the limit price as a maker fill.
 //     Orders that never walk through expire unfilled at window close.
+//
+//     STOP LOSS: while the window is still open, any filled entry
+//     whose side's mid walks down to LEADER.STOP_LOSS_PRICE (0.50) is
+//     sold at 0.50 immediately (realized, bankroll credited now; no
+//     re-entry). Entries that survive to window close settle at
+//     resolution ($1 win / $0 loss).
 //
 //   TRACKERS (per engine):
 //     - streak: current consecutive wins / losses.
@@ -322,7 +328,7 @@ function computeUnrealized(engine) {
 // Places the two resting buy-limit ladders (UP + DOWN) on a fresh
 // window. One order per rung per side; each buys a FIXED number of
 // shares (RUNG_SHARES, default 50), resting at the rung price. Called
-// ---- LEADER engine (5m only): buy the NON-dipping side ----
+// ---- LEADER engine (15m only): buy the NON-dipping side ----
 // When a side's mid is first observed at or below a trigger level,
 // place a buy-limit order on the OPPOSITE (leader) side at the MIRROR
 // of the dipped level (0.40 -> 0.60, ... 0.10 -> 0.90). Each
@@ -370,6 +376,31 @@ async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, lea
   log(`${tag} LEADER ORDER placed — ${triggerSide} dipped to $${level.toFixed(2)} -> buy ${leaderSide} ${shares}sh @ $${limitPrice.toFixed(2)} (mid $${freshPx.toFixed(3)}) | order latency ${latencyMs}ms, fill confirmed after price walks through`);
 }
 
+// Stops out every still-'filled' leader entry whose side's mid has
+// walked down to config.LEADER.STOP_LOSS_PRICE. The exit is realized
+// at the stop price immediately (bankroll credited now); resolveWindow
+// later skips entries that already have a pnl. No re-entry.
+function stopOutEntries(engine, win, tag, upPrice, downPrice) {
+  const stopPrice = config.LEADER.STOP_LOSS_PRICE;
+  if (stopPrice == null) return;
+  for (const entry of win.entries || []) {
+    if (entry.status !== 'filled') continue;
+    const cur = priceOf(entry.side, upPrice, downPrice);
+    if (cur == null || cur > stopPrice) continue;
+    const f = entry.fillFee || 0;
+    const r = entry.fillRebate || 0;
+    entry.status = 'stopped_out';
+    entry.exitPrice = stopPrice;
+    entry.resolvedWon = null;
+    entry.cost = Math.round((entry.shares * entry.fillPrice + f) * 100000) / 100000;
+    entry.payout = Math.round(entry.shares * stopPrice * 100000) / 100000 + r;
+    entry.pnl = Math.round((entry.payout - entry.cost) * 100000) / 100000;
+    entry.settledAt = new Date().toISOString();
+    engine.bankroll = Math.round((engine.bankroll + entry.pnl) * 100) / 100;
+    log(`${tag} STOP LOSS ${entry.side} ${entry.shares}sh @ $${entry.fillPrice.toFixed(2)} -> sold @ $${stopPrice.toFixed(2)} (mid walked down to $${cur.toFixed(3)}) | realized pnl $${entry.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
+  }
+}
+
 // Marks confirmed fills for orders whose placement latency has elapsed
 // and whose leader-side price has walked through the limit price.
 function confirmLeaderFills(engine, win, tag, upPrice, downPrice, upTokenId, downTokenId) {
@@ -412,6 +443,7 @@ async function leaderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTok
   }
 
   confirmLeaderFills(engine, win, tag, upPrice, downPrice, upTokenId, downTokenId);
+  stopOutEntries(engine, win, tag, upPrice, downPrice);
 }
 
 async function engineTick(state, engineKey, engineCfg, nowSec) {
@@ -479,7 +511,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh @ the mirror limit ($${(config.LADDER_RUNGS || []).map(p => (1 - p).toFixed(2)).join(', $')}) | fill confirmed after price walks through | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
+        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh @ the mirror limit ($${(config.LADDER_RUNGS || []).map(p => (1 - p).toFixed(2)).join(', $')}) | fill confirmed after price walks through | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -559,7 +591,7 @@ async function tick() {
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
     const rungs = (config.LADDER_RUNGS || []).map((p) => '$' + p.toFixed(2)).join(' / ');
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh @ mirror limit (dip $0.40 -> $0.60 ... $0.10 -> $0.90) | fill confirmed after price walks through (latency measured) | maker fills (20% rebate) | no cutoff`);
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh @ mirror limit (dip $0.40 -> $0.60 ... $0.10 -> $0.90) | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} | fill confirmed after price walks through (latency measured) | maker fills (20% rebate) | no cutoff`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
