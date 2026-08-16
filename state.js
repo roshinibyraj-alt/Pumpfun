@@ -100,6 +100,18 @@ function loadState() {
         raw.engines[key] = engineDefault(key, cfg);
       } else {
         const eng = raw.engines[key];
+        const capital = cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL;
+
+        // Capital change detected (e.g. demo capital raised): start a
+        // fresh engine so bankroll, peak, and the equity curve are
+        // rebuilt at the new capital instead of continuing an
+        // old-scale demo.
+        if (eng.startingBankroll != null && capital != null && Math.round(eng.startingBankroll * 100) / 100 !== Math.round(capital * 100) / 100) {
+          console.log(new Date().toISOString(), `- Capital change for engine ${key} ($${eng.startingBankroll} -> $${capital}) — resetting to a fresh demo at the new capital.`);
+          raw.engines[key] = engineDefault(key, cfg);
+          continue;
+        }
+
         // Bucket-era fields are gone with v25/v26 (LEADER strategy).
         delete eng.bucket;
         delete eng.miniBucket;
@@ -107,7 +119,6 @@ function loadState() {
         delete eng.lastClearWins;
 
         const hist = Array.isArray(eng.windowHistory) ? eng.windowHistory : [];
-        const capital = cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL;
 
         if (eng.streak == null) {
           let wins = 0, losses = 0;

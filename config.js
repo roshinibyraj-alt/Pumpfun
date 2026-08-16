@@ -18,12 +18,7 @@
 //      $0.35 -> $0.65, ... $0.10 -> $0.90 (50 fixed shares, cost = 50
 //      x limit price). Each side+level can trigger at most once per
 //      window. No cutoff — triggers stay armed until the window closes.
-//   3. ENTRY SKIP: no triggers are armed during the first
-//      LEADER.ENTRY_SKIP_SEC seconds of the window. Backtest over the
-//      last 7 days (2,016 windows) showed the 2-minute skip improves
-//      P&L to +$112.5k vs +$101.8k without it (early dips rarely
-//      re-touch their level, and those fills were net-negative).
-//   4. FILL CONFIRMATION: fills are NOT assumed. The order is placed
+//   3. FILL CONFIRMATION: fills are NOT assumed. The order is placed
 //      and its placement round-trip latency is measured (ms, real
 //      Polymarket API call). Only AFTER that latency elapses does the
 //      bot check that the price has walked through the order price
@@ -53,7 +48,7 @@ module.exports = {
 
   // ---- Default capital ----
   // Used when an engine doesn't set its own CAPITAL.
-  STARTING_BANKROLL: 1000,
+  STARTING_BANKROLL: 2000,
 
   // ---- Trigger levels ----
   // LEADER: the first time a side's price is observed at or below
@@ -71,10 +66,6 @@ module.exports = {
   // is the floor below which we still wait before checking walk-through.
   LEADER: {
     CONFIRM_MS_MIN: 300,
-    // Skip the first 2 minutes of each 5m window — no triggers are
-    // armed until this many seconds have elapsed. Triggers stay armed
-    // after that until the window closes (no cutoff).
-    ENTRY_SKIP_SEC: 120,
   },
 
   // ---- Engines ----
@@ -86,7 +77,7 @@ module.exports = {
       label: '5m',
       STRATEGY: 'LEADER',
       WINDOW_MINUTES: 5,
-      CAPITAL: 1000, // this engine's starting bankroll (independent)
+      CAPITAL: 2000, // this engine's starting bankroll (independent)
     },
   },
 

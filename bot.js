@@ -395,19 +395,6 @@ async function leaderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTok
   const rungs = (config.LADDER_RUNGS || []).slice().sort((a, b) => b - a);
   win.triggered = win.triggered || {};
 
-  // ENTRY SKIP: during the first LEADER.ENTRY_SKIP_SEC seconds of the
-  // window no triggers are armed. Pending order fills are still
-  // confirmed during the skip so a mid-window restart never strands
-  // an already-placed order.
-  const skipSec = config.LEADER.ENTRY_SKIP_SEC || 0;
-  if (skipSec > 0) {
-    const elapsedSec = Math.floor(Date.now() / 1000) - win.windowStart;
-    if (elapsedSec < skipSec) {
-      confirmLeaderFills(engine, win, tag, upPrice, downPrice, upTokenId, downTokenId);
-      return;
-    }
-  }
-
   // Process UP first, then DOWN; within a side highest level first.
   for (const triggerSide of ['UP', 'DOWN']) {
     const px = priceOf(triggerSide, upPrice, downPrice);
@@ -492,7 +479,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh @ the mirror limit ($${(config.LADDER_RUNGS || []).map(p => (1 - p).toFixed(2)).join(', $')}) | no entries in the first ${config.LEADER.ENTRY_SKIP_SEC || 0}s | fill confirmed after price walks through | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
+        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh @ the mirror limit ($${(config.LADDER_RUNGS || []).map(p => (1 - p).toFixed(2)).join(', $')}) | fill confirmed after price walks through | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -572,7 +559,7 @@ async function tick() {
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
     const rungs = (config.LADDER_RUNGS || []).map((p) => '$' + p.toFixed(2)).join(' / ');
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh @ mirror limit (dip $0.40 -> $0.60 ... $0.10 -> $0.90) | no entries in first ${config.LEADER.ENTRY_SKIP_SEC || 0}s | fill confirmed after price walks through (latency measured) | maker fills (20% rebate) | no cutoff`);
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh @ mirror limit (dip $0.40 -> $0.60 ... $0.10 -> $0.90) | fill confirmed after price walks through (latency measured) | maker fills (20% rebate) | no cutoff`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
