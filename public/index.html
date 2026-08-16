@@ -166,6 +166,7 @@
   </div>
 
   <div id="engines"></div>
+  <div id="learnPanel"></div>
 
   <footer id="footer">—</footer>
 
@@ -179,6 +180,62 @@
     if (sec < 0) sec = 0;
     const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
     return m + ':' + String(s).padStart(2, '0');
+  }
+
+  function pnlCell(p) {
+    return '<span class="sf-pnl ' + (p >= 0 ? 'pos' : 'neg') + '">' + (p >= 0 ? '+' : '') + fmt$(p) + '</span>';
+  }
+
+  function renderLearnPanel() {
+    const el = $('learnPanel');
+    if (!el) return;
+    fetch('/api/learn').then((r) => r.json()).then((j) => {
+      if (!j.found || !j.data) {
+        el.innerHTML = '<div class="card"><div class="card-title"><span>Learn — backtest on real history</span><span class="countdown">not ready</span></div><div class="empty-state">No backtest yet — run <code>npm run learn</code> or wait for the boot refresh (~2 min).</div></div>';
+        return;
+      }
+      const d = j.data;
+      const parts = Object.entries(d.engines || {}).map(([tf, e]) => {
+        const v = e.variants || {};
+        const skips = e.skips || [];
+        const rows = [
+          { label: 'Base (live)', ...(v.base || {}) },
+          { label: 'TimeFilter', ...(v.timeFilter || {}) },
+          { label: 'Cap', ...(v.cap || {}) },
+          { label: 'TakeProfit', ...(v.tp || {}) },
+          { label: 'All', ...(v.all || {}) },
+          { label: 'LEADER (flip)', ...(v.leader || {}) },
+          ...skips.map((s2) => ({ label: s2.label, ...s2 })),
+        ];
+        let best = rows[0];
+        for (const r of rows) if ((r.pnl || 0) > best.pnl) best = r;
+        const varRows = rows.map((r) =>
+          '<div class="sf-row' + (r.pnl === best.pnl && r.label !== 'Base (live)' ? ' sf-best' : '') + '" style="grid-template-columns:1.4fr 1.2fr 0.7fr 0.7fr">' +
+            '<span>' + r.label + '</span>' + pnlCell(r.pnl || 0) +
+            '<span>' + (r.traded != null ? r.traded : '—') + '</span>' +
+            '<span>' + (r.wins != null ? r.wins : '—') + '</span>' +
+          '</div>').join('');
+        const rungRows = (e.rungs || []).map((r) =>
+          '<div class="sf-row" style="grid-template-columns:0.9fr 0.8fr 0.7fr 2fr 1fr 1fr 1fr">' +
+            '<span>$' + r.level.toFixed(2) + '</span><span>' + r.touches + '</span><span>' + r.fills + '</span>' +
+            '<span>' + (r.winRate != null ? (r.winRate * 100).toFixed(0) + '%' : '—') + ' <span class="sf-pnl ' + ((r.edge || 0) >= 0 ? 'pos' : 'neg') + '">(' + ((r.edge || 0) >= 0 ? '+' : '') + (r.edge * 100).toFixed(1) + '%)</span></span>' +
+            '<span>' + (r.leaderWinRate != null ? (r.leaderWinRate * 100).toFixed(0) + '%' : '—') + '</span>' +
+            '<span class="sf-pnl ' + ((r.leaderEdge || 0) >= 0 ? 'pos' : 'neg') + '">' + ((r.leaderEdge || 0) >= 0 ? '+' : '') + (r.leaderEdge * 100).toFixed(1) + '%</span>' +
+            '<span>' + (r.avgPnl != null ? r.avgPnl.toFixed(2) : '—') + '</span>' +
+          '</div>').join('');
+        return '<div class="card">' +
+          '<div class="card-title"><span>' + tf + ' — Learn (backtest, real history)</span><span class="countdown">' + e.windows + ' windows · ' + fmtTime(d.fetchedAt) + '</span></div>' +
+          '<div class="sf-table">' +
+            '<div class="sf-row sf-head" style="grid-template-columns:1.4fr 1.2fr 0.7fr 0.7fr"><span>Variant</span><span>Net P&amp;L</span><span>Traded</span><span>Wins</span></div>' + varRows +
+          '</div>' +
+          '<div style="margin-top:10px" class="sf-table">' +
+            '<div class="sf-row sf-head" style="grid-template-columns:0.9fr 0.8fr 0.7fr 2fr 1fr 1fr 1fr"><span>Rung</span><span>Touches</span><span>Fills</span><span>Fill Win (edge)</span><span>Leader Win</span><span>Leader Edge</span><span>Avg P&amp;L/fill</span></div>' + rungRows +
+          '</div>' +
+          '<div class="drow" style="font-size:10px;color:var(--text-dim);margin-top:6px"><span>Fill side = the side that dipped to the rung (what the ladder buys). Leader = the opposite side — a positive leader edge means buying the non-dipping side pays.</span><span></span></div>' +
+        '</div>';
+      });
+      el.innerHTML = parts.join('');
+    }).catch(() => {});
   }
 
   function fmtTime(iso) {
@@ -529,6 +586,8 @@
       $('engines').innerHTML = keys.map((k) => renderEngine(k, engines[k])).join('');
       keys.forEach((k) => drawEquity(k, engines[k]));
     } catch (e) { console.error('engines render failed', e); }
+
+    renderLearnPanel();
 
     let lastTs = null;
     for (const k of keys) {

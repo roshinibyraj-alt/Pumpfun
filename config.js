@@ -102,6 +102,30 @@ module.exports = {
   // windows. Purely observational — live trading is unaffected.
   SKIP_FILTERS: [1, 2, 3, 4],
 
+  // ---- Learn / backtest (dashboard "Learn" panel — trading unchanged) ----
+  // Replays real Polymarket price history to evaluate the live ladder
+  // strategy against improvement variants:
+  //   timeFilter — deep rungs (DEEP_RUNGS) may only fill before
+  //                TIME_FILTER_FRACTION of the window has elapsed.
+  //   cap        — after CAP_RUNGS fills on one side, its lower rungs
+  //                fill at CAP_TAIL_SHARES instead of the full size.
+  //   tp         — sell a side's shares at TAKE_PROFIT when the mid
+  //                bounces up to it (buy the dip, sell the bounce).
+  // WINDOWS: how many PAST windows to fetch per engine on refresh.
+  // LEARN_ON_BOOT: refresh learn.json in the background on start.
+  LEARN: {
+    WINDOWS: { '5m': 48, '15m': 24 },
+    FIDELITY: 1,
+    DEEP_RUNGS: [0.15, 0.10],
+    TIME_FILTER_FRACTION: 0.60,
+    CAP_RUNGS: 4,
+    CAP_TAIL_SHARES: 25,
+    TAKE_PROFIT: 0.55,
+    LEARN_ON_BOOT: true,
+    LEARN_MAX_AGE_MS: 30 * 60 * 1000,
+    LEARN_FILE: './learn.json',
+  },
+
   // ---- Loop timing ----
   // Polymarket's own docs confirm /midpoint allows 1,500 req/10s
   // (150/s) per IP. Polling every 500ms uses a small fraction of

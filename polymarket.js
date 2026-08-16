@@ -67,4 +67,35 @@ async function getMidpoint(tokenId) {
   return parseFloat(data.mid);
 }
 
-module.exports = { getCurrentUpDownMarket, parseTokens, getMidpoint };
+// Historical midpoint/trade ticks for a token between startTs and
+// endTs (epoch seconds). Returns [{ t, p }] sorted by time. Used by
+// the learn backtester to replay windows against real prices.
+async function getPriceHistory(tokenId, startTs, endTs, fidelity = 1) {
+  const url = `${CLOB_BASE}/prices-history?market=${encodeURIComponent(tokenId)}&startTs=${startTs}&endTs=${endTs}&fidelity=${fidelity}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`CLOB prices-history failed: ${res.status}`);
+  const data = await res.json();
+  const hist = (data && Array.isArray(data.history)) ? data.history : [];
+  return hist
+    .filter((h) => h.t != null && h.p != null)
+    .map((h) => ({ t: h.t, p: parseFloat(h.p) }))
+    .sort((a, b) => a.t - b.t);
+}
+
+// Market info by exact slug (used by the learn backtester to resolve
+// token ids for historical windows).
+async function getMarketBySlug(slug) {
+  return fetchMarketBySlug(slug);
+}
+
+// Events (including CLOSED ones) by exact slug. /markets?slug only
+// returns live markets, so the learn backtester uses this for
+// historical windows. Returns the first event, or null.
+async function getEventBySlug(slug) {
+  const res = await fetch(`${GAMMA_BASE}/events?slug=${encodeURIComponent(slug)}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  return Array.isArray(data) && data.length ? data[0] : null;
+}
+
+module.exports = { getCurrentUpDownMarket, parseTokens, getMidpoint, getPriceHistory, getMarketBySlug, getEventBySlug };

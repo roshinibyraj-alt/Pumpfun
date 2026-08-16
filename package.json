@@ -4,7 +4,8 @@
   "description": "Polymarket BTC/ETH up/down paper bot \u2014 5m + 15m dual-ladder (resting limit) engines",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "learn": "node learn.js"
   },
   "engines": {
     "node": ">=18.0.0"

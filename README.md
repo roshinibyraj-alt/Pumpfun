@@ -95,6 +95,9 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
 
 - `ASSET`: `'btc'` or `'eth'`
 - `SKIP_FILTERS`: what-if skip rules for the learning table (`[1, 2, 3, 4]`)
+- `LEARN`: backtest knobs — `WINDOWS`, `FIDELITY`, `DEEP_RUNGS`,
+  `TIME_FILTER_FRACTION`, `CAP_RUNGS`, `CAP_TAIL_SHARES`, `TAKE_PROFIT`,
+  `LEARN_ON_BOOT`, `LEARN_MAX_AGE_MS`
 - `LADDER_RUNGS`: rung prices, highest first (default `0.40 … 0.10`)
 - `RUNG_SHARES`: fixed shares per rung (**50**)
 - `ENGINES`: one block per engine (`'5m'` and `'15m'`), each with:
@@ -104,6 +107,40 @@ Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
   (maker fills: `ENTRY_IS_MAKER: true`)
 - `RESOLUTION_WIN_THRESHOLD` / `RESOLUTION_LOSS_THRESHOLD`
 - `POLL_INTERVAL_MS`, `STATE_FILE`
+
+## Learn — backtest on real history (dashboard panel)
+
+The dashboard has a **Learn** panel that replays the ladder strategy (and
+improvement variants) against **real Polymarket price history** for the
+last `LEARN.WINDOWS` windows per engine, using each closed market's
+authoritative `outcomePrices` as the winner. Purely observational —
+**live trading is unchanged**.
+
+Variants compared (see `config.LEARN`):
+
+| Variant | Rule |
+|---|---|
+| Base (live) | the strategy as it runs today |
+| TimeFilter | deep rungs (0.15/0.10) only fill before `TIME_FILTER_FRACTION` of the window elapsed |
+| Cap | after `CAP_RUNGS` fills on one side, its lower rungs fill at `CAP_TAIL_SHARES` |
+| TakeProfit | sell a side's shares at `TAKE_PROFIT` when its mid bounces up |
+| All | TimeFilter + Cap + TakeProfit |
+| LEADER (flip) | **direction experiment**: when one side dips to a rung, buy the *opposite* (leader) side at its mid |
+| 1w1s … 4w4s | skip what-ifs on the base replay (same full-round-win rule as the live tracker) |
+
+The rung table shows, per level: touches, fills, the **fill side's** win
+rate vs its implied price (edge), and the **leader side's** win rate vs
+its implied price. A positive leader edge means the non-dipping side pays
+better than its price implies.
+
+Refresh manually with:
+
+```bash
+npm run learn
+```
+
+The server also refreshes on boot when the cached `learn.json` is missing
+or older than `LEARN_MAX_AGE_MS`.
 
 ## Run locally
 
