@@ -142,6 +142,15 @@
   .ladder-cell.filled.up { color: var(--up); background: var(--up-dim); }
   .ladder-cell.filled.down { color: var(--down); background: var(--down-dim); }
   .ladder-cell.cancelled { color: var(--text-dim); background: transparent; text-decoration: line-through; opacity: 0.55; }
+  .sf-table { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .sf-row { display: grid; grid-template-columns: 1.1fr 1.3fr 0.8fr 0.8fr 0.9fr; gap: 6px; padding: 6px 10px; font-family: var(--font-data); font-size: 11px; align-items: center; }
+  .sf-row + .sf-row { border-top: 1px solid var(--border); }
+  .sf-row.sf-head { background: var(--surface-raised); color: var(--text-dim); text-transform: uppercase; font-size: 9px; letter-spacing: 0.7px; }
+  .sf-row .sf-pnl { font-weight: 700; }
+  .sf-row .sf-pnl.pos { color: var(--win); }
+  .sf-row .sf-pnl.neg { color: var(--loss); }
+  .sf-row.sf-best { outline: 1px solid var(--up); outline-offset: -1px; border-radius: 6px; background: rgba(45,212,191,0.08); }
+
 
   footer { text-align: center; color: var(--text-dim); font-size: 11px; margin-top: 20px; font-family: var(--font-data); }
 </style>
@@ -381,6 +390,32 @@
     ctx.fillText('$' + min.toFixed(0), 2, h - 2);
   }
 
+
+  function renderSkipFilters(e) {
+    const sf = e.skipFilters;
+    if (!sf) return '';
+    const rows = [sf.actual].concat(sf.filters || []);
+    let bestPnl = rows[0].pnl;
+    for (const r of rows) if (r.pnl > bestPnl) bestPnl = r.pnl;
+    const row = (r) => '<div class="sf-row' + (r.pnl === bestPnl && r.label !== 'actual' ? ' sf-best' : '') + '">' +
+      '<span>' + (r.label === 'actual' ? 'Actual' : r.label) + '</span>' +
+      '<span class="sf-pnl ' + (r.pnl >= 0 ? 'pos' : 'neg') + '">' + (r.pnl >= 0 ? '+' : '') + fmt$(r.pnl) + '</span>' +
+      '<span>' + r.traded + '</span>' +
+      '<span>' + r.skipped + '</span>' +
+      '<span>' + r.fullWins + '</span>' +
+    '</div>';
+    return '<div class="card">' +
+      '<div class="card-title"><span>Skip-Filter Learning (what-if)</span>' +
+        '<span class="countdown">win = 7 rungs filled + won</span></div>' +
+      '<div class="sf-table">' +
+        '<div class="sf-row sf-head"><span>Filter</span><span>Net P&amp;L</span><span>Traded</span><span>Skipped</span><span>Full Wins</span></div>' +
+        rows.map(row).join('') +
+      '</div>' +
+      '<div class="drow" style="font-size:10px;color:var(--text-dim);margin-top:6px">' +
+        '<span>What P&amp;L would have been if, after N consecutive full-round wins, the next N windows were skipped.</span><span></span></div>' +
+    '</div>';
+  }
+
   function renderEngine(key, e) {
     const cfg = e.config || {};
     const live = e.liveWindow || { unrealizedPnl: 0 };
@@ -434,6 +469,7 @@
         '<div class="chip"><div class="k">Rungs Filled</div><div class="v ' + ((lc2 && lc2.filled > 0) ? 'pos' : '') + '">' + (win ? lc2.filled + ' / ' + lc2.total : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Rungs Resting</div><div class="v">' + (win ? lc2.open : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Cross-Cancelled</div><div class="v">' + (win ? lc2.cancelled : '—') + '</div></div>' +
+        '<div class="chip"><div class="k">Full-Round Wins</div><div class="v ' + (hist.filter(w => w.fullRoundWon).length > 0 ? 'pos' : '') + '">' + hist.filter(w => w.fullRoundWon).length + '</div></div>' +
         '<div class="chip"><div class="k">Max Ladder Risk</div><div class="v">' + '$' + (2 * rungShares * rungs.reduce((a, p) => a + p, 0)).toFixed(0) + '</div></div>' +
         '<div class="chip"><div class="k">Win Streak</div><div class="v ' + (streak.wins > 0 ? 'pos' : '') + '">W' + streak.wins + '</div></div>' +
         '<div class="chip"><div class="k">Loss Streak</div><div class="v ' + (streak.losses > 0 ? 'neg' : '') + '">L' + streak.losses + '</div></div>' +
@@ -449,6 +485,7 @@
         '<canvas id="eq-' + key + '" class="equity-canvas"></canvas>' +
       '</div>' +
 
+      renderSkipFilters(e) +
       '<div class="card">' +
         '<div class="card-title"><span>Current Window</span>' +
           '<span class="countdown">' + (lc.secondsRemaining != null ? (lc.secondsRemaining > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—') + '</span></div>' +

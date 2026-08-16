@@ -95,6 +95,13 @@ module.exports = {
   RESOLUTION_WIN_THRESHOLD: 0.90,
   RESOLUTION_LOSS_THRESHOLD: 0.10,
 
+  // ---- Skip-filter learning (tracking only, bot keeps trading) ----
+  // The dashboard replays resolved windows and shows what P&L would
+  // have been if, after N consecutive FULL-ROUND wins (all 7 rungs
+  // filled and that side won), the bot had skipped the next N
+  // windows. Purely observational — live trading is unaffected.
+  SKIP_FILTERS: [1, 2, 3, 4],
+
   // ---- Loop timing ----
   // Polymarket's own docs confirm /midpoint allows 1,500 req/10s
   // (150/s) per IP. Polling every 500ms uses a small fraction of

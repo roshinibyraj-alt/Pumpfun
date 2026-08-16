@@ -8,7 +8,7 @@ const express = require('express');
 const path = require('path');
 const config = require('./config');
 const { loadState } = require('./state');
-const { startBotLoop, computeUnrealized } = require('./bot');
+const { startBotLoop, computeUnrealized, computeSkipFilters } = require('./bot');
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
@@ -38,6 +38,7 @@ app.get('/api/state', (req, res) => {
         RUNG_SHARES: config.RUNG_SHARES,
       },
       liveWindow: live,
+      skipFilters: computeSkipFilters(eng),
       totalFees: fees,
       totalRebates: rebates,
     };

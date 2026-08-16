@@ -41,6 +41,30 @@ shares, $15). UP wins → payout 100 shares → **+$65 profit**; UP loses →
   fees, and the crypto maker rebate is **20% of the fee-equivalent**,
   credited on fill (`ENTRY_IS_MAKER: true`).
 
+## Skip-filter learning (what-if tracking only)
+
+The bot keeps trading as configured — but the dashboard also replays the
+resolved windows and shows **what P&L would have been** if, after **N
+consecutive FULL-ROUND wins**, the bot had skipped the **next N windows**:
+
+| Filter | Rule |
+|---|---|
+| 1w1s | after 1 full-round win, skip the next 1 window |
+| 2w2s | after 2 consecutive full-round wins, skip the next 2 windows |
+| 3w3s | after 3 consecutive full-round wins, skip the next 3 windows |
+| 4w4s | after 4 consecutive full-round wins, skip the next 4 windows |
+
+- A **full-round win** = all ladder rungs (7) filled in that window AND
+  the window settled with P&L ≥ 0.
+- Skipped windows contribute nothing to that filter's P&L; skipped
+  windows don't count as wins or losses. After a skip completes, the win
+  counter resets and the cycle repeats.
+- Any window that isn't a full-round win (partial fills, or a loss)
+  resets the streak. No-trade windows are ignored.
+- Shown per engine (5m / 15m separately) with Net P&L, windows traded,
+  windows skipped, and full-round wins — compared side by side with the
+  actual bot results. Tune `SKIP_FILTERS` in `config.js`.
+
 ## Trackers (per engine)
 
 - **Streak** — current consecutive wins / losses (only traded windows
@@ -70,6 +94,7 @@ shares, $15). UP wins → payout 100 shares → **+$65 profit**; UP loses →
 Everything is tuned in `config.js` — edit, commit, and Railway redeploys:
 
 - `ASSET`: `'btc'` or `'eth'`
+- `SKIP_FILTERS`: what-if skip rules for the learning table (`[1, 2, 3, 4]`)
 - `LADDER_RUNGS`: rung prices, highest first (default `0.40 … 0.10`)
 - `RUNG_SHARES`: fixed shares per rung (**50**)
 - `ENGINES`: one block per engine (`'5m'` and `'15m'`), each with:

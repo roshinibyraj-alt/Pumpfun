@@ -208,6 +208,10 @@ async function resolveWindow(engine, win) {
     bankrollAfter: engine.bankroll,
     ladderFills: entries.length,
     ladderNotional: Math.round(cost * 100) / 100,
+    // FULL-ROUND WIN (skip-filter learning): all ladder rungs filled
+    // in this window AND the window settled with P&L >= 0.
+    fullRound: traded && entries.length === (config.LADDER_RUNGS || []).length,
+    fullRoundWon: traded && entries.length === (config.LADDER_RUNGS || []).length && pnl >= 0,
     peakBankrollAfter: engine.peakBankroll,
     maxDrawdownAfter: engine.maxDrawdown,
     maxDrawdownPctAfter: engine.maxDrawdownPct,
@@ -527,6 +531,56 @@ async function tick() {
   }
 }
 
+// Replays an engine's resolved windows and computes, per skip filter
+// N (config.SKIP_FILTERS), the P&L the bot WOULD have made if it had
+// skipped the next N windows after N consecutive FULL-ROUND wins
+// (all rungs filled + won). Purely observational — trading logic is
+// untouched. Skipped windows contribute nothing; no-trade windows are
+// ignored; any window that isn't a full-round win breaks the streak.
+function computeSkipFilters(engine) {
+  const hist = (engine && Array.isArray(engine.windowHistory)) ? engine.windowHistory : [];
+  const filters = (config.SKIP_FILTERS || [1, 2, 3, 4]).map((n) => {
+    let streak = 0, skipLeft = 0, pnl = 0, traded = 0, skipped = 0, fullWins = 0;
+    for (const w of hist) {
+      if (!w.traded) continue;
+      if (skipLeft > 0) {
+        skipLeft -= 1;
+        skipped += 1;
+        continue;
+      }
+      traded += 1;
+      pnl += w.pnl || 0;
+      if (w.fullRoundWon) {
+        fullWins += 1;
+        streak += 1;
+        if (streak >= n) {
+          skipLeft = n;
+          streak = 0;
+        }
+      } else {
+        streak = 0;
+      }
+    }
+    return {
+      label: n + 'w' + n + 's',
+      n,
+      traded,
+      skipped,
+      fullWins,
+      pnl: round2(pnl),
+    };
+  });
+  const actual = { label: 'actual', n: 0, traded: 0, skipped: 0, fullWins: 0, pnl: 0 };
+  for (const w of hist) {
+    if (!w.traded) continue;
+    actual.traded += 1;
+    actual.pnl += w.pnl || 0;
+    if (w.fullRoundWon) actual.fullWins += 1;
+  }
+  actual.pnl = round2(actual.pnl);
+  return { actual, filters };
+}
+
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
     const rungs = (config.LADDER_RUNGS || []).map((p) => '$' + p.toFixed(2)).join(' / ');
@@ -536,4 +590,4 @@ function startBotLoop() {
   setInterval(tick, config.POLL_INTERVAL_MS);
 }
 
-module.exports = { startBotLoop, tick, computeUnrealized };
+module.exports = { startBotLoop, tick, computeUnrealized, computeSkipFilters };
