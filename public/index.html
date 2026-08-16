@@ -452,7 +452,7 @@
     const maxDDPct = e.maxDrawdownPct != null ? e.maxDrawdownPct : 0;
     const currDD = Math.max(0, peak - equity);
     const currDDPct = peak > 0 ? currDD / peak : 0;
-    const schedule = 'LEADER · dip to ' + rungs.map((p) => '$' + p.toFixed(2)).join(' / ') + ' → buy opposite side ' + rungShares + 'sh @ mirror limit (dip $0.40 → $0.60 … $0.10 → $0.90) · fill confirmed on walk-through';
+    const schedule = 'LEADER · dip to ' + rungs.map((p) => '$' + p.toFixed(2)).join(' / ') + ' → buy opposite side ' + rungShares + 'sh @ mirror limit (dip $0.40 → $0.60 … $0.10 → $0.90) · no entries in first 2 min · fill confirmed on walk-through';
 
     return '<div class="engine">' +
       '<div class="engine-head">' +
