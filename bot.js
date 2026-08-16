@@ -1,22 +1,24 @@
 // ============================================================
-// bot.js — v30. ONE unified engine shape (15m only, 5m removed).
+// bot.js — v32. ONE unified engine shape (15m only, 5m removed).
 // The ONLY live strategy is LEADER (see config.js):
 //
 //   15m — LEADER (buy the non-dipping side):
 //     When a side's mid price is first observed AT OR BELOW a trigger
-//     level (0.40 -> 0.10), the bot places a resting buy-limit order
-//     on the OPPOSITE (leader) side at the MIRROR of the dipped level
-//     — a $0.40 dip places the limit at exactly $0.60, $0.35 -> $0.65,
-//     ... $0.10 -> $0.90 (50 fixed shares per trigger, cost = 50 x
-//     limit price). Each side+level can trigger once per window;
-//     triggers stay armed until the window closes (no cutoff).
+//     level (0.40 -> 0.10), the bot fires a TAKER market buy on the
+//     OPPOSITE (leader) side — the side that did NOT dip (50 fixed
+//     shares per trigger). The fill is immediate at the fresh leader
+//     mid plus realistic slippage (config.TAKER_SLIPPAGE_MIN/MAX, can
+//     be better or worse than the observed mid) and pays the taker
+//     fee. Each side+level can trigger once per window; triggers stay
+//     armed until the window closes (no cutoff). Set ENTRY_MODE='maker'
+//     to go back to the v30 resting limit at the mirror price with
+//     walk-through fill confirmation.
 //
-//     FILL CONFIRMATION: fills are NOT assumed. Order placement
-//     latency is measured in ms with a real Polymarket round-trip;
-//     only after that latency has elapsed does the bot check that the
-//     price walked through the order price (leader mid <= limit). The
-//     fill is then confirmed at the limit price as a maker fill.
-//     Orders that never walk through expire unfilled at window close.
+//     FILL MODEL (taker): order placement latency is still measured in
+//     ms with a real Polymarket round-trip, and the fill executes at
+//     the FRESH mid fetched during that round-trip ± slippage. No
+//     walk-through wait — this is what gives taker orders the better
+//     fill rate.
 //
 //     STOP LOSS: while the window is still open, any filled entry
 //     whose side's mid walks down to LEADER.STOP_LOSS_PRICE (0.50) is
@@ -31,11 +33,9 @@
 //     - equityCurve: one realized-equity point per resolved window.
 //
 // FEES & REBATES (docs.polymarket.com/trading/fees + maker-rebates):
-//   Crypto: taker fee = shares x 0.07 x price x (1 - price).
-//   Makers never pay fees; crypto maker rebate = 20% of the
-//   fee-equivalent, only for resting (maker) fills.
-//   Confirmed LEADER fills are RESTING (maker) fills: fee 0, 20%
-//   rebate credited (config.ENTRY_IS_MAKER=true).
+//   Crypto: taker fee = shares x 0.07 x price x (1 - price), paid on
+//   every taker fill (entries AND stop-loss exits). Makers never pay
+//   fees and earn a 20% fee-equivalent rebate — only in maker mode.
 //
 // Live marks: every tick we snapshot both sides' midpoints; the
 // dashboard uses them (via computeUnrealized) to show real-time
@@ -53,6 +53,18 @@ function log(...args) {
 function round2(n) { return Math.round(n * 100) / 100; }
 function round5(n) { return Math.round(n * 100000) / 100000; }
 
+// Realistic taker slippage: a market order's fill price is the current
+// mid plus a slippage draw. Usually adverse (you cross the spread), but
+// occasionally favorable (mid/book moves before execution) — the band
+// is configurable and clamped to the valid 0-1 price range.
+function applySlippage(mid) {
+  if (mid == null) return null;
+  const min = config.TAKER_SLIPPAGE_MIN != null ? config.TAKER_SLIPPAGE_MIN : 0;
+  const max = config.TAKER_SLIPPAGE_MAX != null ? config.TAKER_SLIPPAGE_MAX : 0;
+  const slip = min + Math.random() * (max - min);
+  return Math.min(0.999, Math.max(0.001, Math.round((mid + slip) * 1000) / 1000));
+}
+
 function priceOf(side, upPrice, downPrice) {
   return side === 'UP' ? upPrice : downPrice;
 }
@@ -63,7 +75,7 @@ function priceOf(side, upPrice, downPrice) {
 function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const tokenId = side === 'UP' ? upTokenId : downTokenId;
   const feeEquiv = shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice);
-  const isMaker = !!config.ENTRY_IS_MAKER;
+  const isMaker = config.ENTRY_MODE === 'maker';
   return {
     side,
     tokenId,
@@ -87,7 +99,8 @@ function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
 function fireEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
   const entry = makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason);
   win.entries.push(entry);
-  log(`[${win.engine || '?'}] ENTRY: ${side} ${shares}sh @ $${fillPrice.toFixed(2)} ($${(shares * fillPrice).toFixed(2)} notional) | fee $${entry.fillFee.toFixed(4)} | rebate $${entry.fillRebate.toFixed(4)} — ${reason}`);
+  const pxFmt = config.ENTRY_MODE === 'taker' ? fillPrice.toFixed(3) : fillPrice.toFixed(2);
+  log(`[${win.engine || '?'}] ENTRY: ${side} ${shares}sh @ $${pxFmt} ($${(shares * fillPrice).toFixed(2)} notional) | fee $${entry.fillFee.toFixed(4)} | rebate $${entry.fillRebate.toFixed(4)} — ${reason}`);
   return entry;
 }
 
@@ -340,12 +353,6 @@ async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, lea
   const shares = config.RUNG_SHARES;
   const leaderTokenId = leaderSide === 'UP' ? upTokenId : downTokenId;
 
-  // The leader-side buy-limit rests at the MIRROR of the dipped
-  // level: a $0.40 dip places the limit at exactly $0.60, $0.35 ->
-  // $0.65, ... $0.10 -> $0.90. The fill is confirmed at that limit
-  // price when the leader mid walks through it — never marked lower.
-  const limitPrice = Math.round((1 - level) * 100) / 100;
-
   // Measure the order-placement round-trip latency (ms) with a real
   // Polymarket call — in demo mode the midpoint fetch is the closest
   // proxy for "how long placing an order takes".
@@ -356,6 +363,38 @@ async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, lea
   } catch (_) {}
   const latencyMs = Date.now() - t0;
   win.lastLatencyMs = latencyMs;
+
+  if (config.ENTRY_MODE === 'taker') {
+    // TAKER (v31): the trigger executes as a market buy IMMEDIATELY at
+    // the fresh leader mid plus realistic slippage. No walk-through
+    // wait — better fill rate, but every fill pays the taker fee and
+    // the fill price can be worse (or better) than the observed mid.
+    const fillPrice = applySlippage(freshPx);
+    const entry = fireEntry(win, leaderSide, shares, fillPrice, upTokenId, downTokenId,
+      `LEADER taker — ${triggerSide} dipped to $${level.toFixed(2)} → bought ${leaderSide} ${shares}sh @ $${fillPrice.toFixed(3)} (mid $${freshPx.toFixed(3)} ± slippage, order latency ${latencyMs}ms)`);
+    win.orders = win.orders || [];
+    win.orders.push({
+      side: leaderSide,
+      triggerSide,
+      triggerLevel: level,
+      price: fillPrice,
+      rawMid: freshPx,
+      shares,
+      status: 'filled',
+      placedAt: new Date().toISOString(),
+      filledAt: new Date().toISOString(),
+      measuredLatencyMs: latencyMs,
+      entryRef: entry,
+    });
+    log(`${tag} LEADER TAKER FILL ${leaderSide} ${shares}sh @ $${fillPrice.toFixed(3)} (mid $${freshPx.toFixed(3)} ${(fillPrice - freshPx) >= 0 ? '+' : ''}${(fillPrice - freshPx).toFixed(3)} slippage) | fee $${entry.fillFee.toFixed(4)} | order latency ${latencyMs}ms`);
+    return;
+  }
+
+  // MAKER (v30): the leader-side buy-limit rests at the MIRROR of the
+  // dipped level — a $0.40 dip places the limit at exactly $0.60,
+  // $0.35 -> $0.65, ... $0.10 -> $0.90. The fill is confirmed at that
+  // limit price when the leader mid walks through it.
+  const limitPrice = Math.round((1 - level) * 100) / 100;
   const order = {
     side: leaderSide,
     triggerSide,
@@ -383,21 +422,25 @@ async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, lea
 function stopOutEntries(engine, win, tag, upPrice, downPrice) {
   const stopPrice = config.LEADER.STOP_LOSS_PRICE;
   if (stopPrice == null) return;
+  const isMaker = config.ENTRY_MODE === 'maker';
   for (const entry of win.entries || []) {
     if (entry.status !== 'filled') continue;
     const cur = priceOf(entry.side, upPrice, downPrice);
     if (cur == null || cur > stopPrice) continue;
     const f = entry.fillFee || 0;
     const r = entry.fillRebate || 0;
+    // A stop exit is a market (taker) sell too — it pays the taker fee.
+    const exitFee = isMaker ? 0 : round5(entry.shares * config.BASE_TAKER_FEE_RATE * stopPrice * (1 - stopPrice));
     entry.status = 'stopped_out';
     entry.exitPrice = stopPrice;
+    entry.exitFee = exitFee;
     entry.resolvedWon = null;
     entry.cost = Math.round((entry.shares * entry.fillPrice + f) * 100000) / 100000;
-    entry.payout = Math.round(entry.shares * stopPrice * 100000) / 100000 + r;
+    entry.payout = Math.round((entry.shares * stopPrice - exitFee + r) * 100000) / 100000;
     entry.pnl = Math.round((entry.payout - entry.cost) * 100000) / 100000;
     entry.settledAt = new Date().toISOString();
     engine.bankroll = Math.round((engine.bankroll + entry.pnl) * 100) / 100;
-    log(`${tag} STOP LOSS ${entry.side} ${entry.shares}sh @ $${entry.fillPrice.toFixed(2)} -> sold @ $${stopPrice.toFixed(2)} (mid walked down to $${cur.toFixed(3)}) | realized pnl $${entry.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
+    log(`${tag} STOP LOSS ${entry.side} ${entry.shares}sh @ $${entry.fillPrice.toFixed(2)} -> sold @ $${stopPrice.toFixed(2)} (mid walked down to $${cur.toFixed(3)}) | exit fee $${exitFee.toFixed(4)} | realized pnl $${entry.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
   }
 }
 
@@ -426,8 +469,14 @@ async function leaderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTok
   const rungs = (config.LADDER_RUNGS || []).slice().sort((a, b) => b - a);
   win.triggered = win.triggered || {};
 
+  // No NEW entries in the last ENTRY_CUTOFF_SEC of the window — a
+  // taker buy in the final minute has no time to recover. Existing
+  // fills still stop out / ride to resolution (handled below).
+  const cutoffSec = config.LEADER.ENTRY_CUTOFF_SEC;
+  const inEntryWindow = cutoffSec == null || Date.now() / 1000 < win.windowEnd - cutoffSec;
+
   // Process UP first, then DOWN; within a side highest level first.
-  for (const triggerSide of ['UP', 'DOWN']) {
+  for (const triggerSide of inEntryWindow ? ['UP', 'DOWN'] : []) {
     const px = priceOf(triggerSide, upPrice, downPrice);
     if (px == null) continue;
     for (const level of rungs) {
@@ -442,7 +491,11 @@ async function leaderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTok
     }
   }
 
-  confirmLeaderFills(engine, win, tag, upPrice, downPrice, upTokenId, downTokenId);
+  // Taker mode fills instantly on trigger — no pending orders to
+  // confirm; walk-through confirmation only exists in maker mode.
+  if (config.ENTRY_MODE !== 'taker') {
+    confirmLeaderFills(engine, win, tag, upPrice, downPrice, upTokenId, downTokenId);
+  }
   stopOutEntries(engine, win, tag, upPrice, downPrice);
 }
 
@@ -511,7 +564,11 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh @ the mirror limit ($${(config.LADDER_RUNGS || []).map(p => (1 - p).toFixed(2)).join(', $')}) | fill confirmed after price walks through | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
+        const mirrorText = (config.LADDER_RUNGS || []).map(p => (1 - p).toFixed(2)).join(', $');
+        const execText = config.ENTRY_MODE === 'taker'
+          ? `as a TAKER fill @ mid ± slippage (${config.TAKER_SLIPPAGE_MIN}…+${config.TAKER_SLIPPAGE_MAX}) · taker fee`
+          : `@ the mirror limit ($${mirrorText}) · fill confirmed after price walks through`;
+        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh ${execText} | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} | no entries after last $${config.LEADER.ENTRY_CUTOFF_SEC || 0}s | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -591,7 +648,10 @@ async function tick() {
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
     const rungs = (config.LADDER_RUNGS || []).map((p) => '$' + p.toFixed(2)).join(' / ');
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh @ mirror limit (dip $0.40 -> $0.60 ... $0.10 -> $0.90) | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} | fill confirmed after price walks through (latency measured) | maker fills (20% rebate) | no cutoff`);
+    const execText = config.ENTRY_MODE === 'taker'
+      ? `taker fills @ mid ± slippage (${config.TAKER_SLIPPAGE_MIN}…+${config.TAKER_SLIPPAGE_MAX}) · taker fee · latency measured`
+      : 'resting limit @ mirror (dip $0.40 -> $0.60 ... $0.10 -> $0.90) · fill confirmed after price walks through · maker fills (20% rebate)';
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} | ${execText} | no entries after last ${config.LEADER.ENTRY_CUTOFF_SEC || 0}s`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);

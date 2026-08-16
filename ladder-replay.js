@@ -66,6 +66,20 @@ function replayWindow(opts) {
   const capRungs = opts.capRungs;
   const capTailShares = opts.capTailShares != null ? opts.capTailShares : shares;
   const takeProfit = opts.takeProfit;
+  const entrySkipSec = opts.entrySkipSec;
+  const entryCutoffSec = opts.entryCutoffSec;
+  const stopLossPrice = opts.stopLossPrice;
+  const singleEntry = opts.singleEntry;
+  const walkThrough = opts.walkThrough;
+  const taker = !!opts.taker;
+  const slipMin = opts.slippageMin != null ? opts.slippageMin : 0;
+  const slipMax = opts.slippageMax != null ? opts.slippageMax : 0;
+  // Seeded PRNG so taker-slippage backtests are reproducible.
+  let rngSeed = (opts.seed != null ? opts.seed : 1) >>> 0;
+  function slipDraw() {
+    rngSeed = (rngSeed * 1664525 + 1013904223) >>> 0;
+    return rngSeed / 4294967296;
+  }
 
   const windowSec = windowEnd - windowStart;
   const ticks = mergeTicks(opts.upTicks, opts.downTicks)
@@ -87,6 +101,8 @@ function replayWindow(opts) {
   const leaderMode = !!opts.buyLeader;
   const triggered = {}; // leaderMode: side+level already triggered
   const last = { up: null, down: null };
+  const pendingOrders = []; // walkThrough: resting leader limits awaiting walk-through
+  let ordersPlaced = 0; // leader triggers placed this window (pending + filled)
 
   for (const t of ticks) {
     if (t.up != null) last.up = t.up;
@@ -96,6 +112,45 @@ function replayWindow(opts) {
     // (leader) side via a resting limit at the MIRROR of the dipped
     // level — once per level per side.
     if (leaderMode) {
+      if (entrySkipSec != null && t.t - windowStart < entrySkipSec) continue;
+
+      // STOP LOSS: if a held leader side's mid walks down to
+      // stopLossPrice, exit those shares at stopLossPrice immediately
+      // (realized — no re-entry).
+      if (stopLossPrice != null) {
+        for (const f of fills) {
+          if (f.sold) continue;
+          const cur = f.side === 'UP' ? last.up : last.down;
+          if (cur != null && cur <= stopLossPrice) {
+            f.sold = true;
+            f.sellPrice = stopLossPrice;
+            sellEvents.push({ side: f.side, shares: f.shares, price: stopLossPrice, at: t.t });
+          }
+        }
+      }
+
+      // WALK-THROUGH CONFIRMATION: a resting leader limit only fills
+      // once that side's mid has walked through (<=) the limit price.
+      // Orders that never walk through expire unfilled at window close.
+      if (walkThrough && pendingOrders.length) {
+        for (let i = pendingOrders.length - 1; i >= 0; i--) {
+          const o = pendingOrders[i];
+          const cur = o.side === 'UP' ? last.up : last.down;
+          if (cur != null && cur <= o.price) {
+            fills.push({ side: o.side, price: o.price, shares: o.shares, fillAt: t.t, sold: false, triggerLevel: o.triggerLevel, triggerSide: o.triggerSide });
+            pendingOrders.splice(i, 1);
+          }
+        }
+      }
+
+      // No NEW entries in the last entryCutoffSec of the window —
+      // existing fills still stop out (above) and ride to resolution.
+      if (entryCutoffSec != null && t.t >= windowEnd - entryCutoffSec) continue;
+
+      // singleEntry: one exposure per window — after the first trigger
+      // no further triggers (no flip).
+      if (singleEntry && ordersPlaced > 0) continue;
+
       for (const side of ['UP', 'DOWN']) {
         const px = side === 'UP' ? last.up : last.down;
         if (px == null) continue;
@@ -105,9 +160,26 @@ function replayWindow(opts) {
           const key = side + ':' + price;
           if (triggered[key] || oppPx == null) continue;
           triggered[key] = true;
-          const mirror = Math.round((1 - price) * 100) / 100;
-          fills.push({ side: side === 'UP' ? 'DOWN' : 'UP', price: mirror, shares, fillAt: t.t, sold: false, triggerLevel: price, triggerSide: side });
+          ordersPlaced++;
+          if (taker) {
+            // TAKER (v31): immediate fill at the current leader mid ±
+            // realistic slippage (worse or better than the observed mid),
+            // seeded for reproducibility.
+            const slip = slipMin + slipDraw() * (slipMax - slipMin);
+            const fillPx = Math.min(0.999, Math.max(0.001, Math.round((oppPx + slip) * 1000) / 1000));
+            fills.push({ side: side === 'UP' ? 'DOWN' : 'UP', price: fillPx, shares, fillAt: t.t, sold: false, triggerLevel: price, triggerSide: side });
+          } else {
+            const mirror = Math.round((1 - price) * 100) / 100;
+            const entry = { side: side === 'UP' ? 'DOWN' : 'UP', price: mirror, shares, fillAt: t.t, sold: false, triggerLevel: price, triggerSide: side };
+            if (walkThrough) {
+              pendingOrders.push({ ...entry, filled: false });
+            } else {
+              fills.push(entry);
+            }
+          }
+          if (singleEntry) break; // one exposure per window
         }
+        if (singleEntry && ordersPlaced > 0) break; // out of sides too
       }
       continue; // no ladder fills / TP in leader mode
     }
@@ -161,7 +233,7 @@ function replayWindow(opts) {
         const held = fills.filter((f) => f.side === side && !f.sold);
         if (held.length === 0) continue;
         const sh = held.reduce((a, f) => a + f.shares, 0);
-        for (const f of held) f.sold = true;
+        for (const f of held) { f.sold = true; f.sellPrice = takeProfit; }
         sellEvents.push({ side, shares: sh, price: takeProfit, at: t.t });
       }
     }
@@ -178,15 +250,20 @@ function replayWindow(opts) {
   else if (last.up != null) winner = 'UP';
   else if (last.down != null) winner = 'DOWN';
 
-  let cost = 0, payout = 0, rebates = 0;
+  let cost = 0, payout = 0, rebates = 0, fees = 0;
   for (const f of fills) {
     const feeEquiv = f.shares * takerFee * f.price * (1 - f.price);
-    rebates += feeEquiv * rebateRate;
+    if (taker) fees += feeEquiv; else rebates += feeEquiv * rebateRate;
     cost += f.shares * f.price;
-    if (f.sold) payout += f.shares * takeProfit;
+    if (f.sold) {
+      const sp = f.sellPrice != null ? f.sellPrice : takeProfit;
+      payout += f.shares * sp;
+      // A stop-loss exit is a taker sell too — it pays the taker fee.
+      if (taker) fees += f.shares * takerFee * sp * (1 - sp);
+    }
     else if (winner === f.side) payout += f.shares;
   }
-  const pnl = payout - cost + rebates;
+  const pnl = payout - cost - fees + rebates;
   const fullRound = fills.length === rungs.length;
   const sides = new Set(fills.map((f) => f.side));
 
@@ -196,12 +273,15 @@ function replayWindow(opts) {
     cost,
     payout,
     rebates,
+    fees,
     pnl,
     winner,
     fullRound,
     fullRoundWon: fullRound && pnl >= 0,
     mixed: fills.length > 0 && sides.size === 2,
     orders,
+    placedOrders: ordersPlaced,
+    expired: pendingOrders.length,
   };
 }
 

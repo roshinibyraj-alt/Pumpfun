@@ -98,18 +98,32 @@ function variantOpts() {
       capTailShares: L.CAP_TAIL_SHARES,
       takeProfit: L.TAKE_PROFIT,
     },
-    leader: { ...common, buyLeader: true },
+    // Live strategy (v31): TAKER execution — immediate fill at the
+    // leader mid ± slippage, taker fee charged. leaderMaker keeps the
+    // v30 resting-limit walk-through model for comparison.
+    leader: {
+      ...common,
+      buyLeader: true,
+      stopLossPrice: config.LEADER.STOP_LOSS_PRICE,
+      entryCutoffSec: config.LEADER.ENTRY_CUTOFF_SEC,
+      taker: config.ENTRY_MODE === 'taker',
+      slippageMin: config.TAKER_SLIPPAGE_MIN,
+      slippageMax: config.TAKER_SLIPPAGE_MAX,
+      seed: 12345,
+    },
+    leaderMaker: { ...common, buyLeader: true, walkThrough: true, stopLossPrice: config.LEADER.STOP_LOSS_PRICE, entryCutoffSec: config.LEADER.ENTRY_CUTOFF_SEC },
   };
 }
 
 function aggregate(rows, name) {
-  let pnl = 0, traded = 0, wins = 0, fullWins = 0, mixed = 0, cost = 0, sells = 0;
+  let pnl = 0, traded = 0, wins = 0, fullWins = 0, mixed = 0, cost = 0, sells = 0, fees = 0;
   for (const w of rows) {
     const v = w.results && w.results[name];
     if (!v) continue;
     if (v.fills.length > 0) traded += 1;
     pnl += v.pnl;
     cost += v.cost;
+    fees += v.fees || 0;
     sells += (v.sellEvents || []).length;
     if (v.pnl >= 0) wins += 1;
     if (v.fullRoundWon) fullWins += 1;
@@ -124,6 +138,7 @@ function aggregate(rows, name) {
     sells,
     cost: round2(cost),
     pnl: round2(pnl),
+    fees: round2(fees),
   };
 }
 

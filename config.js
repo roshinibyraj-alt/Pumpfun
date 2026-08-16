@@ -3,7 +3,7 @@
 // Change numbers, restart the bot (Railway redeploys automatically
 // when you push to GitHub), no need to touch other files.
 //
-// STRATEGY (v30 — LEADER, single 15m engine):
+// STRATEGY (v32 — LEADER, single 15m engine, TAKER execution):
 //
 //   The ONLY live strategy is LEADER: when one side's price DIPS to
 //   a trigger level, the bot buys the OPPOSITE (leader) side — the
@@ -13,18 +13,21 @@
 //      capital, equity curve, drawdown, and streak per engine.
 //   2. Trigger levels at LADDER_RUNGS (0.40 down to 0.10): the first
 //      time a side's mid is observed AT OR BELOW a level in a window,
-//      the bot places a RESTING buy-limit order on the opposite side
-//      at the MIRROR of the dipped level — $0.40 dip -> limit $0.60,
-//      $0.35 -> $0.65, ... $0.10 -> $0.90 (50 fixed shares, cost = 50
-//      x limit price). Each side+level can trigger at most once per
-//      window. No cutoff — triggers stay armed until the window closes.
-//   3. FILL CONFIRMATION: fills are NOT assumed. The order is placed
-//      and its placement round-trip latency is measured (ms, real
-//      Polymarket API call). Only AFTER that latency elapses does the
-//      bot check that the price has walked through the order price
-//      (leader mid <= limit) — the fill is then confirmed at the
-//      limit price as a maker fill. Orders that never walk through
-//      expire unfilled at window close (no cost).
+//      the bot fires a TAKER market buy on the opposite side — the
+//      leader side that did NOT dip. 50 fixed shares per trigger,
+//      filled immediately at the current leader mid ± realistic
+//      slippage (TAKER_SLIPPAGE_MIN/MAX). Each side+level can trigger
+//      at most once per window. No entry in the last
+//      ENTRY_CUTOFF_SEC of the window — triggers stay armed until the
+//      cutoff. (Set ENTRY_MODE='maker' to go back to the v30 resting
+//      limit at the mirror price with walk-through confirmation.)
+//   3. FILL MODEL (taker): no waiting for a walk-through — the order
+//      placement round-trip latency is still measured (ms, real
+//      Polymarket call), and the fill is executed at the FRESH mid
+//      fetched during that round-trip plus a slippage draw. Slippage
+//      can be worse (crossing the book) or better (favorable mid/book
+//      move) than the observed mid. Every fill pays the crypto taker
+//      fee; no maker rebate.
 //   4. STOP LOSS: while the window is open, any filled entry whose
 //      side's mid walks down to LEADER.STOP_LOSS_PRICE (0.50) is sold
 //      at 0.50 immediately (realized, no re-entry). Backtest over the
@@ -38,10 +41,10 @@
 //   shares, up to 100 x sum(rungs) = $175 at the current level set.
 //
 //   FEES (per docs.polymarket.com/trading/fees + maker-rebates):
-//     - Confirmed fills are RESTING (maker) limit fills: makers are
-//       never charged fees, and the crypto maker rebate is 20% of
-//       the fee-equivalent, credited on fill.
-//     - ENTRY_IS_MAKER=true models exactly that: fee 0, 20% rebate.
+//     - Taker fee = shares x 0.07 x price x (1 - price). Takers pay
+//       it on every fill (entries AND stop-loss exits). Makers never
+//       pay fees and earn a 20% fee-equivalent rebate — only relevant
+//       if ENTRY_MODE='maker'.
 // ============================================================
 
 module.exports = {
@@ -65,16 +68,19 @@ module.exports = {
   // cost per trigger = RUNG_SHARES x mirror limit (e.g. 50sh @ 0.60 = $30).
   RUNG_SHARES: 50,
 
-  // ---- Leader fill confirmation ----
-  // Fills are only confirmed AFTER the price walks through the order
-  // price, and only after the measured order-placement latency (a
-  // real Polymarket round-trip, logged per trigger). CONFIRM_MS_MIN
-  // is the floor below which we still wait before checking walk-through.
+  // ---- Leader execution ----
+  // CONFIRM_MS_MIN only matters in 'maker' mode (floor wait before
+  // checking walk-through). Taker mode fills instantly on trigger.
   LEADER: {
     CONFIRM_MS_MIN: 300,
     // Stop loss: sell a filled leader entry at this price the moment
     // its side's mid walks down to it. null/undefined = no stop.
     STOP_LOSS_PRICE: 0.50,
+    // No NEW entries (triggers) in the last ENTRY_CUTOFF_SEC of the
+    // window — a taker buy in the final minute has no time to recover
+    // and resolution is imminent. Existing positions still stop out /
+    // ride to resolution. null/undefined = no cutoff.
+    ENTRY_CUTOFF_SEC: 60,
   },
 
   // ---- Engines ----
@@ -90,6 +96,24 @@ module.exports = {
     },
   },
 
+  // ---- Execution mode ----
+  // 'maker' (v30): resting buy-limit at the mirror price — fill
+  //   confirmed only after the leader mid walks through the limit.
+  //   No fees, 20% maker rebate, but many orders expire unfilled.
+  // 'taker' (v31): fill IMMEDIATELY at the leader mid with realistic
+  //   slippage. Much better fill rate; every fill pays the taker fee.
+  ENTRY_MODE: 'taker',
+
+  // Taker slippage model (0–1 price units), applied to the leader-side
+  // mid at execution: fillPrice = clamp(mid + slippage, 0.001, 0.999).
+  // A market order usually pays the ask (worse than mid by ~half the
+  // spread) but can occasionally fill better than mid when the book or
+  // mid moves favorably between snapshot and execution — hence a band
+  // with a small adverse bias. SLIPPAGE_MIN = best-case fill relative
+  // to mid, SLIPPAGE_MAX = worst-case fill relative to mid.
+  TAKER_SLIPPAGE_MIN: -0.010, // fill up to 1.0 cent better than mid
+  TAKER_SLIPPAGE_MAX: 0.020,  // fill up to 2.0 cents worse than mid
+
   // ---- Fees & rebates (Polymarket docs, Crypto category) ----
   // Taker fee = shares x BASE_TAKER_FEE_RATE x price x (1 - price).
   // Crypto taker fee rate is 0.07; makers are never charged.
@@ -97,10 +121,6 @@ module.exports = {
   // Maker rebate = 20% of the fee-equivalent (Crypto category).
   // Only resting (maker) fills earn it.
   MAKER_REBATE_RATE: 0.20,
-  // true = confirmed leader fills are modeled as resting maker fills:
-  // fee 0, 20% rebate credited. (LEADER entries are buy-limits that
-  // fill on walk-through, so this stays true.)
-  ENTRY_IS_MAKER: true,
 
   // ---- Resolution ----
   // If either side's price is observed at/above RESOLUTION_WIN_THRESHOLD

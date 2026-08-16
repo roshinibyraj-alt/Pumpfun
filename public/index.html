@@ -195,9 +195,13 @@
       const parts = Object.entries(d.engines || {}).map(([tf, e]) => {
         const v = e.variants || {};
         const leader = v.leader || {};
-        const traded = leader.traded != null ? leader.traded : 0;
-        const wins = leader.wins != null ? leader.wins : 0;
-        const winRate = traded ? (wins / traded * 100).toFixed(1) + '%' : '—';
+        const leaderMaker = v.leaderMaker || {};
+        const row = (label, r) => {
+          const traded = r.traded != null ? r.traded : 0;
+          const wins = r.wins != null ? r.wins : 0;
+          const winRate = traded ? (wins / traded * 100).toFixed(1) + '%' : '—';
+          return '<div class="sf-row" style="grid-template-columns:1.4fr 1.2fr 0.7fr 0.7fr 0.9fr"><span>' + label + '</span>' + pnlCell(r.pnl || 0) + '<span>' + traded + '</span><span>' + wins + '</span><span>' + winRate + '</span></div>';
+        };
         const rungRows = (e.rungs || []).map((r) =>
           '<div class="sf-row" style="grid-template-columns:0.9fr 0.8fr 0.7fr 2fr 1fr 1fr 1fr">' +
             '<span>$' + r.level.toFixed(2) + '</span><span>' + r.touches + '</span><span>' + r.fills + '</span>' +
@@ -210,12 +214,13 @@
           '<div class="card-title"><span>LEADER — backtest (real history, ' + tf + ')</span><span class="countdown">' + e.windows + ' windows · ' + fmtTime(d.fetchedAt) + '</span></div>' +
           '<div class="sf-table">' +
             '<div class="sf-row sf-head" style="grid-template-columns:1.4fr 1.2fr 0.7fr 0.7fr 0.9fr"><span>Strategy</span><span>Net P&amp;L</span><span>Traded</span><span>Wins</span><span>Win Rate</span></div>' +
-            '<div class="sf-row" style="grid-template-columns:1.4fr 1.2fr 0.7fr 0.7fr 0.9fr"><span>LEADER (live)</span>' + pnlCell(leader.pnl || 0) + '<span>' + traded + '</span><span>' + wins + '</span><span>' + winRate + '</span></div>' +
+            row('LEADER taker (live)', leader) +
+            row('LEADER maker (v30)', leaderMaker) +
           '</div>' +
           '<div style="margin-top:10px" class="sf-table">' +
             '<div class="sf-row sf-head" style="grid-template-columns:0.9fr 0.8fr 0.7fr 2fr 1fr 1fr 1fr"><span>Level</span><span>Touches</span><span>Fills</span><span>Dipper Win (edge)</span><span>Leader Win</span><span>Leader Edge</span><span>Avg P&amp;L/fill</span></div>' + rungRows +
           '</div>' +
-          '<div class="drow" style="font-size:10px;color:var(--text-dim);margin-top:6px"><span>Trigger = a side dips to the level. Leader = opposite side bought via resting limit at the mirror price (1 − level). A positive leader edge means buying the non-dipping side pays.</span><span></span></div>' +
+          '<div class="drow" style="font-size:10px;color:var(--text-dim);margin-top:6px"><span>Trigger = a side dips to the level. Leader = opposite side — taker (v31): immediate fill at mid ± slippage, taker fee; maker (v30): resting limit at mirror (1 − level), walk-through confirmation. A positive leader edge means buying the non-dipping side pays.</span><span></span></div>' +
         '</div>';
       });
       el.innerHTML = parts.join('');
@@ -239,13 +244,17 @@
   function strategyState(win, cfg, lc) {
     if (!win) return 'no window';
     const c = ladderCounts(win);
+    if (cfg && cfg.ENTRY_MODE === 'taker') {
+      return c.filled + ' taker fill(s) executed' + (c.expired ? ' · ' + c.expired + ' expired' : ' · no pending orders');
+    }
     return c.filled + ' fills confirmed · ' + c.placed + ' awaiting walk-through' + (c.expired ? ' · ' + c.expired + ' expired' : '');
   }
 
-  function patternText(win) {
+  function patternText(win, cfg) {
     if (!win) return 'no window';
     const c = ladderCounts(win);
     if (c.filled === 0 && c.placed === 0) return 'arming triggers — waiting for a side to dip to a level';
+    if (cfg && cfg.ENTRY_MODE === 'taker') return c.filled + ' taker fill(s) @ mid ± slippage — riding to resolution';
     if (c.filled === 0) return c.placed + ' order(s) placed — waiting for price to walk through';
     return c.filled + ' fill(s) confirmed · ' + c.placed + ' awaiting walk-through';
   }
@@ -254,8 +263,8 @@
     return '<span class="pill e5m">' + key + '</span>';
   }
 
-  function positionStatusLabel(pos) {
-    if (pos.status === 'filled') return 'filled (limit) @ $' + pos.fillPrice.toFixed(2) + ' · riding to resolution';
+  function positionStatusLabel(pos, cfg) {
+    if (pos.status === 'filled') return 'filled (' + ((cfg && cfg.ENTRY_MODE === 'taker') ? 'taker' : 'limit') + ') @ $' + pos.fillPrice.toFixed(2) + ' · riding to resolution';
     if (pos.status === 'stopped_out') return 'stopped out @ $' + (pos.exitPrice != null ? pos.exitPrice.toFixed(2) : '—') + ' · realized ' + (pos.pnl != null ? ((pos.pnl >= 0 ? '+' : '') + pos.pnl.toFixed(2)) : '—');
     if (pos.status === 'resolved_win') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · won @ resolution';
     if (pos.status === 'resolved_loss') return 'filled @ $' + pos.fillPrice.toFixed(2) + ' · lost @ resolution';
@@ -281,7 +290,7 @@
     '</div>';
   }
 
-  function renderPositionArea(win, live, rungs) {
+  function renderPositionArea(win, live, rungs, cfg) {
     if (!win) return '<div class="empty-state">No open window.</div>';
     const entries = win.entries || [];
     const lv = (live && live.entries) || [];
@@ -308,7 +317,7 @@
         '<span class="lbl">Fee</span><span>$' + (l.fee || 0).toFixed(3) + '</span>' +
         '<span class="lbl">Rebate</span><span>$' + (l.rebate || 0).toFixed(3) + '</span></div>' +
         '<div class="reason">' + (pos.entryReason || '') + '</div>' +
-        '<span class="status-pill">' + positionStatusLabel(pos) + '</span>' +
+        '<span class="status-pill">' + positionStatusLabel(pos, cfg) + '</span>' +
       '</div>';
     }).join('') + (triggerGridHtml ? '<div style="margin-top:10px">' + triggerGridHtml + '</div>' : '');
   }
@@ -453,7 +462,10 @@
     const maxDDPct = e.maxDrawdownPct != null ? e.maxDrawdownPct : 0;
     const currDD = Math.max(0, peak - equity);
     const currDDPct = peak > 0 ? currDD / peak : 0;
-    const schedule = 'LEADER · dip to ' + rungs.map((p) => '$' + p.toFixed(2)).join(' / ') + ' → buy opposite side ' + rungShares + 'sh @ mirror limit (dip $0.40 → $0.60 … $0.10 → $0.90) · stop loss @ $0.50 · fill confirmed on walk-through';
+    const execText = cfg.ENTRY_MODE === 'taker'
+      ? 'TAKER fills @ mid ± slippage (' + (cfg.TAKER_SLIPPAGE_MIN != null ? cfg.TAKER_SLIPPAGE_MIN : 0) + '…+' + (cfg.TAKER_SLIPPAGE_MAX != null ? cfg.TAKER_SLIPPAGE_MAX : 0) + ') · taker fee · no entries after last ' + (cfg.ENTRY_CUTOFF_SEC != null ? cfg.ENTRY_CUTOFF_SEC + 's' : '—')
+      : 'resting limit @ mirror (dip $0.40 → $0.60 … $0.10 → $0.90) · fill confirmed on walk-through · maker rebate';
+    const schedule = 'LEADER · dip to ' + rungs.map((p) => '$' + p.toFixed(2)).join(' / ') + ' → buy opposite side ' + rungShares + 'sh · ' + execText + ' · stop loss @ ' + (cfg.STOP_LOSS_PRICE != null ? '$' + cfg.STOP_LOSS_PRICE.toFixed(2) : 'off');
 
     return '<div class="engine">' +
       '<div class="engine-head">' +
@@ -480,7 +492,7 @@
         '<div class="chip"><div class="k">Avg Fill</div><div class="v">' + (fills.length ? '$' + (fills.reduce((a, b) => a + b, 0) / fills.length).toFixed(2) : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Pending</div><div class="v">' + (e.pendingResolutions || []).length + '</div></div>' +
         '<div class="chip"><div class="k">Triggers</div><div class="v ' + ((lc2 && lc2.filled > 0) ? 'pos' : '') + '">' + (win ? lc2.filled + ' / ' + lc2.total : '—') + '</div></div>' +
-        '<div class="chip"><div class="k">Awaiting Walk-Thru</div><div class="v">' + (win ? lc2.placed : '—') + '</div></div>' +
+        '<div class="chip"><div class="k">' + (cfg.ENTRY_MODE === 'taker' ? 'Pending Fills' : 'Awaiting Walk-Thru') + '</div><div class="v">' + (win ? lc2.placed : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Expired</div><div class="v">' + (win ? lc2.expired : '—') + '</div></div>' +
         '<div class="chip"><div class="k">Order Latency</div><div class="v">' + ((win && win.lastLatencyMs != null) ? win.lastLatencyMs + 'ms' : ((live && live.triggers && live.triggers.lastLatencyMs != null) ? live.triggers.lastLatencyMs + 'ms' : '—')) + '</div></div>' +
         '<div class="chip"><div class="k">Win Streak</div><div class="v ' + (streak.wins > 0 ? 'pos' : '') + '">W' + streak.wins + '</div></div>' +
@@ -501,10 +513,10 @@
         '<div class="card-title"><span>Current Window</span>' +
           '<span class="countdown">' + (lc.secondsRemaining != null ? (lc.secondsRemaining > 0 ? fmtCountdown(lc.secondsRemaining) + ' left' : 'resolving…') : '—') + '</span></div>' +
         '<div class="pattern-row">' +
-          '<span class="pattern-chip">' + (win ? patternText(win) : '— — —') + '</span>' +
+          '<span class="pattern-chip">' + (win ? patternText(win, cfg) : '— — —') + '</span>' +
           '<span class="signal-chip">' + strategyState(win, cfg, lc) + '</span>' +
         '</div>' +
-        renderPositionArea(win, live, rungs) +
+        renderPositionArea(win, live, rungs, cfg) +
       '</div>' +
 
       '<div class="card">' +
