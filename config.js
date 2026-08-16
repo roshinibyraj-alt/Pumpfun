@@ -13,10 +13,11 @@
 //      capital, equity curve, drawdown, and streak per engine.
 //   2. Trigger levels at LADDER_RUNGS (0.40 down to 0.10): the first
 //      time a side's mid is observed AT OR BELOW a level in a window,
-//      the bot places a buy-limit order on the opposite side at its
-//      current mid (50 fixed shares, cost = 50 x limit price). Each
-//      side+level can trigger at most once per window. No cutoff —
-//      triggers stay armed until the window closes.
+//      the bot places a RESTING buy-limit order on the opposite side
+//      at the MIRROR of the dipped level — $0.40 dip -> limit $0.60,
+//      $0.35 -> $0.65, ... $0.10 -> $0.90 (50 fixed shares, cost = 50
+//      x limit price). Each side+level can trigger at most once per
+//      window. No cutoff — triggers stay armed until the window closes.
 //   3. FILL CONFIRMATION: fills are NOT assumed. The order is placed
 //      and its placement round-trip latency is measured (ms, real
 //      Polymarket API call). Only AFTER that latency elapses does the
@@ -55,7 +56,7 @@ module.exports = {
   // level first; every side+level can trigger once per window.
   LADDER_RUNGS: [0.40, 0.35, 0.30, 0.25, 0.20, 0.15, 0.10],
   // Shares bought per trigger (fixed, regardless of dollar cost).
-  // cost per trigger = RUNG_SHARES x leader mid (e.g. 50sh @ 0.60 = $30).
+  // cost per trigger = RUNG_SHARES x mirror limit (e.g. 50sh @ 0.60 = $30).
   RUNG_SHARES: 50,
 
   // ---- Leader fill confirmation ----

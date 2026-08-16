@@ -17,9 +17,10 @@
 //   all        — timeFilter + cap + tp combined.
 //   leader     — DIRECTION EXPERIMENT: when one side crosses a rung
 //                level (dips to it), buy 50 shares of the OPPOSITE
-//                (leader) side at its current mid instead. Tests the
-//                hypothesis that the dipping side is overpriced and
-//                the leader side carries positive edge.
+//                (leader) side via a resting limit at the MIRROR of
+//                the dipped level (0.40 -> 0.60, ... 0.10 -> 0.90).
+//                Tests the hypothesis that the dipping side is
+//                overpriced and the leader side carries positive edge.
 // ============================================================
 
 const DEFAULTS = {
@@ -92,7 +93,8 @@ function replayWindow(opts) {
     if (t.down != null) last.down = t.down;
 
     // LEADER MODE: when a side crosses a rung level, buy the opposite
-    // (leader) side at its current mid — once per level per side.
+    // (leader) side via a resting limit at the MIRROR of the dipped
+    // level — once per level per side.
     if (leaderMode) {
       for (const side of ['UP', 'DOWN']) {
         const px = side === 'UP' ? last.up : last.down;
@@ -103,7 +105,8 @@ function replayWindow(opts) {
           const key = side + ':' + price;
           if (triggered[key] || oppPx == null) continue;
           triggered[key] = true;
-          fills.push({ side: side === 'UP' ? 'DOWN' : 'UP', price: oppPx, shares, fillAt: t.t, sold: false, triggerLevel: price, triggerSide: side });
+          const mirror = Math.round((1 - price) * 100) / 100;
+          fills.push({ side: side === 'UP' ? 'DOWN' : 'UP', price: mirror, shares, fillAt: t.t, sold: false, triggerLevel: price, triggerSide: side });
         }
       }
       continue; // no ladder fills / TP in leader mode

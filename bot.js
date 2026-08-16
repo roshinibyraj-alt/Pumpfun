@@ -4,11 +4,12 @@
 //
 //   5m — LEADER (buy the non-dipping side):
 //     When a side's mid price is first observed AT OR BELOW a trigger
-//     level (0.40 -> 0.10), the bot places a buy-limit order on the
-//     OPPOSITE (leader) side at its current mid — 50 fixed shares per
-//     trigger (cost = 50 x limit price). Each side+level can trigger
-//     once per window; triggers stay armed until the window closes
-//     (no cutoff).
+//     level (0.40 -> 0.10), the bot places a resting buy-limit order
+//     on the OPPOSITE (leader) side at the MIRROR of the dipped level
+//     — a $0.40 dip places the limit at exactly $0.60, $0.35 -> $0.65,
+//     ... $0.10 -> $0.90 (50 fixed shares per trigger, cost = 50 x
+//     limit price). Each side+level can trigger once per window;
+//     triggers stay armed until the window closes (no cutoff).
 //
 //     FILL CONFIRMATION: fills are NOT assumed. Order placement
 //     latency is measured in ms with a real Polymarket round-trip;
@@ -323,14 +324,21 @@ function computeUnrealized(engine) {
 // shares (RUNG_SHARES, default 50), resting at the rung price. Called
 // ---- LEADER engine (5m only): buy the NON-dipping side ----
 // When a side's mid is first observed at or below a trigger level,
-// place a buy-limit order on the OPPOSITE (leader) side at its
-// current mid. Each side+level can trigger once per window. The order
-// placement round-trip is timed with a real Polymarket call (ms) and
-// the fill is only confirmed after that latency once the price has
-// walked through the limit price.
+// place a buy-limit order on the OPPOSITE (leader) side at the MIRROR
+// of the dipped level (0.40 -> 0.60, ... 0.10 -> 0.90). Each
+// side+level can trigger once per window. The order placement
+// round-trip is timed with a real Polymarket call (ms) and the fill
+// is only confirmed after that latency once the price has walked
+// through the limit price.
 async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, leaderPx, upTokenId, downTokenId, tag) {
   const shares = config.RUNG_SHARES;
   const leaderTokenId = leaderSide === 'UP' ? upTokenId : downTokenId;
+
+  // The leader-side buy-limit rests at the MIRROR of the dipped
+  // level: a $0.40 dip places the limit at exactly $0.60, $0.35 ->
+  // $0.65, ... $0.10 -> $0.90. The fill is confirmed at that limit
+  // price when the leader mid walks through it — never marked lower.
+  const limitPrice = Math.round((1 - level) * 100) / 100;
 
   // Measure the order-placement round-trip latency (ms) with a real
   // Polymarket call — in demo mode the midpoint fetch is the closest
@@ -342,8 +350,6 @@ async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, lea
   } catch (_) {}
   const latencyMs = Date.now() - t0;
   win.lastLatencyMs = latencyMs;
-
-  const limitPrice = Math.round(freshPx * 100) / 100;
   const order = {
     side: leaderSide,
     triggerSide,
@@ -473,7 +479,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           finalDownPrice: null,
         };
 
-        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh @ its mid | fill confirmed after price walks through | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
+        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh @ the mirror limit ($${(config.LADDER_RUNGS || []).map(p => (1 - p).toFixed(2)).join(', $')}) | fill confirmed after price walks through | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -553,7 +559,7 @@ async function tick() {
 function startBotLoop() {
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
     const rungs = (config.LADDER_RUNGS || []).map((p) => '$' + p.toFixed(2)).join(' / ');
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh @ mid | fill confirmed after price walks through (latency measured) | maker fills (20% rebate) | no cutoff`);
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh @ mirror limit (dip $0.40 -> $0.60 ... $0.10 -> $0.90) | fill confirmed after price walks through (latency measured) | maker fills (20% rebate) | no cutoff`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);
