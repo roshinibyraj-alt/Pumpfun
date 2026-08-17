@@ -418,11 +418,13 @@ async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, lea
 // Stops out every still-'filled' leader entry whose side's mid has
 // walked down to config.LEADER.STOP_LOSS_PRICE. The exit is realized
 // at the stop price immediately (bankroll credited now); resolveWindow
-// later skips entries that already have a pnl. No re-entry.
+// later skips entries that already have a pnl. After any stop-out, all
+// ladder levels are rearmed so the bot can re-enter on the next dip.
 function stopOutEntries(engine, win, tag, upPrice, downPrice) {
   const stopPrice = config.LEADER.STOP_LOSS_PRICE;
   if (stopPrice == null) return;
   const isMaker = config.ENTRY_MODE === 'maker';
+  let stoppedAny = false;
   for (const entry of win.entries || []) {
     if (entry.status !== 'filled') continue;
     const cur = priceOf(entry.side, upPrice, downPrice);
@@ -440,7 +442,12 @@ function stopOutEntries(engine, win, tag, upPrice, downPrice) {
     entry.pnl = Math.round((entry.payout - entry.cost) * 100000) / 100000;
     entry.settledAt = new Date().toISOString();
     engine.bankroll = Math.round((engine.bankroll + entry.pnl) * 100) / 100;
-    log(`${tag} STOP LOSS ${entry.side} ${entry.shares}sh @ $${entry.fillPrice.toFixed(2)} -> sold @ $${stopPrice.toFixed(2)} (mid walked down to $${cur.toFixed(3)}) | exit fee $${exitFee.toFixed(4)} | realized pnl $${entry.pnl.toFixed(2)} | bankroll $${engine.bankroll}`);
+    log(`${tag} STOP LOSS ${entry.side} ${entry.shares}sh @ ${entry.fillPrice.toFixed(2)} -> sold @ ${stopPrice.toFixed(2)} (mid walked down to ${cur.toFixed(3)}) | exit fee ${exitFee.toFixed(4)} | realized pnl ${entry.pnl.toFixed(2)} | bankroll ${engine.bankroll}`);
+    stoppedAny = true;
+  }
+  if (stoppedAny) {
+    win.triggered = {};
+    log(`${tag} STOP LOSS: all ladders rearmed — ${(config.LADDER_RUNGS || []).length * 2} side+level combos re-armed for re-entry`);
   }
 }
 
