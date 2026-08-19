@@ -417,38 +417,24 @@ async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, lea
 
 // Stops out every still-'filled' leader entry whose side's mid has
 // walked down to config.LEADER.STOP_LOSS_PRICE. The exit is realized
-// at the stop price immediately (bankroll credited now); resolveWindow
-// later skips entries that already have a pnl. After any stop-out, all
-// ladder levels are rearmed so the bot can re-enter on the next dip.
-function stopOutEntries(engine, win, tag, upPrice, downPrice) {
+// Detects when a filled entry's side drops to the stop loss price.
+// Instead of selling, the bot re-arms all ladders at 2× size.
+// Existing positions stay open and settle at window end.
+function rearmOnStop(engine, win, tag, upPrice, downPrice) {
   const stopPrice = config.LEADER.STOP_LOSS_PRICE;
   if (stopPrice == null) return;
-  const isMaker = config.ENTRY_MODE === 'maker';
-  let stoppedAny = false;
+  let triggered = false;
   for (const entry of win.entries || []) {
     if (entry.status !== 'filled') continue;
     const cur = priceOf(entry.side, upPrice, downPrice);
     if (cur == null || cur > stopPrice) continue;
-    const f = entry.fillFee || 0;
-    const r = entry.fillRebate || 0;
-    // A stop exit is a market (taker) sell too — it pays the taker fee.
-    const exitFee = isMaker ? 0 : round5(entry.shares * config.BASE_TAKER_FEE_RATE * stopPrice * (1 - stopPrice));
-    entry.status = 'stopped_out';
-    entry.exitPrice = stopPrice;
-    entry.exitFee = exitFee;
-    entry.resolvedWon = null;
-    entry.cost = Math.round((entry.shares * entry.fillPrice + f) * 100000) / 100000;
-    entry.payout = Math.round((entry.shares * stopPrice - exitFee + r) * 100000) / 100000;
-    entry.pnl = Math.round((entry.payout - entry.cost) * 100000) / 100000;
-    entry.settledAt = new Date().toISOString();
-    engine.bankroll = Math.round((engine.bankroll + entry.pnl) * 100) / 100;
-    log(`${tag} STOP LOSS ${entry.side} ${entry.shares}sh @ ${entry.fillPrice.toFixed(2)} -> sold @ ${stopPrice.toFixed(2)} (mid walked down to ${cur.toFixed(3)}) | exit fee ${exitFee.toFixed(4)} | realized pnl ${entry.pnl.toFixed(2)} | bankroll ${engine.bankroll}`);
-    stoppedAny = true;
+    log(`${tag} STOP LEVEL HIT ${entry.side} ${entry.shares}sh @ ${entry.fillPrice.toFixed(2)} — mid at ${cur.toFixed(3)} <= ${stopPrice.toFixed(2)}, re-arming ladders at 2× size`);
+    triggered = true;
   }
-  if (stoppedAny) {
+  if (triggered) {
     win.rearmMultiplier = 2;
     win.triggered = {};
-    log(`${tag} STOP LOSS: all ladders rearmed — ${(config.LADDER_RUNGS || []).length * 2} side+level combos re-armed for re-entry at ${config.RUNG_SHARES * 2}sh (doubled)`);
+    log(`${tag} REARM: all ladders re-armed — ${(config.LADDER_RUNGS || []).length * 2} side+level combos re-armed at ${config.RUNG_SHARES * 2}sh (doubled from ${config.RUNG_SHARES}sh)`);
   }
 }
 
@@ -504,7 +490,7 @@ async function leaderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTok
   if (config.ENTRY_MODE !== 'taker') {
     confirmLeaderFills(engine, win, tag, upPrice, downPrice, upTokenId, downTokenId);
   }
-  stopOutEntries(engine, win, tag, upPrice, downPrice);
+  rearmOnStop(engine, win, tag, upPrice, downPrice);
 }
 
 async function engineTick(state, engineKey, engineCfg, nowSec) {
