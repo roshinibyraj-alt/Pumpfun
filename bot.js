@@ -1,8 +1,8 @@
 // ============================================================
-// bot.js — v32. ONE unified engine shape (15m only, 5m removed).
+// bot.js — LEADER strategy on 5-minute windows with 1 rearm martingale.
 // The ONLY live strategy is LEADER (see config.js):
 //
-//   15m — LEADER (buy the non-dipping side):
+//   5m — LEADER (buy the non-dipping side):
 //     When a side's mid price is first observed AT OR BELOW a trigger
 //     level (0.40 -> 0.10), the bot fires a TAKER market buy on the
 //     OPPOSITE (leader) side — the side that did NOT dip (50 fixed
@@ -416,17 +416,14 @@ async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, lea
   log(`${tag} LEADER ORDER placed — ${triggerSide} dipped to $${level.toFixed(2)} -> buy ${leaderSide} ${shares}sh @ $${limitPrice.toFixed(2)} (mid $${freshPx.toFixed(3)}) | order latency ${latencyMs}ms, fill confirmed after price walks through`);
 }
 
-// Stops out every still-'filled' leader entry whose side's mid has
-// walked down to config.LEADER.STOP_LOSS_PRICE. The exit is realized
 // Detects when a filled entry's side drops to the stop loss price.
-// Instead of selling, the bot re-arms all ladders with progressive
-// martingale: 50 → 100 → 200 → 400. Existing positions stay open
-// and settle at window end. Triggered map is NOT cleared until the
-// price recovers above stop — prevents infinite re-entry loop.
+// Sells at STOP_LOSS_PRICE (realized loss, bankroll credited), then
+// re-arms ladders at 2× size. Only one rearm allowed per window.
+// After stop, existing positions ride to resolution.
 function rearmOnStop(engine, win, tag, upPrice, downPrice) {
   const stopPrice = config.LEADER.STOP_LOSS_PRICE;
   if (stopPrice == null) return;
-  const maxMart = config.LEADER.MAX_MARTINGALE || 3;
+  const maxMart = config.LEADER.MAX_MARTINGALE || 1;
   const curCount = win.martingaleCount || 0;
   if (curCount >= maxMart) return;
 
@@ -435,9 +432,18 @@ function rearmOnStop(engine, win, tag, upPrice, downPrice) {
     if (entry.status !== 'filled') continue;
     const cur = priceOf(entry.side, upPrice, downPrice);
     if (cur == null || cur > stopPrice) continue;
+
+    // REAL STOP LOSS: sell at stop price, realize the loss now
+    const sellFee = round5(entry.shares * config.BASE_TAKER_FEE_RATE * stopPrice * (1 - stopPrice));
     entry.status = 'stopped_out';
     entry.stoppedAt = new Date().toISOString();
     entry.exitPrice = stopPrice;
+    entry.cost = round5(entry.shares * entry.fillPrice + (entry.fillFee || 0));
+    entry.payout = round5(entry.shares * stopPrice - sellFee);
+    entry.pnl = round5(entry.payout - entry.cost);
+    entry.settledAt = new Date().toISOString();
+    engine.bankroll = round2(engine.bankroll + entry.pnl);
+    log(`${tag} STOP LOSS: ${entry.side} ${entry.shares}sh sold @ $${stopPrice.toFixed(2)} | P&L $${entry.pnl.toFixed(2)} (cost $${entry.cost.toFixed(2)} payout $${entry.payout.toFixed(2)})`);
     triggered = true;
   }
   if (!triggered) return;
@@ -446,14 +452,14 @@ function rearmOnStop(engine, win, tag, upPrice, downPrice) {
   const newMult = prevMult * 2;
   win.rearmMultiplier = newMult;
   win.martingaleCount = curCount + 1;
-  win.rearmPending = true; // wait for price recovery before clearing triggered
+  win.rearmPending = true;
 
   if (win.martingaleCount > (engine.maxMartingaleCount || 0)) {
     engine.maxMartingaleCount = win.martingaleCount;
   }
 
   const newShares = config.RUNG_SHARES * newMult;
-  log(`${tag} 🎯 STOP HIT → MARTINGALE #${win.martingaleCount}: ${newMult}× (${newShares}sh/level) | waiting for price recovery before re-entry | max ${maxMart}`);
+  log(`${tag} 🎯 MARTINGALE #${win.martingaleCount}: re-arming at ${newMult}× (${newShares}sh/level) | waiting for price recovery | max ${maxMart}`);
 }
 
 // Marks confirmed fills for orders whose placement latency has elapsed
@@ -501,11 +507,13 @@ async function leaderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTok
     }
   }
 
-  // No NEW entries in the last ENTRY_CUTOFF_SEC of the window — a
-  // taker buy in the final minute has no time to recover. Existing
-  // fills still stop out / ride to resolution (handled below).
-  const cutoffSec = config.LEADER.ENTRY_CUTOFF_SEC;
-  const inEntryWindow = cutoffSec == null || Date.now() / 1000 < win.windowEnd - cutoffSec;
+  // Entry window: no entries in first ENTRY_START_SEC (watch period)
+  // and no entries in last ENTRY_CUTOFF_SEC (too close to close).
+  const startSec = config.LEADER.ENTRY_START_SEC || 0;
+  const cutoffSec = config.LEADER.ENTRY_CUTOFF_SEC || 0;
+  const elapsed = Date.now() / 1000 - win.windowStart;
+  const remaining = win.windowEnd - Date.now() / 1000;
+  const inEntryWindow = elapsed >= startSec && remaining > cutoffSec;
 
   // Process UP first, then DOWN; within a side highest level first.
   for (const triggerSide of inEntryWindow ? ['UP', 'DOWN'] : []) {
@@ -602,7 +610,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
         const execText = config.ENTRY_MODE === 'taker'
           ? `as a TAKER fill @ mid ± slippage (${config.TAKER_SLIPPAGE_MIN}…+${config.TAKER_SLIPPAGE_MAX}) · taker fee`
           : `@ the mirror limit ($${mirrorText}) · fill confirmed after price walks through`;
-        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh ${execText} | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} → 2× size on re-arm | no entries after last $${config.LEADER.ENTRY_CUTOFF_SEC || 0}s | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
+        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh ${execText} | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} → 2× size on re-arm | entries after $${config.LEADER.ENTRY_START_SEC || 0}s, before last $${config.LEADER.ENTRY_CUTOFF_SEC || 0}s | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
@@ -685,7 +693,7 @@ function startBotLoop() {
     const execText = config.ENTRY_MODE === 'taker'
       ? `taker fills @ mid ± slippage (${config.TAKER_SLIPPAGE_MIN}…+${config.TAKER_SLIPPAGE_MAX}) · taker fee · latency measured`
       : 'resting limit @ mirror (dip $0.40 -> $0.60 ... $0.10 -> $0.90) · fill confirmed after price walks through · maker fills (20% rebate)';
-    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} | ${execText} | no entries after last ${config.LEADER.ENTRY_CUTOFF_SEC || 0}s`);
+    log(`Bot started — ${key} engine (${cfg.WINDOW_MINUTES}-min windows, ${cfg.STRATEGY}). Bankroll: $${cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL} | LEADER: dip to ${rungs} -> buy opposite side ${config.RUNG_SHARES}sh | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} | ${execText} | entries after ${config.LEADER.ENTRY_START_SEC || 0}s, before last ${config.LEADER.ENTRY_CUTOFF_SEC || 0}s`);
   }
   tick();
   setInterval(tick, config.POLL_INTERVAL_MS);

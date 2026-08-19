@@ -9,7 +9,7 @@
 //   a trigger level, the bot buys the OPPOSITE (leader) side — the
 //   side that did NOT dip — instead of buying the dip.
 //
-//   1. One 15-minute window engine only (no 5m). Separate demo
+//   1. One 5-minute window engine only. Separate demo
 //      capital, equity curve, drawdown, and streak per engine.
 //   2. Trigger levels at LADDER_RUNGS (0.40 down to 0.10): the first
 //      time a side's mid is observed AT OR BELOW a level in a window,
@@ -80,22 +80,25 @@ module.exports = {
     // window — a taker buy in the final minute has no time to recover
     // and resolution is imminent. Existing positions still stop out /
     // ride to resolution. null/undefined = no cutoff.
-    ENTRY_CUTOFF_SEC: 60,
+    ENTRY_CUTOFF_SEC: 15,
+    // No entries in the first ENTRY_START_SEC of the window.
+    // Bot watches for 2 minutes before placing any trades.
+    ENTRY_START_SEC: 120,
     // Max number of martingale rearms per window after stop loss.
     // 0 = no rearms, 1 = one rearm (50→100), 3 = up to 400 shares.
-    MAX_MARTINGALE: 3,
+    MAX_MARTINGALE: 1,
   },
 
   // ---- Engines ----
-  // One 15m engine with its own bankroll and history. The 5m engine
-  // was removed in v30 — the backtest proved LEADER works on 15m, so
-  // it is now the ONLY live strategy.
+  // One 5m engine with its own bankroll and history.
+  // LEADER strategy on 5-minute windows.
+  // no 15m engine — 5m only.
   ENGINES: {
-    '15m': {
-      label: '15m',
+    '5m': {
+      label: '5m',
       STRATEGY: 'LEADER',
-      WINDOW_MINUTES: 15,
-      CAPITAL: 2000, // this engine's starting bankroll (independent)
+      WINDOW_MINUTES: 5,
+      CAPITAL: 2000,
     },
   },
 
@@ -140,7 +143,7 @@ module.exports = {
   // windows to fetch per engine on refresh. LEARN_ON_BOOT: refresh
   // learn.json in the background on start.
   LEARN: {
-    WINDOWS: { '15m': 48 },
+    WINDOWS: { '5m': 48 },
     FIDELITY: 1,
     DEEP_RUNGS: [0.15, 0.10],
     TIME_FILTER_FRACTION: 0.60,
