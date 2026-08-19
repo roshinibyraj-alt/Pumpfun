@@ -245,6 +245,7 @@ async function resolveWindow(engine, win) {
     maxDrawdownAfter: engine.maxDrawdown,
     maxDrawdownPctAfter: engine.maxDrawdownPct,
     streakAfter: { wins: engine.streak.wins, losses: engine.streak.losses },
+    martingaleCount: win.martingaleCount || 0,
     resolvedAt: new Date().toISOString(),
   });
 
@@ -418,24 +419,41 @@ async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, lea
 // Stops out every still-'filled' leader entry whose side's mid has
 // walked down to config.LEADER.STOP_LOSS_PRICE. The exit is realized
 // Detects when a filled entry's side drops to the stop loss price.
-// Instead of selling, the bot re-arms all ladders at 2× size.
-// Existing positions stay open and settle at window end.
+// Instead of selling, the bot re-arms all ladders with progressive
+// martingale: 50 → 100 → 200 → 400. Existing positions stay open
+// and settle at window end. Triggered map is NOT cleared until the
+// price recovers above stop — prevents infinite re-entry loop.
 function rearmOnStop(engine, win, tag, upPrice, downPrice) {
   const stopPrice = config.LEADER.STOP_LOSS_PRICE;
   if (stopPrice == null) return;
+  const maxMart = config.LEADER.MAX_MARTINGALE || 3;
+  const curCount = win.martingaleCount || 0;
+  if (curCount >= maxMart) return;
+
   let triggered = false;
   for (const entry of win.entries || []) {
     if (entry.status !== 'filled') continue;
     const cur = priceOf(entry.side, upPrice, downPrice);
     if (cur == null || cur > stopPrice) continue;
-    log(`${tag} STOP LEVEL HIT ${entry.side} ${entry.shares}sh @ ${entry.fillPrice.toFixed(2)} — mid at ${cur.toFixed(3)} <= ${stopPrice.toFixed(2)}, re-arming ladders at 2× size`);
+    entry.status = 'stopped_out';
+    entry.stoppedAt = new Date().toISOString();
+    entry.exitPrice = stopPrice;
     triggered = true;
   }
-  if (triggered) {
-    win.rearmMultiplier = 2;
-    
-    log(`${tag} REARM: all ladders re-armed — ${(config.LADDER_RUNGS || []).length * 2} side+level combos re-armed at ${config.RUNG_SHARES * 2}sh (doubled from ${config.RUNG_SHARES}sh)`);
+  if (!triggered) return;
+
+  const prevMult = win.rearmMultiplier || 1;
+  const newMult = prevMult * 2;
+  win.rearmMultiplier = newMult;
+  win.martingaleCount = curCount + 1;
+  win.rearmPending = true; // wait for price recovery before clearing triggered
+
+  if (win.martingaleCount > (engine.maxMartingaleCount || 0)) {
+    engine.maxMartingaleCount = win.martingaleCount;
   }
+
+  const newShares = config.RUNG_SHARES * newMult;
+  log(`${tag} 🎯 STOP HIT → MARTINGALE #${win.martingaleCount}: ${newMult}× (${newShares}sh/level) | waiting for price recovery before re-entry | max ${maxMart}`);
 }
 
 // Marks confirmed fills for orders whose placement latency has elapsed
@@ -462,6 +480,26 @@ function confirmLeaderFills(engine, win, tag, upPrice, downPrice, upTokenId, dow
 async function leaderTick(engine, win, engineCfg, tag, upPrice, downPrice, upTokenId, downTokenId) {
   const rungs = (config.LADDER_RUNGS || []).slice().sort((a, b) => b - a);
   win.triggered = win.triggered || {};
+
+  // After a rearm: wait until price recovers above stop before
+  // clearing triggered and allowing new entries. Prevents the
+  // infinite re-entry loop where stop fires every 500ms.
+  if (win.rearmPending) {
+    const stopPrice = config.LEADER.STOP_LOSS_PRICE;
+    let recovered = true;
+    for (const entry of win.entries || []) {
+      if (entry.status !== 'stopped_out') continue;
+      const cur = priceOf(entry.side, upPrice, downPrice);
+      if (cur != null && cur <= stopPrice) { recovered = false; break; }
+    }
+    if (recovered) {
+      win.rearmPending = false;
+      win.triggered = {};
+      log(`${tag} ✅ PRICE RECOVERED above stop — ladders re-armed at ${win.rearmMultiplier}× (${config.RUNG_SHARES * win.rearmMultiplier}sh/level)`);
+    } else {
+      return; // still waiting for recovery — skip entries this tick
+    }
+  }
 
   // No NEW entries in the last ENTRY_CUTOFF_SEC of the window — a
   // taker buy in the final minute has no time to recover. Existing
@@ -554,6 +592,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           orders: [],
           triggered: {},
           rearmMultiplier: 1,
+          martingaleCount: 0,
           lastLatencyMs: null,
           finalUpPrice: null,
           finalDownPrice: null,

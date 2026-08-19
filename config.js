@@ -81,6 +81,9 @@ module.exports = {
     // and resolution is imminent. Existing positions still stop out /
     // ride to resolution. null/undefined = no cutoff.
     ENTRY_CUTOFF_SEC: 60,
+    // Max number of martingale rearms per window after stop loss.
+    // 0 = no rearms, 1 = one rearm (50→100), 3 = up to 400 shares.
+    MAX_MARTINGALE: 3,
   },
 
   // ---- Engines ----

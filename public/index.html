@@ -44,6 +44,7 @@
   .live-price { font-family: var(--font-data); font-size: 12px; color: var(--text-dim); text-align: right; }
   .live-price b { color: var(--text); font-weight: 600; }
   .live-price .sep { color: var(--border); }
+  .mart-badge { font-family: var(--font-data); font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 8px; background: rgba(248,113,113,0.15); color: var(--loss); border: 1px solid rgba(248,113,113,0.3); white-space: nowrap; }
 
   .engine { margin-bottom: 26px; }
   .engine-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -159,7 +160,10 @@
       <span class="dot"></span>
       <h1>LEADER Terminal</h1>
     </div>
-    <div class="live-price" id="livePrice">— —</div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+      <span class="mart-badge" id="martBadge">MARTINGALE 0</span>
+      <div class="live-price" id="livePrice">— —</div>
+    </div>
   </div>
 
   <div id="engines"></div>
@@ -545,7 +549,15 @@
         const lc = engines[k].lastCheck || {};
         return '<span>' + k + ' UP <b>' + (lc.upPrice != null ? '$' + lc.upPrice.toFixed(2) : '—') + '</b> · DOWN <b>' + (lc.downPrice != null ? '$' + lc.downPrice.toFixed(2) : '—') + '</b></span>';
       });
-      $('livePrice').innerHTML = priceParts.length ? priceParts.join('<span class="sep">|</span>') : '— —';
+          // Martingale badge
+    var maxMart = 0;
+    for (var ek in data.engines || {}) {
+      var ee = data.engines[ek];
+      if ((ee.maxMartingaleCount || 0) > maxMart) maxMart = ee.maxMartingaleCount;
+    }
+    var martEl = $('martBadge');
+    if (martEl) martEl.textContent = 'MARTINGALE ' + maxMart;
+    $('livePrice').innerHTML = priceParts.length ? priceParts.join('<span class="sep">|</span>') : '— —';
     } catch (e) { console.error('header render failed', e); }
 
     try {

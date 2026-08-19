@@ -51,6 +51,7 @@ function engineDefault(engineKey, engineCfg) {
     maxDrawdown: 0,
     maxDrawdownPct: 0,
     equityCurve: [],
+    maxMartingaleCount: 0,
   };
 }
 
