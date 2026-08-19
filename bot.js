@@ -433,7 +433,7 @@ function rearmOnStop(engine, win, tag, upPrice, downPrice) {
   }
   if (triggered) {
     win.rearmMultiplier = 2;
-    win.triggered = {};
+    
     log(`${tag} REARM: all ladders re-armed — ${(config.LADDER_RUNGS || []).length * 2} side+level combos re-armed at ${config.RUNG_SHARES * 2}sh (doubled from ${config.RUNG_SHARES}sh)`);
   }
 }
