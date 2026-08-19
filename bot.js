@@ -350,7 +350,7 @@ function computeUnrealized(engine) {
 // is only confirmed after that latency once the price has walked
 // through the limit price.
 async function placeLeaderOrder(engine, win, triggerSide, level, leaderSide, leaderPx, upTokenId, downTokenId, tag) {
-  const shares = config.RUNG_SHARES;
+  const shares = config.RUNG_SHARES * (win.rearmMultiplier || 1);
   const leaderTokenId = leaderSide === 'UP' ? upTokenId : downTokenId;
 
   // Measure the order-placement round-trip latency (ms) with a real
@@ -446,8 +446,9 @@ function stopOutEntries(engine, win, tag, upPrice, downPrice) {
     stoppedAny = true;
   }
   if (stoppedAny) {
+    win.rearmMultiplier = 2;
     win.triggered = {};
-    log(`${tag} STOP LOSS: all ladders rearmed — ${(config.LADDER_RUNGS || []).length * 2} side+level combos re-armed for re-entry`);
+    log(`${tag} STOP LOSS: all ladders rearmed — ${(config.LADDER_RUNGS || []).length * 2} side+level combos re-armed for re-entry at ${config.RUNG_SHARES * 2}sh (doubled)`);
   }
 }
 
@@ -566,6 +567,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
           entries: [],
           orders: [],
           triggered: {},
+          rearmMultiplier: 1,
           lastLatencyMs: null,
           finalUpPrice: null,
           finalDownPrice: null,
@@ -575,7 +577,7 @@ async function engineTick(state, engineKey, engineCfg, nowSec) {
         const execText = config.ENTRY_MODE === 'taker'
           ? `as a TAKER fill @ mid ± slippage (${config.TAKER_SLIPPAGE_MIN}…+${config.TAKER_SLIPPAGE_MAX}) · taker fee`
           : `@ the mirror limit ($${mirrorText}) · fill confirmed after price walks through`;
-        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh ${execText} | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} | no entries after last $${config.LEADER.ENTRY_CUTOFF_SEC || 0}s | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
+        log(`${tag} Window ${windowStart} opened — LEADER: when a side dips to $${(config.LADDER_RUNGS || []).map(p => p.toFixed(2)).join(', $')} buy the opposite side ${config.RUNG_SHARES}sh ${execText} | stop loss @ $${config.LEADER.STOP_LOSS_PRICE != null ? config.LEADER.STOP_LOSS_PRICE.toFixed(2) : 'off'} → 2× size on re-arm | no entries after last $${config.LEADER.ENTRY_CUTOFF_SEC || 0}s | live until window close | peak $${engine.peakBankroll.toFixed(2)}`);
       }
 
       const [upPrice, downPrice] = await Promise.all([
