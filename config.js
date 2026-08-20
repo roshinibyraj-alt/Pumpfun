@@ -1,12 +1,12 @@
 // ============================================================
 // CONFIG — cheap/expensive phase strategy
 //
-//   Phase 1 (0–180s): Buy the CHEAP side every 20s, 8 shares
-//   Phase 2 (180s–window end): Buy the EXPENSIVE side every 20s, 15 shares
+//   Phase 1 (0–Xs): Buy the CHEAP side, 8 shares per entry
+//   Phase 2 (X–end): Buy the EXPENSIVE side, 15 shares per entry
 //
-//   Both 5m and 15m engines follow same logic.
-//   No stop loss, no martingale, no anti-whipsaw filters.
-//   Hold until window resolution ($1 win / $0 loss).
+//   5m engine:  180s phase1, 20s interval
+//   15m engine: 540s phase1, 60s interval (3x of 5m)
+//   Same share sizes on both. Hold until resolution.
 // ============================================================
 
 module.exports = {
@@ -15,23 +15,26 @@ module.exports = {
   ASSET: 'btc',
   STARTING_BANKROLL: 2000,
 
-  // Strategy params
-  PHASE1_SECONDS: 180,
+  // Shares per entry (same for both engines)
   PHASE1_SHARES: 8,
   PHASE2_SHARES: 15,
-  BUY_INTERVAL_SEC: 20,
 
-  // Engines — fully independent capital and history
+  // Engines — fully independent capital, intervals, and history
+  // 15m gets 3x time intervals vs 5m, same share sizes
   ENGINES: {
     '5m': {
       label: '5m',
       WINDOW_MINUTES: 5,
       CAPITAL: 2000,
+      PHASE1_SECONDS: 180,
+      BUY_INTERVAL_SEC: 20,
     },
     '15m': {
       label: '15m',
       WINDOW_MINUTES: 15,
       CAPITAL: 2000,
+      PHASE1_SECONDS: 540,
+      BUY_INTERVAL_SEC: 60,
     },
   },
 

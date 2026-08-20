@@ -42,23 +42,15 @@ app.get('/api/state', (req, res) => {
       totalFees: fees,
       config: {
         WINDOW_MINUTES: cfg.WINDOW_MINUTES,
-        PHASE1_SECONDS: config.PHASE1_SECONDS,
+        PHASE1_SECONDS: cfg.PHASE1_SECONDS,
+        BUY_INTERVAL_SEC: cfg.BUY_INTERVAL_SEC,
         PHASE1_SHARES: config.PHASE1_SHARES,
         PHASE2_SHARES: config.PHASE2_SHARES,
-        BUY_INTERVAL_SEC: config.BUY_INTERVAL_SEC,
       },
     };
   }
   res.json({
-    config: {
-      DEMO_MODE: config.DEMO_MODE,
-      ASSET: config.ASSET,
-      STARTING_BANKROLL: config.STARTING_BANKROLL,
-      PHASE1_SECONDS: config.PHASE1_SECONDS,
-      PHASE1_SHARES: config.PHASE1_SHARES,
-      PHASE2_SHARES: config.PHASE2_SHARES,
-      BUY_INTERVAL_SEC: config.BUY_INTERVAL_SEC,
-    },
+    config: { DEMO_MODE: config.DEMO_MODE, ASSET: config.ASSET },
     engines,
     totalFees: Math.round(totalFees * 100) / 100,
     lastError: state.lastError,
