@@ -11,17 +11,35 @@ app.get('/api/state', (req, res) => {
   const state = loadState();
   const engines = {};
   let totalFees = 0;
-  let totalRebates = 0;
   for (const [key, cfg] of Object.entries(config.ENGINES)) {
     const eng = state.engines[key] || { bankroll: 0, startingBankroll: 0, currentWindow: null, pendingResolutions: [], windowHistory: [] };
     const live = computeUnrealized(eng);
     const histFees = (eng.windowHistory || []).reduce((a, w) => a + (w.totalFees || 0), 0);
     const fees = Math.round((histFees + live.fees) * 100) / 100;
-    const rebates = Math.round(live.rebates * 100) / 100;
     totalFees += fees;
-    totalRebates += rebates;
     engines[key] = {
-      ...eng,
+      label: eng.label,
+      windowMinutes: eng.windowMinutes,
+      bankroll: eng.bankroll,
+      startingBankroll: eng.startingBankroll,
+      currentWindow: eng.currentWindow ? {
+        engine: eng.currentWindow.engine,
+        windowStart: eng.currentWindow.windowStart,
+        windowEnd: eng.currentWindow.windowEnd,
+        entries: eng.currentWindow.entries,
+        lastBuyAt: eng.currentWindow.lastBuyAt,
+        finalUpPrice: eng.currentWindow.finalUpPrice,
+        finalDownPrice: eng.currentWindow.finalDownPrice,
+      } : null,
+      lastCheck: eng.lastCheck,
+      streak: eng.streak || { wins: 0, losses: 0 },
+      peakBankroll: eng.peakBankroll,
+      maxDrawdown: eng.maxDrawdown,
+      maxDrawdownPct: eng.maxDrawdownPct,
+      equityCurve: eng.equityCurve || [],
+      windowHistory: (eng.windowHistory || []).slice(-50),
+      liveWindow: live,
+      totalFees: fees,
       config: {
         WINDOW_MINUTES: cfg.WINDOW_MINUTES,
         PHASE1_SECONDS: config.PHASE1_SECONDS,
@@ -29,15 +47,11 @@ app.get('/api/state', (req, res) => {
         PHASE2_SHARES: config.PHASE2_SHARES,
         BUY_INTERVAL_SEC: config.BUY_INTERVAL_SEC,
       },
-      liveWindow: live,
-      totalFees: fees,
-      totalRebates: rebates,
     };
   }
   res.json({
     config: {
       DEMO_MODE: config.DEMO_MODE,
-      TRADING_ENABLED: config.TRADING_ENABLED,
       ASSET: config.ASSET,
       STARTING_BANKROLL: config.STARTING_BANKROLL,
       PHASE1_SECONDS: config.PHASE1_SECONDS,
@@ -47,7 +61,6 @@ app.get('/api/state', (req, res) => {
     },
     engines,
     totalFees: Math.round(totalFees * 100) / 100,
-    totalRebates: Math.round(totalRebates * 100) / 100,
     lastError: state.lastError,
     startedAt: state.startedAt,
   });

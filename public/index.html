@@ -7,58 +7,72 @@
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: #000; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 12px; font-weight: 700; }
-h1 { font-size: 18px; text-align: center; margin-bottom: 12px; letter-spacing: 1px; }
-.status { font-size: 12px; text-align: center; color: #888; margin-bottom: 16px; }
-.engine { background: #111; border: 1px solid #333; border-radius: 8px; padding: 12px; margin-bottom: 12px; }
-.engine-title { font-size: 16px; font-weight: 700; margin-bottom: 8px; color: #fff; display: flex; justify-content: space-between; align-items: center; }
-.engine-title .phase { font-size: 11px; color: #888; }
+h1 { font-size: 20px; text-align: center; margin-bottom: 6px; letter-spacing: 2px; }
+.sub { font-size: 12px; text-align: center; color: #666; margin-bottom: 14px; }
+.engine { background: #111; border: 1px solid #333; border-radius: 10px; padding: 14px; margin-bottom: 16px; }
+.engine-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.engine-title { font-size: 17px; font-weight: 700; }
+.phase-badge { font-size: 10px; padding: 3px 8px; border-radius: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+.phase-badge.p1 { background: rgba(0,255,136,0.15); color: #00ff88; }
+.phase-badge.p2 { background: rgba(255,68,68,0.15); color: #ff4444; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
-.stat { background: #000; border: 1px solid #333; border-radius: 6px; padding: 8px; flex: 1; min-width: 80px; }
-.stat .label { font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
-.stat .value { font-size: 18px; font-weight: 700; color: #fff; }
+.stat { background: #000; border: 1px solid #333; border-radius: 8px; padding: 10px; flex: 1; min-width: 70px; text-align: center; }
+.stat .label { font-size: 9px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.stat .value { font-size: 17px; font-weight: 700; color: #fff; }
 .stat .value.green { color: #00ff88; }
 .stat .value.red { color: #ff4444; }
 .stat .value.blue { color: #44aaff; }
-.entries { margin-top: 8px; }
-.entry { background: #000; border: 1px solid #333; border-radius: 4px; padding: 6px 8px; margin-bottom: 4px; font-size: 11px; display: flex; justify-content: space-between; }
-.entry .side { font-weight: 700; }
-.entry .side.up { color: #00ff88; }
-.entry .side.down { color: #ff4444; }
-.entry .details { color: #ccc; }
-.history { margin-top: 12px; }
-.history-item { background: #000; border: 1px solid #333; border-radius: 4px; padding: 6px 8px; margin-bottom: 4px; font-size: 11px; display: flex; justify-content: space-between; }
+.stat .value.yellow { color: #ffaa00; }
+.stat .value.big { font-size: 22px; }
+.section-label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin: 12px 0 6px 0; border-top: 1px solid #222; padding-top: 8px; }
+.entry-list { max-height: 200px; overflow-y: auto; }
+.entry { background: #000; border: 1px solid #222; border-radius: 4px; padding: 5px 8px; margin-bottom: 3px; font-size: 11px; display: flex; justify-content: space-between; align-items: center; }
+.entry .side-up { color: #00ff88; font-weight: 700; }
+.entry .side-down { color: #ff4444; font-weight: 700; }
+.entry .info { color: #999; font-size: 10px; }
+.history-item { background: #000; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; border: 1px solid #222; }
 .history-item.win { border-color: #00ff88; }
 .history-item.loss { border-color: #ff4444; }
-canvas { width: 100%; height: 80px; display: block; margin-top: 8px; }
-.phase-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin: 8px 0 4px 0; }
-.phase-label.cheap { color: #00ff88; }
-.phase-label.expensive { color: #ff4444; }
+.history-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.history-result { font-size: 13px; font-weight: 700; }
+.history-result.win { color: #00ff88; }
+.history-result.loss { color: #ff4444; }
+.history-detail { font-size: 10px; color: #888; display: flex; gap: 12px; flex-wrap: wrap; }
+.history-detail span { white-space: nowrap; }
+.history-detail b { color: #ccc; }
+canvas { width: 100%; height: 70px; display: block; margin-top: 6px; }
+.price-bar { display: flex; gap: 4px; margin-bottom: 6px; }
+.price-bar .side { flex: 1; padding: 6px; border-radius: 4px; text-align: center; font-size: 12px; }
+.price-bar .side.up { background: rgba(0,255,136,0.08); border: 1px solid rgba(0,255,136,0.2); }
+.price-bar .side.down { background: rgba(255,68,68,0.08); border: 1px solid rgba(255,68,68,0.2); }
+.price-bar .side .p { font-size: 16px; font-weight: 700; }
+.price-bar .side.up .p { color: #00ff88; }
+.price-bar .side.down .p { color: #ff4444; }
 </style>
 </head>
 <body>
 <h1>CHEAP / EXPENSIVE BOT</h1>
-<div id="status" class="status">connecting…</div>
+<div class="sub" id="status">connecting…</div>
 <div id="engines"></div>
 <script>
 const $ = id => document.getElementById(id);
-
 function fmt$(n) { return '$' + (n || 0).toFixed(2); }
 function fmtCountdown(s) {
   if (s <= 0) return '0:00';
   const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return m + ':' + String(sec).padStart(2, '0');
+  return m + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 }
+function pnlClass(v) { return v >= 0 ? 'green' : 'red'; }
+function pnlSign(v) { return v >= 0 ? '+$' : '-$'; }
 
 function renderEngine(key, e) {
   const cfg = e.config || {};
   const live = e.liveWindow || {};
   const streak = e.streak || { wins: 0, losses: 0 };
-  const peak = e.peakBankroll || e.startingBankroll || 0;
   const bankroll = e.bankroll || 0;
-  const returnPct = e.startingBankroll ? ((bankroll - e.startingBankroll) / e.startingBankroll * 100) : 0;
-  const dd = e.maxDrawdown || 0;
-  const ddPct = e.maxDrawdownPct ? (e.maxDrawdownPct * 100) : 0;
+  const start = e.startingBankroll || 2000;
+  const returnPct = ((bankroll - start) / start * 100);
+  const peak = e.peakBankroll || start;
   const currDD = peak - bankroll;
   const currDDPct = peak > 0 ? (currDD / peak * 100) : 0;
   const hist = e.windowHistory || [];
@@ -69,90 +83,111 @@ function renderEngine(key, e) {
   const win = e.currentWindow;
   const elapsed = win ? Math.floor(Date.now() / 1000) - win.windowStart : 0;
   const remaining = lc.secondsRemaining || 0;
-  const phase = elapsed < (cfg.PHASE1_SECONDS || 180) ? 'PHASE 1 — CHEAP' : 'PHASE 2 — EXPENSIVE';
-  const entries = live.entries || [];
-  const upEntries = entries.filter(en => en.side === 'UP');
-  const downEntries = entries.filter(en => en.side === 'DOWN');
+  const phase = elapsed < (cfg.PHASE1_SECONDS || 180) ? 1 : 2;
 
-  let html = '<div class="engine">';
-  html += '<div class="engine-title"><span>' + (cfg.WINDOW_MINUTES || '?') + ' MIN ENGINE</span><span class="phase">' + phase + '</span></div>';
+  let h = '<div class="engine">';
 
-  // Stats row 1
-  html += '<div class="row">';
-  html += '<div class="stat"><div class="label">Bankroll</div><div class="value">' + fmt$(bankroll) + '</div></div>';
-  html += '<div class="stat"><div class="label">Return</div><div class="value ' + (returnPct >= 0 ? 'green' : 'red') + '">' + (returnPct >= 0 ? '+' : '') + returnPct.toFixed(2) + '%</div></div>';
-  html += '<div class="stat"><div class="label">Peak</div><div class="value blue">' + fmt$(peak) + '</div></div>';
-  html += '<div class="stat"><div class="label">Max DD</div><div class="value red">' + fmt$(dd) + ' (' + ddPct.toFixed(1) + '%)</div></div>';
-  html += '</div>';
+  // Header
+  h += '<div class="engine-head">';
+  h += '<div class="engine-title">' + (cfg.WINDOW_MINUTES || '?') + ' MIN</div>';
+  h += win ? '<span class="phase-badge p' + phase + '">' + (phase === 1 ? '⚡ CHEAP' : '💰 EXPENSIVE') + '</span>' : '<span class="phase-badge p1">IDLE</span>';
+  h += '</div>';
 
-  // Stats row 2
-  html += '<div class="row">';
-  html += '<div class="stat"><div class="label">Wins</div><div class="value green">' + winCount + '</div></div>';
-  html += '<div class="stat"><div class="label">Losses</div><div class="value red">' + lossCount + '</div></div>';
-  html += '<div class="stat"><div class="label">Total PnL</div><div class="value ' + (totalPnl >= 0 ? 'green' : 'red') + '">' + fmt$(totalPnl) + '</div></div>';
-  html += '<div class="stat"><div class="label">Fees</div><div class="value">' + fmt$(e.totalFees) + '</div></div>';
-  html += '</div>';
+  // Live prices
+  h += '<div class="price-bar">';
+  h += '<div class="side up"><div>UP</div><div class="p">' + (lc.upPrice != null ? '$' + lc.upPrice.toFixed(3) : '—') + '</div></div>';
+  h += '<div class="side down"><div>DOWN</div><div class="p">' + (lc.downPrice != null ? '$' + lc.downPrice.toFixed(3) : '—') + '</div></div>';
+  h += '</div>';
 
-  // Live prices + countdown
-  html += '<div class="row">';
-  html += '<div class="stat"><div class="label">UP</div><div class="value green">' + (lc.upPrice != null ? '$' + lc.upPrice.toFixed(3) : '—') + '</div></div>';
-  html += '<div class="stat"><div class="label">DOWN</div><div class="value red">' + (lc.downPrice != null ? '$' + lc.downPrice.toFixed(3) : '—') + '</div></div>';
-  html += '<div class="stat"><div class="label">Countdown</div><div class="value blue">' + (win ? fmtCountdown(remaining) : '—') + '</div></div>';
-  html += '<div class="stat"><div class="label">Cost</div><div class="value">' + fmt$(live.totalCost) + '</div></div>';
-  html += '</div>';
+  // Bankroll + return
+  h += '<div class="row">';
+  h += '<div class="stat"><div class="label">Bankroll</div><div class="value big">' + fmt$(bankroll) + '</div></div>';
+  h += '<div class="stat"><div class="label">Return</div><div class="value ' + pnlClass(returnPct) + '">' + (returnPct >= 0 ? '+' : '') + returnPct.toFixed(1) + '%</div></div>';
+  h += '<div class="stat"><div class="label">Countdown</div><div class="value blue">' + (win ? fmtCountdown(Math.max(0, remaining)) : '—') + '</div></div>';
+  h += '</div>';
+
+  // Floating P&L
+  h += '<div class="row">';
+  h += '<div class="stat"><div class="label">Cost</div><div class="value yellow">' + fmt$(live.totalCost) + '</div></div>';
+  h += '<div class="stat"><div class="label">Float P&L</div><div class="value ' + pnlClass(live.unrealizedPnL) + '">' + pnlSign(Math.abs(live.unrealizedPnL)) + Math.abs(live.unrealizedPnL).toFixed(2) + '</div></div>';
+  h += '<div class="stat"><div class="label">UP P&L</div><div class="value ' + pnlClass(live.upUnrealized) + '">' + pnlSign(Math.abs(live.upUnrealized)) + Math.abs(live.upUnrealized).toFixed(2) + '</div></div>';
+  h += '<div class="stat"><div class="label">DOWN P&L</div><div class="value ' + pnlClass(live.downUnrealized) + '">' + pnlSign(Math.abs(live.downUnrealized)) + Math.abs(live.downUnrealized).toFixed(2) + '</div></div>';
+  h += '</div>';
+
+  // Accumulated shares per side
+  h += '<div class="row">';
+  h += '<div class="stat"><div class="label">UP Shares</div><div class="value green">' + (live.upShares || 0) + '</div></div>';
+  h += '<div class="stat"><div class="label">DOWN Shares</div><div class="value red">' + (live.downShares || 0) + '</div></div>';
+  h += '<div class="stat"><div class="label">UP Cost</div><div class="value">' + fmt$(live.upCost) + '</div></div>';
+  h += '<div class="stat"><div class="label">DOWN Cost</div><div class="value">' + fmt$(live.downCost) + '</div></div>';
+  h += '</div>';
+
+  // Win/Loss stats
+  h += '<div class="row">';
+  h += '<div class="stat"><div class="label">Wins</div><div class="value green">' + winCount + '</div></div>';
+  h += '<div class="stat"><div class="label">Losses</div><div class="value red">' + lossCount + '</div></div>';
+  h += '<div class="stat"><div class="label">Total P&L</div><div class="value ' + pnlClass(totalPnl) + '">' + pnlSign(Math.abs(totalPnl)) + Math.abs(totalPnl).toFixed(2) + '</div></div>';
+  h += '<div class="stat"><div class="label">Fees</div><div class="value">' + fmt$(e.totalFees) + '</div></div>';
+  h += '</div>';
 
   // Current window entries
-  if (entries.length > 0) {
-    html += '<div class="phase-label cheap">CHEAP SIDE (' + (live.upShares || 0) + ' UP / ' + (live.downShares || 0) + ' DOWN)</div>';
-    html += '<div class="entries">';
-    for (const en of entries) {
-      html += '<div class="entry">';
-      html += '<span class="side ' + en.side.toLowerCase() + '">' + en.side + '</span>';
-      html += '<span class="details">' + en.shares + 'sh @ $' + en.fillPrice.toFixed(3) + ' | ' + fmt$(en.shares * en.fillPrice) + ' | ' + en.entryReason + '</span>';
-      html += '</div>';
+  if (win && live.entries && live.entries.length > 0) {
+    h += '<div class="section-label">CURRENT WINDOW — ' + live.entries.length + ' entries</div>';
+    h += '<div class="entry-list">';
+    for (let i = live.entries.length - 1; i >= 0; i--) {
+      const en = live.entries[i];
+      h += '<div class="entry">';
+      h += '<span class="side-' + en.side.toLowerCase() + '">' + en.side + '</span>';
+      h += '<span class="info">' + en.shares + 'sh @ $' + en.fillPrice.toFixed(3) + ' — ' + fmt$(en.shares * en.fillPrice) + '</span>';
+      h += '</div>';
     }
-    html += '</div>';
+    h += '</div>';
   } else if (win) {
-    html += '<div style="text-align:center;color:#888;font-size:11px;padding:8px;">Waiting for entries…</div>';
+    h += '<div class="section-label">WAITING FOR ENTRIES…</div>';
   }
 
   // Equity curve
-  if (hist.length > 0) {
-    html += '<canvas id="eq-' + key + '"></canvas>';
+  if (hist.length > 1) {
+    h += '<div class="section-label">EQUITY CURVE (' + hist.length + ' windows)</div>';
+    h += '<canvas id="eq-' + key + '"></canvas>';
   }
 
-  // History
+  // Resolved windows
   if (hist.length > 0) {
-    html += '<div class="history">';
-    html += '<div class="phase-label">RESOLVED WINDOWS (' + hist.length + ')</div>';
-    for (const w of hist.slice(-20).reverse()) {
+    h += '<div class="section-label">RESOLVED WINDOWS (' + hist.length + ')</div>';
+    for (const w of hist.slice().reverse()) {
       const isWin = w.pnl >= 0;
-      html += '<div class="history-item ' + (isWin ? 'win' : 'loss') + '">';
-      html += '<span>' + (isWin ? '✓ WIN' : '✗ LOSS') + ' | ' + w.entries + ' entries | ' + fmt$(w.totalCost) + ' cost</span>';
-      html += '<span>' + fmt$(w.totalPayout) + ' payout | ' + fmt$(w.pnl) + '</span>';
-      html += '</div>';
+      h += '<div class="history-item ' + (isWin ? 'win' : 'loss') + '">';
+      h += '<div class="history-head">';
+      h += '<span class="history-result ' + (isWin ? 'win' : 'loss') + '">' + (isWin ? '✓ WIN' : '✗ LOSS') + ' ' + pnlSign(Math.abs(w.pnl)) + Math.abs(w.pnl).toFixed(2) + '</span>';
+      h += '<span style="font-size:10px;color:#666">' + fmt$(w.totalCost) + ' → ' + fmt$(w.totalPayout) + '</span>';
+      h += '</div>';
+      h += '<div class="history-detail">';
+      h += '<span>UP: <b>' + (w.upShares || 0) + 'sh</b> ' + fmt$(w.upCost) + ' → ' + fmt$(w.upPayout) + '</span>';
+      h += '<span>DOWN: <b>' + (w.downShares || 0) + 'sh</b> ' + fmt$(w.downCost) + ' → ' + fmt$(w.downPayout) + '</span>';
+      h += '<span>Final: UP $' + (w.finalUpPrice != null ? w.finalUpPrice.toFixed(3) : '—') + ' / DOWN $' + (w.finalDownPrice != null ? w.finalDownPrice.toFixed(3) : '—') + '</span>';
+      h += '</div></div>';
     }
-    html += '</div>';
   }
 
-  html += '</div>';
-  return html;
+  h += '</div>';
+  return h;
 }
 
 function drawEquity(key, e) {
   const canvas = document.getElementById('eq-' + key);
   if (!canvas) return;
-  const ctx = canvas.getContext('2d');
   const hist = (e.equityCurve || []).slice(-50);
   if (hist.length < 2) return;
+  const ctx = canvas.getContext('2d');
   const rect = canvas.getBoundingClientRect();
   canvas.width = rect.width * 2;
   canvas.height = rect.height * 2;
   ctx.scale(2, 2);
   const w = rect.width, h = rect.height;
   const vals = hist.map(p => p.bankroll);
-  const min = Math.min(...vals) * 0.98;
-  const max = Math.max(...vals) * 1.02;
+  const min = Math.min(...vals) * 0.99;
+  const max = Math.max(...vals) * 1.01;
   const range = max - min || 1;
   ctx.clearRect(0, 0, w, h);
   ctx.strokeStyle = '#00ff88';
@@ -186,7 +221,8 @@ async function refresh() {
   for (const k of keys) {
     drawEquity(k, engines[k]);
   }
-  $('status').textContent = 'updated ' + new Date().toLocaleTimeString() + ' | ' + (s.config.DEMO_MODE ? 'DEMO' : 'LIVE') + ' | ' + s.config.ASSET.toUpperCase();
+  const errText = s.lastError ? ' ⚠ ' + s.lastError : '';
+  $('status').textContent = new Date().toLocaleTimeString() + ' · ' + (s.config.DEMO_MODE ? 'DEMO' : 'LIVE') + ' · ' + s.config.ASSET.toUpperCase() + errText;
 }
 
 refresh();
