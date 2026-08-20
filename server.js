@@ -18,48 +18,33 @@ app.get('/api/state', (req, res) => {
     const fees = Math.round((histFees + live.fees) * 100) / 100;
     totalFees += fees;
     engines[key] = {
-      label: eng.label,
-      windowMinutes: eng.windowMinutes,
-      bankroll: eng.bankroll,
-      startingBankroll: eng.startingBankroll,
+      label: eng.label, windowMinutes: eng.windowMinutes,
+      bankroll: eng.bankroll, startingBankroll: eng.startingBankroll,
       currentWindow: eng.currentWindow ? {
-        engine: eng.currentWindow.engine,
-        windowStart: eng.currentWindow.windowStart,
-        windowEnd: eng.currentWindow.windowEnd,
-        entries: eng.currentWindow.entries,
+        engine: eng.currentWindow.engine, windowStart: eng.currentWindow.windowStart,
+        windowEnd: eng.currentWindow.windowEnd, entries: eng.currentWindow.entries,
         lastBuyAt: eng.currentWindow.lastBuyAt,
-        finalUpPrice: eng.currentWindow.finalUpPrice,
-        finalDownPrice: eng.currentWindow.finalDownPrice,
+        finalUpPrice: eng.currentWindow.finalUpPrice, finalDownPrice: eng.currentWindow.finalDownPrice,
       } : null,
       lastCheck: eng.lastCheck,
       streak: eng.streak || { wins: 0, losses: 0 },
-      peakBankroll: eng.peakBankroll,
-      maxDrawdown: eng.maxDrawdown,
-      maxDrawdownPct: eng.maxDrawdownPct,
+      peakBankroll: eng.peakBankroll, maxDrawdown: eng.maxDrawdown, maxDrawdownPct: eng.maxDrawdownPct,
       equityCurve: eng.equityCurve || [],
       windowHistory: (eng.windowHistory || []).slice(-50),
-      liveWindow: live,
-      totalFees: fees,
+      liveWindow: live, totalFees: fees,
       config: {
         WINDOW_MINUTES: cfg.WINDOW_MINUTES,
         PHASE1_SECONDS: cfg.PHASE1_SECONDS,
+        PHASE2_SECONDS: cfg.PHASE2_SECONDS,
         BUY_INTERVAL_SEC: cfg.BUY_INTERVAL_SEC,
         PHASE1_SHARES: config.PHASE1_SHARES,
         PHASE2_SHARES: config.PHASE2_SHARES,
       },
     };
   }
-  res.json({
-    config: { DEMO_MODE: config.DEMO_MODE, ASSET: config.ASSET },
-    engines,
-    totalFees: Math.round(totalFees * 100) / 100,
-    lastError: state.lastError,
-    startedAt: state.startedAt,
-  });
+  res.json({ config: { DEMO_MODE: config.DEMO_MODE, ASSET: config.ASSET }, engines,
+    totalFees: Math.round(totalFees * 100) / 100, lastError: state.lastError, startedAt: state.startedAt });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Dashboard running on port ${PORT}`);
-  startBotLoop();
-});
+app.listen(PORT, () => { console.log(`Dashboard running on port ${PORT}`); startBotLoop(); });
