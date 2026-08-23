@@ -21,12 +21,8 @@ function engineDefault(engineKey, engineCfg) {
 }
 
 function defaultState() {
-  const engines = {};
-  for (const [key, cfg] of Object.entries(config.ENGINES)) {
-    engines[key] = engineDefault(key, cfg);
-  }
   return {
-    engines,
+    engine: engineDefault('base', { CAPITAL: config.STARTING_BANKROLL, label: '15m-base' }),
     lastError: null,
     startedAt: new Date().toISOString(),
   };
@@ -35,30 +31,10 @@ function defaultState() {
 function loadState() {
   try {
     const raw = JSON.parse(fs.readFileSync(config.STATE_FILE, 'utf8'));
-    if (!raw || !raw.engines) {
+    if (!raw || !raw.engine) {
       return defaultState();
     }
-    for (const [key, cfg] of Object.entries(config.ENGINES)) {
-      if (!raw.engines[key]) {
-        raw.engines[key] = engineDefault(key, cfg);
-      } else {
-        const eng = raw.engines[key];
-        const capital = cfg.CAPITAL != null ? cfg.CAPITAL : config.STARTING_BANKROLL;
-        if (eng.startingBankroll != null && capital != null && Math.round(eng.startingBankroll * 100) / 100 !== Math.round(capital * 100) / 100) {
-          raw.engines[key] = engineDefault(key, cfg);
-          continue;
-        }
-        if (eng.streak == null) eng.streak = { wins: 0, losses: 0 };
-        if (eng.peakBankroll == null) eng.peakBankroll = eng.startingBankroll || capital;
-        if (eng.maxDrawdown == null) eng.maxDrawdown = 0;
-        if (eng.maxDrawdownPct == null) eng.maxDrawdownPct = 0;
-        if (!Array.isArray(eng.equityCurve)) eng.equityCurve = [];
-        if (!Array.isArray(eng.windowHistory)) eng.windowHistory = [];
-      }
-    }
-    for (const key of Object.keys(raw.engines)) {
-      if (!config.ENGINES[key]) delete raw.engines[key];
-    }
+    if (!raw.engine) raw.engine = engineDefault('base', { CAPITAL: config.STARTING_BANKROLL });
     return raw;
   } catch (e) {
     const fresh = defaultState();
@@ -68,13 +44,10 @@ function loadState() {
 }
 
 function saveState(state) {
-  for (const eng of Object.values(state.engines || {})) {
-    if (eng.windowHistory && eng.windowHistory.length > 200) {
-      eng.windowHistory = eng.windowHistory.slice(-200);
-    }
-    if (eng.equityCurve && eng.equityCurve.length > 10000) {
-      eng.equityCurve = eng.equityCurve.slice(-10000);
-    }
+  const eng = state.engine;
+  if (eng) {
+    if (eng.windowHistory?.length > 200) eng.windowHistory = eng.windowHistory.slice(-200);
+    if (eng.equityCurve?.length > 10000) eng.equityCurve = eng.equityCurve.slice(-10000);
   }
   fs.writeFileSync(config.STATE_FILE, JSON.stringify(state, null, 2));
 }

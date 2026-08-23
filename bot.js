@@ -1,226 +1,167 @@
-// ============================================================
-// bot.js — Cheap/Expensive Phase Strategy (proportional intervals)
-//
-//   Phase 1 (0–Xs): Buy CHEAP side, 8sh per entry
-//   Phase 2 (X–Ys): Buy EXPENSIVE side, 15sh per entry
-//   After Ys: No trades, hold to resolution
-//   5m:  120s/240s/20s.  15m: 360s/720s/60s.
-// ============================================================
-
 const config = require('./config');
 const polymarket = require('./polymarket');
 const { loadState, saveState } = require('./state');
 
 function log(...args) { console.log(new Date().toISOString(), '-', ...args); }
-function round2(n) { return Math.round(n * 100) / 100; }
-function round5(n) { return Math.round(n * 100000) / 100000; }
+function r2(n) { return Math.round(n * 100) / 100; }
+function r5(n) { return Math.round(n * 100000) / 100000; }
 
 function applySlippage(mid) {
   if (mid == null) return null;
-  const min = config.TAKER_SLIPPAGE_MIN != null ? config.TAKER_SLIPPAGE_MIN : 0;
-  const max = config.TAKER_SLIPPAGE_MAX != null ? config.TAKER_SLIPPAGE_MAX : 0;
-  const slip = min + Math.random() * (max - min);
-  return Math.min(0.999, Math.max(0.001, Math.round((mid + slip) * 1000) / 1000));
+  const min = config.TAKER_SLIPPAGE_MIN || 0;
+  const max = config.TAKER_SLIPPAGE_MAX || 0;
+  return Math.min(0.999, Math.max(0.001, Math.round((mid + min + Math.random() * (max - min)) * 1000) / 1000));
 }
 
-function makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason) {
-  const tokenId = side === 'UP' ? upTokenId : downTokenId;
+function makeEntry(side, shares, fillPrice, tokenId, reason) {
   const feeEquiv = shares * config.BASE_TAKER_FEE_RATE * fillPrice * (1 - fillPrice);
-  return {
-    side, tokenId, shares, fillPrice,
-    fillFee: round5(feeEquiv),
-    filledAt: new Date().toISOString(),
-    entryReason: reason,
-    status: 'filled',
-    resolvedWon: null, exitPrice: null, cost: null,
-    payout: null, pnl: null, settledAt: null,
-  };
+  return { side, tokenId, shares, fillPrice, fillFee: r5(feeEquiv), filledAt: new Date().toISOString(),
+    reason, status: 'filled', resolvedWon: null, exitPrice: null, cost: null, payout: null, pnl: null, settledAt: null };
 }
 
-function fireEntry(win, side, shares, fillPrice, upTokenId, downTokenId, reason) {
-  const entry = makeEntry(side, shares, fillPrice, upTokenId, downTokenId, reason);
+function fireEntry(win, side, shares, fillPrice, tokenId, reason) {
+  const entry = makeEntry(side, shares, fillPrice, tokenId, reason);
   win.entries.push(entry);
-  log(`[${win.engine}] ENTRY: ${side} ${shares}sh @ $${fillPrice.toFixed(3)} ($${(shares * fillPrice).toFixed(2)}) | ${reason}`);
-  return entry;
+  log(`ENTRY: ${side} ${shares}sh @ $${fillPrice.toFixed(3)} | ${reason}`);
 }
 
 function computeUnrealized(engine) {
-  if (!engine || !engine.currentWindow) {
-    return { entries: [], totalCost: 0, totalShares: 0, unrealizedPnL: 0, fees: 0,
-      upShares: 0, downShares: 0, upCost: 0, downCost: 0, upUnrealized: 0, downUnrealized: 0 };
-  }
-  const win = engine.currentWindow;
-  const lc = engine.lastCheck || {};
-  const upPrice = lc.upPrice || 0, downPrice = lc.downPrice || 0;
-  let totalCost = 0, totalShares = 0, fees = 0;
-  let upShares = 0, downShares = 0, upCost = 0, downCost = 0;
-  let upUnrealized = 0, downUnrealized = 0;
+  if (!engine || !engine.currentWindow) return { entries: [], totalCost: 0, totalShares: 0, unrealizedPnL: 0, fees: 0, upShares: 0, downShares: 0, upCost: 0, downCost: 0, upUnrealized: 0, downUnrealized: 0 };
+  const win = engine.currentWindow, lc = engine.lastCheck || {};
+  const upPrice = lc.up15m || lc.upPrice || 0, downPrice = lc.down15m || lc.downPrice || 0;
+  let totalCost = 0, totalShares = 0, fees = 0, upSh = 0, dnSh = 0, upC = 0, dnC = 0, upU = 0, dnU = 0;
   for (const e of win.entries) {
-    if (e.status === 'filled') {
-      const cost = e.shares * e.fillPrice;
-      totalCost += cost; totalShares += e.shares; fees += e.fillFee || 0;
-      if (e.side === 'UP') { upShares += e.shares; upCost += cost; upUnrealized += e.shares * upPrice - cost; }
-      else { downShares += e.shares; downCost += cost; downUnrealized += e.shares * downPrice - cost; }
-    }
+    if (e.status !== 'filled') continue;
+    const cost = e.shares * e.fillPrice; totalCost += cost; totalShares += e.shares; fees += e.fillFee || 0;
+    if (e.side === 'UP') { upSh += e.shares; upC += cost; upU += e.shares * upPrice - cost; }
+    else { dnSh += e.shares; dnC += cost; dnU += e.shares * downPrice - cost; }
   }
-  return {
-    entries: win.entries.filter(e => e.status === 'filled'),
-    totalCost: round2(totalCost), totalShares,
-    unrealizedPnL: round2(upUnrealized + downUnrealized),
-    upUnrealized: round2(upUnrealized), downUnrealized: round2(downUnrealized),
-    fees: round2(fees), upShares, downShares, upCost: round2(upCost), downCost: round2(downCost),
-  };
+  return { entries: win.entries.filter(e => e.status === 'filled'), totalCost: r2(totalCost), totalShares,
+    unrealizedPnL: r2(upU + dnU), upUnrealized: r2(upU), downUnrealized: r2(dnU),
+    fees: r2(fees), upShares: upSh, downShares: dnSh, upCost: r2(upC), downCost: r2(dnC) };
 }
 
-function getCheapExpensive(upPrice, downPrice) {
-  if (upPrice == null || downPrice == null) return null;
-  if (upPrice < downPrice) return { cheap: 'UP', expensive: 'DOWN', cheapPrice: upPrice, expensivePrice: downPrice };
-  if (downPrice < upPrice) return { cheap: 'DOWN', expensive: 'UP', cheapPrice: downPrice, expensivePrice: upPrice };
-  return null;
-}
-
-function resolveWindow(eng, engineCfg, win, tag) {
-  const filled = win.entries.filter(e => e.status === 'filled');
-  if (filled.length === 0) { log(`${tag} RESOLVED NO_TRADE: window ${win.windowStart}`); return; }
-  let totalCost = 0, totalPayout = 0, totalFees = 0;
-  for (const e of filled) {
+function resolveEntries(entries, finalUp, finalDown) {
+  let totalPayout = 0, totalCost = 0, totalFees = 0;
+  for (const e of entries) {
     const cost = e.shares * e.fillPrice;
     totalCost += cost; totalFees += e.fillFee || 0;
-    let won = false;
-    if (e.side === 'UP' && win.finalUpPrice != null && win.finalUpPrice >= config.RESOLUTION_WIN_THRESHOLD) won = true;
-    if (e.side === 'DOWN' && win.finalDownPrice != null && win.finalDownPrice >= config.RESOLUTION_WIN_THRESHOLD) won = true;
+    const won = e.side === 'UP' ? finalUp >= config.RESOLUTION_WIN_THRESHOLD : finalDown >= config.RESOLUTION_WIN_THRESHOLD;
     e.resolvedWon = won; e.status = won ? 'resolved_win' : 'resolved_loss';
     e.payout = won ? e.shares : 0; e.cost = cost;
     e.pnl = e.payout - cost - (e.fillFee || 0); e.exitPrice = won ? 1.0 : 0;
     e.settledAt = new Date().toISOString(); totalPayout += e.payout;
   }
-  const netPnl = totalPayout - totalCost - totalFees;
-  eng.bankroll = round2((eng.bankroll || 0) + netPnl);
-  eng.peakBankroll = Math.max(eng.peakBankroll || 0, eng.bankroll);
-  const dd = eng.peakBankroll - eng.bankroll;
-  const ddPct = eng.peakBankroll > 0 ? dd / eng.peakBankroll : 0;
-  if (dd > (eng.maxDrawdown || 0)) eng.maxDrawdown = round2(dd);
-  if (ddPct > (eng.maxDrawdownPct || 0)) eng.maxDrawdownPct = round5(ddPct);
-  if (netPnl >= 0) { eng.streak.wins += 1; eng.streak.losses = 0; }
-  else { eng.streak.losses += 1; eng.streak.wins = 0; }
-
-  const upE = filled.filter(e => e.side === 'UP'), downE = filled.filter(e => e.side === 'DOWN');
-  eng.windowHistory.push({
-    windowStart: win.windowStart, entries: filled.length,
-    upShares: upE.reduce((a, e) => a + e.shares, 0),
-    downShares: downE.reduce((a, e) => a + e.shares, 0),
-    upCost: round2(upE.reduce((a, e) => a + e.shares * e.fillPrice, 0)),
-    downCost: round2(downE.reduce((a, e) => a + e.shares * e.fillPrice, 0)),
-    upPayout: round2(upE.reduce((a, e) => a + (e.payout || 0), 0)),
-    downPayout: round2(downE.reduce((a, e) => a + (e.payout || 0), 0)),
-    totalCost: round2(totalCost), totalPayout: round2(totalPayout), totalFees: round2(totalFees),
-    finalUpPrice: win.finalUpPrice, finalDownPrice: win.finalDownPrice,
-    pnl: round2(netPnl), bankrollAfter: eng.bankroll, traded: true, settledAt: new Date().toISOString(),
-  });
-  if (eng.windowHistory.length > 200) eng.windowHistory = eng.windowHistory.slice(-200);
-  eng.equityCurve.push({ windowStart: win.windowStart, bankroll: eng.bankroll });
-  if (eng.equityCurve.length > 10000) eng.equityCurve = eng.equityCurve.slice(-10000);
-  log(`${tag} RESOLVED ${netPnl >= 0 ? 'WIN' : 'LOSS'}: ${filled.length} entries, UP ${upE.reduce((a,e)=>a+e.shares,0)}sh / DOWN ${downE.reduce((a,e)=>a+e.shares,0)}sh, cost $${totalCost.toFixed(2)}, payout $${totalPayout.toFixed(2)}, PnL $${netPnl.toFixed(2)}, bankroll $${eng.bankroll.toFixed(2)}`);
+  return { netPnl: totalPayout - totalCost - totalFees, totalPayout, totalCost, totalFees };
 }
 
-async function engineTick(state, engineKey, engineCfg, nowSec) {
-  const tag = `[${engineKey}]`;
-  const engine = state.engines[engineKey];
-  if (!engine) return;
+function resolveWindow(eng, win) {
+  const filled = win.entries.filter(e => e.status === 'filled');
+  if (!filled.length) { log(`RESOLVED NO_TRADE: ${win.windowStart}`); return; }
+  const result = resolveEntries(filled, win.finalUpPrice ?? 0, win.finalDownPrice ?? 0);
+  eng.bankroll = r2((eng.bankroll || 0) + result.netPnl);
+  eng.peakBankroll = Math.max(eng.peakBankroll || eng.startingBankroll, eng.bankroll);
+  const dd = eng.peakBankroll - eng.bankroll, ddPct = eng.peakBankroll > 0 ? dd / eng.peakBankroll : 0;
+  eng.maxDrawdown = Math.max(eng.maxDrawdown || 0, dd); eng.maxDrawdownPct = Math.max(eng.maxDrawdownPct || 0, ddPct);
+  if (result.netPnl > 0) eng.streak.wins++; else eng.streak.losses++;
+  eng.equityCurve.push({ t: Date.now(), equity: eng.bankroll });
+  eng.windowHistory.push({ windowStart: win.windowStart, entries: filled.length, pnl: r2(result.netPnl),
+    bankrollAfter: eng.bankroll, sides: filled.map(e => `${e.side}:${e.shares}sh`).join('+') });
+  log(`RESOLVED — PnL $${result.netPnl.toFixed(2)} (${filled.length} entries) → bankroll $${eng.bankroll}`);
+}
 
-  while (engine.pendingResolutions && engine.pendingResolutions.length > 0) {
-    const pending = engine.pendingResolutions.shift();
-    try { resolveWindow(engine, engineCfg, pending, tag); }
-    catch (e) { log(`${tag} ERROR resolving:`, e.message); state.lastError = e.message; }
+async function engineTick(state, nowSec) {
+  const eng = state.engine; if (!eng) return;
+  while (eng.pendingResolutions?.length > 0) {
+    const pending = eng.pendingResolutions.shift();
+    resolveWindow(eng, pending);
   }
+  const baseInfo = await polymarket.getCurrentUpDownMarket(config.ASSET, config.BASE_WINDOW_MINUTES).catch(() => null);
+  if (!baseInfo) { if (eng.currentWindow && nowSec >= eng.currentWindow.windowEnd) { resolveWindow(eng, eng.currentWindow); eng.currentWindow = null; } return; }
+  const { market: baseMarket, windowStart: baseStart, windowEnd: baseEnd } = baseInfo;
+  const baseTokens = polymarket.parseTokens(baseMarket);
 
-  let marketInfo = null;
-  try { marketInfo = await polymarket.getCurrentUpDownMarket(config.ASSET, engineCfg.WINDOW_MINUTES); }
-  catch (e) { log(`${tag} ERROR market:`, e.message); state.lastError = e.message; return; }
+  // Determine which 5m sub-window we're in
+  const subWindowSec = 300;
+  const elapsedInBase = nowSec - baseStart;
+  const subIndex = Math.floor(elapsedInBase / subWindowSec); // 0,1,2 for first/second/third
+  const subStart = baseStart + subIndex * subWindowSec;
+  const subEnd = subStart + subWindowSec;
 
-  if (!marketInfo) {
-    if (engine.currentWindow && nowSec >= engine.currentWindow.windowEnd) {
-      try { resolveWindow(engine, engineCfg, engine.currentWindow, tag); }
-      catch (e) { log(`${tag} ERROR resolving:`, e.message); }
-      engine.currentWindow = null;
+  // Discover 5m market for current sub-window
+  let subMarket = null;
+  try { subMarket = await polymarket.getCurrentUpDownMarket(config.ASSET, 5); } catch (_) {}
+  const subTokens = subMarket ? polymarket.parseTokens(subMarket.market) : null;
+
+  // Initialize new base window
+  if (!eng.currentWindow || eng.currentWindow.baseStart !== baseStart) {
+    if (eng.currentWindow) {
+      const old = eng.currentWindow;
+      if (old.entries.length > 0) resolveWindow(eng, old);
     }
-    if (!engine.noMarketSuppressedAt || nowSec - engine.noMarketSuppressedAt >= 60) {
-      engine.noMarketSuppressedAt = nowSec;
-      log(`${tag} No live ${engineCfg.WINDOW_MINUTES}m market.`);
-    }
-    return;
+    eng.currentWindow = { baseStart, baseEnd, entries: [], hedgeState: 'initial', lastSubResolvedWon: null, activeSubIndex: -1 };
+    log(`🆕 BASE WINDOW t=${baseStart} (15m)`);
   }
+  const win = eng.currentWindow; if (!win) return;
 
-  const { market, windowStart, windowEnd } = marketInfo;
-  const { upTokenId, downTokenId } = polymarket.parseTokens(market);
-
-  if (!engine.currentWindow || engine.currentWindow.windowStart !== windowStart) {
-    if (engine.currentWindow) {
-      const old = engine.currentWindow;
-      if (old.finalUpPrice == null || old.finalDownPrice == null) {
-        try {
-          const [u, d] = await Promise.all([polymarket.getMidpoint(upTokenId), polymarket.getMidpoint(downTokenId)]);
-          old.finalUpPrice = u; old.finalDownPrice = d;
-        } catch (_) {}
-      }
-      if (old.entries.length > 0) {
-        log(`${tag} Window ${old.windowStart} closed (${old.entries.length} entries) → resolving`);
-        resolveWindow(engine, engineCfg, old, tag);
-      }
-    }
-    engine.currentWindow = {
-      engine: engineKey, windowStart, windowEnd,
-      entries: [], lastBuyAt: 0, finalUpPrice: null, finalDownPrice: null,
-    };
-    log(`${tag} Window ${windowStart} opened (${engineCfg.WINDOW_MINUTES}m)`);
-  }
-
-  const [upPrice, downPrice] = await Promise.all([
-    polymarket.getMidpoint(upTokenId), polymarket.getMidpoint(downTokenId),
+  // Fetch prices
+  const [up15, down15] = await Promise.all([
+    polymarket.getMidpoint(baseTokens.upTokenId).catch(() => null),
+    polymarket.getMidpoint(baseTokens.downTokenId).catch(() => null),
+  ]);
+  let up5 = null, down5 = null;
+  if (subTokens) [up5, down5] = await Promise.all([
+    polymarket.getMidpoint(subTokens.upTokenId).catch(() => null),
+    polymarket.getMidpoint(subTokens.downTokenId).catch(() => null),
   ]);
 
-  engine.lastCheck = {
-    timestamp: new Date().toISOString(), windowStart, windowEnd,
-    secondsRemaining: windowEnd - nowSec, upPrice, downPrice,
-  };
+  eng.lastCheck = { timestamp: new Date().toISOString(), elapsed: elapsedInBase, subIndex,
+    secondsRemaining: baseEnd - nowSec, up15m: up15, down15m: down15, up5m: up5, down5m: down5,
+    hedgeState: win.hedgeState, baseStart, baseEnd };
 
-  const win = engine.currentWindow;
-  if (!win) return;
+  // Check if sub-window ended and resolve hedge
+  if (win.activeSubIndex >= 0 && subIndex !== win.activeSubIndex && win.activeSubIndex < 2) {
+    const hedgeEntry = win.entries.find(e => e.side === 'DOWN' && e.subIndex === win.activeSubIndex && e.status === 'filled');
+    if (hedgeEntry) {
+      const won = hedgeEntry.fillPrice != null && down5 != null && down5 >= config.RESOLUTION_WIN_THRESHOLD;
+      hedgeEntry.resolvedWon = won; hedgeEntry.status = won ? 'resolved_win' : 'resolved_loss';
+      hedgeEntry.pnl = (won ? hedgeEntry.shares : 0) - hedgeEntry.cost;
+      win.lastSubResolvedWon = won;
+      log(`SUB-WINDOW #${win.activeSubIndex + 1} DOWN ${won ? 'WON' : 'LOST'}`);
+      if (won && win.activeSubIndex === 0) win.hedgeState = 'rearm_sub2';
+      else win.hedgeState = 'idle';
+    } else { win.lastSubResolvedWon = null; win.hedgeState = 'idle'; }
+  }
 
-  if (nowSec < windowEnd) {
-    win.finalUpPrice = upPrice;
-    win.finalDownPrice = downPrice;
+  // Strategy execution
+  if (nowSec < baseEnd) {
+    win.finalUpPrice = up15; win.finalDownPrice = down15;
 
-    const elapsed = nowSec - windowStart;
-    const phase1End = engineCfg.PHASE1_SECONDS || 120;
-    const phase2End = engineCfg.PHASE2_SECONDS || 240;
-    const interval = engineCfg.BUY_INTERVAL_SEC || 20;
-
-    // Only trade during phase 1 or phase 2
-    if (elapsed < phase2End && (elapsed - win.lastBuyAt >= interval)) {
-      const sideInfo = getCheapExpensive(upPrice, downPrice);
-      if (sideInfo) {
-        let buySide, buyPrice, shares, reason;
-        if (elapsed < phase1End) {
-          buySide = sideInfo.cheap; buyPrice = sideInfo.cheapPrice; shares = config.PHASE1_SHARES;
-          reason = `PHASE1 cheap ${buySide} @ $${buyPrice.toFixed(3)} t=${elapsed}s`;
-        } else {
-          buySide = sideInfo.expensive; buyPrice = sideInfo.expensivePrice; shares = config.PHASE2_SHARES;
-          reason = `PHASE2 expensive ${buySide} @ $${buyPrice.toFixed(3)} t=${elapsed}s`;
-        }
-        const fillPrice = applySlippage(buyPrice);
-        fireEntry(win, buySide, shares, fillPrice, upTokenId, downTokenId, reason);
-        win.lastBuyAt = elapsed;
-      }
+    // Phase 1: t=0 in base window → buy UP 150sh + DOWN 50sh on sub-window #1
+    if (elapsedInBase < 10 && !win.entries.some(e => e.side === 'UP')) {
+      const fill = applySlippage(up15 ?? 0.50);
+      fireEntry(win, 'UP', config.BASE_UP_SHARES, fill, baseTokens.upTokenId, `BASE UP 150sh @${fill.toFixed(3)} t=${elapsedInBase}s`);
+      win.baseUpFired = true;
     }
+
+    if (elapsedInBase < 10 && subTokens && !win.entries.some(e => e.side === 'DOWN')) {
+      const fill = applySlippage(down5 ?? 0.50);
+      fireEntry(win, 'DOWN', config.HEDGE_SHARES, fill, subTokens.downTokenId, `HEDGE#1 DOWN 50sh @${fill.toFixed(3)} t=${elapsedInBase}s`);
+      win.activeSubIndex = 0;
+    }
+
+    // Phase 2: after sub-window #1 won → re-hedge on sub-window #2
+    if (win.hedgeState === 'rearm_sub2' && subIndex === 1 && subTokens && !win.entries.some(e => e.side === 'DOWN' && e.subIndex === 1)) {
+      const fill = applySlippage(down5 ?? 0.50);
+      fireEntry(win, 'DOWN', config.HEDGE_SHARES, fill, subTokens.downTokenId, `HEDGE#2 DOWN 50sh @${fill.toFixed(3)} t=${elapsedInBase}s`);
+      win.activeSubIndex = 1;
+      win.hedgeState = 'holding_sub2';
+    }
+    // No trades on third sub-window — no action needed
   } else {
-    win.finalUpPrice = upPrice;
-    win.finalDownPrice = downPrice;
-    if (win.entries.length > 0) {
-      log(`${tag} Window ended → resolving UP=$${upPrice.toFixed(3)} DOWN=$${downPrice.toFixed(3)}`);
-      resolveWindow(engine, engineCfg, win, tag);
-    }
-    engine.currentWindow = null;
+    win.finalUpPrice = up15; win.finalDownPrice = down15;
+    if (win.entries.some(e => e.status === 'filled')) resolveWindow(eng, win);
+    eng.currentWindow = null;
   }
 }
 
@@ -229,21 +170,15 @@ async function tick() {
   if (tickRunning) return; tickRunning = true;
   try {
     const state = loadState();
-    const nowSec = Math.floor(Date.now() / 1000);
-    for (const [key, cfg] of Object.entries(config.ENGINES)) {
-      try { await engineTick(state, key, cfg, nowSec); }
-      catch (e) { log(`[${key}] ERROR:`, e.message); state.lastError = e.message; }
-    }
+    await engineTick(state, Math.floor(Date.now() / 1000));
     saveState(state);
-  } finally { tickRunning = false; }
+  } catch (e) { log('ERROR:', e.message); }
+  finally { tickRunning = false; }
 }
 
 function startBotLoop() {
-  for (const [key, cfg] of Object.entries(config.ENGINES)) {
-    log(`Bot started — ${key} (${cfg.WINDOW_MINUTES}m). $${cfg.CAPITAL} | Phase1: 0–${cfg.PHASE1_SECONDS}s cheap ${config.PHASE1_SHARES}sh/${cfg.BUY_INTERVAL_SEC}s | Phase2: ${cfg.PHASE1_SECONDS}–${cfg.PHASE2_SECONDS}s expensive ${config.PHASE2_SHARES}sh/${cfg.BUY_INTERVAL_SEC}s | Hold after ${cfg.PHASE2_SECONDS}s`);
-  }
-  tick();
-  setInterval(tick, config.POLL_INTERVAL_MS);
+  log(`Bot started — 15m base + 3×5m hedges | UP ${config.BASE_UP_SHARES}sh + DOWN ${config.HEDGE_SHARES}sh per hedge | DEMO:${config.DEMO_MODE}`);
+  tick(); setInterval(tick, config.POLL_INTERVAL_MS);
 }
 
 module.exports = { startBotLoop, tick, computeUnrealized };

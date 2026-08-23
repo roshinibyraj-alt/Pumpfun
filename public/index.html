@@ -1,174 +1,70 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Cheap/Expensive Bot</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:12px;font-weight:700}
-h1{font-size:20px;text-align:center;margin-bottom:6px;letter-spacing:2px}
-.sub{font-size:12px;text-align:center;color:#666;margin-bottom:14px}
-.engine{background:#111;border:1px solid #333;border-radius:10px;padding:14px;margin-bottom:16px}
-.engine-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
-.engine-title{font-size:17px;font-weight:700}
-.phase-badge{font-size:10px;padding:3px 8px;border-radius:12px;text-transform:uppercase;letter-spacing:.5px}
-.phase-badge.p1{background:rgba(0,255,136,.15);color:#00ff88}
-.phase-badge.p2{background:rgba(255,68,68,.15);color:#ff4444}
-.phase-badge.hold{background:rgba(100,100,100,.15);color:#888}
-.row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-.stat{background:#000;border:1px solid #333;border-radius:8px;padding:10px;flex:1;min-width:70px;text-align:center}
-.stat .label{font-size:9px;color:#666;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
-.stat .value{font-size:17px;font-weight:700;color:#fff}
-.stat .value.green{color:#00ff88}.stat .value.red{color:#ff4444}.stat .value.blue{color:#44aaff}
-.stat .value.yellow{color:#ffaa00}.stat .value.big{font-size:22px}
-.section-label{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin:12px 0 6px 0;border-top:1px solid #222;padding-top:8px}
-.entry-list{max-height:200px;overflow-y:auto}
-.entry{background:#000;border:1px solid #222;border-radius:4px;padding:5px 8px;margin-bottom:3px;font-size:11px;display:flex;justify-content:space-between;align-items:center}
-.entry .side-up{color:#00ff88;font-weight:700}.entry .side-down{color:#ff4444;font-weight:700}
-.entry .info{color:#999;font-size:10px}
-.history-item{background:#000;border-radius:6px;padding:8px 10px;margin-bottom:6px;border:1px solid #222}
-.history-item.win{border-color:#00ff88}.history-item.loss{border-color:#ff4444}
-.history-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
-.history-result{font-size:13px;font-weight:700}
-.history-result.win{color:#00ff88}.history-result.loss{color:#ff4444}
-.history-detail{font-size:10px;color:#888;display:flex;gap:12px;flex-wrap:wrap}
-.history-detail span{white-space:nowrap}.history-detail b{color:#ccc}
-canvas{width:100%;height:70px;display:block;margin-top:6px}
-.price-bar{display:flex;gap:4px;margin-bottom:6px}
-.price-bar .side{flex:1;padding:6px;border-radius:4px;text-align:center;font-size:12px}
-.price-bar .side.up{background:rgba(0,255,136,.08);border:1px solid rgba(0,255,136,.2)}
-.price-bar .side.down{background:rgba(255,68,68,.08);border:1px solid rgba(255,68,68,.2)}
-.price-bar .side .p{font-size:16px;font-weight:700}
-.price-bar .side.up .p{color:#00ff88}.price-bar .side.down .p{color:#ff4444}
-</style>
-</head>
-<body>
-<h1>CHEAP / EXPENSIVE BOT</h1>
-<div class="sub" id="status">connecting…</div>
-<div id="engines"></div>
-<script>
-const $=id=>document.getElementById(id);
-function fmt$(n){return '$'+(n||0).toFixed(2)}
-function fmtCountdown(s){if(s<=0)return'0:00';return Math.floor(s/60)+':'+String(Math.floor(s%60)).padStart(2,'0')}
-function pnlClass(v){return v>=0?'green':'red'}
-function pnlSign(v){return v>=0?'+$':'-$'}
-
-function renderEngine(key,e){
-  const cfg=e.config||{};
-  const live=e.liveWindow||{};
-  const streak=e.streak||{wins:0,losses:0};
-  const bankroll=e.bankroll||0;
-  const start=e.startingBankroll||2000;
-  const returnPct=((bankroll-start)/start*100);
-  const peak=e.peakBankroll||start;
-  const currDD=peak-bankroll;
-  const currDDPct=peak>0?(currDD/peak*100):0;
-  const hist=e.windowHistory||[];
-  const winCount=hist.filter(w=>w.pnl>=0).length;
-  const lossCount=hist.filter(w=>w.pnl<0).length;
-  const totalPnl=hist.reduce((a,w)=>a+(w.pnl||0),0);
-  const lc=e.lastCheck||{};
-  const win=e.currentWindow;
-  const elapsed=win?Math.floor(Date.now()/1000)-win.windowStart:0;
-  const remaining=lc.secondsRemaining||0;
-  const p1=cfg.PHASE1_SECONDS||120;
-  const p2=cfg.PHASE2_SECONDS||240;
-  let phase='HOLD';
-  if(win){if(elapsed<p1)phase='PHASE 1 — CHEAP';else if(elapsed<p2)phase='PHASE 2 — EXPENSIVE';else phase='HOLD';}
-  let phaseClass='hold';
-  if(win){if(elapsed<p1)phaseClass='p1';else if(elapsed<p2)phaseClass='p2';}
-
-  let h='<div class="engine">';
-  h+='<div class="engine-head">';
-  h+='<div class="engine-title">'+(cfg.WINDOW_MINUTES||'?')+' MIN</div>';
-  h+=win?'<span class="phase-badge '+phaseClass+'">'+phase+'</span>':'<span class="phase-badge hold">IDLE</span>';
-  h+='</div>';
-
-  h+='<div class="price-bar">';
-  h+='<div class="side up"><div>UP</div><div class="p">'+(lc.upPrice!=null?'$'+lc.upPrice.toFixed(3):'—')+'</div></div>';
-  h+='<div class="side down"><div>DOWN</div><div class="p">'+(lc.downPrice!=null?'$'+lc.downPrice.toFixed(3):'—')+'</div></div>';
-  h+='</div>';
-
-  h+='<div class="row">';
-  h+='<div class="stat"><div class="label">Bankroll</div><div class="value big">'+fmt$(bankroll)+'</div></div>';
-  h+='<div class="stat"><div class="label">Return</div><div class="value '+pnlClass(returnPct)+'">'+(returnPct>=0?'+':'')+returnPct.toFixed(1)+'%</div></div>';
-  h+='<div class="stat"><div class="label">Countdown</div><div class="value blue">'+(win?fmtCountdown(Math.max(0,remaining)):'—')+'</div></div>';
-  h+='</div>';
-
-  h+='<div class="row">';
-  h+='<div class="stat"><div class="label">Cost</div><div class="value yellow">'+fmt$(live.totalCost)+'</div></div>';
-  h+='<div class="stat"><div class="label">Float P&L</div><div class="value '+pnlClass(live.unrealizedPnL)+'">'+pnlSign(Math.abs(live.unrealizedPnL))+Math.abs(live.unrealizedPnL).toFixed(2)+'</div></div>';
-  h+='<div class="stat"><div class="label">UP P&L</div><div class="value '+pnlClass(live.upUnrealized)+'">'+pnlSign(Math.abs(live.upUnrealized))+Math.abs(live.upUnrealized).toFixed(2)+'</div></div>';
-  h+='<div class="stat"><div class="label">DOWN P&L</div><div class="value '+pnlClass(live.downUnrealized)+'">'+pnlSign(Math.abs(live.downUnrealized))+Math.abs(live.downUnrealized).toFixed(2)+'</div></div>';
-  h+='</div>';
-
-  h+='<div class="row">';
-  h+='<div class="stat"><div class="label">UP Shares</div><div class="value green">'+(live.upShares||0)+'</div></div>';
-  h+='<div class="stat"><div class="label">DOWN Shares</div><div class="value red">'+(live.downShares||0)+'</div></div>';
-  h+='<div class="stat"><div class="label">UP Cost</div><div class="value">'+fmt$(live.upCost)+'</div></div>';
-  h+='<div class="stat"><div class="label">DOWN Cost</div><div class="value">'+fmt$(live.downCost)+'</div></div>';
-  h+='</div>';
-
-  h+='<div class="row">';
-  h+='<div class="stat"><div class="label">Wins</div><div class="value green">'+winCount+'</div></div>';
-  h+='<div class="stat"><div class="label">Losses</div><div class="value red">'+lossCount+'</div></div>';
-  h+='<div class="stat"><div class="label">Total P&L</div><div class="value '+pnlClass(totalPnl)+'">'+pnlSign(Math.abs(totalPnl))+Math.abs(totalPnl).toFixed(2)+'</div></div>';
-  h+='<div class="stat"><div class="label">Fees</div><div class="value">'+fmt$(e.totalFees)+'</div></div>';
-  h+='</div>';
-
-  if(win&&live.entries&&live.entries.length>0){
-    h+='<div class="section-label">CURRENT WINDOW — '+live.entries.length+' entries</div>';
-    h+='<div class="entry-list">';
-    for(let i=live.entries.length-1;i>=0;i--){
-      const en=live.entries[i];
-      h+='<div class="entry"><span class="side-'+en.side.toLowerCase()+'">'+en.side+'</span>';
-      h+='<span class="info">'+en.shares+'sh @ $'+en.fillPrice.toFixed(3)+' — '+fmt$(en.shares*en.fillPrice)+'</span></div>';
-    }
-    h+='</div>';
-  }else if(win){h+='<div class="section-label">WAITING FOR ENTRIES…</div>';}
-
-  if(hist.length>1){h+='<div class="section-label">EQUITY ('+hist.length+')</div><canvas id="eq-'+key+'"></canvas>';}
-
-  if(hist.length>0){
-    h+='<div class="section-label">RESOLVED ('+hist.length+')</div>';
-    for(const w of hist.slice().reverse()){
-      const isWin=w.pnl>=0;
-      h+='<div class="history-item '+(isWin?'win':'loss')+'">';
-      h+='<div class="history-head">';
-      h+='<span class="history-result '+(isWin?'win':'loss')+'">'+(isWin?'✓ WIN':'✗ LOSS')+' '+pnlSign(Math.abs(w.pnl))+Math.abs(w.pnl).toFixed(2)+'</span>';
-      h+='<span style="font-size:10px;color:#666">'+fmt$(w.totalCost)+' → '+fmt$(w.totalPayout)+'</span></div>';
-      h+='<div class="history-detail">';
-      h+='<span>UP: <b>'+(w.upShares||0)+'sh</b> '+fmt$(w.upCost)+' → '+fmt$(w.upPayout)+'</span>';
-      h+='<span>DOWN: <b>'+(w.downShares||0)+'sh</b> '+fmt$(w.downCost)+' → '+fmt$(w.downPayout)+'</span>';
-      h+='<span>Final: UP $'+(w.finalUpPrice!=null?w.finalUpPrice.toFixed(3):'—')+' / DOWN $'+(w.finalDownPrice!=null?w.finalDownPrice.toFixed(3):'—')+'</span>';
-      h+='</div></div>';
-    }
-  }
-  h+='</div>';return h;
+<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTC Hedge 15m+5m</title>
+<style>*{box-sizing:border-box;margin:0;padding:0}body{background:#000;color:#fff;font-family:'Courier New',monospace;font-weight:bold;font-size:13px;padding:9px}
+.h{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.title{font-size:19px}.title span{color:#00ccff}.badge{padding:4px 10px;border-radius:14px;border:1px solid #333;font-size:11px}.demo{color:#ffcc00;background:#ffcc0018}
+.timer{text-align:center;padding:10px;background:#050505;border:2px solid #222;border-radius:8px;margin-bottom:8px}.tv{font-size:40px;color:#00ccff;font-variant-numeric:tabular-nums;line-height:1}.tl{font-size:9px;color:#777;text-transform:uppercase;letter-spacing:2px;margin-top:3px}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:8px}.box{background:#0d0d0d;border:1px solid #2a2a2a;border-radius:6px;padding:8px}.lb{font-size:9px;color:#777;text-transform:uppercase}.val{font-size:16px;margin-top:2px}
+.green{color:#00ff88}.red{color:#ff4444}.acc{color:#00ccff}.warn{color:#ffcc00}
+.card{background:#080808;border:1px solid #1e1e1e;border-radius:7px;padding:10px;margin-bottom:8px}
+.prices{display:grid;grid-template-columns:repeat(6,1fr);gap:5px;text-align:center;padding:8px 0}.price{font-size:22px}.plabel{font-size:8px;color:#777;text-transform:uppercase;letter-spacing:1px}
+.poscard{border-left:3px solid #333;padding-left:10px;margin-bottom:6px;font-size:14px}.posdetail{font-size:11px;color:#aaa;margin-top:3px}
+.sub{font-size:10px;color:#888;margin-top:6px;line-height:1.5}
+#chart svg{width:100%;height:90px}#hist div{padding:4px 0;border-bottom:1px solid #151515;font-size:11px}#hist{max-height:160px;overflow-y:auto}
+.phase{display:inline-block;padding:3px 12px;border-radius:10px;font-size:10px;margin-top:5px}.observing{color:#ffcc00;background:#ffcc0015}.firedp{color:#00ff88;background:#00ff8815}.waiting{color:#666;background:#ffffff08}
+@media(max-width:600px){.grid{grid-template-columns:repeat(2,1fr)}.val{font-size:13px}.price{font-size:17px}.tv{font-size:32px}}</style></head><body>
+<div class="h"><div class="title">BTC <span>HEDGE</span> 15m+3×5m</div><div id="mode" class="badge demo">DEMO</div></div>
+<div class="timer"><div class="tv" id="timer">--</div><div class="tl">BASE WINDOW SECONDS LEFT</div><br><span id="phase" class="phase waiting">WAITING…</span></div>
+<div class="grid" id="top"></div>
+<div class="card">
+<div class="prices">
+<div><div class="plabel">15m UP</div><div class="price acc" id="u15">--</div></div>
+<div><div class="plabel">15m DN</div><div class="price warn" id="d15">--</div></div>
+<div><div class="plabel">5m UP</div><div class="price acc" id="u5" style="opacity:.6">--</div></div>
+<div><div class="plabel">5m DN</div><div class="price warn" id="d5" style="opacity:.6">--</div></div>
+<div><div class="plabel">SUB#</div><div class="price" style="color:#888" id="subN">--</div></div>
+<div><div class="plabel">HEDGE</div><div class="price" style="font-size:14px" id="hedgeS">--</div></div>
+</div></div>
+<div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:7px">POSITIONS</div><div id="posarea"></div>
+<div class="sub">UP 150sh base @t=0 · DOWN 50sh hedge sub#1 · re-hedge sub#2 if #1 won · no trades sub#3</div></div>
+<div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:5px">EQUITY CURVE</div><div id="chart"><svg viewBox="0 0 600 90" preserveAspectRatio="none"><polyline id="eqline" fill="none" stroke="#00ccff" stroke-width="2.5"/></svg></div></div>
+<div class="card"><div style="font-size:9px;color:#777;text-transform:uppercase;margin-bottom:5px">WINDOW HISTORY</div><div id="hist"></div></div>
+<script src="/socket.io/socket.io.js"></script><script>
+var s=null;
+function q(id){return document.getElementById(id)}
+function f2(n){return n==null?'--':Number(n).toFixed(2)}function f3(n){return n==null?'--':Number(n).toFixed(3)}
+function sg(n){return n>0?'+$'+f2(n):n<0? '-$'+f2(Math.abs(n)):'$'+f2(n)}function cl(n){return n>0?'green':n<0?'red':''}
+function bx(l,v){return '<div class="box"><div class="lb">'+l+'</div><div class="val">'+v+'</div></div>'}
+async function poll(){try{var r=await fetch('/api/state');s=await r.json();render()}catch(_){}}
+function render(){if(!s)return;
+ q('mode').textContent=s.demoMode?'DEMO':'LIVE';
+ var lc=s.engine.lastCheck||{};
+ var sr=lc.secondsRemaining||0;q('timer').textContent=sr;
+ var ph=q('phase'),hs=lc.hedgeState||'initial';
+ if(hs==='rearm_sub2'){ph.textContent='RE-ARM SUB#2';ph.className='phase firedp'}
+ else if(hs==='holding_sub2'){ph.textContent='HOLDING SUB#2';ph.className='phase observing'}
+ else if(hs==='idle'){ph.textContent='IDLE — NO MORE HEDGES';ph.className='phase waiting'}
+ else if(s.engine.currentWindow){ph.textContent='ACTIVE';ph.className='phase firedp'}
+ else{ph.textContent='DISCOVERING…';ph.className='phase waiting'}
+ var pnl=s.engine.bankroll-s.engine.startingBankroll;
+ q('top').innerHTML=bx('BANKROLL','$'+f2(s.engine.bankroll))+bx('PNL','<span class="'+cl(pnl)+'">'+sg(pnl)+'</span>')+bx('W/L','<span class="green">'+(s.engine.streak?.wins||0)+'W</span>/<span class="red">'+(s.engine.streak?.losses||0)+'L</span>')+bx('MAX DD','$'+f2(s.engine.maxDrawdown||0));
+ q('u15').textContent=f3(lc.up15m);q('d15').textContent=f3(lc.down15m);
+ q('u5').textContent=f3(lc.up5m);q('d5').textContent=f3(lc.down5m);
+ q('subN').textContent=(lc.subIndex!=null)?'#'+(lc.subIndex+1):'--';
+ q('hedgeS').textContent=(lc.hedgeState||'--').replace(/_/g,' ');
+ var pa=q('posarea');
+ if(s.engine.currentWindow&&s.engine.currentWindow.entries&&s.engine.currentWindow.entries.length){
+   var h='';s.engine.currentWindow.entries.forEach(function(e){if(e.status!=='filled')return;
+     var mid=e.side==='UP'?(lc.up15m||e.fillPrice):(lc.down5m||lc.down15m||e.fillPrice);var fl=e.shares*mid-e.shares*e.fillPrice;
+     h+='<div class="poscard" style="border-color:'+(fl>=0?'#00ff88':'#ff4444')+'">'+e.side+' '+e.shares+'sh @'+f3(e.fillPrice)+' <span class="'+cl(fl)+'">'+sg(fl)+'</span></div>'});
+   pa.innerHTML=h||'<div style="color:#444">No open positions</div>';
+ }else pa.innerHTML='<div style="color:#444">No positions</div>';
+ renderChart();renderHist();
 }
-
-function drawEquity(key,e){
-  const canvas=document.getElementById('eq-'+key);if(!canvas)return;
-  const hist=(e.equityCurve||[]).slice(-50);if(hist.length<2)return;
-  const ctx=canvas.getContext('2d');const rect=canvas.getBoundingClientRect();
-  canvas.width=rect.width*2;canvas.height=rect.height*2;ctx.scale(2,2);
-  const w=rect.width,h=rect.height;
-  const vals=hist.map(p=>p.bankroll);const min=Math.min(...vals)*.99;const max=Math.max(...vals)*1.01;const range=max-min||1;
-  ctx.clearRect(0,0,w,h);ctx.strokeStyle='#00ff88';ctx.lineWidth=1.5;ctx.beginPath();
-  for(let i=0;i<vals.length;i++){const x=(i/(vals.length-1))*w;const y=h-((vals[i]-min)/range)*h;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}
-  ctx.stroke();
-}
-
-async function refresh(){
-  let s;try{const res=await fetch('/api/state');s=await res.json();}catch(e){$('status').textContent='connection error';return;}
-  const engines=s.engines||{};const keys=Object.keys(engines);
-  let html='';for(const k of keys)html+=renderEngine(k,engines[k]);
-  $('engines').innerHTML=html;
-  for(const k of keys)drawEquity(k,engines[k]);
-  $('status').textContent=new Date().toLocaleTimeString()+' · '+(s.config.DEMO_MODE?'DEMO':'LIVE')+' · '+s.config.ASSET.toUpperCase()+(s.lastError?' ⚠ '+s.lastError:'');
-}
-refresh();setInterval(refresh,1000);
-</script>
-</body>
-</html>
+function renderChart(){var ec=s.engine.equityCurve;if(!ec||ec.length<2)return;
+ var vals=ec.map(function(x){return x.equity});vals.push(s.engine.startingBankroll);
+ var lo=Math.min.apply(null,vals),hi=Math.max.apply(null,vals),rg=(hi-lo)||1;
+ q('eqline').setAttribute('points',ec.map(function(v,i){return((i/(ec.length-1)*600).toFixed(1))+','+((85-(v.equity-lo)/rg*75).toFixed(1))}).join(' '))}
+function renderHist(){var wh=s.engine.windowHistory||[];var h='';
+ for(var i=wh.length-1;i>=Math.max(0,wh.length-30);i--){var w=wh[i];h+='<div>'+w.sides+' → <span class="'+cl(w.pnl)+'">'+sg(w.pnl)+'</span></div>'}
+ q('hist').innerHTML=h||'<div style="color:#444">No windows yet</div>'}
+setInterval(poll,2000);poll();
+</script></body></html>
