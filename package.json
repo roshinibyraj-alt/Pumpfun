@@ -1,0 +1,16 @@
+{
+  "name": "btc-correlation-combo-bot",
+  "version": "1.0.0",
+  "description": "BTC+ETH opposite-side combo bot — flat 100 SH per leg",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5"
+  }
+}
