@@ -207,6 +207,32 @@ class PolymarketTrader {
   }
 
 
+  // ── Simulate GTC fill by sweeping the order book ──
+  simulateGtcBookFill(book, shares, ceiling = 0.99) {
+    if (!book) return null;
+    const asks = (book.asks || [])
+      .filter(level => Number(level.size) > 0)
+      .map(level => ({ price: Number(level.price), size: Number(level.size) }))
+      .filter(level => level.price > 0 && level.price <= 1)
+      .sort((a, b) => a.price - b.price);
+    let remaining = shares;
+    let totalCost = 0;
+    const levels = [];
+    for (const level of asks) {
+      if (level.price > ceiling) break;
+      if (remaining <= 0) break;
+      const fill = Math.min(level.size, remaining);
+      const cost = Math.round(fill * level.price * 100) / 100;
+      levels.push({ price: level.price, size: fill, cost });
+      totalCost += cost;
+      remaining -= fill;
+    }
+    const filled = shares - remaining;
+    if (filled <= 0) return null;
+    const avgPrice = Math.round(totalCost / filled * 100000) / 100000;
+    return { avgPrice, filled, totalCost: Math.round(totalCost * 100) / 100, levels };
+  }
+
   // ── FOK order with explicit price & size (no market price calc) ──
   async placeFokLimitOrder(tokenId, side, price, size) {
     const sideVal = side === 'BUY' ? Side.BUY : Side.SELL;
