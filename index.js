@@ -48,7 +48,7 @@ h1{font-size:20px;letter-spacing:.3px}.sub{font-size:10px;color:#7f93a8;margin-t
   <div><div class="ctrl-label">Trading Mode</div><label class="toggle"><input type="checkbox" id="liveToggle" onchange="toggleLive(this.checked)"><span class="slider"></span></label></div>
   <div id="modeLabel" style="font-size:12px;color:#ffc861;font-weight:700">🟡 PAPER</div>
   <div id="dryRunBadge" style="font-size:10px;color:#ff5566;border:1px solid #ff556644;border-radius:8px;padding:4px 10px;display:none">🔒 DRY_RUN</div>
-  <div><div class="ctrl-label">Shares per Leg</div><input type="number" class="ctrl-input" id="sharesInput" value="10" min="1" max="10000" onchange="updateShares(this.value)"></div>
+  <div><div class="ctrl-label">Shares per Leg</div><input type="number" class="ctrl-input" id="sharesInput" value="20" min="1" max="10000" onchange="updateShares(this.value)"></div>
   <div><button class="ctrl-btn" id="authBtn" onclick="authTrader()">Authenticate Wallet</button></div>
   <div class="wallet-badge" id="walletBadge">No wallet</div><div class="wallet-badge" id="walletBalance" style="display:none;color:#00ff9d;border-color:#00ff9d44">💰 $<span id="balanceAmount">0.00</span></div>
 </div>
