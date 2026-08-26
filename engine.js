@@ -13,7 +13,7 @@ const ENTRY_MAX_SUM = Number(process.env.ENTRY_MAX_SUM || 0.85);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
-const DRY_RUN = String(process.env.DRY_RUN || 'true').toLowerCase() !== 'false';
+const DRY_RUN = String(process.env.DRY_RUN || 'false').toLowerCase() !== 'false';
 const SWEEP_INTERVAL_MS = Number(process.env.RESOLUTION_SWEEP_MS || 5000);
 
 function round2(value) { return Math.round(value * 100) / 100; }
