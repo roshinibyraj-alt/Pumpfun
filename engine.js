@@ -55,6 +55,13 @@ class MomentumLagEngine {
     this.lastDiscoveryAt = null;
     this.discoveryRunning = false;
     this.lastPollErrorAt = null;
+    this.trader = options.trader || null;
+    this.liveMode = false;
+    this.liveShares = TRADE_SHARES;
+    this.traderAuthenticated = false;
+    this.liveOrders = [];
+    this.traderAddress = null;
+    this.dryRun = DRY_RUN;
   }
 
   log(message) {
