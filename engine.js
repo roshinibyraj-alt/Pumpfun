@@ -62,6 +62,7 @@ class MomentumLagEngine {
     this.liveOrders = [];
     this.traderAddress = null;
     this.dryRun = DRY_RUN;
+    this.walletBalance = null;
   }
 
   log(message) {
@@ -318,6 +319,10 @@ class MomentumLagEngine {
       this.traderAddress = this.trader.address;
       this.traderAuthenticated = true;
       await this.trader.approveAllowance();
+      try {
+        this.walletBalance = await this.trader.getBalance();
+        this.log(`💰 Wallet balance: $${this.walletBalance.toFixed(2)}`);
+      } catch (e) { this.log(`⚠️ Could not fetch balance: ${e.message}`); }
       this.log(`✅ Trader authenticated: ${this.traderAddress}`);
       return true;
     } catch (error) {
@@ -620,6 +625,7 @@ class MomentumLagEngine {
       traderAuthenticated: this.traderAuthenticated,
       traderAddress: this.traderAddress,
       dryRun: DRY_RUN,
+      walletBalance: this.walletBalance,
       liveOrders: this.liveOrders.slice(-30),
       serverTime: Date.now(),
       windowStart: activeStart,

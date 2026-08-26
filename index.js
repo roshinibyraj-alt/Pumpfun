@@ -50,7 +50,7 @@ h1{font-size:20px;letter-spacing:.3px}.sub{font-size:10px;color:#7f93a8;margin-t
   <div id="dryRunBadge" style="font-size:10px;color:#ff5566;border:1px solid #ff556644;border-radius:8px;padding:4px 10px;display:none">🔒 DRY_RUN</div>
   <div><div class="ctrl-label">Shares per Leg</div><input type="number" class="ctrl-input" id="sharesInput" value="10" min="1" max="10000" onchange="updateShares(this.value)"></div>
   <div><button class="ctrl-btn" id="authBtn" onclick="authTrader()">Authenticate Wallet</button></div>
-  <div class="wallet-badge" id="walletBadge">No wallet</div>
+  <div class="wallet-badge" id="walletBadge">No wallet</div><div class="wallet-badge" id="walletBalance" style="display:none;color:#00ff9d;border-color:#00ff9d44">💰 $<span id="balanceAmount">0.00</span></div>
 </div>
 <section class="kpis" id="kpis"></section>
 <section class="two-col"><div class="panel"><div class="panel-head"><span>Global equity curve</span><strong id="equityValue">—</strong></div><div class="chart"><svg id="equityChart" preserveAspectRatio="none"></svg></div></div><div class="panel"><div class="panel-head"><span>Strategy & connection</span><strong>ACTIVE RULES</strong></div><div class="config-grid" id="configGrid"></div></div></section>
@@ -66,7 +66,7 @@ socket.on('connect',()=>{$('connection').textContent='UI LIVE';$('connection').c
 socket.on('log',line=>{logs.push(line);if(logs.length>300)logs.shift();safe(renderLogs)});socket.on('tick',data=>{if(acceptTick(data)){if(data.messageCount!=null)updateRate(data.messageCount);requestAnimationFrame(()=>safe(()=>{renderLivePrices(lastLivePacket,'CLOB TICK');renderFloating();lastRender=Date.now()}))}});
 socket.on('state',data=>safe(()=>render(data)));
 async function refreshState(){try{const response=await fetch('/api/status');render(await response.json())}catch(error){$('connection').textContent='UI RETRY';$('connection').className='pill warn'}}
-refreshState();setInterval(refreshState,1000);fetch('/api/trader-info').then(r=>r.json()).then(d=>updateLiveUI(d)).catch(()=>{});
+refreshState();setInterval(refreshState,1000);fetch('/api/trader-info').then(r=>r.json()).then(d=>updateLiveUI(d)).catch(()=>{});setInterval(()=>{if(state&&state.traderAuthenticated)fetch('/api/trader-info').then(r=>r.json()).then(d=>updateLiveUI(d)).catch(()=>{})},30000);
 function safe(fn){try{fn()}catch(error){console.error('Dashboard render error:',error)}}
 function acceptTick(packet){if(!packet||!Array.isArray(packet.markets)||!packet.markets.length)return false;if(state&&packet.windowStart!==state.windowStart)return false;tickData=packet;lastLivePacket=packet;return true}
 function num(v){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:2})}function cash(v){return'$'+Number(v||0).toFixed(2)}function money(v){if(v==null)return'—';const n=Number(v);return(n>0?'+$':n<0?'-$':'$')+Math.abs(n).toFixed(2)}function tone(v){return Number(v)>0?'green':Number(v)<0?'red':''}function price(v){return v==null?'—':Number(v).toFixed(3)}function clock(s){s=Math.max(0,Math.floor(s));return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')}function esc(x){return String(x||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
@@ -91,7 +91,7 @@ function renderLogs(){const panel=$('logsPanel'),nearBottom=panel.scrollHeight-p
 async function toggleLive(on){try{const response=await fetch('/api/live-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})});const data=await response.json();updateLiveUI(data)}catch(error){console.error('Toggle failed:',error);$('liveToggle').checked=false}}
 async function updateShares(value){try{await fetch('/api/live-shares',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shares:Number(value)})})}catch(error){console.error('Shares update failed:',error)}}
 async function authTrader(){try{$('authBtn').textContent='AUTHENTICATING...';const response=await fetch('/api/live-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:state?.liveMode||false})});const data=await response.json();updateLiveUI(data)}catch(error){$('authBtn').textContent='AUTH FAILED'}}
-function updateLiveUI(data){$('liveToggle').checked=!!data.liveMode;$('modeLabel').textContent=data.liveMode?'🔴 LIVE':'🟡 PAPER';$('modeLabel').style.color=data.liveMode?'#ff4a68':'#ffc861';$('authBtn').textContent=data.traderAuthenticated?'✅ AUTHENTICATED':'Authenticate Wallet';$('authBtn').className=data.traderAuthenticated?'ctrl-btn danger':'ctrl-btn';$('walletBadge').textContent=data.traderAddress?data.traderAddress.slice(0,10)+'...'+data.traderAddress.slice(-6):(data.hasPrivateKey?'No wallet':'No PRIVATE_KEY set');const dryBadge=$('dryRunBadge');if(data.dryRun){dryBadge.style.display='inline-block'}else{dryBadge.style.display='none'}}
+function updateLiveUI(data){$('liveToggle').checked=!!data.liveMode;$('modeLabel').textContent=data.liveMode?'🔴 LIVE':'🟡 PAPER';$('modeLabel').style.color=data.liveMode?'#ff4a68':'#ffc861';$('authBtn').textContent=data.traderAuthenticated?'✅ AUTHENTICATED':'Authenticate Wallet';$('authBtn').className=data.traderAuthenticated?'ctrl-btn danger':'ctrl-btn';$('walletBadge').textContent=data.traderAddress?data.traderAddress.slice(0,10)+'...'+data.traderAddress.slice(-6):(data.hasPrivateKey?'No wallet':'No PRIVATE_KEY set');const dryBadge=$('dryRunBadge');if(data.dryRun){dryBadge.style.display='inline-block'}else{dryBadge.style.display='none'};const balEl=$('walletBalance');if(data.walletBalance!=null){balEl.style.display='inline-block';$('balanceAmount').textContent=Number(data.walletBalance).toFixed(2)}else if(data.traderAuthenticated){balEl.style.display='inline-block';$('balanceAmount').textContent='...'}else{balEl.style.display='none'}}
 function renderLiveOrders(orders){if(!orders||!orders.length){$('liveOrdersGrid').innerHTML='<div class="empty">No live orders yet</div>';return}$('liveOrderCount').textContent=orders.length+' ORDERS';$('liveOrdersGrid').innerHTML=orders.slice(0,30).reverse().map(order=>'<article class="feed-item"><div class="small">'+new Date(order.timestamp).toLocaleTimeString()+' · '+esc(order.combo)+'</div><div class="feed-main"><span class="'+(order.outcome==='UP'?'tag-up':'tag-down')+'">'+order.asset.toUpperCase()+' '+order.outcome+'</span> '+num(order.shares)+' SH @ '+Number(order.avgPrice).toFixed(3)+'</div><div class="feed-detail">Order '+(order.status||'UNKNOWN')+' · id:'+(order.orderId||'?').slice(0,12)+'</div></article>').join('')}
 setInterval(()=>safe(()=>{if(lastLivePacket&&state&&lastLivePacket.windowStart===state.windowStart&&Date.now()-lastRender>=100){renderLivePrices(lastLivePacket,'CLOB TICK');renderFloating();lastRender=Date.now()}}),50);
 </script></body></html>`;
@@ -108,7 +108,7 @@ app.post('/api/live-mode', async (request, response) => {
     if (!ok) return response.status(503).json({ error: 'Trader authentication failed', traderAddress: engine.traderAddress, hasPrivateKey: Boolean(PRIVATE_KEY) });
   }
   engine.setLiveMode(enabled);
-  response.json({ liveMode: engine.liveMode, dryRun: engine.dryRun, traderAuthenticated: engine.traderAuthenticated, traderAddress: engine.traderAddress, hasPrivateKey: Boolean(PRIVATE_KEY) });
+  response.json({ liveMode: engine.liveMode, dryRun: engine.dryRun, traderAuthenticated: engine.traderAuthenticated, traderAddress: engine.traderAddress, hasPrivateKey: Boolean(PRIVATE_KEY), walletBalance: engine.walletBalance });
 });
 app.post('/api/live-shares', (request, response) => {
   const { shares } = request.body || {};
@@ -124,6 +124,7 @@ app.get('/api/trader-info', (_, response) => {
     liveMode: engine.liveMode,
     liveShares: engine.liveShares,
     dryRun: engine.dryRun,
+    walletBalance: engine.walletBalance,
   });
 });
 app.get('/api/status', (_, response) => response.json(engine.buildState()));
