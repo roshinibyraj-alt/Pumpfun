@@ -17,6 +17,7 @@ const DRY_RUN = String(process.env.DRY_RUN || 'false').toLowerCase() !== 'false'
 const AUTO_LIVE = String(process.env.AUTO_LIVE || 'false').toLowerCase() === 'true';
 const SWEEP_INTERVAL_MS = Number(process.env.RESOLUTION_SWEEP_MS || 5000);
 const COMBO_SELL_TARGET = Number(process.env.COMBO_SELL_TARGET || 1.10);
+const COMBO_SELL_DELAY = Number(process.env.COMBO_SELL_DELAY || 5000);
 
 function round2(value) { return Math.round(value * 100) / 100; }
 function round5(value) { return Math.round(value * 100000) / 100000; }
@@ -418,6 +419,8 @@ class MomentumLagEngine {
           this.log(`🔴 LIVE ORDER FAILED ${leg.asset.toUpperCase()} ${leg.outcome}: ${error.message}`);
         }
       }
+      leg.filledAt = liveResult?.isFilled ? Date.now() : (liveResult ? null : null);
+      leg.isFilled = !!liveResult?.isFilled;
       const trade = {
         timestamp: now, orderType: orderTag, comboId, combo: signal.name,
         slug: leg.slug, asset: leg.asset, outcome: leg.outcome, shares: leg.shares,
@@ -486,13 +489,17 @@ class MomentumLagEngine {
     for (const combo of this.combos) {
       if (combo.status !== 'open') continue;
       if (combo.sellAttempted) continue;
+      const allFilled = combo.legs.every(leg => leg.isFilled);
+      if (!allFilled) continue;
+      const latestFill = Math.max(...combo.legs.map(leg => leg.filledAt || 0));
+      if (Date.now() - latestFill < COMBO_SELL_DELAY) continue;
       const bidTotal = this.comboBidPrice(combo);
       if (bidTotal < COMBO_SELL_TARGET) continue;
       combo.sellAttempted = true;
       this.log(`💰 Combo ${combo.name} bid $${bidTotal.toFixed(2)} >= target $${COMBO_SELL_TARGET.toFixed(2)} — SELLING`);
       let totalProceeds = 0;
       let totalSellFees = 0;
-      let allFilled = true;
+      let sellComplete = true;
       for (const leg of combo.legs) {
         try {
           const result = await this.trader.placeGtcFloorSell(leg.tokenId, leg.shares, 0.01);
@@ -504,7 +511,7 @@ class MomentumLagEngine {
           this.log(`🔴 SOLD ${leg.asset.toUpperCase()} ${leg.outcome} ${leg.shares}sh @${fillPrice.toFixed(3)} → $${proceeds.toFixed(2)} (${result.status})`);
         } catch (error) {
           this.log(`🔴 SELL FAILED ${leg.asset.toUpperCase()} ${leg.outcome}: ${error.message}`);
-          allFilled = false;
+          sellComplete = false;
         }
       }
       const pnl = round2(totalProceeds - totalSellFees - combo.cost - combo.fees);
@@ -519,7 +526,13 @@ class MomentumLagEngine {
       this.comboSellCount++;
       this.resolvedCombos.unshift({ ...combo, legs: combo.legs.map(leg => ({ ...leg })) });
       this.resolvedCombos = this.resolvedCombos.slice(0, 30);
-      this.log(`🏁 INTRA SELL ${combo.name} ${combo.result} — bid $${bidTotal.toFixed(2)} · proceeds $${totalProceeds.toFixed(2)} · cost $${combo.cost.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+      this.firedComboKeys.delete(combo.id.split('-').slice(0, -1).join('-'));
+      for (const key of this.firedComboKeys) {
+        if (key.startsWith(String(combo.windowStart) + ':')) {
+          this.firedComboKeys.delete(key);
+        }
+      }
+      this.log(`🏁 INTRA SELL ${combo.name} ${combo.result} — bid $${bidTotal.toFixed(2)} · proceeds $${totalProceeds.toFixed(2)} · cost $${combo.cost.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · REARMED`);
     }
     this.positions = this.positions.filter(position => position.status === 'open');
   }
@@ -696,6 +709,7 @@ class MomentumLagEngine {
       autoLive: AUTO_LIVE,
       comboSellTarget: COMBO_SELL_TARGET,
       comboSellCount: this.comboSellCount,
+      comboSellDelay: COMBO_SELL_DELAY,
       walletBalance: this.walletBalance,
       liveOrders: this.liveOrders.slice(-30),
       serverTime: Date.now(),
