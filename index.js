@@ -66,7 +66,7 @@ socket.on('connect',()=>{$('connection').textContent='UI LIVE';$('connection').c
 socket.on('log',line=>{logs.push(line);if(logs.length>300)logs.shift();safe(renderLogs)});socket.on('tick',data=>{if(acceptTick(data)){if(data.messageCount!=null)updateRate(data.messageCount);requestAnimationFrame(()=>safe(()=>{renderLivePrices(lastLivePacket,'CLOB TICK');renderFloating();lastRender=Date.now()}))}});
 socket.on('state',data=>safe(()=>render(data)));
 async function refreshState(){try{const response=await fetch('/api/status');render(await response.json())}catch(error){$('connection').textContent='UI RETRY';$('connection').className='pill warn'}}
-refreshState();setInterval(refreshState,1000);
+refreshState();setInterval(refreshState,1000);fetch('/api/trader-info').then(r=>r.json()).then(d=>updateLiveUI(d)).catch(()=>{});
 function safe(fn){try{fn()}catch(error){console.error('Dashboard render error:',error)}}
 function acceptTick(packet){if(!packet||!Array.isArray(packet.markets)||!packet.markets.length)return false;if(state&&packet.windowStart!==state.windowStart)return false;tickData=packet;lastLivePacket=packet;return true}
 function num(v){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:2})}function cash(v){return'$'+Number(v||0).toFixed(2)}function money(v){if(v==null)return'—';const n=Number(v);return(n>0?'+$':n<0?'-$':'$')+Math.abs(n).toFixed(2)}function tone(v){return Number(v)>0?'green':Number(v)<0?'red':''}function price(v){return v==null?'—':Number(v).toFixed(3)}function clock(s){s=Math.max(0,Math.floor(s));return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')}function esc(x){return String(x||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
@@ -101,14 +101,14 @@ app.post('/api/live-mode', async (request, response) => {
   const { enabled } = request.body || {};
   if (typeof enabled !== 'boolean') return response.status(400).json({ error: 'enabled must be boolean' });
   if (enabled && engine.dryRun) {
-    return response.status(403).json({ error: 'DRY_RUN=true — set DRY_RUN=false on Railway to enable live trading', dryRun: true, liveMode: false, traderAuthenticated: engine.traderAuthenticated, traderAddress: engine.traderAddress });
+    return response.status(403).json({ error: 'DRY_RUN=true — set DRY_RUN=false on Railway to enable live trading', dryRun: true, liveMode: false, traderAuthenticated: engine.traderAuthenticated, traderAddress: engine.traderAddress, hasPrivateKey: Boolean(PRIVATE_KEY) });
   }
   if (enabled && !engine.traderAuthenticated) {
     const ok = await engine.initTrader();
-    if (!ok) return response.status(503).json({ error: 'Trader authentication failed', traderAddress: engine.traderAddress });
+    if (!ok) return response.status(503).json({ error: 'Trader authentication failed', traderAddress: engine.traderAddress, hasPrivateKey: Boolean(PRIVATE_KEY) });
   }
   engine.setLiveMode(enabled);
-  response.json({ liveMode: engine.liveMode, dryRun: engine.dryRun, traderAuthenticated: engine.traderAuthenticated, traderAddress: engine.traderAddress });
+  response.json({ liveMode: engine.liveMode, dryRun: engine.dryRun, traderAuthenticated: engine.traderAuthenticated, traderAddress: engine.traderAddress, hasPrivateKey: Boolean(PRIVATE_KEY) });
 });
 app.post('/api/live-shares', (request, response) => {
   const { shares } = request.body || {};
