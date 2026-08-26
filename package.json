@@ -1,7 +1,7 @@
 {
-  "name": "btc-correlation-combo-bot",
-  "version": "1.0.0",
-  "description": "BTC+ETH opposite-side combo bot — flat 100 SH per leg",
+  "name": "flatline-bot",
+  "version": "2.0.0",
+  "description": "FlatLine — BTC+ETH opposite-side combo · GTC@0.99 book sweep · PAPER/LIVE toggle",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,7 +10,10 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.10",
+    "@polymarket/clob-client-v2": "^1.1.0",
     "express": "^4.19.2",
-    "socket.io": "^4.7.5"
+    "socket.io": "^4.7.5",
+    "viem": "^2.21.0"
   }
 }

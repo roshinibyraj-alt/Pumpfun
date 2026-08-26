@@ -102,6 +102,25 @@ class PolymarketTrader {
     return { id };
   }
 
+  // ── GTC limit BUY at ceiling — sweeps entire book up to ceiling price ──
+  async placeGtcCeilingBuy(tokenId, shares, ceiling = 0.99) {
+    let tickSize = '0.01', negRisk = false;
+    try { tickSize = (await this._clob.getTickSize(tokenId)) ?? '0.01'; } catch (_) {}
+    try { negRisk  = (await this._clob.getNegRisk(tokenId))  ?? false;  } catch (_) {}
+    const resp = await this._clob.createAndPostOrder(
+      { tokenID: tokenId, price: ceiling, size: shares, side: Side.BUY },
+      { tickSize, negRisk },
+      OrderType.GTC
+    );
+    const id        = resp?.orderID ?? resp?.id ?? null;
+    const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+    const remaining = parseFloat(resp?.remaining_size ?? '999');
+    const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
+    const avgPrice  = parseFloat(resp?.avg_fill_price || resp?.price || ceiling);
+    if (id) this._log(`🏷️ GTC BUY ${shares}sh ceiling $${ceiling} → ${status} avg:$${avgPrice.toFixed(3)} id:${id.slice(0,12)}…`);
+    return { id, status, isFilled, avgPrice, raw: resp };
+  }
+
   // ── FOK market BUY — amount is dollars ──
   async placeFokBuy(tokenId, dollarAmount) {
     let tickSize = '0.01', negRisk = false;

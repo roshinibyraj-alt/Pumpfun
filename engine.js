@@ -8,7 +8,7 @@ const WINDOW_SECONDS = 300;
 const ASSETS = ['btc', 'eth'];
 const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
-const TRADE_SHARES = Number(process.env.TRADE_SHARES || 100);
+const TRADE_SHARES = Number(process.env.TRADE_SHARES || 10);
 const ENTRY_MAX_SUM = Number(process.env.ENTRY_MAX_SUM || 0.85);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
@@ -167,7 +167,7 @@ class MomentumLagEngine {
   }
 
   currentTradeShares() {
-    return TRADE_SHARES;
+    return this.liveMode ? this.liveShares : TRADE_SHARES;
   }
   applyBook(token, bids, asks) {
     const validBids = bids.filter(level => Number(level.size) > 0).map(level => ({ price: Number(level.price), size: Number(level.size) }));
@@ -287,6 +287,32 @@ class MomentumLagEngine {
       market.asset === asset && !market.resolved && Date.now() / 1000 < market.windowEnd) || null;
   }
 
+  setLiveMode(enabled) {
+    this.liveMode = Boolean(enabled);
+    this.log(`🔀 Trading mode: ${this.liveMode ? '🔴 LIVE' : '🟡 PAPER'}`);
+  }
+
+  setLiveShares(shares) {
+    this.liveShares = Math.max(1, Math.round(shares));
+    this.log(`📊 Live shares set to ${this.liveShares} per leg`);
+  }
+
+  async initTrader() {
+    if (!this.trader) { this.log('⚠️ No trader instance — live mode unavailable'); return false; }
+    try {
+      await this.trader.authenticate();
+      this.traderAddress = this.trader.address;
+      this.traderAuthenticated = true;
+      await this.trader.approveAllowance();
+      this.log(`✅ Trader authenticated: ${this.traderAddress}`);
+      return true;
+    } catch (error) {
+      this.log(`❌ Trader auth failed: ${error.message}`);
+      this.traderAuthenticated = false;
+      return false;
+    }
+  }
+
   fireCombo(signal) {
     const now = Date.now();
     if (now / 1000 >= signal.btcMarket.windowEnd) return false;
@@ -350,11 +376,31 @@ class MomentumLagEngine {
         pnl: this.positionPnl(leg), signal: leg.signal,
       };
       this.trades.push(trade);
+      const isLive = this.liveMode && this.traderAuthenticated && this.trader;
+      if (isLive) {
+        (async () => {
+          try {
+            const liveResult = await this.trader.placeGtcCeilingBuy(leg.tokenId, shares, 0.99);
+            const liveOrder = {
+              orderId: liveResult.id, status: liveResult.status, avgPrice: liveResult.avgPrice,
+              tokenId: leg.tokenId, asset: leg.asset, outcome: leg.outcome, shares,
+              timestamp: Date.now(), comboId, combo: signal.name,
+            };
+            this.liveOrders.push(liveOrder);
+            this.liveOrders = this.liveOrders.slice(-100);
+            this.log(`🔴 LIVE ORDER ${liveResult.status} ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh avg:$${liveResult.avgPrice?.toFixed(3)??'?'} id:${liveResult.id?.slice(0,12)??'?'}`);
+          } catch (error) {
+            this.log(`🔴 LIVE ORDER FAILED ${leg.asset.toUpperCase()} ${leg.outcome}: ${error.message}`);
+          }
+        })();
+      }
       const sweepInfo = leg.sweep ? `sweep ${leg.sweep.filled}sh avg:${leg.sweep.avgPrice.toFixed(3)} levels:${leg.sweep.levels.length}` : 'no book depth';
-      this.log(`⚡ GTC BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh @${leg.avgPrice.toFixed(3)} (${sweepInfo} book bid:${leg.bookBid?.toFixed(3)??'-'} ask:${leg.bookAsk?.toFixed(3)??'-'} mid:${leg.bookMid?.toFixed(3)??'-'}) | ${signal.name} combined ${signal.combinedMid.toFixed(3)} < ${ENTRY_MAX_SUM.toFixed(2)} | $${leg.cost.toFixed(2)}`);
+      const modeTag = isLive ? '🔴 LIVE' : '🟡 PAPER';
+      this.log(`⚡ GTC BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh @${leg.avgPrice.toFixed(3)} (${sweepInfo}) ${modeTag} | ${signal.name} combined ${signal.combinedMid.toFixed(3)} < ${ENTRY_MAX_SUM.toFixed(2)} | $${leg.cost.toFixed(2)}`);
     }
     this.trades = this.trades.slice(-300);
-    this.log(`✅ ${signal.name} OPEN — GTC@0.99 · combined mid ${signal.combinedMid.toFixed(3)} · cost $${cost.toFixed(2)} · hold to resolution`);
+    const modeTag = this.liveMode && this.traderAuthenticated ? '🔴 LIVE' : '🟡 PAPER';
+    this.log(`✅ ${signal.name} OPEN — ${modeTag} GTC@0.99 · combined mid ${signal.combinedMid.toFixed(3)} · cost $${cost.toFixed(2)} · hold to resolution`);
     this.recordEquity();
     return true;
   }
@@ -553,8 +599,13 @@ class MomentumLagEngine {
     const currentDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart))).length;
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
-      mode: 'AUTONOMOUS DEMO',
-      strategy: 'BTC+ALT opposite-side combo <0.85 · 100 SH flat per leg',
+      mode: this.liveMode && this.traderAuthenticated ? '🔴 LIVE TRADING' : '🟡 PAPER DEMO',
+      strategy: 'BTC+ALT opposite-side combo <0.85 · GTC@0.99 book sweep · flat per leg',
+      liveMode: this.liveMode,
+      liveShares: this.liveShares,
+      traderAuthenticated: this.traderAuthenticated,
+      traderAddress: this.traderAddress,
+      liveOrders: this.liveOrders.slice(-30),
       serverTime: Date.now(),
       windowStart: activeStart,
       connected: this.isClobFresh(), tickCount: this.tickCount, messageCount: this.messageCount,
@@ -583,6 +634,7 @@ class MomentumLagEngine {
       logs: this.logs.slice(-220),
       config: {
         tradeShares: TRADE_SHARES,
+        liveShares: this.liveShares,
         entryMaxSum: ENTRY_MAX_SUM,
         resolutionPrice: RESOLUTION_PRICE, feeBps: TAKER_FEE_BPS,
       },
