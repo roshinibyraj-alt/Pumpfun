@@ -13,6 +13,7 @@ const ENTRY_MAX_SUM = Number(process.env.ENTRY_MAX_SUM || 0.85);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
+const DRY_RUN = String(process.env.DRY_RUN || 'true').toLowerCase() !== 'false';
 const SWEEP_INTERVAL_MS = Number(process.env.RESOLUTION_SWEEP_MS || 5000);
 
 function round2(value) { return Math.round(value * 100) / 100; }
@@ -288,6 +289,11 @@ class MomentumLagEngine {
   }
 
   setLiveMode(enabled) {
+    if (enabled && DRY_RUN) {
+      this.liveMode = false;
+      this.log('⛔ DRY_RUN=true — live mode blocked by env. Set DRY_RUN=false on Railway to enable.');
+      return;
+    }
     this.liveMode = Boolean(enabled);
     this.log(`🔀 Trading mode: ${this.liveMode ? '🔴 LIVE' : '🟡 PAPER'}`);
   }
@@ -298,6 +304,7 @@ class MomentumLagEngine {
   }
 
   async initTrader() {
+    if (DRY_RUN) { this.log('⛔ DRY_RUN=true — trader auth blocked. Set DRY_RUN=false on Railway to enable.'); return false; }
     if (!this.trader) { this.log('⚠️ No trader instance — live mode unavailable'); return false; }
     try {
       await this.trader.authenticate();
@@ -376,7 +383,7 @@ class MomentumLagEngine {
         pnl: this.positionPnl(leg), signal: leg.signal,
       };
       this.trades.push(trade);
-      const isLive = this.liveMode && this.traderAuthenticated && this.trader;
+      const isLive = this.liveMode && this.traderAuthenticated && this.trader && !DRY_RUN;
       if (isLive) {
         (async () => {
           try {
@@ -605,6 +612,7 @@ class MomentumLagEngine {
       liveShares: this.liveShares,
       traderAuthenticated: this.traderAuthenticated,
       traderAddress: this.traderAddress,
+      dryRun: DRY_RUN,
       liveOrders: this.liveOrders.slice(-30),
       serverTime: Date.now(),
       windowStart: activeStart,

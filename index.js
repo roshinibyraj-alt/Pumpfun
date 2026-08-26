@@ -47,6 +47,7 @@ h1{font-size:20px;letter-spacing:.3px}.sub{font-size:10px;color:#7f93a8;margin-t
 <div class="ctrl-panel" id="ctrlPanel">
   <div><div class="ctrl-label">Trading Mode</div><label class="toggle"><input type="checkbox" id="liveToggle" onchange="toggleLive(this.checked)"><span class="slider"></span></label></div>
   <div id="modeLabel" style="font-size:12px;color:#ffc861;font-weight:700">🟡 PAPER</div>
+  <div id="dryRunBadge" style="font-size:10px;color:#ff5566;border:1px solid #ff556644;border-radius:8px;padding:4px 10px;display:none">🔒 DRY_RUN</div>
   <div><div class="ctrl-label">Shares per Leg</div><input type="number" class="ctrl-input" id="sharesInput" value="10" min="1" max="10000" onchange="updateShares(this.value)"></div>
   <div><button class="ctrl-btn" id="authBtn" onclick="authTrader()">Authenticate Wallet</button></div>
   <div class="wallet-badge" id="walletBadge">No wallet</div>
@@ -90,7 +91,7 @@ function renderLogs(){const panel=$('logsPanel'),nearBottom=panel.scrollHeight-p
 async function toggleLive(on){try{const response=await fetch('/api/live-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})});const data=await response.json();updateLiveUI(data)}catch(error){console.error('Toggle failed:',error);$('liveToggle').checked=false}}
 async function updateShares(value){try{await fetch('/api/live-shares',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({shares:Number(value)})})}catch(error){console.error('Shares update failed:',error)}}
 async function authTrader(){try{$('authBtn').textContent='AUTHENTICATING...';const response=await fetch('/api/live-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:state?.liveMode||false})});const data=await response.json();updateLiveUI(data)}catch(error){$('authBtn').textContent='AUTH FAILED'}}
-function updateLiveUI(data){$('liveToggle').checked=!!data.liveMode;$('modeLabel').textContent=data.liveMode?'🔴 LIVE':'🟡 PAPER';$('modeLabel').style.color=data.liveMode?'#ff4a68':'#ffc861';$('authBtn').textContent=data.traderAuthenticated?'✅ AUTHENTICATED':'Authenticate Wallet';$('authBtn').className=data.traderAuthenticated?'ctrl-btn danger':'ctrl-btn';$('walletBadge').textContent=data.traderAddress?data.traderAddress.slice(0,10)+'...'+data.traderAddress.slice(-6):(data.hasPrivateKey?'No wallet':'No PRIVATE_KEY set')}
+function updateLiveUI(data){$('liveToggle').checked=!!data.liveMode;$('modeLabel').textContent=data.liveMode?'🔴 LIVE':'🟡 PAPER';$('modeLabel').style.color=data.liveMode?'#ff4a68':'#ffc861';$('authBtn').textContent=data.traderAuthenticated?'✅ AUTHENTICATED':'Authenticate Wallet';$('authBtn').className=data.traderAuthenticated?'ctrl-btn danger':'ctrl-btn';$('walletBadge').textContent=data.traderAddress?data.traderAddress.slice(0,10)+'...'+data.traderAddress.slice(-6):(data.hasPrivateKey?'No wallet':'No PRIVATE_KEY set');const dryBadge=$('dryRunBadge');if(data.dryRun){dryBadge.style.display='inline-block'}else{dryBadge.style.display='none'}}
 function renderLiveOrders(orders){if(!orders||!orders.length){$('liveOrdersGrid').innerHTML='<div class="empty">No live orders yet</div>';return}$('liveOrderCount').textContent=orders.length+' ORDERS';$('liveOrdersGrid').innerHTML=orders.slice(0,30).reverse().map(order=>'<article class="feed-item"><div class="small">'+new Date(order.timestamp).toLocaleTimeString()+' · '+esc(order.combo)+'</div><div class="feed-main"><span class="'+(order.outcome==='UP'?'tag-up':'tag-down')+'">'+order.asset.toUpperCase()+' '+order.outcome+'</span> '+num(order.shares)+' SH @ '+Number(order.avgPrice).toFixed(3)+'</div><div class="feed-detail">Order '+(order.status||'UNKNOWN')+' · id:'+(order.orderId||'?').slice(0,12)+'</div></article>').join('')}
 setInterval(()=>safe(()=>{if(lastLivePacket&&state&&lastLivePacket.windowStart===state.windowStart&&Date.now()-lastRender>=100){renderLivePrices(lastLivePacket,'CLOB TICK');renderFloating();lastRender=Date.now()}}),50);
 </script></body></html>`;
@@ -99,12 +100,15 @@ app.get('/healthz', (_, response) => response.sendStatus(200));
 app.post('/api/live-mode', async (request, response) => {
   const { enabled } = request.body || {};
   if (typeof enabled !== 'boolean') return response.status(400).json({ error: 'enabled must be boolean' });
+  if (enabled && engine.dryRun) {
+    return response.status(403).json({ error: 'DRY_RUN=true — set DRY_RUN=false on Railway to enable live trading', dryRun: true, liveMode: false, traderAuthenticated: engine.traderAuthenticated, traderAddress: engine.traderAddress });
+  }
   if (enabled && !engine.traderAuthenticated) {
     const ok = await engine.initTrader();
     if (!ok) return response.status(503).json({ error: 'Trader authentication failed', traderAddress: engine.traderAddress });
   }
   engine.setLiveMode(enabled);
-  response.json({ liveMode: engine.liveMode, traderAuthenticated: engine.traderAuthenticated, traderAddress: engine.traderAddress });
+  response.json({ liveMode: engine.liveMode, dryRun: engine.dryRun, traderAuthenticated: engine.traderAuthenticated, traderAddress: engine.traderAddress });
 });
 app.post('/api/live-shares', (request, response) => {
   const { shares } = request.body || {};
@@ -119,6 +123,7 @@ app.get('/api/trader-info', (_, response) => {
     authenticated: engine.traderAuthenticated,
     liveMode: engine.liveMode,
     liveShares: engine.liveShares,
+    dryRun: engine.dryRun,
   });
 });
 app.get('/api/status', (_, response) => response.json(engine.buildState()));
