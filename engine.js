@@ -14,6 +14,7 @@ const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
 const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
 const DRY_RUN = String(process.env.DRY_RUN || 'false').toLowerCase() !== 'false';
+const AUTO_LIVE = String(process.env.AUTO_LIVE || 'false').toLowerCase() === 'true';
 const SWEEP_INTERVAL_MS = Number(process.env.RESOLUTION_SWEEP_MS || 5000);
 
 function round2(value) { return Math.round(value * 100) / 100; }
@@ -634,6 +635,7 @@ class MomentumLagEngine {
       traderAuthenticated: this.traderAuthenticated,
       traderAddress: this.traderAddress,
       dryRun: DRY_RUN,
+      autoLive: AUTO_LIVE,
       walletBalance: this.walletBalance,
       liveOrders: this.liveOrders.slice(-30),
       serverTime: Date.now(),
@@ -699,6 +701,12 @@ class MomentumLagEngine {
     setInterval(() => this.retryDiscovery(), 1500);
     setInterval(() => this.refreshBalance(), 1000);
     this.log(`🚀 BTC correlation combo bot started | ${ASSETS.join('/')} | CLOB books every ${CLOB_POLL_MS}ms | demo ${START_BANKROLL}`);
+    if (AUTO_LIVE && !DRY_RUN && this.trader) {
+      this.log('⚡ AUTO_LIVE=true — authenticating and enabling live mode...');
+      this.initTrader().then(ok => {
+        if (ok) this.setLiveMode(true);
+      }).catch(e => this.log(`⚠️ AUTO_LIVE auth failed: ${e.message}`));
+    }
   }
 }
 
