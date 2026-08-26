@@ -62,29 +62,38 @@ class PolymarketTrader {
   }
 
   async approveAllowance(amount = null) {
-    try {
-      await this._clob.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-      const ba = await this._clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
-      const allowance = parseFloat(ba?.allowance ?? '0') / 1e6;
-      const bal = parseFloat(ba?.balance ?? '0') / 1e6;
-      this._log(`ℹ️  Allowance: $${allowance.toFixed(2)} | Balance: $${bal.toFixed(2)}`);
-      if (allowance <= 0) this._log('⚠️  Allowance is $0 — run approveAllowance to approve pUSD');
-      return allowance > 0;
-    } catch (e) {
-      this._log(`⚠️  Allowance check: ${e.message}`);
-      return false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        this._log(`🔄 Updating collateral allowance (attempt ${attempt + 1})...`);
+        await this._clob.updateBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        const ba = await this._clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
+        const allowance = parseFloat(ba?.allowance ?? '0') / 1e6;
+        const bal = parseFloat(ba?.balance ?? '0') / 1e6;
+        this._log(`ℹ️  Collateral allowance: $${allowance.toFixed(2)} | Balance: $${bal.toFixed(2)}`);
+        if (allowance > 0) return true;
+        if (attempt === 0) this._log('⚠️  Allowance still $0, retrying in 5s...');
+      } catch (e) {
+        this._log(`❌ Allowance update error: ${e.message}`);
+        if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 5000));
+      }
     }
+    this._log('❌ Collateral approval failed after 2 attempts');
+    return false;
   }
 
-  async approveConditionalTokens() {
+  async approveConditionalTokens(tokenId) {
+    if (!tokenId) { this._log('⚠️  approveConditionalTokens: no tokenId provided'); return false; }
     try {
-      await this._clob.updateBalanceAllowance({ asset_type: AssetType.CONDITIONAL });
-      const ba = await this._clob.getBalanceAllowance({ asset_type: AssetType.CONDITIONAL });
+      this._log(`🔄 Updating conditional allowance for token ${tokenId.substring(0, 12)}...`);
+      await this._clob.updateBalanceAllowance({ asset_type: AssetType.CONDITIONAL, token_id: tokenId });
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      const ba = await this._clob.getBalanceAllowance({ asset_type: AssetType.CONDITIONAL, token_id: tokenId });
       const allowance = parseFloat(ba?.allowance ?? '0') / 1e6;
-      this._log(`ℹ️  Conditional allowance: ${allowance > 0 ? 'APPROVED' : 'ZERO'}`);
+      this._log(`ℹ️  Conditional allowance for ${tokenId.substring(0, 8)}: ${allowance > 0 ? 'APPROVED' : 'ZERO'}`);
       return allowance > 0;
     } catch (e) {
-      this._log(`⚠️  Conditional allowance check: ${e.message}`);
+      this._log(`❌ Conditional allowance failed for ${tokenId.substring(0, 8)}: ${e.message}`);
       return false;
     }
   }

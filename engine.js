@@ -333,8 +333,7 @@ class MomentumLagEngine {
       this.log(`🏦 Deposit wallet: ${this.trader.depositWallet || 'NONE (falling back to EOA)'}`);
       const collOk = await this.trader.approveAllowance();
       this.log(`🔐 Collateral approval: ${collOk ? 'OK' : 'FAILED'}`);
-      const condOk = await this.trader.approveConditionalTokens();
-      this.log(`🔐 Conditional tokens approval: ${condOk ? 'OK' : 'FAILED'}`);
+      this.log('🔐 Conditional tokens approval deferred to buy time (needs tokenId)');
       try {
         this.walletBalance = await this.trader.getBalance();
         this.log(`💰 Wallet balance: $${this.walletBalance.toFixed(2)}`);
@@ -425,6 +424,9 @@ class MomentumLagEngine {
       }
       leg.filledAt = liveResult?.isFilled ? Date.now() : (liveResult ? null : null);
       leg.isFilled = !!liveResult?.isFilled;
+      if (isLive && leg.isFilled) {
+        this.trader.approveConditionalTokens(leg.tokenId).catch(e => this.log(`⚠️ Conditional approval failed for ${leg.outcome}: ${e.message}`));
+      }
       const comboLeg = combo.legs.find(cl => cl.tokenId === leg.tokenId && cl.outcome === leg.outcome);
       if (comboLeg) { comboLeg.isFilled = leg.isFilled; comboLeg.filledAt = leg.filledAt; }
       const trade = {
