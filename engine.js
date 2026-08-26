@@ -8,7 +8,7 @@ const WINDOW_SECONDS = 300;
 const ASSETS = ['btc', 'eth'];
 const LEAD_ASSET = (process.env.LEAD_ASSET || 'btc').toLowerCase();
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
-const TRADE_SHARES = Number(process.env.TRADE_SHARES || 20);
+const TRADE_SHARES = Number(process.env.TRADE_SHARES || 10);
 const ENTRY_MAX_SUM = Number(process.env.ENTRY_MAX_SUM || 0.85);
 const RESOLUTION_PRICE = Number(process.env.RESOLUTION_PRICE || 0.90);
 const PRICE_HISTORY_MS = Number(process.env.PRICE_HISTORY_MS || 5000);
@@ -16,6 +16,7 @@ const TAKER_FEE_BPS = Number(process.env.TAKER_FEE_BPS || 0);
 const DRY_RUN = String(process.env.DRY_RUN || 'false').toLowerCase() !== 'false';
 const AUTO_LIVE = String(process.env.AUTO_LIVE || 'false').toLowerCase() === 'true';
 const SWEEP_INTERVAL_MS = Number(process.env.RESOLUTION_SWEEP_MS || 5000);
+const COMBO_SELL_TARGET = Number(process.env.COMBO_SELL_TARGET || 1.10);
 
 function round2(value) { return Math.round(value * 100) / 100; }
 function round5(value) { return Math.round(value * 100000) / 100000; }
@@ -64,6 +65,7 @@ class MomentumLagEngine {
     this.traderAddress = null;
     this.dryRun = DRY_RUN;
     this.walletBalance = null;
+    this.comboSellCount = 0;
   }
 
   log(message) {
@@ -468,6 +470,60 @@ class MomentumLagEngine {
     }
   }
 
+  comboBidPrice(combo) {
+    let total = 0;
+    for (const leg of combo.legs) {
+      const market = this.markets.get(leg.slug);
+      const token = leg.outcome === 'UP' ? market?.up : market?.down;
+      const bid = token?.bid ?? token?.mid ?? 0;
+      total += leg.shares * bid;
+    }
+    return round2(total);
+  }
+
+  async checkComboSell() {
+    if (!this.liveMode || !this.traderAuthenticated || !this.trader) return;
+    for (const combo of this.combos) {
+      if (combo.status !== 'open') continue;
+      if (combo.sellAttempted) continue;
+      const bidTotal = this.comboBidPrice(combo);
+      if (bidTotal < COMBO_SELL_TARGET) continue;
+      combo.sellAttempted = true;
+      this.log(`💰 Combo ${combo.name} bid $${bidTotal.toFixed(2)} >= target $${COMBO_SELL_TARGET.toFixed(2)} — SELLING`);
+      let totalProceeds = 0;
+      let totalSellFees = 0;
+      let allFilled = true;
+      for (const leg of combo.legs) {
+        try {
+          const result = await this.trader.placeGtcFloorSell(leg.tokenId, leg.shares, 0.01);
+          const fillPrice = result.avgPrice || 0;
+          const proceeds = round2(leg.shares * fillPrice);
+          const fee = round2(proceeds * TAKER_FEE_BPS / 10000);
+          totalProceeds += proceeds;
+          totalSellFees += fee;
+          this.log(`🔴 SOLD ${leg.asset.toUpperCase()} ${leg.outcome} ${leg.shares}sh @${fillPrice.toFixed(3)} → $${proceeds.toFixed(2)} (${result.status})`);
+        } catch (error) {
+          this.log(`🔴 SELL FAILED ${leg.asset.toUpperCase()} ${leg.outcome}: ${error.message}`);
+          allFilled = false;
+        }
+      }
+      const pnl = round2(totalProceeds - totalSellFees - combo.cost - combo.fees);
+      combo.status = 'settled'; combo.payout = round2(totalProceeds); combo.pnl = pnl;
+      combo.result = pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSS' : 'FLAT';
+      combo.settledAt = new Date().toISOString();
+      combo.resolutionSource = 'INTRA_WINDOW_SELL';
+      combo.winner = 'SOLD @ $' + bidTotal.toFixed(2);
+      this.bankroll = round2(this.bankroll + totalProceeds - totalSellFees);
+      this.realizedPnl = round2(this.realizedPnl + pnl);
+      if (pnl > 0) this.wins++; else if (pnl < 0) this.losses++;
+      this.comboSellCount++;
+      this.resolvedCombos.unshift({ ...combo, legs: combo.legs.map(leg => ({ ...leg })) });
+      this.resolvedCombos = this.resolvedCombos.slice(0, 30);
+      this.log(`🏁 INTRA SELL ${combo.name} ${combo.result} — bid $${bidTotal.toFixed(2)} · proceeds $${totalProceeds.toFixed(2)} · cost $${combo.cost.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+    }
+    this.positions = this.positions.filter(position => position.status === 'open');
+  }
+
   settleResolvedCombos() {
     for (const combo of this.combos) {
       if (combo.status !== 'open') continue;
@@ -590,6 +646,7 @@ class MomentumLagEngine {
         if (!market.resolved && Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
       this.updatePositionMarks();
+      this.checkComboSell().catch(() => {});
       this.evaluateSignals().catch(() => {});
       this.tickCount++;
       this.emitTick(this.publicMarkets(), this.messageCount);
@@ -637,6 +694,8 @@ class MomentumLagEngine {
       traderAddress: this.traderAddress,
       dryRun: DRY_RUN,
       autoLive: AUTO_LIVE,
+      comboSellTarget: COMBO_SELL_TARGET,
+      comboSellCount: this.comboSellCount,
       walletBalance: this.walletBalance,
       liveOrders: this.liveOrders.slice(-30),
       serverTime: Date.now(),

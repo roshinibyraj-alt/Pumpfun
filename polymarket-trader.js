@@ -76,6 +76,19 @@ class PolymarketTrader {
     }
   }
 
+  async approveConditionalTokens() {
+    try {
+      await this._clob.updateBalanceAllowance({ asset_type: AssetType.CONDITIONAL });
+      const ba = await this._clob.getBalanceAllowance({ asset_type: AssetType.CONDITIONAL });
+      const allowance = parseFloat(ba?.allowance ?? '0') / 1e6;
+      this._log(`ℹ️  Conditional allowance: ${allowance > 0 ? 'APPROVED' : 'ZERO'}`);
+      return allowance > 0;
+    } catch (e) {
+      this._log(`⚠️  Conditional allowance check: ${e.message}`);
+      return false;
+    }
+  }
+
   async getBalance() {
     try {
       const resp = await this._clob.getBalanceAllowance({ asset_type: AssetType.COLLATERAL });
