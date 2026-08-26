@@ -268,6 +268,9 @@ class MomentumLagEngine {
     const leadMarket = this.currentMarket(LEAD_ASSET);
     if (!leadMarket || leadMarket.windowStart !== this.activeWindowStart) return;
     if (!Number.isFinite(leadMarket.up.mid) || !Number.isFinite(leadMarket.down.mid)) return;
+    for (const key of this.firedComboKeys) {
+      if (key.startsWith(String(leadMarket.windowStart) + ':')) return;
+    }
 
     for (const altAsset of ASSETS.filter(asset => asset !== LEAD_ASSET)) {
       const altMarket = this.markets.get(slugFor(altAsset, leadMarket.windowStart));
@@ -282,16 +285,14 @@ class MomentumLagEngine {
         if (!Number.isFinite(btcToken.mid) || !Number.isFinite(altToken.mid)) continue;
         const combinedMid = round5(btcToken.mid + altToken.mid);
         if (combinedMid >= ENTRY_MAX_SUM) continue;
-        const wasFired = this.firedComboKeys.has(comboKey);
-        const opened = await this.fireCombo({
+        await this.fireCombo({
           key: comboKey, name: comboName, windowStart: leadMarket.windowStart,
           btcMarket: leadMarket, btcToken, altMarket, altToken, combinedMid,
         });
-
+        return;
       }
     }
   }
-
   currentMarket(asset) {
     return [...this.markets.values()].find(market =>
       market.asset === asset && !market.resolved && Date.now() / 1000 < market.windowEnd) || null;
