@@ -3,7 +3,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const { MomentumLagEngine } = require('./engine');
-const { PolymarketTrader } = require('./polymarket-trader');
+const PolymarketTrader = require('./polymarket-trader');
 
 const app = express();
 const server = http.createServer(app);
