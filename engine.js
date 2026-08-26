@@ -92,7 +92,7 @@ class MomentumLagEngine {
     } finally { clearTimeout(timer); }
   }
 
-  async postJSON(url, body, timeout = 2500) {
+  async postJSON(url, body, timeout = 12000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
@@ -330,7 +330,11 @@ class MomentumLagEngine {
       await this.trader.authenticate();
       this.traderAddress = this.trader.address;
       this.traderAuthenticated = true;
-      await this.trader.approveAllowance();
+      this.log(`🏦 Deposit wallet: ${this.trader.depositWallet || 'NONE (falling back to EOA)'}`);
+      const collOk = await this.trader.approveAllowance();
+      this.log(`🔐 Collateral approval: ${collOk ? 'OK' : 'FAILED'}`);
+      const condOk = await this.trader.approveConditionalTokens();
+      this.log(`🔐 Conditional tokens approval: ${condOk ? 'OK' : 'FAILED'}`);
       try {
         this.walletBalance = await this.trader.getBalance();
         this.log(`💰 Wallet balance: $${this.walletBalance.toFixed(2)}`);

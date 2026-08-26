@@ -11,6 +11,7 @@ const io = new Server(server, { pingInterval: 2000, pingTimeout: 5000 });
 const port = process.env.PORT || 8080;
 const PRIVATE_KEY = process.env.PRIVATE_KEY || '';
 const trader = PRIVATE_KEY ? new PolymarketTrader(PRIVATE_KEY) : null;
+if (trader) trader.setLogFn((msg) => { console.log(msg); });
 const engine = new MomentumLagEngine({
   onTick: (markets, messageCount) => io.emit('tick', { t: Date.now(), windowStart: markets[0]?.windowStart ?? null, messageCount, markets }),
   onLog: line => { console.log(line); io.emit('log', line); },

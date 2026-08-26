@@ -125,12 +125,14 @@ class PolymarketTrader {
       { tickSize, negRisk },
       OrderType.GTC
     );
+    this._log(`📋 GTC raw response: ${JSON.stringify(resp).substring(0, 300)}`);
     const id        = resp?.orderID ?? resp?.id ?? null;
-    const status    = resp?.status || (id ? 'UNKNOWN' : 'FAILED');
+    const status    = resp?.status || resp?.errorMsg || (id ? 'UNKNOWN' : 'FAILED');
     const remaining = parseFloat(resp?.remaining_size ?? '999');
     const isFilled  = status === 'FILLED' || (resp?.match_status || '').toLowerCase() === 'filled' || remaining === 0;
     const avgPrice  = parseFloat(resp?.avg_fill_price || resp?.price || ceiling);
     if (id) this._log(`🏷️ GTC BUY ${shares}sh ceiling $${ceiling} → ${status} avg:$${avgPrice.toFixed(3)} id:${id.slice(0,12)}…`);
+    else this._log(`❌ GTC BUY FAILED: ${JSON.stringify(resp).substring(0, 200)}`);
     return { id, status, isFilled, avgPrice, raw: resp };
   }
 
