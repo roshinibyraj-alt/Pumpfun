@@ -414,13 +414,15 @@ class MomentumLagEngine {
           };
           this.liveOrders.push(liveOrder);
           this.liveOrders = this.liveOrders.slice(-100);
-          this.log(`🔴 LIVE ORDER ${liveResult.status} ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh avg:$${liveResult.avgPrice?.toFixed(3)??'?'} id:${liveResult.id?.slice(0,12)??'?'}`);
+          this.log(`🔴 LIVE ORDER ${liveResult.status} ${(leg.asset||'').toUpperCase()} ${leg.outcome} ${shares}sh avg:$${liveResult.avgPrice?.toFixed(3)??'?'} id:${liveResult.id?.slice(0,12)??'?'}`);
         } catch (error) {
-          this.log(`🔴 LIVE ORDER FAILED ${leg.asset.toUpperCase()} ${leg.outcome}: ${error.message}`);
+          this.log(`🔴 LIVE ORDER FAILED ${(leg.asset||'').toUpperCase()} ${leg.outcome}: ${error.message}`);
         }
       }
       leg.filledAt = liveResult?.isFilled ? Date.now() : (liveResult ? null : null);
       leg.isFilled = !!liveResult?.isFilled;
+      const comboLeg = combo.legs.find(cl => cl.tokenId === leg.tokenId && cl.outcome === leg.outcome);
+      if (comboLeg) { comboLeg.isFilled = leg.isFilled; comboLeg.filledAt = leg.filledAt; }
       const trade = {
         timestamp: now, orderType: orderTag, comboId, combo: signal.name,
         slug: leg.slug, asset: leg.asset, outcome: leg.outcome, shares: leg.shares,
@@ -431,7 +433,7 @@ class MomentumLagEngine {
       this.trades.push(trade);
       const sweepInfo = leg.sweep ? `sweep ${leg.sweep.filled}sh avg:${leg.sweep.avgPrice.toFixed(3)} levels:${leg.sweep.levels.length}` : 'no book depth';
       const modeTag = isLive ? '🔴 LIVE' : '🟡 PAPER';
-      this.log(`⚡ GTC BUY ${leg.asset.toUpperCase()} ${leg.outcome} ${shares}sh @${(liveResult?.avgPrice ?? leg.avgPrice).toFixed(3)} (${sweepInfo}) ${modeTag} | ${signal.name} combined ${signal.combinedMid.toFixed(3)} < ${ENTRY_MAX_SUM.toFixed(2)} | $${leg.cost.toFixed(2)}`);
+      this.log(`⚡ GTC BUY ${(leg.asset||'').toUpperCase()} ${leg.outcome} ${shares}sh @${(liveResult?.avgPrice ?? leg.avgPrice).toFixed(3)} (${sweepInfo}) ${modeTag} | ${signal.name} combined ${signal.combinedMid.toFixed(3)} < ${ENTRY_MAX_SUM.toFixed(2)} | $${leg.cost.toFixed(2)}`);
     }
     this.trades = this.trades.slice(-300);
     const modeTag = isLive ? '🔴 LIVE' : '🟡 PAPER';
@@ -508,9 +510,9 @@ class MomentumLagEngine {
           const fee = round2(proceeds * TAKER_FEE_BPS / 10000);
           totalProceeds += proceeds;
           totalSellFees += fee;
-          this.log(`🔴 SOLD ${leg.asset.toUpperCase()} ${leg.outcome} ${leg.shares}sh @${fillPrice.toFixed(3)} → $${proceeds.toFixed(2)} (${result.status})`);
+          this.log(`🔴 SOLD ${(leg.asset||'').toUpperCase()} ${leg.outcome} ${leg.shares}sh @${fillPrice.toFixed(3)} → $${proceeds.toFixed(2)} (${result.status})`);
         } catch (error) {
-          this.log(`🔴 SELL FAILED ${leg.asset.toUpperCase()} ${leg.outcome}: ${error.message}`);
+          this.log(`🔴 SELL FAILED ${(leg.asset||'').toUpperCase()} ${leg.outcome}: ${error.message}`);
           sellComplete = false;
         }
       }
@@ -558,7 +560,7 @@ class MomentumLagEngine {
       const pnl = round2(payout - combo.cost - combo.fees);
       combo.status = 'settled'; combo.payout = payout; combo.pnl = pnl;
       combo.result = pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSS' : 'FLAT';
-      combo.winner = combo.legs.filter(leg => leg.won).map(leg => `${leg.asset.toUpperCase()} ${leg.outcome}`).join(' + ') || 'none';
+      combo.winner = combo.legs.filter(leg => leg.won).map(leg => `${(leg.asset||'').toUpperCase()} ${leg.outcome}`).join(' + ') || 'none';
       combo.resolutionSource = markets.map(market => market.resolutionSource).join('/');
       combo.settledAt = new Date().toISOString();
       this.bankroll = round2(this.bankroll + payout);
