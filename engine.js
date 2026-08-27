@@ -632,6 +632,8 @@ class MomentumLagEngine {
     const market = this.currentMarket(LEAD_ASSET);
     if (!market) return false;
     if (this.flipTradedThisWindow || this.openFlipPosition) return false;
+    const elapsed = Date.now() / 1000 - market.windowStart;
+    if (elapsed < 10) return false;  // wait 10s after window start
     const TRIGGER = FLIP_ENTRY_PRICE - FLIP_TOLERANCE;
     const candidates = [market.up, market.down].map(token => {
       const best = token.mid ?? token.ask ?? token.bid;
