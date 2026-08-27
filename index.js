@@ -39,7 +39,17 @@ h1{font-size:20px;letter-spacing:.3px}.sub{font-size:10px;color:#7f93a8;margin-t
 .ctrl-input{background:#080f18;border:1px solid #22364b;border-radius:8px;padding:6px 10px;color:#fff;font-size:12px;font-weight:700;width:70px;text-align:center;outline:none}.ctrl-input:focus{border-color:#38d6ff}
 .ctrl-btn{background:#0a1a2a;border:1px solid #38d6ff44;color:#38d6ff;border-radius:8px;padding:6px 14px;font-size:10px;font-weight:700;cursor:pointer;text-transform:uppercase;letter-spacing:.5px;transition:.2s}.ctrl-btn:hover{background:#38d6ff20}.ctrl-btn.danger{border-color:#ff4a6844;color:#ff4a68}.ctrl-btn.danger:hover{background:#ff4a6820}
 .wallet-badge{font-size:9px;color:#667e94;background:#080f18;border:1px solid #172434;border-radius:8px;padding:5px 10px;font-family:SFMono-Regular,Consolas,monospace}
-.logs{height:230px;overflow:auto;background:#010407;border-radius:10px;padding:8px;font-family:SFMono-Regular,Consolas,monospace;font-size:9px;font-weight:500;-webkit-overflow-scrolling:touch}.log{white-space:pre-wrap;color:#95a7b9;padding:1px 0}.empty{padding:16px;text-align:center;color:#445467;font-size:11px}
+.logs{height:230px;overflow:auto;background:#010407;border-radius:10px;padding:8px;font-family:SFMono-Regular,Consolas,monospace;font-size:9px;font-weight:500;-webkit-overflow-scrolling:touch}.log{white-space:pre-wrap;color:#95a7b9;padding:1px 0}.empty{padding:16px;text-align:center;color:#445467;font
+.flip-panel{background:#0a0014;border:1px solid #2d1a4e;border-radius:13px;overflow:hidden;margin-bottom:10px}
+.flip-panel .panel-head{border-bottom:1px solid #2d1a4e}
+.flip-pos{background:#080f18;border:1px solid #2d1a4e;border-radius:12px;padding:12px;margin:8px}
+.flip-pos-header{display:flex;justify-content:space-between;align-items:center}
+.flip-badge{font-size:8px;border-radius:99px;padding:3px 8px;font-weight:700;color:#c77dff;border:1px solid #c77dff44;background:#c77dff10}
+.flip-pnl{font-size:20px;margin:4px 0;font-variant-numeric:tabular-nums}
+.flip-metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:5px;margin-top:8px}
+.flip-metric{background:#0a0014;border-radius:7px;padding:5px 6px;font-size:8px;color:#9575cd}
+.flip-metric b{display:block;font-size:11px;color:#fff;margin-top:1px}
+.purple{color:#c77dff!important}-size:11px}
 .stale{color:#ffc861!important}
 @media(max-width:1150px){.kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.markets{grid-template-columns:repeat(2,minmax(0,1fr))}.combos,.results,.feeds{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:720px){body{padding:7px}.topbar{flex-direction:column;align-items:stretch}.pills{justify-content:flex-start}.kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.two-col{grid-template-columns:1fr}.markets,.combos,.results,.feeds{grid-template-columns:1fr}.mid{font-size:30px}.value,.money{font-size:20px}h1{font-size:17px}}
@@ -57,7 +67,7 @@ h1{font-size:20px;letter-spacing:.3px}.sub{font-size:10px;color:#7f93a8;margin-t
 <section class="two-col"><div class="panel"><div class="panel-head"><span>Global equity curve</span><strong id="equityValue">—</strong></div><div class="chart"><svg id="equityChart" preserveAspectRatio="none"></svg></div></div><div class="panel"><div class="panel-head"><span>Strategy & connection</span><strong>ACTIVE RULES</strong></div><div class="config-grid" id="configGrid"></div></div></section>
 <section class="panel section"><div class="panel-head"><span>Live CLOB order books</span><strong id="tickInfo">WAITING</strong></div><div class="markets" id="marketsGrid"></div></section>
 <section class="panel section"><div class="panel-head"><span>Open correlation combos</span><strong id="comboCount">0 OPEN</strong></div><div class="combos" id="combosGrid"></div></section>
-<div class="two-col"><div class="panel"><div class="panel-head"><span>Resolved combos · last 2s >0.90</span><strong>SETTLED</strong></div><div class="results" id="resultsGrid" style="padding:8px"></div></div><div class="panel"><div class="panel-head"><span>Execution feed</span><strong>PAPER FOK LEGS</strong></div><div class="feeds" style="padding:8px" id="feedGrid"></div></div></div>
+<div class="flip-panel"><div class="panel-head"><span>⚡ BTC Flip Strategy</span><strong id="flipStatus">IDLE</strong></div><div style="padding:10px"><div id="flipPanel"></div></div></div><div class="two-col"><div class="panel"><div class="panel-head"><span>Resolved combos · last 2s >0.90</span><strong>SETTLED</strong></div><div class="results" id="resultsGrid" style="padding:8px"></div></div><div class="panel"><div class="panel-head"><span>Execution feed</span><strong>PAPER FOK LEGS</strong></div><div class="feeds" style="padding:8px" id="feedGrid"></div></div></div>
 <section class="panel section"><div class="panel-head"><span>Live orders (real executions)</span><strong id="liveOrderCount">0 ORDERS</strong></div><div class="feeds" style="padding:8px" id="liveOrdersGrid"></div></section>
 <section class="panel"><div class="panel-head"><span>Server activity</span><strong id="socketStatus">READY</strong></div><div class="logs" id="logsPanel"></div></section>
 </div><script src="/socket.io/socket.io.js"></script><script>
@@ -76,7 +86,8 @@ function validPacketFor(data,packet){return packet&&Array.isArray(packet.markets
 function render(data){const previousWindow=state?.windowStart;if(previousWindow!==data.windowStart){tickData=null;lastLivePacket=null;priceHistory={};quoteSeen={};quoteStamps={};renderedMarketsKey=''}state=data;$('uptime').textContent=clock(data.uptime);const clob=$('clobStatus');clob.textContent=data.connected?'CLOB LIVE':(data.trackedTokens?'CLOB POLL RETRY':'CLOB CONNECTING');clob.className='pill '+(data.connected?'live':'warn');const discovery=$('discoveryStatus');discovery.textContent=data.discovery.currentDiscovered+'/'+data.discovery.expectedMarkets+' NOW';discovery.className='pill '+(data.discovery.currentDiscovered===data.discovery.expectedMarkets?'live':'warn');
 $('kpis').innerHTML=[['Equity',cash(data.markValue),'',cash(data.bankroll)+' bankroll'],['Total P&L',money(data.totalPnl),tone(data.totalPnl),'Since launch'],['Realized P&L',money(data.realizedPnl),tone(data.realizedPnl),'Settled combos'],['Floating P&L',money(data.unrealizedPnl),tone(data.unrealizedPnl),'Live mark'],['Open Cost',cash(data.openValue),'',data.combos.length+' combos'],['Win Rate',(data.winRate==null?'—':data.winRate+'%'),'',(data.wins||0)+'W / '+(data.losses||0)+'L'],['Combo Legs',num(data.positions.length),'',data.currentTradeShares+' SH each now'],['CLOB Polls',num(data.messageCount),'',data.pollCount+' batches']].map(item=>'<article class="kpi"><div class="label">'+item[0]+'</div><div class="value '+item[2]+'">'+item[1]+'</div><div class="small">'+item[3]+'</div></article>').join('');
 $('equityValue').textContent=cash(data.markValue);renderChart(data.equityCurve||[]);$('configGrid').innerHTML=[['Entry','combined mid &lt; '+data.config.entryMaxSum.toFixed(2)],['Base size',data.config.baseTradeShares+' SH × each leg'],['Trade size',data.currentTradeShares+' SH per leg'],['Exit','hold to resolution'],['Resolution','final 2s > '+data.config.resolutionPrice.toFixed(2)],['Fees',data.config.feeBps+' bps'],['Bankroll',cash(data.bankroll)],['Window start',new Date(data.windowStart*1000).toLocaleTimeString()]].map(row=>'<div class="config-item">'+row[0]+'<b>'+row[1]+'</b></div>').join('');
-const packet=validPacketFor(data,lastLivePacket)?lastLivePacket:{t:data.serverTime,windowStart:data.windowStart,markets:data.markets};buildMarkets(data.markets||[]);renderLivePrices(packet,validPacketFor(data,lastLivePacket)?'CLOB TICK':'STATE SNAPSHOT');renderCombos(data.combos||[]);renderResults(data.resolvedCombos||[]);renderFeed(data.trades||[]);renderLogs()}
+const packet=validPacketFor(data,lastLivePacket)?lastLivePacket:{t:data.serverTime,windowStart:data.windowStart,markets:data.markets};buildMarkets(data.markets||[]);renderLivePrices(packet,validPacketFor(data,lastLivePacket)?'CLOB TICK':'STATE SNAPSHOT');renderCombos(data.combos||[]);renderResults(data.resolvedCombos||[]);renderFeed(data.trades||[]);
+  renderFlip(data.flip);renderLogs()}
 function marketKey(markets){return(state?.windowStart??'')+':'+markets.map(market=>market.slug).sort().join('|')}
 function buildMarkets(markets){const key=marketKey(markets);if(key===renderedMarketsKey&&markets.every(market=>$('market-'+market.asset)))return;$('marketsGrid').innerHTML=markets.length?markets.map(market=>'<article class="market-card" id="market-'+market.asset+'"><div class="market-top"><div><div class="asset-name">'+market.asset.toUpperCase()+'</div><div class="small">'+market.slug+'</div></div><div class="timer" id="timer-'+market.asset+'">--:--<small>T+0s</small></div></div><div class="sides">'+sideHtml(market.asset,'UP')+sideHtml(market.asset,'DOWN')+'</div></article>').join(''):'<div class="empty">Discovering current-window books…</div>';renderedMarketsKey=key}
 function sideHtml(asset,outcome){const id=(asset+'-'+outcome).toLowerCase();return'<div class="side"><div class="side-label '+outcome.toLowerCase()+'-label">'+outcome+'</div><div class="mid" id="mid-'+id+'">—</div><div class="quote">B <span id="bid-'+id+'">—</span> · A <span id="ask-'+id+'">—</span></div><div class="quote">SPR <span id="spread-'+id+'">—</span></div><div class="quote">AGE <span id="age-'+id+'">WAIT</span></div><div class="delta" id="delta-'+id+'">HOLD</div></div>'}
@@ -94,6 +105,59 @@ async function updateShares(value){try{await fetch('/api/live-shares',{method:'P
 async function authTrader(){try{$('authBtn').textContent='AUTHENTICATING...';const response=await fetch('/api/live-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:state?.liveMode||false})});const data=await response.json();updateLiveUI(data)}catch(error){$('authBtn').textContent='AUTH FAILED'}}
 function updateLiveUI(data){$('liveToggle').checked=!!data.liveMode;$('modeLabel').textContent=data.liveMode?'🔴 LIVE':'🟡 PAPER';$('modeLabel').style.color=data.liveMode?'#ff4a68':'#ffc861';$('authBtn').textContent=data.traderAuthenticated?'✅ AUTHENTICATED':'Authenticate Wallet';$('authBtn').className=data.traderAuthenticated?'ctrl-btn danger':'ctrl-btn';$('walletBadge').textContent=data.traderAddress?data.traderAddress.slice(0,10)+'...'+data.traderAddress.slice(-6):(data.hasPrivateKey?'No wallet':'No PRIVATE_KEY set');const dryBadge=$('dryRunBadge');if(data.dryRun){dryBadge.style.display='inline-block'}else{dryBadge.style.display='none'};const balEl=$('walletBalance');if(data.walletBalance!=null){balEl.style.display='inline-block';$('balanceAmount').textContent=Number(data.walletBalance).toFixed(2)}else if(data.traderAuthenticated){balEl.style.display='inline-block';$('balanceAmount').textContent='...'}else{balEl.style.display='none'}}
 function renderLiveOrders(orders){if(!orders||!orders.length){$('liveOrdersGrid').innerHTML='<div class="empty">No live orders yet</div>';return}$('liveOrderCount').textContent=orders.length+' ORDERS';$('liveOrdersGrid').innerHTML=orders.slice(0,30).reverse().map(order=>'<article class="feed-item"><div class="small">'+new Date(order.timestamp).toLocaleTimeString()+' · '+esc(order.combo)+'</div><div class="feed-main"><span class="'+(order.outcome==='UP'?'tag-up':'tag-down')+'">'+order.asset.toUpperCase()+' '+order.outcome+'</span> '+num(order.shares)+' SH @ '+Number(order.avgPrice).toFixed(3)+'</div><div class="feed-detail">Order '+(order.status||'UNKNOWN')+' · id:'+(order.orderId||'?').slice(0,12)+'</div></article>').join('')}
+
+function renderFlip(flip) {
+  if (!flip) return;
+  const statusEl = $('flipStatus');
+  if (flip.open) {
+    statusEl.textContent = 'FLIP #' + flip.windowCount + '/' + flip.maxFlips;
+    statusEl.className = 'pill purple';
+  } else if (flip.windowCount > 0) {
+    statusEl.textContent = flip.windowCount + ' FLIPS DONE';
+    statusEl.className = 'pill warn';
+  } else {
+    statusEl.textContent = 'IDLE — WAITING';
+    statusEl.className = 'pill';
+  }
+
+  let html = '';
+  if (flip.open) {
+    const pos = flip.open;
+    const markVal = pos.markValue || pos.cost;
+    const unrl = pos.unrealized || 0;
+    html += '<div class="flip-pos">'
+      + '<div class="flip-pos-header"><div class="combo-name">⚡ FLIP #' + pos.flipIndex + ' — ' + esc(LEAD_ASSET.toUpperCase()) + ' ' + pos.outcome + '</div>'
+      + '<span class="flip-badge">HOLDING</span></div>'
+      + '<div class="flip-pnl ' + tone(unrl) + '">' + money(unrl) + '</div>'
+      + '<div class="small">' + pos.shares + ' SH @ ' + prc(pos.entryPrice) + ' · Sunk $' + (flip.sunkCost||0).toFixed(2) + '</div>'
+      + '<div class="flip-metrics">'
+      + '<div class="flip-metric">ENTRY<b>' + prc(pos.entryPrice) + '</b></div>'
+      + '<div class="flip-metric">MARK<b>' + prc(pos.markPrice) + '</b></div>'
+      + '<div class="flip-metric">VALUE<b>' + cash(markVal) + '</b></div>'
+      + '<div class="flip-metric">P&L<b class="' + tone(unrl) + '">' + money(unrl) + '</b></div>'
+      + '<div class="flip-metric">FLIPS<b>' + flip.windowCount + '/' + flip.maxFlips + '</b></div>'
+      + '</div></div>';
+  } else {
+    html += '<div style="text-align:center;padding:12px;color:#556677;font-size:10px">'
+      + 'Waiting for BTC price near ' + (flip.entryPrice||0.60).toFixed(2) + ' (±' + (flip.tolerance||0.02).toFixed(2) + ')'
+      + '<br>Sizing: ' + (flip.shares||[]).join(' → ') + ' shares · Max ' + (flip.maxFlips||2) + ' flips'
+      + '<br>UP: ' + (flip.accumUpShares||0) + ' SH · DOWN: ' + (flip.accumDownShares||0) + ' SH'
+      + '</div>';
+  }
+
+  if (flip.resolved && flip.resolved.length) {
+    html += '<div style="margin-top:8px"><div class="small" style="color:#9575cd;padding:4px 0">RESOLVED</div>';
+    for (const r of flip.resolved.slice(0, 5)) {
+      const icon = r.result === 'WIN' ? '✅' : r.result === 'LOSS' ? '❌' : '➖';
+      html += '<div style="display:flex;justify-content:space-between;padding:4px 8px;background:#080f18;border-radius:6px;margin-top:3px;font-size:10px">'
+        + '<span>' + icon + ' ' + esc(r.name) + ' · Flip ' + (r.flipCount||0) + ' · UP ' + (r.upShares||0) + ' SH · DOWN ' + (r.downShares||0) + ' SH</span>'
+        + '<span class="' + tone(r.pnl) + '">' + money(r.pnl) + '</span></div>';
+    }
+    html += '</div>';
+  }
+
+  $('flipPanel').innerHTML = html;
+}
 setInterval(()=>safe(()=>{if(lastLivePacket&&state&&lastLivePacket.windowStart===state.windowStart&&Date.now()-lastRender>=100){renderLivePrices(lastLivePacket,'CLOB TICK');renderFloating();lastRender=Date.now()}}),50);
 </script></body></html>`;
 app.use(require('express').json());

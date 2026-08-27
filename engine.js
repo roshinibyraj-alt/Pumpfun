@@ -18,6 +18,11 @@ const AUTO_LIVE = String(process.env.AUTO_LIVE || 'false').toLowerCase() === 'tr
 const SWEEP_INTERVAL_MS = Number(process.env.RESOLUTION_SWEEP_MS || 5000);
 const COMBO_SELL_TARGET = Number(process.env.COMBO_SELL_TARGET || 1.10);
 const COMBO_SELL_DELAY = Number(process.env.COMBO_SELL_DELAY || 5000);
+const FLIP_ENTRY_PRICE = Number(process.env.FLIP_ENTRY_PRICE || 0.60);
+const FLIP_TOLERANCE = Number(process.env.FLIP_TOLERANCE || 0.02);
+const FLIP_SHARES = [5, 10, 20];
+const MAX_FLIPS = 2;
+
 
 function round2(value) { return Math.round(value * 100) / 100; }
 function round5(value) { return Math.round(value * 100000) / 100000; }
@@ -67,6 +72,17 @@ class MomentumLagEngine {
     this.dryRun = DRY_RUN;
     this.walletBalance = null;
     this.comboSellCount = 0;
+    this.flipWindowCount = 0;
+    this.flipWindowSunkCost = 0;
+    this.openFlipPosition = null;
+    this.flipPositions = [];
+    this.flipTrades = [];
+    this.flipResolvedCombos = [];
+    this.flipAccumUpShares = 0;
+    this.flipAccumDownShares = 0;
+    this.flipFiredKeys = new Set();
+    this.flipTradedThisWindow = false;
+    this.flipWindowStart = null;
   }
 
   log(message) {
@@ -603,6 +619,207 @@ class MomentumLagEngine {
     } finally { this.discoveryRunning = false; }
   }
 
+
+  /* ═══════════════════════════════════════════════════════════════
+     FLIP STRATEGY — Independent BTC 5-min flip
+     Entry at ~0.60, flip up to 2 times, sizing 5→10→20
+     ═══════════════════════════════════════════════════════════════ */
+  getFlipShares(flipNumber) {
+    return FLIP_SHARES[Math.min(flipNumber, FLIP_SHARES.length - 1)];
+  }
+
+  async evaluateFlipEntry() {
+    const market = this.currentMarket(LEAD_ASSET);
+    if (!market) return false;
+    if (this.flipTradedThisWindow || this.openFlipPosition) return false;
+    const TRIGGER = FLIP_ENTRY_PRICE - FLIP_TOLERANCE;
+    const candidates = [market.up, market.down].map(token => {
+      const best = token.mid ?? token.ask ?? token.bid;
+      return { token, price: best };
+    }).filter(c => Number.isFinite(c.price) && c.price >= TRIGGER);
+    if (!candidates.length) return false;
+    candidates.sort((a, b) => a.price - b.price);
+    this.enterFlipPosition(market, candidates[0].token, candidates[0].price);
+    return true;
+  }
+
+  async evaluateFlip() {
+    if (!this.openFlipPosition || this.flipWindowCount >= MAX_FLIPS) return false;
+    const market = this.currentMarket(LEAD_ASSET);
+    if (!market) return false;
+    const currentOutcome = this.openFlipPosition.outcome;
+    const flipToken = currentOutcome === 'UP' ? market.down : market.up;
+    const price = flipToken.mid ?? flipToken.ask ?? flipToken.bid;
+    if (!Number.isFinite(price)) return false;
+    if (price < FLIP_ENTRY_PRICE - FLIP_TOLERANCE) return false;
+    this.doFlip(market, flipToken);
+    return true;
+  }
+
+  async enterFlipPosition(market, token, triggerPrice) {
+    const CEILING = 0.99;
+    const shares = this.getFlipShares(0);
+    const sweep = this.simulateGtcBookFill(token, shares, CEILING);
+    if (!sweep) return false;
+    const entryPrice = sweep.avgPrice;
+    const cost = sweep.totalCost;
+    const fee = round2(cost * TAKER_FEE_BPS / 10000);
+    if (cost + fee > this.bankroll) {
+      this.flipTradedThisWindow = true;
+      this.log(`⚡ FLIP ENTRY SKIPPED — need $${round2(cost + fee)}, available $${this.bankroll}`);
+      return false;
+    }
+    this.flipTradedThisWindow = true;
+    this.bankroll = round2(this.bankroll - cost - fee);
+    this.flipWindowSunkCost = round2(this.flipWindowSunkCost + cost + fee);
+    const now = Date.now();
+    const flipId = `flip-${LEAD_ASSET}-${market.windowStart}-${now}`;
+    const isLive = this.liveMode && this.traderAuthenticated && this.trader && !DRY_RUN;
+    const orderTag = isLive ? 'LIVE-GTC@0.99' : 'PAPER-GTC@0.99';
+    let liveResult = null;
+    if (isLive) {
+      try {
+        liveResult = await this.trader.placeGtcCeilingBuy(token.tokenId, shares, 0.99);
+        this.liveOrders.push({ orderId: liveResult.id, status: liveResult.status, avgPrice: liveResult.avgPrice, tokenId: token.tokenId, asset: LEAD_ASSET, outcome: token.outcome, shares, timestamp: now, comboId: flipId, combo: 'FLIP' });
+        this.log(`🔴 LIVE FLIP ENTRY ${(LEAD_ASSET).toUpperCase()} ${token.outcome} ${shares}sh avg:$${liveResult.avgPrice?.toFixed(3)??'?'} id:${liveResult.id?.slice(0,12)??'?'}`);
+        if (liveResult.isFilled) this.trader.approveConditionalTokens(token.tokenId).catch(e => this.log(`⚠️ Conditional approval failed: ${e.message}`));
+      } catch (error) {
+        this.log(`🔴 LIVE FLIP ENTRY FAILED: ${error.message}`);
+      }
+    }
+    const actualPrice = liveResult?.avgPrice ?? entryPrice;
+    const actualCost = liveResult?.isFilled ? round2(shares * actualPrice) : cost;
+    const position = {
+      id: flipId, slug: market.slug, outcome: token.outcome, tokenId: token.tokenId,
+      shares, entryPrice: actualPrice, cost: actualCost, fee, status: 'open',
+      openedAt: now, windowStart: market.windowStart, markPrice: token.mid,
+      signal: { triggerPrice, triggerSource: 'ENTRY_0.60', bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.max(0, Math.floor(now / 1000 - market.windowStart)) },
+      flipIndex: 0, isFilled: !!liveResult?.isFilled, fillStatus: liveResult?.status || null,
+    };
+    if (token.outcome === 'UP') this.flipAccumUpShares += shares;
+    else this.flipAccumDownShares += shares;
+    this.openFlipPosition = position;
+    this.flipPositions.push({ ...position });
+    this.flipTrades.push({ timestamp: now, orderType: orderTag, comboId: flipId, combo: 'FLIP', slug: market.slug, asset: LEAD_ASSET, outcome: token.outcome, shares, price: actualPrice, cost: actualCost, markPrice: token.mid, pnl: this.positionPnl(position), signal: position.signal, orderId: liveResult?.id || null, fillStatus: liveResult?.status || null });
+    this.trades.push(this.flipTrades[this.flipTrades.length - 1]);
+    this.positions.push(position);
+    this.log(`⚡ FLIP ENTRY #0 ${(LEAD_ASSET).toUpperCase()} ${token.outcome} ${shares}sh @${actualPrice.toFixed(3)} (sweep ${sweep.filled}sh levels:${sweep.levels.length}) cost $${actualCost.toFixed(2)} sunk $${this.flipWindowSunkCost.toFixed(2)}`);
+    this.recordEquity();
+    return true;
+  }
+
+  async doFlip(market, token) {
+    if (this.flipWindowCount >= MAX_FLIPS) return false;
+    this.flipWindowCount += 1;
+    const CEILING = 0.99;
+    const shares = this.getFlipShares(this.flipWindowCount);
+    const sweep = this.simulateGtcBookFill(token, shares, CEILING);
+    if (!sweep) { this.flipWindowCount -= 1; return false; }
+    const entryPrice = sweep.avgPrice;
+    const cost = sweep.totalCost;
+    const fee = round2(cost * TAKER_FEE_BPS / 10000);
+    if (cost + fee > this.bankroll) {
+      this.flipWindowCount -= 1;
+      this.log(`⚡ FLIP #${this.flipWindowCount + 1} SKIPPED — need $${round2(cost + fee)}, available $${this.bankroll}`);
+      return false;
+    }
+    this.bankroll = round2(this.bankroll - cost - fee);
+    this.flipWindowSunkCost = round2(this.flipWindowSunkCost + cost + fee);
+    const now = Date.now();
+    const flipId = `flip-${LEAD_ASSET}-${market.windowStart}-f${this.flipWindowCount}-${now}`;
+    const isLive = this.liveMode && this.traderAuthenticated && this.trader && !DRY_RUN;
+    const orderTag = isLive ? 'LIVE-GTC@0.99' : 'PAPER-GTC@0.99';
+    let liveResult = null;
+    if (isLive) {
+      try {
+        liveResult = await this.trader.placeGtcCeilingBuy(token.tokenId, shares, 0.99);
+        this.liveOrders.push({ orderId: liveResult.id, status: liveResult.status, avgPrice: liveResult.avgPrice, tokenId: token.tokenId, asset: LEAD_ASSET, outcome: token.outcome, shares, timestamp: now, comboId: flipId, combo: `FLIP_${this.flipWindowCount}` });
+        this.log(`🔴 LIVE FLIP #${this.flipWindowCount} ${(LEAD_ASSET).toUpperCase()} ${token.outcome} ${shares}sh avg:$${liveResult.avgPrice?.toFixed(3)??'?'} id:${liveResult.id?.slice(0,12)??'?'}`);
+        if (liveResult.isFilled) this.trader.approveConditionalTokens(token.tokenId).catch(e => this.log(`⚠️ Conditional approval failed: ${e.message}`));
+      } catch (error) {
+        this.log(`🔴 LIVE FLIP #${this.flipWindowCount} FAILED: ${error.message}`);
+      }
+    }
+    const actualPrice = liveResult?.avgPrice ?? entryPrice;
+    const actualCost = liveResult?.isFilled ? round2(shares * actualPrice) : cost;
+    this.openFlipPosition = {
+      id: flipId, slug: market.slug, outcome: token.outcome, tokenId: token.tokenId,
+      shares, entryPrice: actualPrice, cost: actualCost, fee, status: 'open',
+      openedAt: now, windowStart: market.windowStart, markPrice: token.mid,
+      signal: { triggerPrice: actualPrice, triggerSource: `FLIP_${this.flipWindowCount}`, bid: token.bid, ask: token.ask, mid: token.mid, elapsed: Math.max(0, Math.floor(now / 1000 - market.windowStart)) },
+      flipIndex: this.flipWindowCount, isFilled: !!liveResult?.isFilled, fillStatus: liveResult?.status || null,
+    };
+    if (token.outcome === 'UP') this.flipAccumUpShares += shares;
+    else this.flipAccumDownShares += shares;
+    this.flipPositions.push({ ...this.openFlipPosition });
+    this.flipTrades.push({ timestamp: now, orderType: orderTag, comboId: flipId, combo: `FLIP_${this.flipWindowCount}`, slug: market.slug, asset: LEAD_ASSET, outcome: token.outcome, shares, price: actualPrice, cost: actualCost, markPrice: token.mid, pnl: this.positionPnl(this.openFlipPosition), signal: this.openFlipPosition.signal, orderId: liveResult?.id || null, fillStatus: liveResult?.status || null });
+    this.trades.push(this.flipTrades[this.flipTrades.length - 1]);
+    this.positions.push(this.openFlipPosition);
+    this.log(`⚡ FLIP #${this.flipWindowCount} ${(LEAD_ASSET).toUpperCase()} ${token.outcome} ${shares}sh @${actualPrice.toFixed(3)} (sweep ${sweep.filled}sh levels:${sweep.levels.length}) cost $${actualCost.toFixed(2)} sunk $${this.flipWindowSunkCost.toFixed(2)}`);
+    this.recordEquity();
+    return true;
+  }
+
+  settleFlipPositions() {
+    const market = this.currentMarket(LEAD_ASSET);
+    if (!market || !market.resolved) return;
+    if (this.flipPositions.length === 0 && !this.openFlipPosition) return;
+    const windowFlipPositions = this.flipPositions.filter(p => p.windowStart === market.windowStart);
+    if (windowFlipPositions.length === 0) return;
+    const winningShares = market.winner === 'UP' ? this.flipAccumUpShares : this.flipAccumDownShares;
+    const payout = round2(winningShares);
+    const exitFee = round2(payout * TAKER_FEE_BPS / 10000);
+    const net = round2(payout - exitFee - this.flipWindowSunkCost);
+    this.bankroll = round2(this.bankroll + payout - exitFee);
+    this.realizedPnl = round2(this.realizedPnl + net);
+    if (net > 0) this.wins++; else if (net < 0) this.losses++;
+    for (const pos of windowFlipPositions) {
+      pos.status = 'closed';
+      pos.pnl = net / windowFlipPositions.length;
+      pos.closedAt = Date.now();
+      pos.closeReason = 'FLIP_RESOLUTION';
+    }
+    this.flipResolvedCombos.push({
+      id: `flip-settle-${market.windowStart}`, name: 'FLIP', status: 'settled',
+      windowStart: market.windowStart, cost: this.flipWindowSunkCost, payout, fees: exitFee,
+      pnl: net, result: net > 0 ? 'WIN' : net < 0 ? 'LOSS' : 'FLAT',
+      winner: market.winner, flipCount: this.flipWindowCount,
+      upShares: this.flipAccumUpShares, downShares: this.flipAccumDownShares,
+      resolutionSource: market.resolutionSource, settledAt: new Date().toISOString(),
+    });
+    this.flipResolvedCombos = this.flipResolvedCombos.slice(0, 20);
+    this.log(`🏁 FLIP SETTLE ${market.winner} WON — up:${this.flipAccumUpShares} down:${this.flipAccumDownShares} payout $${payout.toFixed(2)} cost $${this.flipWindowSunkCost.toFixed(2)} net ${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)} flips ${this.flipWindowCount}`);
+    this.flipWindowCount = 0;
+    this.flipWindowSunkCost = 0;
+    this.flipPositions = [];
+    this.openFlipPosition = null;
+    this.flipAccumUpShares = 0;
+    this.flipAccumDownShares = 0;
+    this.flipTradedThisWindow = false;
+  }
+
+  resetFlipWindow() {
+    this.flipWindowCount = 0;
+    this.flipWindowSunkCost = 0;
+    this.flipPositions = [];
+    this.openFlipPosition = null;
+    this.flipAccumUpShares = 0;
+    this.flipAccumDownShares = 0;
+    this.flipTradedThisWindow = false;
+  }
+
+  activeFlipSummaries() {
+    if (!this.openFlipPosition) return [];
+    return [{
+      ...this.openFlipPosition,
+      markValue: this.positionPnl(this.openFlipPosition) + this.openFlipPosition.cost,
+      unrealized: this.positionPnl(this.openFlipPosition),
+      flipCount: this.flipWindowCount,
+      maxFlips: MAX_FLIPS,
+      sunkCost: this.flipWindowSunkCost,
+    }];
+  }
+
   async rotateAndSweep() {
     if (this.loopRunning) return;
     this.loopRunning = true;
@@ -611,6 +828,7 @@ class MomentumLagEngine {
       if (start !== this.activeWindowStart) {
         this.activeWindowStart = null;
         this.firedComboKeys.clear();
+        this.resetFlipWindow();
         await this.discoverWindow(start, 'New');
       }
       for (const market of this.markets.values()) {
@@ -619,6 +837,7 @@ class MomentumLagEngine {
         if (Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
       this.settleResolvedCombos();
+      this.settleFlipPositions();
       this.pruneExpiredMarkets();
       this.recordEquity();
     } catch (error) {
@@ -669,6 +888,8 @@ class MomentumLagEngine {
       this.updatePositionMarks();
       this.checkComboSell().catch(() => {});
       this.evaluateSignals().catch(() => {});
+      this.evaluateFlipEntry().catch(() => {});
+      this.evaluateFlip().catch(() => {});
       this.tickCount++;
       this.emitTick(this.publicMarkets(), this.messageCount);
     } catch (error) {
@@ -708,7 +929,7 @@ class MomentumLagEngine {
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
       mode: this.liveMode && this.traderAuthenticated ? '🔴 LIVE TRADING' : '🟡 PAPER DEMO',
-      strategy: 'BTC+ALT opposite-side combo <0.85 · GTC@0.99 book sweep · flat per leg',
+      strategy: 'COMBO: BTC+ALT <0.85 + FLIP: BTC@0.60 5→10→20 · GTC@0.99',
       liveMode: this.liveMode,
       liveShares: this.liveShares,
       traderAuthenticated: this.traderAuthenticated,
@@ -742,6 +963,23 @@ class MomentumLagEngine {
       markets: this.publicMarkets(),
       positions: this.positions.filter(position => position.status === 'open').slice().reverse(),
       combos: openCombos,
+      flip: {
+        windowCount: this.flipWindowCount,
+        maxFlips: MAX_FLIPS,
+        entryPrice: FLIP_ENTRY_PRICE,
+        tolerance: FLIP_TOLERANCE,
+        shares: FLIP_SHARES,
+        sunkCost: this.flipWindowSunkCost,
+        accumUpShares: this.flipAccumUpShares,
+        accumDownShares: this.flipAccumDownShares,
+        open: this.openFlipPosition ? {
+          ...this.openFlipPosition,
+          markValue: this.positionPnl(this.openFlipPosition) + this.openFlipPosition.cost,
+          unrealized: this.positionPnl(this.openFlipPosition),
+        } : null,
+        resolved: this.flipResolvedCombos.slice(0, 10),
+        trades: this.flipTrades.slice(-30).reverse(),
+      },
       resolvedCombos: this.resolvedCombos.slice(0, 20),
       trades: this.trades.slice(-160).reverse(),
       equityCurve: this.equityCurve.slice(-1500),
