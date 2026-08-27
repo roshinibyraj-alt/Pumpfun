@@ -886,8 +886,9 @@ class MomentumLagEngine {
         if (!market.resolved && Date.now() / 1000 >= market.windowEnd) this.resolveFromFinalPrices(market);
       }
       this.updatePositionMarks();
-      this.checkComboSell().catch(() => {});
-      this.evaluateSignals().catch(() => {});
+      // COMBO HARD-PAUSED — evaluateSignals() skipped
+      // this.checkComboSell().catch(() => {});
+      // this.evaluateSignals().catch(() => {});
       this.evaluateFlipEntry().catch(() => {});
       this.evaluateFlip().catch(() => {});
       this.tickCount++;
@@ -928,8 +929,8 @@ class MomentumLagEngine {
     const currentDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart))).length;
     const nextDiscovered = ASSETS.filter(asset => this.markets.has(slugFor(asset, activeStart + WINDOW_SECONDS))).length;
     return {
-      mode: this.liveMode && this.traderAuthenticated ? '🔴 LIVE TRADING' : '🟡 PAPER DEMO',
-      strategy: 'COMBO: BTC+ALT <0.85 + FLIP: BTC@0.60 5→10→20 · GTC@0.99',
+      mode: this.liveMode && this.traderAuthenticated ? '🔴 LIVE TRADING (FLIP ONLY)' : '🟡 PAPER DEMO',
+      strategy: 'FLIP: BTC@0.60 5→10→20 · GTC@0.99 · COMBO PAUSED',
       liveMode: this.liveMode,
       liveShares: this.liveShares,
       traderAuthenticated: this.traderAuthenticated,
