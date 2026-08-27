@@ -97,7 +97,7 @@ function renderLivePrices(packet,source){if(!packet?.markets||!state)return;cons
 function renderFloating(){if(!state)return;for(const combo of state.combos||[]){const element=$('floating-'+combo.id);if(element)element.textContent=money(combo.unrealized),element.className='money '+tone(combo.unrealized)}}
 function renderCombos(combos){$('comboCount').textContent=combos.length+' OPEN';if(!combos.length){$('combosGrid').innerHTML='<div class="empty">No combo meets combined mid &lt;0.85 yet</div>';return}$('combosGrid').innerHTML=combos.map(combo=>'<article class="combo"><div class="combo-top"><div><div class="combo-name">'+esc(combo.name)+'</div><div class="small">ENTRY MID '+Number(combo.combinedEntryMid).toFixed(3)+' · T+'+Math.floor((Date.now()-combo.windowStart)/1000)+'s</div></div><span class="status">HOLDING</span></div><div class="metrics"><div class="metric-cell">COMBO COST<b>'+cash(combo.cost)+'</b></div><div class="metric-cell">MARK<b>'+cash(combo.markValue)+'</b></div><div class="metric-cell">FLOATING<b class="'+tone(combo.unrealized)+'">'+money(combo.unrealized)+'</b></div></div><div class="legs">'+combo.legs.map(leg=>'<div class="leg"><span class="small">'+leg.asset.toUpperCase()+' '+leg.outcome+'</span><b>'+num(leg.shares)+' SH</b><div class="small">ENTRY '+Number(leg.entryPrice).toFixed(3)+' · MARK '+Number(leg.markPrice??leg.entryPrice).toFixed(3)+'</div><div class="small">COST '+cash(leg.cost)+' · VALUE '+cash(leg.shares*(leg.markPrice??leg.entryPrice))+'</div></div>').join('')+'</div></article>').join('')}
 function renderResults(results){if(!results.length){$('resultsGrid').innerHTML='<div class="empty">No settled combos yet</div>';return}$('resultsGrid').innerHTML=results.map(result=>'<article class="result"><div class="result-name">'+esc(result.name)+' · <span class="'+(result.pnl>=0?'green':'red')+'">'+result.result+'</span><div class="winners">'+esc(result.winner)+'</div></div><div class="money '+tone(result.pnl)+'">'+money(result.pnl)+'<div class="small-money">'+cash(result.payout)+' payout / '+cash(result.cost)+' cost</div></div></article>').join('')}
-function renderFeed(trades){if(!trades.length){$('feedGrid').innerHTML='<div class="empty">Waiting for correlation entries…</div>';return}$('feedGrid').innerHTML=trades.slice(0,30).map(trade=>'<article class="feed-item"><div class="small">'+new Date(trade.timestamp).toLocaleTimeString()+' · '+esc(trade.signal.combo)+'</div><div class="feed-main"><span class="'+(trade.outcome==='UP'?'tag-up':'tag-down')+'">'+trade.asset.toUpperCase()+' '+trade.outcome+'</span> '+num(trade.shares)+' SH @ '+Number(trade.price).toFixed(3)+'</div><div class="feed-detail">Combined mid '+Number(trade.signal.combinedMid).toFixed(3)+' · '+cash(trade.cost)+' · FOK</div></article>').join('')}
+function renderFeed(trades){if(!trades.length){$('feedGrid').innerHTML='<div class="empty">Waiting for entries…</div>';return}$('feedGrid').innerHTML=trades.slice(0,30).map(trade=>{const isFlip=(trade.combo||'').startsWith('FLIP');const label=isFlip?'⚡ '+esc(trade.combo):esc(trade.signal?.combo||trade.combo||'');const detail=isFlip?'Trigger '+price(trade.signal?.triggerPrice)+' · '+trade.signal?.triggerSource+' · '+cash(trade.cost):'Combined mid '+Number(trade.signal?.combinedMid||0).toFixed(3)+' · '+cash(trade.cost)+' · FOK';return'<article class="feed-item" style="'+(isFlip?'border-color:#2d1a4e':'')+'"><div class="small">'+new Date(trade.timestamp).toLocaleTimeString()+' · '+label+'</div><div class="feed-main"><span class="'+(trade.outcome==='UP'?'tag-up':'tag-down')+'">'+trade.asset.toUpperCase()+' '+trade.outcome+'</span> '+num(trade.shares)+' SH @ '+Number(trade.price).toFixed(3)+'</div><div class="feed-detail">'+detail+'</div></article>'}).join('')}
 function renderChart(curve){const svg=$('equityChart');if(!curve.length){svg.innerHTML='';return}const values=curve.map(point=>point.equity),low=Math.min(...values),high=Math.max(...values),range=(high-low)||1,width=700,height=160,pad=12,points=curve.map((point,index)=>[index/Math.max(1,curve.length-1)*width,height-pad-(point.equity-low)/range*(height-pad*2)]),path='M'+points.map(point=>point[0].toFixed(1)+','+point[1].toFixed(1)).join(' L'),last=points.at(-1)||[0,height/2],color=state.totalPnl>=0?'#15ff9c':'#ff4a68';svg.innerHTML='<path d="'+path+'" fill="none" stroke="'+color+'" stroke-width="3"/><circle cx="'+last[0]+'" cy="'+last[1]+'" r="5" fill="'+color+'"/>'}
 function renderLogs(){const panel=$('logsPanel'),nearBottom=panel.scrollHeight-panel.scrollTop-panel.clientHeight<50;panel.innerHTML=logs.slice(-220).map(line=>{let className='';if(line.includes('BUY'))className='log-info';else if(line.includes('WIN'))className='log-win';else if(line.includes('LOSS')||line.includes('⚠️'))className='log-loss';return'<div class="log '+className+'">'+esc(line)+'</div>'}).join('');if(nearBottom)panel.scrollTop=panel.scrollHeight}
 async function toggleLive(on){try{const response=await fetch('/api/live-mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})});const data=await response.json();updateLiveUI(data)}catch(error){console.error('Toggle failed:',error);$('liveToggle').checked=false}}
@@ -110,48 +110,68 @@ function renderFlip(flip) {
   if (!flip) return;
   const statusEl = $('flipStatus');
   if (flip.open) {
-    statusEl.textContent = 'FLIP #' + flip.windowCount + '/' + flip.maxFlips;
+    statusEl.textContent = 'FLIP #' + flip.windowCount + '/' + flip.maxFlips + ' · ' + (flip.open.outcome === 'UP' ? '▲ UP' : '▼ DOWN');
     statusEl.className = 'pill purple';
   } else if (flip.windowCount > 0) {
     statusEl.textContent = flip.windowCount + ' FLIPS DONE';
     statusEl.className = 'pill warn';
   } else {
-    statusEl.textContent = 'IDLE — WAITING';
+    statusEl.textContent = 'WAITING';
     statusEl.className = 'pill';
   }
 
-  let html = '';
+  let html = '<div class="combos">';
+
   if (flip.open) {
     const pos = flip.open;
     const markVal = pos.markValue || pos.cost;
     const unrl = pos.unrealized || 0;
-    html += '<div class="flip-pos">'
-      + '<div class="flip-pos-header"><div class="combo-name">⚡ FLIP #' + pos.flipIndex + ' — ' + esc(LEAD_ASSET.toUpperCase()) + ' ' + pos.outcome + '</div>'
-      + '<span class="flip-badge">HOLDING</span></div>'
-      + '<div class="flip-pnl ' + tone(unrl) + '">' + money(unrl) + '</div>'
-      + '<div class="small">' + pos.shares + ' SH @ ' + prc(pos.entryPrice) + ' · Sunk $' + (flip.sunkCost||0).toFixed(2) + '</div>'
-      + '<div class="flip-metrics">'
-      + '<div class="flip-metric">ENTRY<b>' + prc(pos.entryPrice) + '</b></div>'
-      + '<div class="flip-metric">MARK<b>' + prc(pos.markPrice) + '</b></div>'
-      + '<div class="flip-metric">VALUE<b>' + cash(markVal) + '</b></div>'
-      + '<div class="flip-metric">P&L<b class="' + tone(unrl) + '">' + money(unrl) + '</b></div>'
-      + '<div class="flip-metric">FLIPS<b>' + flip.windowCount + '/' + flip.maxFlips + '</b></div>'
-      + '</div></div>';
+    html += '<article class="combo" style="border-color:#2d1a4e">'
+      + '<div class="combo-top"><div>'
+      + '<div class="combo-name" style="color:#c77dff">⚡ FLIP #' + pos.flipIndex + ' — BTC ' + pos.outcome + '</div>'
+      + '<div class="small">TRIGGER ' + price(pos.signal?.triggerPrice) + ' · T+' + (pos.signal?.elapsed||0) + 's · Flip ' + flip.windowCount + '/' + flip.maxFlips + '</div>'
+      + '</div><span class="status" style="color:#c77dff;border-color:#c77dff44;background:#c77dff10">HOLDING</span></div>'
+      + '<div class="metrics">'
+      + '<div class="metric-cell">FLIP COST<b>' + cash(pos.cost) + '</b></div>'
+      + '<div class="metric-cell">MARK VALUE<b>' + cash(markVal) + '</b></div>'
+      + '<div class="metric-cell">FLOATING<b class="' + tone(unrl) + '">' + money(unrl) + '</b></div>'
+      + '</div>'
+      + '<div class="legs">'
+      + '<div class="leg">'
+      + '<span class="small"><span class="tag-' + pos.outcome.toLowerCase() + '">BTC ' + pos.outcome + '</span></span>'
+      + '<b>' + num(pos.shares) + ' SH</b>'
+      + '<div class="small">ENTRY ' + price(pos.entryPrice) + ' · MARK ' + price(pos.markPrice) + '</div>'
+      + '<div class="small">COST ' + cash(pos.cost) + ' · VALUE ' + cash(pos.shares * (pos.markPrice||pos.entryPrice)) + '</div>'
+      + '</div>'
+      + '</div>'
+      + '<div style="margin-top:6px;display:flex;gap:8px;font-size:9px;color:#9575cd">'
+      + '<span>UP: ' + (flip.accumUpShares||0) + ' SH</span>'
+      + '<span>DOWN: ' + (flip.accumDownShares||0) + ' SH</span>'
+      + '<span>SUNK: $' + (flip.sunkCost||0).toFixed(2) + '</span>'
+      + '</div></article>';
   } else {
-    html += '<div style="text-align:center;padding:12px;color:#556677;font-size:10px">'
-      + 'Waiting for BTC price near ' + (flip.entryPrice||0.60).toFixed(2) + ' (±' + (flip.tolerance||0.02).toFixed(2) + ')'
-      + '<br>Sizing: ' + (flip.shares||[]).join(' → ') + ' shares · Max ' + (flip.maxFlips||2) + ' flips'
-      + '<br>UP: ' + (flip.accumUpShares||0) + ' SH · DOWN: ' + (flip.accumDownShares||0) + ' SH'
-      + '</div>';
+    html += '<article class="combo" style="border-color:#2d1a4e">'
+      + '<div class="combo-top"><div>'
+      + '<div class="combo-name" style="color:#c77dff">⚡ BTC Flip — Monitoring</div>'
+      + '<div class="small">Entry near ' + (flip.entryPrice||0.60).toFixed(2) + ' (±' + (flip.tolerance||0.02).toFixed(2) + ') · Sizing ' + (flip.shares||[]).join('→') + '</div>'
+      + '</div><span class="status" style="color:#c77dff;border-color:#c77dff44;background:#c77dff10">SCANNING</span></div>'
+      + '<div style="padding:8px 0;font-size:9px;color:#556677">'
+      + 'UP accumulated: ' + (flip.accumUpShares||0) + ' SH · DOWN accumulated: ' + (flip.accumDownShares||0) + ' SH · Sunk: $' + (flip.sunkCost||0).toFixed(2)
+      + '</div></article>';
   }
 
+  html += '</div>';
+
   if (flip.resolved && flip.resolved.length) {
-    html += '<div style="margin-top:8px"><div class="small" style="color:#9575cd;padding:4px 0">RESOLVED</div>';
+    html += '<div style="margin-top:8px"><div class="small" style="color:#9575cd;padding:4px 0;font-weight:700">FLIP RESOLVED</div>';
     for (const r of flip.resolved.slice(0, 5)) {
       const icon = r.result === 'WIN' ? '✅' : r.result === 'LOSS' ? '❌' : '➖';
-      html += '<div style="display:flex;justify-content:space-between;padding:4px 8px;background:#080f18;border-radius:6px;margin-top:3px;font-size:10px">'
-        + '<span>' + icon + ' ' + esc(r.name) + ' · Flip ' + (r.flipCount||0) + ' · UP ' + (r.upShares||0) + ' SH · DOWN ' + (r.downShares||0) + ' SH</span>'
-        + '<span class="' + tone(r.pnl) + '">' + money(r.pnl) + '</span></div>';
+      html += '<article class="result" style="border-color:#2d1a4e">'
+        + '<div class="result-name"><span class="' + (r.pnl>=0?'green':'red') + '">' + icon + ' ' + r.result + '</span></div>'
+        + '<div class="winners">BTC ' + (r.winner||'?') + ' · Flips: ' + (r.flipCount||0) + '</div>'
+        + '<div style="font-size:9px;color:#9575cd">UP ' + (r.upShares||0) + ' SH · DOWN ' + (r.downShares||0) + ' SH · Cost $' + (r.cost||0).toFixed(2) + '</div>'
+        + '<div class="money ' + tone(r.pnl) + '">' + money(r.pnl) + '</div>'
+        + '</article>';
     }
     html += '</div>';
   }
