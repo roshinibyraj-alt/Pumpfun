@@ -1,7 +1,7 @@
 {
-  "name": "flatline-bot",
-  "version": "2.0.0",
-  "description": "FlatLine — BTC+ETH opposite-side combo · GTC@0.99 book sweep · PAPER/LIVE toggle",
+  "name": "jmazzini-bot",
+  "version": "1.0.0",
+  "description": "jmazzini \u2014 BTC+ETH 5m window-delta + momentum + ATR \u00b7 late entry 10-50s before close",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -13,7 +13,6 @@
     "@polymarket/builder-relayer-client": "^0.0.10",
     "@polymarket/clob-client-v2": "^1.1.0",
     "express": "^4.19.2",
-    "socket.io": "^4.7.5",
     "viem": "^2.21.0"
   }
 }
