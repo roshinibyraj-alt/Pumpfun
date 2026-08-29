@@ -8,32 +8,22 @@ const CLOB_POLL_MS  = Number(process.env.CLOB_POLL_MS || 1000);
 const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 4000);
 const TICK_POLL_MS  = Number(process.env.TICK_POLL_MS || 1000);
 const WINDOW_SECONDS = 300;
+const ASSETS        = ['btc'];
 const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 
-// ── jmazzini Strategy Params ───────────────────────────────
-const ASSETS            = ['btc', 'eth'];
-const ENTRY_SECONDS_MIN = Number(process.env.ENTRY_SECONDS_MIN || 10);
-const ENTRY_SECONDS_MAX = Number(process.env.ENTRY_SECONDS_MAX || 50);
-const PRICE_MIN         = {
-  BTC: Number(process.env.PRICE_MIN_BTC || 0.94),
-  ETH: Number(process.env.PRICE_MIN_ETH || 0.92),
-};
-const PRICE_MAX         = Number(process.env.PRICE_MAX || 0.99);
-const DELTA_SKIP        = Number(process.env.DELTA_SKIP || 0.0005);
-const DELTA_WEAK        = Number(process.env.DELTA_WEAK || 0.001);
-const DELTA_STRONG      = Number(process.env.DELTA_STRONG || 0.002);
-const MIN_CONFIDENCE    = Number(process.env.MIN_CONFIDENCE || 0.3);
-const ATR_PERIODS       = Number(process.env.ATR_PERIODS || 5);
-const ATR_MULTIPLIER    = Number(process.env.ATR_MULTIPLIER || 1.5);
+// Strategy params
+const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
+const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
+const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
 const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
+const MARTINGALE_FACTOR = Number(process.env.MARTINGALE_FACTOR || 1.5);
+const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
+const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
 const MIN_BET           = Number(process.env.MIN_BET || 1);
 
 // Polymarket fee
-const TAKER_FEE_RATE    = Number(process.env.TAKER_FEE_RATE || 0.07);
-
-// Binance symbols per asset
-const BINANCE_SYMBOLS = { btc: 'BTCUSDT', eth: 'ETHUSDT' };
+const TAKER_FEE_RATE  = Number(process.env.TAKER_FEE_RATE || 0.07);
 
 const fs = require('fs');
 
@@ -81,17 +71,16 @@ class BotEngine {
     this.lastSuccessfulPollAt = null;
     this.lastPollErrorAt = null;
 
-    // Binance data (per-asset)
-    this.binanceCandles = {};    // { btc: [...], eth: [...] }
-    this.binanceCandles5m = {};  // { btc: [...], eth: [...] } for ATR
-    this.tickHistory = {};       // { btc: [...], eth: [...] }
+    // Binance data
+    this.binanceCandles = [];
+    this.tickHistory = [];
     this.tickFetching = false;
     this.tickFetchedAt = 0;
     this.candleFetching = false;
     this.candleFetchedAt = 0;
 
-    // Per-asset signals
-    this.signals = {};           // { btc: { score, confidence, direction, ... }, eth: { ... } }
+    // Signal
+    this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
     this.lastSignalEvalAt = 0;
 
     // Position (one at a time, max)
@@ -102,6 +91,7 @@ class BotEngine {
     this.trades = [];
     this.wins = 0;
     this.losses = 0;
+    this.consecutiveLosses = 0;
     this.realizedPnl = 0;
     this.peakEquity = START_BANKROLL;
     this.maxDrawdown = 0;
@@ -233,146 +223,22 @@ class BotEngine {
     } finally { this.pollRunning = false; }
   }
 
-  // ── jmazzini Strategy: Window-Delta + Momentum + ATR ──────
-  _getBinanceCurrentPrice(asset) {
-    const symbol = BINANCE_SYMBOLS[asset];
-    if (!symbol) return 0;
-    const candles = this.binanceCandles[asset];
-    if (candles && candles.length > 0) return candles[candles.length - 1].close;
-    const ticks = this.tickHistory[asset];
-    if (ticks && ticks.length > 0) return ticks[ticks.length - 1].p;
-    return 0;
-  }
-
-  _getWindowOpenPrice(asset, windowStart) {
-    const candles5m = this.binanceCandles5m[asset];
-    if (candles5m) {
-      for (const c of candles5m) {
-        if (c.openTime <= windowStart && c.openTime + 300 > windowStart) return c.open;
-      }
-    }
-    const candles = this.binanceCandles[asset];
-    if (candles) {
-      for (const c of candles) {
-        if (c.openTime <= windowStart && c.openTime + 60 > windowStart) return c.open;
-      }
-      if (candles.length > 0) return candles[0].open;
-    }
-    return 0;
-  }
-
-  _getAtr(asset, windowStart, periods = ATR_PERIODS) {
-    const candles5m = this.binanceCandles5m[asset];
-    if (!candles5m || candles5m.length < 2) return 0;
-    const relevant = candles5m.filter(c => c.openTime + 300 <= windowStart).slice(-periods);
-    if (relevant.length === 0) return 0;
-    const ranges = relevant.map(c => c.high - c.low);
-    return ranges.reduce((s, r) => s + r, 0) / ranges.length;
-  }
-
-  _getCurrentRange(asset) {
-    const candles5m = this.binanceCandles5m[asset];
-    if (!candles5m || candles5m.length === 0) return 0;
-    const current = candles5m[candles5m.length - 1];
-    return current.high - current.low;
-  }
-
-  analyzeAsset(asset, windowStart) {
-    const currentPrice = this._getBinanceCurrentPrice(asset);
-    if (currentPrice <= 0) return { confidence: 0, direction: null, reason: 'no Binance price' };
-
-    const windowOpen = this._getWindowOpenPrice(asset, windowStart);
-    if (windowOpen <= 0) return { confidence: 0, direction: null, reason: 'no window open price' };
-
-    // 1. Window Delta
-    const delta = (currentPrice - windowOpen) / windowOpen;
-    const deltaPct = Math.abs(delta) * 100;
-
-    // ATR volatility filter
-    const atr = this._getAtr(asset, windowStart);
-    if (atr > 0) {
-      const currentRange = this._getCurrentRange(asset);
-      if (currentRange > atr * ATR_MULTIPLIER) {
-        return {
-          confidence: 0, direction: null,
-          windowOpen, currentPrice, deltaPct, atr, currentRange,
-          reason: `ATR skip: range $${currentRange.toFixed(2)} > ${ATR_MULTIPLIER}x ATR $${atr.toFixed(2)}`,
-        };
-      }
-    }
-
-    if (Math.abs(delta) < DELTA_SKIP) {
-      return {
-        confidence: 0, direction: null,
-        windowOpen, currentPrice, deltaPct, atr,
-        reason: `delta ${deltaPct.toFixed(4)}% < ${(DELTA_SKIP * 100).toFixed(3)}% — too close to the line`,
-      };
-    }
-
-    // Delta weight (jmazzini scoring)
-    let deltaWeight;
-    if (Math.abs(delta) >= DELTA_STRONG * 5) deltaWeight = 7;   // > 1%
-    else if (Math.abs(delta) >= DELTA_STRONG) deltaWeight = 5;    // > 0.2%
-    else if (Math.abs(delta) >= DELTA_WEAK) deltaWeight = 3;      // > 0.1%
-    else deltaWeight = 1;                                         // > 0.05%
-
-    let score = delta > 0 ? deltaWeight : -deltaWeight;
-
-    // 2. Micro momentum (last 2 × 1m candles)
-    const candles = this.binanceCandles[asset];
-    let momentumStr = 'no data';
-    if (candles && candles.length >= 2) {
-      const prevClose = candles[candles.length - 2].close;
-      const lastClose = candles[candles.length - 1].close;
-      const momentumUp = lastClose > prevClose;
-      if ((delta > 0 && momentumUp) || (delta < 0 && !momentumUp)) {
-        score += 2;
-        momentumStr = momentumUp ? '↑ confirms' : '↓ confirms';
-      } else {
-        momentumStr = `${momentumUp ? '↑' : '↓'} contradicts, ignored`;
-      }
-    }
-
-    const confidence = Math.min(Math.abs(score) / 9.0, 1.0);
-    const direction = score > 0 ? 'UP' : 'DOWN';
-
-    return {
-      score: round5(score), confidence: round5(confidence), direction,
-      windowOpen, currentPrice, deltaPct, deltaWeight,
-      atr: atr || 0, currentRange: this._getCurrentRange(asset),
-      momentum: momentumStr,
-      reason: `delta=${deltaPct.toFixed(4)}% (w=${deltaWeight}) momentum=${momentumStr}`,
-    };
-  }
-
+  // ── Binance Data ──────────────────────────────────────────
   async fetchBinanceCandles(limit = 25) {
     if (this.candleFetching) return;
     const now = Date.now();
     if (now - this.candleFetchedAt < 8000) return;
     this.candleFetching = true;
     try {
-      const fetches = ASSETS.map(async (asset) => {
-        const symbol = BINANCE_SYMBOLS[asset];
-        if (!symbol) return;
-        const data = await this.getJSON(`${BINANCE_API}/api/v3/klines?symbol=${symbol}&interval=1m&limit=${limit}`);
-        if (Array.isArray(data) && data.length > 0) {
-          this.binanceCandles[asset] = data.map(c => ({
-            openTime: Number(c[0]) / 1000,
-            open: Number(c[1]), high: Number(c[2]), low: Number(c[3]), close: Number(c[4]),
-            volume: Number(c[5]),
-          }));
-        }
-        const data5m = await this.getJSON(`${BINANCE_API}/api/v3/klines?symbol=${symbol}&interval=5m&limit=${ATR_PERIODS + 3}`);
-        if (Array.isArray(data5m) && data5m.length > 0) {
-          this.binanceCandles5m[asset] = data5m.map(c => ({
-            openTime: Number(c[0]) / 1000,
-            open: Number(c[1]), high: Number(c[2]), low: Number(c[3]), close: Number(c[4]),
-            volume: Number(c[5]),
-          }));
-        }
-      });
-      await Promise.all(fetches);
-      this.candleFetchedAt = now;
+      const data = await this.getJSON(`${BINANCE_API}/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=${limit}`);
+      if (Array.isArray(data) && data.length > 0) {
+        this.binanceCandles = data.map(c => ({
+          openTime: Number(c[0]) / 1000,
+          open: Number(c[1]), high: Number(c[2]), low: Number(c[3]), close: Number(c[4]),
+          volume: Number(c[5]),
+        }));
+        this.candleFetchedAt = now;
+      }
     } catch (_) {} finally { this.candleFetching = false; }
   }
 
@@ -382,76 +248,199 @@ class BotEngine {
     if (now - this.tickFetchedAt < TICK_POLL_MS - 200) return;
     this.tickFetching = true;
     try {
-      const fetches = ASSETS.map(async (asset) => {
-        const symbol = BINANCE_SYMBOLS[asset];
-        if (!symbol) return;
-        try {
-          const data = await this.getJSON(`${BINANCE_API}/api/v3/ticker/price?symbol=${symbol}`, 4000);
-          const price = Number(data?.price);
-          if (Number.isFinite(price)) {
-            this.tickHistory[asset].push({ t: now, p: price });
-            if (this.tickHistory[asset].length > 120) this.tickHistory[asset].shift();
-          }
-        } catch (_) {}
-      });
-      await Promise.all(fetches);
-      this.tickFetchedAt = now;
-      const cs = windowStartFor(now);
-      const elapsed = Math.floor(now / 1000) - cs;
-      if (elapsed >= WINDOW_SECONDS - ENTRY_SECONDS_MAX && now - (this.lastSignalEvalAt || 0) >= 300) {
-        this.computeSignals();
-        this.evaluateEntry();
+      const data = await this.getJSON(`${BINANCE_API}/api/v3/ticker/price?symbol=BTCUSDT`, 4000);
+      const price = Number(data?.price);
+      if (Number.isFinite(price)) {
+        this.tickHistory.push({ t: now, p: price });
+        if (this.tickHistory.length > 120) this.tickHistory.shift();
+        this.tickFetchedAt = now;
+        // React immediately on fresh market data instead of waiting for the next loop tick.
+        const cs = windowStartFor(now);
+        const elapsed = Math.floor(now / 1000) - cs;
+        if (elapsed >= ENTRY_ELAPSED && elapsed < WINDOW_SECONDS && now - (this.lastSignalEvalAt || 0) >= 300) {
+          this.computeSignal();
+          this.evaluateEntry();
+        }
       }
     } catch (_) {} finally { this.tickFetching = false; }
   }
 
-  computeSignals() {
-    const now = Date.now();
-    const cs = windowStartFor(now);
-    for (const asset of ASSETS) {
-      this.signals[asset] = this.analyzeAsset(asset, cs);
-    }
+  // ── Signal: 7-Indicator Composite ─────────────────────────
+  // Score > 0 → UP, score < 0 → DOWN
+  // Confidence = |score| / 7.0, capped at 1.0
+  computeSignal() {
+    const candles = this.binanceCandles;
+    const cs = windowStartFor(Date.now());
+    if (!candles || candles.length < 5) { this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: Date.now(), indicators: {} }; return; }
+    const indicators = {};
+
+    // 1. Window Delta (weight 5-7)
+    const ind1 = this._windowDelta(candles, cs);
+    indicators.windowDelta = ind1;
+
+    // 2. Micro Momentum (weight 2)
+    const ind2 = this._microMomentum(candles);
+    indicators.microMomentum = ind2;
+
+    // 3. Acceleration (weight 1.5)
+    const ind3 = this._acceleration(candles);
+    indicators.acceleration = ind3;
+
+    // 4. EMA 9/21 (weight 1)
+    const ind4 = this._ema921(candles);
+    indicators.ema921 = ind4;
+
+    // 5. RSI 14 (weight 1-2)
+    const ind5 = this._rsi14(candles);
+    indicators.rsi14 = ind5;
+
+    // 6. Volume Surge (weight 1)
+    const ind6 = this._volumeSurge(candles);
+    indicators.volumeSurge = ind6;
+
+    // 7. Tick Trend (weight 2)
+    const ind7 = this._tickTrend();
+    indicators.tickTrend = ind7;
+
+    const score = ind1.score + ind2.score + ind3.score + ind4.score + ind5.score + ind6.score + ind7.score;
+    const confidence = Math.min(Math.abs(score) / 7.0, 1.0);
+    const lean = score > 0 ? 'UP' : score < 0 ? 'DOWN' : 'NEUTRAL';
+    this.signal = { score: round5(score), confidence: round5(confidence), lean, updatedAt: Date.now(), indicators };
   }
 
-  // ── Strategy: Late Entry (10–50s before close) ────────────
+  _windowDelta(candles, windowStart) {
+    let openPrice = null;
+    for (const c of candles) { if (c.openTime <= windowStart && c.openTime + 60 > windowStart) { openPrice = c.open; break; } }
+    if (openPrice == null) openPrice = candles[0]?.open;
+    const current = candles[candles.length - 1]?.close;
+    if (!Number.isFinite(openPrice) || !Number.isFinite(current) || openPrice <= 0) return { deltaPct: 0, score: 0 };
+    const deltaPct = round5((current - openPrice) / openPrice * 100);
+    let score = 0;
+    const abs = Math.abs(deltaPct);
+    const dir = deltaPct >= 0 ? 1 : -1;
+    if (abs > 0.10) score = dir * 7;
+    else if (abs > 0.02) score = dir * 5;
+    else if (abs > 0.005) score = dir * 3;
+    else if (abs > 0.001) score = dir * 1;
+    return { deltaPct, score };
+  }
+
+  _microMomentum(candles) {
+    if (candles.length < 3) return { score: 0 };
+    const last = candles[candles.length - 1], prev = candles[candles.length - 2];
+    let count = 0;
+    if (last.close > last.open) count++;
+    else if (last.close < last.open) count--;
+    if (prev.close > prev.open) count++;
+    else if (prev.close < prev.open) count--;
+    return { score: count === 2 ? 2 : count === -2 ? -2 : 0 };
+  }
+
+  _acceleration(candles) {
+    if (candles.length < 4) return { score: 0 };
+    const latest = candles[candles.length - 1], ago2 = candles[candles.length - 3];
+    const lm = latest.close - latest.open, am = ago2.close - ago2.open;
+    if (lm > 0 && am > 0) return { score: lm > am ? 1.5 : -0.5 };
+    if (lm < 0 && am < 0) return { score: lm < am ? -1.5 : 0.5 };
+    if (lm > 0) return { score: 0.75 };
+    if (lm < 0) return { score: -0.75 };
+    return { score: 0 };
+  }
+
+  _ema921(candles) {
+    if (candles.length < 21) return { score: 0 };
+    const closes = candles.map(c => c.close);
+    const e9 = ema(closes, 9), e21 = ema(closes, 21);
+    return { ema9: round2(e9), ema21: round2(e21), score: e9 > e21 ? 1 : -1 };
+  }
+
+  _rsi14(candles) {
+    if (candles.length < 15) return { score: 0 };
+    const closes = candles.slice(-15).map(c => c.close);
+    let gains = 0, losses = 0;
+    for (let i = 1; i < closes.length; i++) { const d = closes[i] - closes[i - 1]; if (d > 0) gains += d; else losses -= d; }
+    if (losses === 0) return { rsi: 100, score: -2 };
+    const rsi = round2(100 - 100 / (1 + gains / losses));
+    return { rsi, score: rsi > 75 ? -2 : rsi < 25 ? 2 : 0 };
+  }
+
+  _volumeSurge(candles) {
+    if (candles.length < 6) return { score: 0 };
+    const r3 = candles.slice(-3), p3 = candles.slice(-6, -3);
+    const ra = r3.reduce((s, c) => s + c.volume, 0) / 3;
+    const pa = p3.reduce((s, c) => s + c.volume, 0) / 3;
+    if (pa === 0 || ra / pa < 1.5) return { score: 0 };
+    const dir = r3[2].close > r3[0].open ? 1 : -1;
+    return { surge: round2(ra / pa), score: dir };
+  }
+
+  _tickTrend() {
+    const ticks = this.tickHistory.slice(-30);
+    if (ticks.length < 6) return { score: 0, consistency: 0, direction: 'NONE' };
+    let ups = 0, downs = 0;
+    for (let i = 1; i < ticks.length; i++) { if (ticks[i].p > ticks[i - 1].p) ups++; else if (ticks[i].p < ticks[i - 1].p) downs++; }
+    const total = ups + downs;
+    if (total === 0) return { score: 0, consistency: 0, direction: 'NONE' };
+    const consistency = round2(Math.max(ups, downs) / total);
+    const move = (ticks[ticks.length - 1].p - ticks[0].p) / ticks[0].p * 100;
+    if (consistency < REVERSAL_CONSIST || Math.abs(move) < 0.005) return { score: 0, consistency, direction: 'NONE' };
+    const dir = ups > downs ? 'UP' : 'DOWN';
+    return { score: dir === 'UP' ? 2 : -2, consistency, direction: dir, move: round5(move) };
+  }
+
+  // ── Tick Reversal Detection ───────────────────────────────
+  // After entry: if ticks reverse >60% consistency AND move > 0.05%, return true
+  isTickReversal(entrySide) {
+    const ticks = this.tickHistory.slice(-15); // last 30 seconds
+    if (ticks.length < 6) return false;
+    let against = 0;
+    for (let i = 1; i < ticks.length; i++) {
+      if (entrySide === 'UP' && ticks[i].p < ticks[i - 1].p) against++;
+      else if (entrySide === 'DOWN' && ticks[i].p > ticks[i - 1].p) against++;
+    }
+    const consistency = against / (ticks.length - 1);
+    const move = Math.abs(ticks[ticks.length - 1].p - ticks[0].p) / ticks[0].p * 100;
+    return consistency >= REVERSAL_CONSIST && move >= REVERSAL_PCT;
+  }
+
+  // ── Strategy: Model-Driven Entry / Exit ───────────────────
   evaluateEntry() {
     const now = Date.now();
     const cs = windowStartFor(now);
-    const secondsLeft = (cs + WINDOW_SECONDS) - Math.floor(now / 1000);
-    if (secondsLeft <= 0 || secondsLeft > ENTRY_SECONDS_MAX) return;
-    if (secondsLeft < ENTRY_SECONDS_MIN) return;
+    const elapsed = Math.floor(now / 1000) - cs;
+    const remaining = WINDOW_SECONDS - elapsed;
+    if (remaining <= 0) return;
+    if (elapsed < ENTRY_ELAPSED) return;
 
-    for (const asset of ASSETS) {
-      const signal = this.signals[asset];
-      if (!signal || signal.confidence < MIN_CONFIDENCE || !signal.direction) continue;
+    const conf = this.signal.confidence;
+    const lean = this.signal.lean;
+    if (lean !== 'UP' && lean !== 'DOWN') return;
 
-      const market = [...this.markets.values()].find(m => m.windowStart === cs && m.asset === asset && !m.resolved && !m.tradingClosed);
-      if (!market) continue;
+    const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
+    if (!market) return;
 
-      const alreadyOpen = this.positions.some(p => p.windowStart === cs && p.slug === market.slug && p.status === 'open');
-      if (alreadyOpen) continue;
+    // No stop loss and no intra-window flip: at most one trade per window.
+    // If a position is already open this window, never sell or re-enter.
+    const alreadyOpen = this.positions.find(p => p.windowStart === cs && p.status === 'open');
+    if (alreadyOpen) return;
 
-      const upPrice = market.up.mid ?? market.up.ask ?? market.up.bid;
-      const dnPrice = market.down.mid ?? market.down.ask ?? market.down.bid;
-      if (!Number.isFinite(upPrice) || !Number.isFinite(dnPrice)) continue;
-
-      const leadingSide = upPrice >= dnPrice ? 'UP' : 'DOWN';
-      const leadingPrice = Math.max(upPrice, dnPrice);
-
-      const assetUpper = asset.toUpperCase();
-      const priceFloor = PRICE_MIN[assetUpper] || 0.92;
-      if (leadingPrice < priceFloor) continue;
-      if (leadingPrice > PRICE_MAX) continue;
-
-      if (signal.direction !== leadingSide) continue;
-
-      const token = leadingSide === 'UP' ? market.up : market.down;
-      const price = token.ask ?? token.mid ?? token.bid;
-      if (!Number.isFinite(price) || price <= 0 || price >= 1) continue;
-      if (price > PRICE_MAX) continue;
-
-      this.executeBuy(market, leadingSide, price, FLAT_SHARES, cs, market.windowEnd);
+    if (lean === 'UP' && conf >= HIGH_CONF) {
+      this.tryBuy(market, 'UP', cs, market.windowEnd);
+    } else if (lean === 'DOWN' && conf >= HIGH_CONF) {
+      this.tryBuy(market, 'DOWN', cs, market.windowEnd);
     }
+  }
+
+  nextShares() {
+    // 1.5x martingale: base shares multiplied by factor per consecutive loss.
+    return Math.round(FLAT_SHARES * Math.pow(MARTINGALE_FACTOR, this.consecutiveLosses));
+  }
+
+  tryBuy(market, outcome, windowStart, windowEnd) {
+    const token = outcome === 'UP' ? market.up : market.down;
+    const price = token.ask ?? token.mid ?? token.bid;
+    if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
+    this.executeBuy(market, outcome, price, this.nextShares(), windowStart, windowEnd);
   }
 
   executeBuy(market, outcome, price, shares, windowStart, windowEnd) {
@@ -464,26 +453,26 @@ class BotEngine {
     if (totalCost > this.bankroll) { this.log(`⚠️ SKIP ${outcome} ${shares}sh — need $${totalCost.toFixed(2)}, have $${this.bankroll.toFixed(2)}`); return; }
     this.bankroll = round2(this.bankroll - totalCost);
     const token = outcome === 'UP' ? market.up : market.down;
-    const asset = market.asset;
-    const signal = this.signals[asset] || {};
+    const conf = this.signal.confidence;
     const pos = {
-      slug: market.slug, asset, conditionId: market.conditionId,
+      slug: market.slug, asset: market.asset, conditionId: market.conditionId,
       outcome, tokenId: token.tokenId,
       shares, entryPrice: price, cost, fee, totalCost,
       status: 'open', openedAt: Date.now(), markPrice: token.mid,
       windowStart, windowEnd,
-      signalConf: signal.confidence || 0, signalScore: signal.score || 0,
-      betLabel: outcome,
+      signalConf: conf, signalScore: this.signal.score,
+      signalIndicators: { ...this.signal.indicators }, betLabel: outcome,
       exitReason: null, exitPrice: null, closedAt: null, pnl: null,
     };
     this.positions.push(pos);
-    this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome, shares, price, cost, fee, confidence: signal.confidence || 0, score: signal.score || 0, markPrice: token.mid, betLabel: outcome, asset });
-    this.log(`⚡ ${asset.toUpperCase()} BUY ${outcome} ${shares}sh @${price.toFixed(3)} · conf ${((signal.confidence||0)*100).toFixed(0)}% · delta ${signal.deltaPct!=null?signal.deltaPct.toFixed(4)+'%':'—'} · cost $${cost.toFixed(2)}`);
+    this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome, shares, price, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel: outcome });
+    this.log(`⚡ BUY ${outcome} ${shares}sh @${price.toFixed(3)} · conf ${(conf * 100).toFixed(0)}% · cost $${cost.toFixed(2)}`);
     this.recordEquity();
   }
 
+
   evaluateExit() {
-    // Refresh mark prices for open positions.
+    // Exits are controlled by the confidence flipper (evaluateEntry).
     // This only refreshes mark prices for open positions.
     for (const p of this.positions) {
       if (p.status !== 'open') continue;
@@ -504,7 +493,8 @@ class BotEngine {
     p.closedAt = Date.now(); p.pnl = pnl; p.won = pnl >= 0;
     this.bankroll = round2(this.bankroll + netProceeds);
     this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (pnl >= 0) this.wins++; else this.losses++;
+    if (pnl >= 0) { this.wins++; this.consecutiveLosses = 0; }
+    else { this.losses++; this.consecutiveLosses++; }
     this.log(`💰 EXIT ${reason} ${p.betLabel||''} ${p.outcome} ${p.shares}sh @${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.resolvedPositions.unshift({ ...p });
     this.resolvedPositions = this.resolvedPositions.slice(0, 50);
@@ -519,54 +509,62 @@ class BotEngine {
     if (!openPositions.length) return;
     const now = Date.now() / 1000;
     if (now < openPositions[0].windowEnd) return;
-
+    const candles = this.binanceCandles;
+    if (!candles || candles.length < 2) return;
     for (const p of openPositions) {
-      const candles = this.binanceCandles[p.asset];
-      if (!candles || candles.length < 2) continue;
 
-      // Find the close price at window end
-      let closePrice = null;
-      for (const c of candles) {
-        if (c.openTime >= p.windowEnd - 60 && c.openTime < p.windowEnd) {
-          closePrice = c.close; break;
-        }
+    // Fetch the final 1m candle for the window
+    const candles = this.binanceCandles;
+    if (!candles || candles.length < 2) return;
+
+    // Find the close price at window end
+    let closePrice = null;
+    for (const c of candles) {
+      if (c.openTime >= p.windowEnd - 60 && c.openTime < p.windowEnd) {
+        closePrice = c.close; break;
       }
-      if (closePrice == null) closePrice = candles[candles.length - 1]?.close;
-
-      // Find the open price at window start
-      let openPrice = null;
-      for (const c of candles) {
-        if (c.openTime <= p.windowStart && c.openTime + 60 > p.windowStart) {
-          openPrice = c.open; break;
-        }
+    }
+    if (closePrice == null) {
+      // Fallback: use the latest candle's close
+      closePrice = candles[candles.length - 1]?.close;
+    }
+    // Find the open price at window start
+    let openPrice = null;
+    for (const c of candles) {
+      if (c.openTime <= p.windowStart && c.openTime + 60 > p.windowStart) {
+        openPrice = c.open; break;
       }
-      if (openPrice == null) openPrice = candles[0]?.open;
-      if (!Number.isFinite(closePrice) || !Number.isFinite(openPrice)) continue;
+    }
+    if (openPrice == null) openPrice = candles[0]?.open;
+    if (!Number.isFinite(closePrice) || !Number.isFinite(openPrice)) return;
 
-      const winner = closePrice >= openPrice ? 'UP' : 'DOWN';
-      const won = p.outcome === winner;
-      const payout = won ? p.shares : 0;
-      const pnl = round2(payout - p.cost - p.fee);
+    const winner = closePrice >= openPrice ? 'UP' : 'DOWN';
+    const won = p.outcome === winner;
+    const payout = won ? p.shares : 0;
+    const exitFee = 0; // Polymarket resolution has no fee
+    const netPayout = round2(payout);
+    const pnl = round2(netPayout - p.cost - p.fee);
 
-      p.status = 'closed';
-      p.won = won;
-      p.exitReason = 'RESOLUTION';
-      p.exitPrice = won ? 1 : 0;
-      p.exitFee = 0;
-      p.closedAt = Date.now();
-      p.pnl = pnl;
-      p.resolvedWinner = winner;
-      p.resolvedOpen = openPrice;
-      p.resolvedClose = closePrice;
+    p.status = 'closed';
+    p.won = won;
+    p.exitReason = 'RESOLUTION';
+    p.exitPrice = won ? 1 : 0;
+    p.exitFee = 0;
+    p.closedAt = Date.now();
+    p.pnl = pnl;
+    p.resolvedWinner = winner;
+    p.resolvedOpen = openPrice;
+    p.resolvedClose = closePrice;
 
-      this.bankroll = round2(this.bankroll + payout);
-      this.realizedPnl = round2(this.realizedPnl + pnl);
-      if (won) this.wins++; else this.losses++;
+    this.bankroll = round2(this.bankroll + netPayout);
+    this.realizedPnl = round2(this.realizedPnl + pnl);
+    if (won) { this.wins++; this.consecutiveLosses = 0; }
+    else { this.losses++; this.consecutiveLosses++; }
 
-      this.log(`🏁 ${p.asset.toUpperCase()} RESOLUTION ${winner} (${openPrice.toFixed(0)}→${closePrice.toFixed(0)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-      this.resolvedPositions.unshift({ ...p });
-      this.resolvedPositions = this.resolvedPositions.slice(0, 50);
-      this.trades.push({ timestamp: p.closedAt, type: 'RESOLVED', outcome: p.outcome, shares: p.shares, price: won ? 1 : 0, cost: p.cost, fee: p.fee, pnl, asset: p.asset });
+    this.log(`🏁 RESOLUTION ${winner} (${openPrice.toFixed(0)}→${closePrice.toFixed(0)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+    this.resolvedPositions.unshift({ ...p });
+    this.resolvedPositions = this.resolvedPositions.slice(0, 50);
+    this.trades.push({ timestamp: p.closedAt, type: 'RESOLVED', outcome: p.outcome, shares: p.shares, price: won ? 1 : 0, cost: p.cost, fee: p.fee, pnl });
       this.positions = this.positions.filter(x => x !== p);
     }
     this.recordEquity();
@@ -606,20 +604,6 @@ class BotEngine {
       }));
   }
 
-  _combinedSignal() {
-    const sigs = Object.entries(this.signals || {});
-    if (!sigs.length) return { score: 0, confidence: 0, lean: 'NEUTRAL', indicators: {} };
-    // Pick the asset with highest confidence as the combined view
-    const best = sigs.reduce((a, b) => (b[1]?.confidence || 0) > (a[1]?.confidence || 0) ? b : a);
-    const [asset, sig] = best;
-    return {
-      score: sig.score || 0, confidence: sig.confidence || 0,
-      lean: sig.direction || 'NEUTRAL', asset,
-      indicators: this.signals,
-      reason: sig.reason || '',
-    };
-  }
-
   buildState() {
     const openPos = this.positions.filter(p => p.status === 'open');
     const openMarkValue = openPos.reduce((s, p) => s + p.shares * (p.markPrice ?? p.entryPrice), 0);
@@ -633,10 +617,11 @@ class BotEngine {
       wins: this.wins, losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
-      signals: this.signals,
-      signal: this._combinedSignal(),
+      signal: this.signal,
+      consecutiveLosses: this.consecutiveLosses,
+      nextShares: this.nextShares(),
       positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
-        betLabel: p.betLabel, markPrice: p.markPrice, asset: p.asset,
+        betLabel: p.betLabel, markPrice: p.markPrice,
         unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
         confidence: p.signalConf, openedAt: p.openedAt, side: p.outcome })),
 
@@ -645,30 +630,18 @@ class BotEngine {
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: {
-        entrySecondsMin: ENTRY_SECONDS_MIN, entrySecondsMax: ENTRY_SECONDS_MAX,
-        priceMinBTC: PRICE_MIN.BTC, priceMinETH: PRICE_MIN.ETH, priceMax: PRICE_MAX,
-        deltaSkip: DELTA_SKIP, deltaWeak: DELTA_WEAK, deltaStrong: DELTA_STRONG,
-        minConfidence: MIN_CONFIDENCE, atrPeriods: ATR_PERIODS, atrMultiplier: ATR_MULTIPLIER,
-        flatShares: FLAT_SHARES, takerFeeRate: TAKER_FEE_RATE,
-      },
+      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingFactor: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
-      tickCount: Object.values(this.tickHistory).reduce((s, a) => s + a.length, 0),
+      tickCount: this.tickHistory.length,
     };
   }
 
   // ── Main Loop ─────────────────────────────────────────────
   async init() {
     const start = windowStartFor(Date.now());
-    const discs = [];
-    for (const asset of ASSETS) {
-      discs.push(this.discoverMarket(asset, start));
-      discs.push(this.discoverMarket(asset, start + WINDOW_SECONDS));
-    }
-    await Promise.all(discs);
+    await Promise.all([this.discoverMarket('btc', start), this.discoverMarket('btc', start + WINDOW_SECONDS)]);
     await this.fetchBinanceCandles();
-    this.computeSignals();
 
     // CLOB polling
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
@@ -677,7 +650,7 @@ class BotEngine {
     // Binance candle refresh (10s)
     setInterval(() => this.fetchBinanceCandles().catch(() => {}), 10000);
     // Signal recomputation (every 1s)
-    setInterval(() => { this.lastSignalEvalAt = Date.now(); this.computeSignals(); this.evaluateEntry(); }, 1000);
+    setInterval(() => { this.lastSignalEvalAt = Date.now(); this.computeSignal(); this.evaluateEntry(); }, 1000);
     // Exit check (every 1s)
     setInterval(() => { this.evaluateExit(); }, 1000);
     // Resolution check (every 3s)
@@ -687,8 +660,8 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 jmazzini bot started | ETH+BTC 5m | entry ${ENTRY_SECONDS_MIN}-${ENTRY_SECONDS_MAX}s before close | min-conf ${(MIN_CONFIDENCE*100).toFixed(0)}% | ${FLAT_SHARES}sh`);
+    this.log(`🚀 ConfidenceBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · ${FLAT_SHARES}sh · after ${ENTRY_ELAPSED}s wait · hold to resolution`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, FLAT_SHARES, ENTRY_SECONDS_MIN, ENTRY_SECONDS_MAX, PRICE_MIN, PRICE_MAX, DELTA_SKIP, DELTA_WEAK, DELTA_STRONG, MIN_CONFIDENCE, ATR_PERIODS, ATR_MULTIPLIER, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, MARTINGALE_FACTOR, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };

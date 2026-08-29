@@ -1,7 +1,7 @@
 {
-  "name": "jmazzini-bot",
-  "version": "1.0.0",
-  "description": "jmazzini \u2014 BTC+ETH 5m window-delta + momentum + ATR \u00b7 late entry 10-50s before close",
+  "name": "confidence-bot",
+  "version": "4.1.1",
+  "description": "ConfidenceBot \u2014 7-indicator BTC 5m signal follower, confidence>=70% buys UP/DOWN, 1.5x martingale after loss",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

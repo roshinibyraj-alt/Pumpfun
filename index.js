@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>jmazzini Bot</h1><div class="sub">BTC + ETH 5m · WINDOW-DELTA + MOMENTUM + ATR · ENTRY 10-50s BEFORE CLOSE</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>ConfidenceBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · FLAT 1000 SH · HOLD TO RESOLUTION</div></div></div>
 <div class="status"><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -78,6 +78,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Window</div><div class="value" id="windowTime">—</div><div class="small" id="entryWindow"></div></div>
 <div class="box"><div class="label">Wins / Losses</div><div class="value" id="winLoss">0 / 0</div><div class="small" id="winRate"></div></div>
 <div class="box"><div class="label">Max Drawdown</div><div class="value neg" id="maxDrawdown">$0</div></div>
+<div class="box"><div class="label">Next Shares</div><div class="value" id="nextShares">1,000</div><div class="small" id="lossStreak"></div></div>
 </div>
 <div class="two-col">
 <div>
@@ -128,7 +129,7 @@ const prc=n=>n!=null?Number(n).toFixed(3):'—';
 const tone=n=>n>=0?'pos':'neg';
 function uptimeFmt(s){const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')+':'+String(ss).padStart(2,'0')}
 function renderMarket(m){const b=$('marketBody');if(!m){b.innerHTML='<div class="empty">Waiting for market...</div>';return}const r=m.remaining||0,e=m.elapsed||0;
-b.innerHTML='<div class="clock">'+r+'s<small> T+'+e+'s · window close</small></div><div class="prices">'
+b.innerHTML='<div class="clock">'+r+'s<small> T+'+e+'s · conf entry any time</small></div><div class="prices">'
 +'<div class="side up"><div class="side-name">▲ UP</div><div class="side-price">'+prc(m.up.mid)+'</div>'
 +'<div class="quote-row"><span>Bid</span><span>'+prc(m.up.bid)+'</span></div>'
 +'<div class="quote-row"><span>Ask</span><span>'+prc(m.up.ask)+'</span></div>'
@@ -138,26 +139,16 @@ b.innerHTML='<div class="clock">'+r+'s<small> T+'+e+'s · window close</small></
 +'<div class="quote-row"><span>Ask</span><span>'+prc(m.down.ask)+'</span></div>'
 +(m.down.spread!=null?'<div class="spread">SPR '+prc(m.down.spread)+'</div>':'')+'</div></div>';
 $('windowTitle').textContent=m.title||''}
-function renderSignal(sig){if(!sig)return;
+function renderSignal(sig){if(!sig||!sig.indicators)return;
 const g=$('indGrid');
-const sigs=sig.indicators||{};
-const cards=[];
-for(const asset of ['btc','eth']){
-  const s=sigs[asset];
-  if(!s)continue;
-  const dir=s.direction||'NEUTRAL';
-  const dirCls=dir==='UP'?'ind-pos':dir==='DOWN'?'ind-neg':'ind-zero';
-  cards.push('<div class="ind" style="grid-column:1/-1"><div><div class="ind-name">'+asset.toUpperCase()+' · '+dir+'</div></div>'
-   +'<div class="ind-score '+dirCls+'">conf '+(s.confidence!=null?(s.confidence*100).toFixed(0):'0')+'%</div></div>');
-  const rows=[['Δ Delta',s.deltaPct!=null?s.deltaPct+'%':'—'],['Price',s.currentPrice!=null?num(s.currentPrice):'—'],['Open',s.windowOpen!=null?num(s.windowOpen):'—'],['ATR',s.atr!=null?'$'+s.atr.toFixed(2):'—']];
-  for(const [n,v] of rows){cards.push('<div class="ind"><div><div class="ind-name">'+n+'</div></div><div class="ind-zero">'+v+'</div></div>')}
-  cards.push('<div class="ind" style="grid-column:1/-1"><div><div class="ind-name">Reason</div></div><div class="ind-zero" style="font-size:9px">'+ESC(s.reason||'')+'</div></div>');
-}
-g.innerHTML=cards.join('');
-const sc=sig.score||0;const cs=$('totalScore');cs.textContent='BTC·ETH '+(sig.lean||'NEUTRAL')+' @ '+((sig.confidence||0)*100).toFixed(0)+'%';
+const inds=[['Δ Window',sig.indicators.windowDelta],['Momentum',sig.indicators.microMomentum],['Accel',sig.indicators.acceleration],['EMA 9/21',sig.indicators.ema921],['RSI 14',sig.indicators.rsi14],['Vol Surge',sig.indicators.volumeSurge],['Tick Trend',sig.indicators.tickTrend]];
+g.innerHTML=inds.map(([n,v])=>{const s=v?.score||0;const cls=s>0?'ind-pos':s<0?'ind-neg':'ind-zero';
+let extra='';if(v?.deltaPct!=null)extra=v.deltaPct.toFixed(3)+'%';if(v?.rsi!=null)extra='RSI '+v.rsi;if(v?.consistency!=null)extra=Math.round(v.consistency*100)+'% '+(v.direction||'');if(v?.ema9!=null)extra=v.ema9+' / '+v.ema21;if(v?.surge!=null)extra=v.surge+'x';
+return '<div class="ind"><div><div class="ind-name">'+n+'</div></div><div class="ind-score '+cls+'">'+(s>=0?'+':'')+s.toFixed(1)+(extra?' <span style="font-size:9px;color:#999;font-weight:400">'+extra+'</span>':'')+'</div></div>'}).join('');
+const sc=sig.score||0;const cs=$('totalScore');cs.textContent='Score '+sc.toFixed(1)+' · '+(sig.lean||'NEUTRAL');
 cs.style.color=sc>0?'var(--up)':sc<0?'var(--down)':'var(--muted)';
 const conf=$('confidence');conf.textContent=sig.confidence!=null?(sig.confidence*100).toFixed(1)+'%':'—';
-const cl=$('confLean');if(sig.lean==='UP'){cl.textContent='→ BUY UP '+(sig.asset||'').toUpperCase();cl.style.color='var(--up)'}else if(sig.lean==='DOWN'){cl.textContent='→ BUY DOWN '+(sig.asset||'').toUpperCase();cl.style.color='var(--down)'}else{cl.textContent='→ NEUTRAL · no entry';cl.style.color='var(--muted)'}
+const cl=$('confLean');if(sig.lean==='UP'){cl.textContent='→ BUY UP';cl.style.color='var(--up)'}else if(sig.lean==='DOWN'){cl.textContent='→ BUY DOWN';cl.style.color='var(--down)'}else{cl.textContent='→ NEUTRAL · no entry';cl.style.color='var(--muted)'}
 }
 function renderPosition(positions){const box=$('posBox'),b=$('posBody');if(!positions||!positions.length){box.style.display='none';return}
 box.style.display='';b.innerHTML=positions.map(p=>{const cls=p.outcome==='UP'?'pos-up':'pos-down';
@@ -175,14 +166,12 @@ return '<div class="trade-item"><div><span class="'+cls+'">'+tr.type+' '+ESC(tr.
 +'<div class="dim">'+new Date(tr.timestamp).toLocaleTimeString()+' · '+num(tr.shares)+'sh @ '+prc(tr.price)+(tr.confidence!=null?' · conf '+(tr.confidence*100).toFixed(0)+'%':'')+'</div></div>'
 +'<div style="text-align:right">'+cash(tr.cost)+(tr.pnl!=null?'<div class="'+(tr.pnl>=0?'buy':'sell')+'">'+money(tr.pnl)+'</div>':'')+'</div></div>'}).join('')}
 function renderLogs(a){const b=$('logBody'),ct=$('logCount');ct.textContent=a.length+' LINES';b.innerHTML=a.slice(-50).map(l=>{let c='';if(l.includes('WIN'))c='log-win';else if(l.includes('LOSS'))c='log-loss';else if(l.includes('💰'))c='log-tp';else if(l.includes('ENTRY')||l.includes('EXIT')||l.includes('RESOLUTION'))c='log-info';return '<div class="'+c+'">'+ESC(l)+'</div>'}).join('')}
-function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Entry Window</div><div class="value">'+((c.entrySecondsMin??10)+'-'+(c.entrySecondsMax??50))+'s</div></div>'
-+'<div class="mini"><div class="label">Min Conf</div><div class="value">'+((c.minConfidence??0.3)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">Price BTC/ETH</div><div class="value">'+((c.priceMinBTC??0.94).toFixed(2))+'/'+((c.priceMinETH??0.92).toFixed(2))+'</div></div>'
-+'<div class="mini"><div class="label">Price Max</div><div class="value">'+((c.priceMax??0.99).toFixed(2))+'</div></div>'
-+'<div class="mini"><div class="label">Delta Skip</div><div class="value">'+((c.deltaSkip??0.0005)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">ATR</div><div class="value">'+((c.atrPeriods??5))+'p x'+((c.atrMultiplier??1.5))+'</div></div>'
-+'<div class="mini"><div class="label">Sizing</div><div class="value">'+(c.flatShares??1000)+' sh</div></div>'
-+'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0.07)*100)+'%</div></div>'}
+function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Entry After</div><div class="value">'+(c.entryMinElapsed??c.entryElapsed??0)+'s</div></div>'
++'<div class="mini"><div class="label">Min Conf</div><div class="value">'+((c.minConfidence??c.highConf??0)*100)+'%</div></div>'
++'<div class="mini"><div class="label">Sizing</div><div class="value">'+(c.flatShares??0)+' sh</div></div>'
++'<div class="mini"><div class="label">Reversal</div><div class="value">'+(c.reversalPct??0)+'%</div></div>'
++'<div class="mini"><div class="label">Reversal ≥</div><div class="value">'+((c.reversalConsist??0)*100)+'%</div></div>'
++'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'}
 function renderChart(c){const svg=$('equityChart');if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
 const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);
@@ -193,7 +182,9 @@ function renderKpi(d){$('bankroll').textContent=cash(d.bankroll);$('markValue').
 const tp=d.totalPnl||0;const te=$('totalPnl');te.textContent=money(tp);te.className='value '+tone(tp);
 const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.className='value '+tone(rp);
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
-$('maxDrawdown').textContent=cash(d.maxDrawdown);polls++;$('tickPill').textContent='TICKS '+(d.tickCount||0);
+$('maxDrawdown').textContent=cash(d.maxDrawdown);
+$('nextShares').textContent=num(d.nextShares)+(d.nextShares!=null&&d.nextShares>0?' SH':'');
+$('lossStreak').textContent='LOSS STREAK '+(d.consecutiveLosses||0);polls++;$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
 const m=d.markets&&d.markets[0];if(m){$('windowTime').textContent=m.remaining+'s';$('entryWindow').textContent='T-'+(d.config?.entryTMinus||10)+'s entry'}else{$('windowTime').textContent='—';$('entryWindow').textContent=''}

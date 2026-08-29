@@ -1,19 +1,21 @@
-# Polymarket BTC Correlation Combo Bot
+# ConfidenceBot — BTC 5m Signal Follower
 
-Autonomous 5-minute correlation-combo paper bot priced by direct Polymarket CLOB order-book snapshots.
+BTC-led 5-minute Polymarket paper bot driven by a 7-indicator Binance signal composite.
 
 ## Strategy
-- BTC is the only anchor asset.
-- Two independent BTC-anchor combinations are monitored:
-  - BTC UP + ETH DOWN
-  - BTC DOWN + ETH UP
-- No altcoin-to-altcoin combination is allowed.
-- When a combo's combined CLOB midpoint is below `0.85`, buy `5 shares` (100 when boosted) of each leg at executable CLOB ask prices.
-- Both combinations can run concurrently; multiple combos may share a BTC side.
-- There is no intra-window take-profit or stop-loss.
-- Every combo holds to resolution.
-- During the final two seconds each market's highest UP/DOWN midpoints are sampled. If one side exceeds `0.90`, that side is declared the winner and combo P&L settles immediately.
-- Winning legs pay shares × $1; losing legs pay zero.
+- Watch the `btc-updown-5m-*` market only.
+- Compute a composite score from 7 indicators on Binance 1m candles + tick data:
+  Window Delta, Micro Momentum, Acceleration, EMA 9/21, RSI 14, Volume Surge, Tick Trend.
+- Lean = UP (score > 0) or DOWN (score < 0). Confidence = |score| / 7.0.
+- Wait 10 seconds after the window opens, then:
+  - lean UP and confidence >= 70% → buy UP 1000 shares
+  - lean DOWN and confidence >= 70% → buy DOWN 1000 shares
+- Single trade per window, no stop loss, hold to resolution (Binance open vs close).
+- After a loss, the next window's shares are 1.5x per consecutive loss (1000 → 1500 → 2250 → ...), reset on win.
 
-## Risk / Dashboard
-Default demo bankroll is `$20,000`. The dashboard shows every live bid, ask, midpoint, spread and short-window delta for BTC and ETH, plus open combo marks, floating P&L, execution legs, resolved results, global equity curve and server logs. Base size is 5 shares per leg. When a decorrelation combo resolves as a WIN (BTC UP + ETH DOWN or BTC DOWN + ETH UP), the bot boosts to 100 shares per leg for the next three consecutive windows. If another decorrelation win occurs during an active boost, the 3-window counter resets. Prices come only from batched CLOB `/books` snapshots every 500 ms; if CLOB fails, trading stops.
+## Sizing
+- Base shares: 1000 (`FLAT_SHARES`)
+- Martingale: `1.5^lossStreak` (`MARTINGALE_FACTOR`)
+
+## Pricing
+All market prices come from batched CLOB `/books` snapshots. Signal data comes from Binance public REST (candles + tick price).
