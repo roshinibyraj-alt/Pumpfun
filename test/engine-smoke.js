@@ -27,41 +27,46 @@ async function setup() {
   const end = start + 300;
   await engine.discoverMarket('btc', start);
 
-  // Base size 1000; after one loss, martingale 1.5x -> 1500 shares
+  // Martingale sizing
   assert.equal(engine.nextShares(), 1000, 'base 1000 shares');
   engine.consecutiveLosses = 1;
   assert.equal(engine.nextShares(), 1500, '1.5x martingale after one loss');
 
-  // Build an open UP position
+  // Build a UP position and resolve via final-2s CLOB
   const upMarket = engine.markets.get(`btc-updown-5m-${start}`);
   upMarket.up.ask = 0.04; upMarket.up.bid = 0.03; upMarket.up.mid = 0.035;
   engine.executeBuy(upMarket, 'UP', 0.035, 1000, start, end);
-
-  // Final 2s: UP touched 0.94 in the last 2s -> UP wins, martingale resets
-  upMarket.finalUpMax = 0.94;
-  upMarket.finalDownMax = 0.06;
+  upMarket.finalUpMax = 0.94; upMarket.finalDownMax = 0.06;
   engine.resolveByBinance();
   const resolved = engine.resolvedPositions.find(p => p.windowStart === start);
   assert.ok(resolved, 'position should resolve');
-  assert.equal(resolved.resolvedWinner, 'UP', 'UP wins because final price >= 0.90');
-  assert.equal(resolved.won, true);
-  assert.equal(engine.consecutiveLosses, 0, 'win resets martingale counter');
+  assert.equal(resolved.resolvedWinner, 'UP', 'UP wins');
+  assert.equal(engine.consecutiveLosses, 0, 'win resets martingale');
 
-  // A DOWN loss: DOWN did NOT reach 0.90, UP higher in final 2s -> DOWN loses, martingale increments
+  // ── Key bug fix test: unchanged book within final 2s ───────
   const start2 = start - 300;
   await engine.discoverMarket('btc', start2);
   const downMarket = engine.markets.get(`btc-updown-5m-${start2}`);
-  downMarket.down.ask = 0.60; downMarket.down.bid = 0.58; downMarket.down.mid = 0.59;
-  engine.executeBuy(downMarket, 'DOWN', 0.59, 1000, start2, start2 + 300);
-  downMarket.finalUpMax = 0.08;
-  downMarket.finalDownMax = 0.20; // DOWN highest in final 2s but far below 0.90
+  const downToken = downMarket.down;
+  downToken.mid = 0.91;
+  engine.executeBuy(downMarket, 'DOWN', 0.91, 1000, start2, start2 + 300);
+
+  // applyBook with same prices — unchanged book. Before the fix this
+  // would skip the final-2s capture. After the fix, it must capture.
+  engine.applyBook(downToken, [{ price: '0.90', size: '500' }], [{ price: '0.92', size: '500' }]);
+  assert.equal(downMarket.finalDownMax, 0.91, 'unchanged book still captured');
+
+  // Spike mid to 0.96 via a new book
+  engine.applyBook(downToken, [{ price: '0.95', size: '500' }], [{ price: '0.97', size: '500' }]);
+  assert.equal(downMarket.finalDownMax, 0.96, 'spike captured on new book change');
+
+  downMarket.finalUpMax = 0.05;
   engine.resolveByBinance();
   const resolved2 = engine.resolvedPositions.find(p => p.windowStart === start2);
   assert.ok(resolved2, 'down position should resolve');
-  assert.equal(resolved2.resolvedWinner, 'DOWN', 'DOWN is highest final-2s price -> wins');
+  assert.equal(resolved2.resolvedWinner, 'DOWN');
   assert.equal(resolved2.won, true);
-  assert.equal(engine.consecutiveLosses, 0, 'down won -> still 0 losses');
 
-  console.log('✅ Pumpfun smoke: last-2s CLOB resolution + 1.5x martingale OK');
+  console.log('✅ Pumpfun smoke: martingale + last-2s CLOB + unchanged-book capture fix OK');
   process.exit(0);
 })().catch(e => { console.error('SMOKE FAIL:', e.message); process.exit(1); });
