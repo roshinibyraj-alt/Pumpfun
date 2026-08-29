@@ -23,6 +23,9 @@ const FINAL_WINDOW_MS   = Number(process.env.FINAL_WINDOW_MS || 2000);   // scop
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
 const MIN_BET           = Number(process.env.MIN_BET || 1);
+// Stability gate: how many consecutive signal evaluations the same high-confidence
+// lean must hold before an entry fires (at 200ms cadence, 15 ≈ 3 seconds).
+const SIGNAL_CONFIRM_N   = Number(process.env.SIGNAL_CONFIRM_N || 15);
 
 // Polymarket fee
 const TAKER_FEE_RATE  = Number(process.env.TAKER_FEE_RATE || 0.07);
@@ -84,6 +87,7 @@ class BotEngine {
     // Signal
     this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
     this.lastSignalEvalAt = 0;
+    this.signalStreak = 0;         // consecutive evaluations with same high-conf lean
     this.entryWindow = null;   // first window allowed to enter (set post-init to avoid mid-window start)
 
     // Position (one at a time, max)
@@ -329,6 +333,19 @@ class BotEngine {
     const confidence = Math.min(Math.abs(score) / 7.0, 1.0);
     const lean = score > 0 ? 'UP' : score < 0 ? 'DOWN' : 'NEUTRAL';
     this.signal = { score: round5(score), confidence: round5(confidence), lean, updatedAt: Date.now(), indicators };
+    // Maintain a confirmation streak: count consecutive evaluations with the same
+    // directional signal at or above HIGH_CONF. Any disagreement resets it.
+    if (confidence >= HIGH_CONF && (lean === 'UP' || lean === 'DOWN')) {
+      if (this.lastSignalLean === lean && Date.now() - (this.lastSignalAt || 0) < 5000) {
+        this.signalStreak += 1;
+      } else {
+        this.signalStreak = 1;
+      }
+    } else {
+      this.signalStreak = 0;
+    }
+    this.lastSignalLean = lean;
+    this.lastSignalAt = Date.now();
   }
 
   _windowDelta(candles, windowStart) {
@@ -441,6 +458,10 @@ class BotEngine {
     const conf = this.signal.confidence;
     const lean = this.signal.lean;
     if (lean !== 'UP' && lean !== 'DOWN') return;
+
+    // Confirmation gate: only enter once the high-confidence direction has held
+    // for SIGNAL_CONFIRM_N consecutive evaluations (rejects sub-second blips).
+    if (this.signalStreak < SIGNAL_CONFIRM_N) return;
 
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;

@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "smoke": "node test/engine-smoke.js"
+    "smoke": "node test/engine-smoke.js && node test/signal-gate.test.js"
   },
   "engines": {
     "node": ">=18.0.0"
