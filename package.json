@@ -4,7 +4,8 @@
   "description": "ConfidenceBot \u2014 7-indicator BTC 5m signal follower, confidence>=70% buys UP/DOWN, 1.5x martingale after loss",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "smoke": "node test/engine-smoke.js"
   },
   "engines": {
     "node": ">=18.0.0"
