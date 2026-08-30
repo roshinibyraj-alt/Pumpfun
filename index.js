@@ -78,7 +78,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Window</div><div class="value" id="windowTime">—</div><div class="small" id="entryWindow"></div></div>
 <div class="box"><div class="label">Wins / Losses</div><div class="value" id="winLoss">0 / 0</div><div class="small" id="winRate"></div></div>
 <div class="box"><div class="label">Max Drawdown</div><div class="value neg" id="maxDrawdown">$0</div></div>
-<div class="box"><div class="label">Bet / Rebuy</div><div class="value" id="nextShares">$100</div><div class="small" id="lossStreak"></div></div>
+<div class="box"><div class="label">Shares / Signal</div><div class="value" id="nextShares">1,000</div><div class="small" id="lossStreak"></div></div>
 </div>
 <div class="two-col">
 <div>
@@ -168,8 +168,7 @@ return '<div class="trade-item"><div><span class="'+cls+'">'+tr.type+' '+ESC(tr.
 function renderLogs(a){const b=$('logBody'),ct=$('logCount');ct.textContent=a.length+' LINES';b.innerHTML=a.slice(-50).map(l=>{let c='';if(l.includes('WIN'))c='log-win';else if(l.includes('LOSS'))c='log-loss';else if(l.includes('💰'))c='log-tp';else if(l.includes('ENTRY')||l.includes('EXIT')||l.includes('RESOLUTION'))c='log-info';return '<div class="'+c+'">'+ESC(l)+'</div>'}).join('')}
 function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Entry After</div><div class="value">'+(c.entryMinElapsed??c.entryElapsed??0)+'s</div></div>'
 +'<div class="mini"><div class="label">Min Conf</div><div class="value">'+((c.minConfidence??c.highConf??0)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">Bet</div><div class="value">$'+(c.dollarAmount??c.sizingDollars??100)+'</div></div>'
-+'<div class="mini"><div class="label">Rebuy Below</div><div class="value">'+(c.rebuyPrice??0.40).toFixed(2)+'</div></div>'
++'<div class="mini"><div class="label">Sizing</div><div class="value">'+(c.flatShares??c.sizingShares??1000)+' sh</div></div>'
 +'<div class="mini"><div class="label">Reversal</div><div class="value">'+(c.reversalPct??0)+'%</div></div>'
 +'<div class="mini"><div class="label">Reversal ≥</div><div class="value">'+((c.reversalConsist??0)*100)+'%</div></div>'
 +'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'}
@@ -184,8 +183,8 @@ const tp=d.totalPnl||0;const te=$('totalPnl');te.textContent=money(tp);te.classN
 const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.className='value '+tone(rp);
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
 $('maxDrawdown').textContent=cash(d.maxDrawdown);
-const ns=$('nextShares');if(ns){const val=d.config?.dollarAmount??100;const rp=d.config?.rebuyPrice??0.40;ns.textContent='$'+val+' × '+(d.rebuyDone&&d.rebuyDone.length?'2':'1');}
-const ls=$('lossStreak');if(ls){ls.textContent=(d.rebuyDone&&d.rebuyDone.length?'REBUY DONE':'REBUY READY')+' · <'+((d.config?.rebuyPrice??0.40)).toFixed(2);}
+const ns=$('nextShares');if(ns){const sh=d.config?.flatShares??d.config?.sizingShares??1000;const lean=d.signal?.lean||'NEUTRAL';ns.textContent=num(sh)+' SH';ns.style.color=lean==='UP'?'var(--up)':lean==='DOWN'?'var(--down)':'var(--muted)';}
+const ls=$('lossStreak');if(ls){const lean=d.signal?.lean||'NEUTRAL';ls.textContent=lean==='UP'||lean==='DOWN'?('SIGNAL '+lean):'NEUTRAL · SELL HELD';}
 polls++;const wp=$('waitPill');if(wp){if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Window.now()/1000)));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}

@@ -1,7 +1,7 @@
 {
   "name": "confidence-bot",
   "version": "4.1.1",
-  "description": "ConfidenceBot \u2014 7-indicator BTC 5m signal follower, confidence>=70% buys UP/DOWN, 1.5x martingale after loss",
+  "description": "ConfidenceBot — 7-indicator BTC 5m signal follower: buy signal side when confidence > 0.65 (flat 1000 shares), sell on neutral, re-enter on signal",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
