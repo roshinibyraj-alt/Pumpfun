@@ -45,13 +45,22 @@ async function setup() {
   assert.equal(pos.outcome, 'UP');
   assert.equal(pos.shares, 1000, 'flat 1000 shares');
 
-  // ── Confidence goes neutral → sell immediately ─────────────
-  engine.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: Date.now(), indicators: {} };
+  // ── Confidence falls back to/below the 0.65 entry threshold → sell ──
+  engine.signal = { score: 1, confidence: 0.60, lean: 'UP', updatedAt: Date.now(), indicators: {} };
   engine.markets.get(slug).up.ask = 0.53; engine.markets.get(slug).up.bid = 0.50; engine.markets.get(slug).up.mid = 0.51;
   engine.evaluateExit();
-  assert.equal(engine.positions.filter(p => p.status === 'open').length, 0, 'neutral sells the held position');
+  assert.equal(engine.positions.filter(p => p.status === 'open').length, 0, 'weak confidence (<=0.65) sells the held position');
   const sold = engine.resolvedPositions.find(p => p.windowStart === cs && p.exitReason === 'NEUTRAL');
   assert.ok(sold, 'sell recorded with NEUTRAL reason');
+
+  // ── Literal neutral lean also sells ───────────────────────
+  engine.signal = { score: 4, confidence: 0.80, lean: 'UP', updatedAt: Date.now(), indicators: {} };
+  engine.signalStreak = 999;
+  engine.evaluateEntry();
+  assert.equal(engine.positions.filter(p => p.windowStart === cs && p.status === 'open').length, 1, 're-entered after sell');
+  engine.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: Date.now(), indicators: {} };
+  engine.evaluateExit();
+  assert.equal(engine.positions.filter(p => p.windowStart === cs && p.status === 'open').length, 0, 'literal neutral lean sells held position');
 
   // ── Signal returns → re-enter ──────────────────────────────
   engine.signal = { score: -7, confidence: 0.90, lean: 'DOWN', updatedAt: Date.now(), indicators: {} };

@@ -12,10 +12,11 @@ BTC-led 5-minute Polymarket paper bot driven by a 7-indicator Binance signal com
 - **Confirmation gate**: the >0.65 lean must hold for `SIGNAL_CONFIRM_N`
   consecutive signal evaluations (default 15 ≈ 3s at the 200ms cadence) before
   an entry fires, rejecting sub-second blips.
-- **Intra-window exit**: once the confidence score goes neutral (no UP/DOWN
-  lean), the held position is sold immediately at the current mark/ask.
-- **Re-entry**: if the signal comes back (>0.65) after a neutral sell, the bot
-  buys again — multiple round trips are allowed within one window.
+- **Intra-window exit**: when the confidence score becomes neutral (no UP/DOWN
+  lean) **or drops back to/below the 0.65 entry threshold**, the held position
+  is sold immediately at the current mark/ask.
+- **Re-entry**: if the signal comes back (>0.65) after a neutral/weak sell, the
+  bot buys again — multiple round trips are allowed within one window.
 - No stop loss; anything still open at window end is held to resolution.
 
 ## Sizing

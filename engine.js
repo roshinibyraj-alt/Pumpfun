@@ -510,7 +510,11 @@ class BotEngine {
   evaluateExit() {
     const now = Date.now();
     const cs = windowStartFor(now);
-    const neutral = this.signal.lean !== 'UP' && this.signal.lean !== 'DOWN';
+    // "Neutral" = the signal side disappeared (lean NEUTRAL) OR confidence fell
+    // back to/below the entry threshold — i.e. the confidence score is no
+    // longer strong enough to hold the position.
+    const conf = this.signal.confidence ?? 0;
+    const neutral = (this.signal.lean !== 'UP' && this.signal.lean !== 'DOWN') || conf <= ENTRY_CONF;
 
     for (const p of this.positions) {
       if (p.status !== 'open') continue;
@@ -519,7 +523,7 @@ class BotEngine {
       const token = p.outcome === 'UP' ? market.up : market.down;
       if (Number.isFinite(token?.mid)) p.markPrice = token.mid;
 
-      // Intra-window exit: once the confidence score goes neutral, sell the
+      // Intra-window exit: once the confidence score goes neutral/weak, sell the
       // held position immediately. (Only for the current window.)
       if (p.windowStart === cs && neutral) {
         this.sellPosition(p, 'NEUTRAL');

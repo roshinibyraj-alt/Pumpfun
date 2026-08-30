@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>MartingaleBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · FLAT 1000 SH · HOLD TO RESOLUTION</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>ConfidenceBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF > 0.65 · FLAT 1000 SH · SELL ON NEUTRAL · RE-ENTER</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -184,7 +184,7 @@ const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
 $('maxDrawdown').textContent=cash(d.maxDrawdown);
 const ns=$('nextShares');if(ns){const sh=d.config?.flatShares??d.config?.sizingShares??1000;const lean=d.signal?.lean||'NEUTRAL';ns.textContent=num(sh)+' SH';ns.style.color=lean==='UP'?'var(--up)':lean==='DOWN'?'var(--down)':'var(--muted)';}
-const ls=$('lossStreak');if(ls){const lean=d.signal?.lean||'NEUTRAL';ls.textContent=lean==='UP'||lean==='DOWN'?('SIGNAL '+lean):'NEUTRAL · SELL HELD';}
+const ls=$('lossStreak');if(ls){const lean=d.signal?.lean||'NEUTRAL';const conf=d.signal?.confidence??0;const ec=d.config?.entryConf??0.65;const sellNeutral=!(lean==='UP'||lean==='DOWN')||conf<=ec;ls.textContent=sellNeutral?'NEUTRAL/WEAK · SELL HELD':'SIGNAL '+lean+' · HOLDING';}
 polls++;const wp=$('waitPill');if(wp){if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Window.now()/1000)));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
