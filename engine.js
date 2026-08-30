@@ -16,9 +16,7 @@ const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
 const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
-const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
-const STOP_LOSS_PRICE   = Number(process.env.STOP_LOSS_PRICE || 0.20); // intra-window stop loss trigger price
-const STOP_LOSS_AFTER   = Number(process.env.STOP_LOSS_AFTER || 240);  // only stop-loss once window elapsed >= this (s)
+const FLAT_BUDGET       = Number(process.env.FLAT_BUDGET || 500); // flat $ notional per trade (no martingale)
 const FINAL_WIN_PRICE   = Number(process.env.FINAL_WIN_PRICE || 0.90); // resolve by last-2s price >= this
 const FINAL_WINDOW_MS   = Number(process.env.FINAL_WINDOW_MS || 2000);   // scope of final price capture
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
@@ -457,16 +455,18 @@ class BotEngine {
     }
   }
 
-  nextShares() {
-    // Flat 1000 shares on every bet — no recovery, no martingale.
-    return FLAT_SHARES;
+  // Shares for a given entry price so the spend is a flat $budget.
+  sharesFor(price) {
+    return Math.max(1, Math.floor(FLAT_BUDGET / price));
   }
 
   tryBuy(market, outcome, windowStart, windowEnd) {
     const token = outcome === 'UP' ? market.up : market.down;
     const price = token.ask ?? token.mid ?? token.bid;
     if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
-    this.executeBuy(market, outcome, price, this.nextShares(), windowStart, windowEnd);
+    const shares = this.sharesFor(price);
+    if (shares < 1) return;
+    this.executeBuy(market, outcome, price, shares, windowStart, windowEnd);
   }
 
   executeBuy(market, outcome, price, shares, windowStart, windowEnd) {
@@ -489,7 +489,6 @@ class BotEngine {
       signalConf: conf, signalScore: this.signal.score,
       signalIndicators: { ...this.signal.indicators }, betLabel: outcome,
       exitReason: null, exitPrice: null, closedAt: null, pnl: null,
-      slArmed: false,
     };
     this.positions.push(pos);
     this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome, shares, price, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel: outcome });
@@ -499,32 +498,14 @@ class BotEngine {
 
 
   evaluateExit() {
-    // This only refreshes mark prices for open positions, plus the late-window
-    // stop loss. No other intra-window exits: hold to resolution.
-    const nowS = Date.now() / 1000;
+    // No stop loss and no intra-window sell: only refresh mark prices for open
+    // positions. Every position holds to resolution.
     for (const p of this.positions) {
       if (p.status !== 'open') continue;
       const market = this.markets.get(p.slug);
       if (!market) continue;
       const token = p.outcome === 'UP' ? market.up : market.down;
       if (Number.isFinite(token?.mid)) p.markPrice = token.mid;
-
-      // Stop loss (applies to ANY position): once the window is at least
-      // STOP_LOSS_AFTER seconds old, if the held side's price drops BELOW
-      // STOP_LOSS_PRICE we arm the stop. Then we wait for it to come back up
-      // to STOP_LOSS_PRICE and sell at that level (never dump below it).
-      const elapsed = nowS - p.windowStart;
-      if (elapsed >= STOP_LOSS_AFTER) {
-        const px = token.ask ?? token.mid ?? token.bid;
-        if (Number.isFinite(px)) {
-          if (p.slArmed && px >= STOP_LOSS_PRICE) {
-            p.markPrice = STOP_LOSS_PRICE;
-            this.sellPosition(p, 'STOP_LOSS');
-          } else if (px < STOP_LOSS_PRICE) {
-            p.slArmed = true;
-          }
-        }
-      }
     }
   }
 
@@ -662,19 +643,18 @@ class BotEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
       signal: this.signal,
-      slStatus: (() => { const p = openPos[0]; if (!p) return ''; if (p.slArmed) return 'ARMED · waiting for ' + STOP_LOSS_PRICE.toFixed(2); const el = Math.floor(Date.now() / 1000 - p.windowStart); return el >= STOP_LOSS_AFTER ? 'WATCHING (≥' + STOP_LOSS_AFTER + 's)' : ''; })(),
-      nextShares: this.nextShares(),
+      nextShares: this.sharesFor(0.70), // representative ~flat $budget / 0.70
       positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
         betLabel: p.betLabel, markPrice: p.markPrice,
         unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
-        confidence: p.signalConf, openedAt: p.openedAt, side: p.outcome, slArmed: p.slArmed })),
+        confidence: p.signalConf, openedAt: p.openedAt, side: p.outcome })),
 
       markets: this.publicMarkets(),
       resolvedPositions: this.resolvedPositions.slice(0, 30),
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingFactor: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE, stopLossPrice: STOP_LOSS_PRICE, stopLossAfter: STOP_LOSS_AFTER },
+      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatBudget: FLAT_BUDGET, sizingFactor: FLAT_BUDGET, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
@@ -709,8 +689,8 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 MartingaleBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · ${FLAT_SHARES}sh · after ${ENTRY_ELAPSED}s wait · SL ${STOP_LOSS_PRICE.toFixed(2)} after ${STOP_LOSS_AFTER}s · hold to resolution`);
+    this.log(`🚀 FlatlineBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · flat $${FLAT_BUDGET}/trade · 1 trade/window · NO stop loss · hold to resolution`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, STOP_LOSS_PRICE, STOP_LOSS_AFTER, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_BUDGET, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };

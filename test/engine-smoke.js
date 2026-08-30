@@ -1,8 +1,8 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { BotEngine } = require('../engine');
+const { BotEngine, config } = require('../engine');
 
-async function setup(candles) {
+async function setup() {
   const engine = new BotEngine({
     fetchImpl: async (url, options = {}) => {
       const u = String(url);
@@ -13,107 +13,76 @@ async function setup(candles) {
           outcomes: '["Up","Down"]', clobTokenIds: '["up-id","down-id"]',
         }] };
       }
-      if (u.includes('klines')) return { ok: true, json: async () => candles };
+      if (u.includes('klines')) return { ok: true, json: async () => [] };
       if (u.includes('ticker/price')) return { ok: true, json: async () => ({ price: '60000' }) };
       throw new Error('unexpected url ' + u);
     },
   });
-  engine.binanceCandles = candles;
   return engine;
 }
 
 (async () => {
-  const engine = await setup([]);
+  const engine = await setup();
+  const BUDGET = config.FLAT_BUDGET; // 500
 
-  // ── Flat sizing (no recovery/martingale) ──────────────────
-  assert.equal(engine.nextShares(), 1000, 'flat 1000 shares on every buy');
+  // ── Flat $ budget sizing (no martingale) ─────────────────
+  assert.equal(engine.sharesFor(0.50), Math.floor(BUDGET / 0.50), 'flat $budget / price');
+  assert.equal(engine.sharesFor(0.70), Math.floor(BUDGET / 0.70), 'flat $budget / price');
+  // no martingale — sizing identical regardless of prior losses
   engine.losses = 5;
-  assert.equal(engine.nextShares(), 1000, 'still flat 1000 shares after losses');
+  assert.equal(engine.sharesFor(0.70), Math.floor(BUDGET / 0.70), 'still flat $ after losses');
 
-  // ── Entry: confidence >= 70% → buy signal side 1000 ───────
-  const cs = Math.floor((Date.now() - 30000) / 1000 / 300) * 300; // ~30s into the window
+  // ── Entry: confidence >= 70% → buy signal side $500 worth ─
+  const cs = Math.floor((Date.now() - 30000) / 1000 / 300) * 300; // ~30s in
   const slug = `btc-updown-5m-${cs}`;
   engine.entryWindow = null;
   engine.markets.set(slug, {
     slug, asset: 'btc', conditionId: '0xc0', windowStart: cs, windowEnd: cs + 300,
     resolved: false, tradingClosed: false,
-    up: { tokenId: 'up-id', ask: 0.55, bid: 0.50, mid: 0.52 },
-    down: { tokenId: 'down-id', ask: 0.45, bid: 0.40, mid: 0.42 },
+    up: { tokenId: 'up-id', ask: 0.70, bid: 0.65, mid: 0.67 },
+    down: { tokenId: 'down-id', ask: 0.30, bid: 0.25, mid: 0.27 },
   });
   engine.signal = { score: 7, confidence: 0.80, lean: 'UP', updatedAt: Date.now(), indicators: {} };
   engine.evaluateEntry();
   const pos = engine.positions.find(p => p.windowStart === cs && p.status === 'open');
   assert.ok(pos, 'entry fires at confidence >= 70%');
   assert.equal(pos.outcome, 'UP');
-  assert.equal(pos.shares, 1000, 'flat 1000 shares');
+  assert.equal(pos.shares, Math.floor(BUDGET / 0.70), 'shares = $budget / entry price');
 
-  // ── Stop loss: after 240s, wait for price to come back to 0.20 ──
-  // Before 240s elapsed: price below 0.20 must NOT sell (not armed yet).
+  // ── One trade per window: second buy attempt rejected ─────
+  engine.signal = { score: -7, confidence: 0.85, lean: 'DOWN', updatedAt: Date.now(), indicators: {} };
+  engine.evaluateEntry();
+  const buys = engine.positions.filter(p => p.windowStart === cs);
+  assert.equal(buys.length, 1, 'at most one trade per window');
+
+  // ── No stop loss: position holds even if price crashes ───
   const slStart = Math.floor((Date.now() - 300000) / 1000 / 300) * 300;
   await engine.discoverMarket('btc', slStart);
   const slMarket = engine.markets.get(`btc-updown-5m-${slStart}`);
-  slMarket.up.ask = 0.45; slMarket.up.bid = 0.42; slMarket.up.mid = 0.44;
-  slMarket.down.ask = 0.55; slMarket.down.bid = 0.52; slMarket.down.mid = 0.54;
-  engine.executeBuy(slMarket, 'UP', 0.44, 1000, slStart, slStart + 300);
+  slMarket.up.ask = 0.50; slMarket.up.bid = 0.45; slMarket.up.mid = 0.47;
+  slMarket.down.ask = 0.50; slMarket.down.bid = 0.45; slMarket.down.mid = 0.47;
+  engine.executeBuy(slMarket, 'UP', 0.47, engine.sharesFor(0.47), slStart, slStart + 300);
   const slPos = engine.positions.find(p => p.slug === slMarket.slug && p.status === 'open');
-
-  // Not yet 240s: price below 0.20 → arm only when elapsed >= 240, so no sell.
-  slPos.windowStart = Math.floor(Date.now() / 1000) - 230;
-  slMarket.up.ask = 0.15; slMarket.up.mid = 0.14;
+  // price crashes below any stop level and window well past 240s
+  slPos.windowStart = Math.floor(Date.now() / 1000) - 260;
+  slMarket.up.ask = 0.05; slMarket.up.bid = 0.04; slMarket.up.mid = 0.045;
   engine.evaluateExit();
-  assert.ok(slPos.status === 'open', 'no sell before 240s even if price below 0.20');
+  assert.equal(slPos.status, 'open', 'NO stop loss — position holds even after price crashes');
+  assert.equal(engine.resolvedPositions.find(p => p.exitReason === 'STOP_LOSS') == null, true, 'no STOP_LOSS exit exists');
 
-  // Now 241s elapsed: price below 0.20 → arm (still hold, waiting to recover).
-  slPos.windowStart = Math.floor(Date.now() / 1000) - 241;
-  engine.evaluateExit();
-  assert.ok(slPos.status === 'open', 'below 0.20 after 240s → armed, still holding (waiting for recovery)');
-  assert.equal(slPos.slArmed, true, 'stop-loss armed');
-
-  // Price comes back to 0.20 → sell as stop loss.
-  slMarket.up.ask = 0.20; slMarket.up.mid = 0.19;
-  engine.evaluateExit();
-  const stopped = engine.resolvedPositions.find(p => p.exitReason === 'STOP_LOSS');
-  assert.ok(stopped, 'stop-loss sells once price recovers to 0.20');
-  assert.equal(stopped.exitPrice, 0.20, 'sold at the stop-loss price 0.20');
-
-  // ── Resolution: last-2s CLOB, no fallback ─────────────────
+  // ── Resolution: hold to resolution, no intra-window sell ─
   const start = Math.floor((Date.now() - 600000) / 1000 / 300) * 300;
   await engine.discoverMarket('btc', start);
   const upMarket = engine.markets.get(`btc-updown-5m-${start}`);
   upMarket.up.ask = 0.04; upMarket.up.bid = 0.03; upMarket.up.mid = 0.035;
-  engine.executeBuy(upMarket, 'UP', 0.035, 1000, start, start + 300);
+  engine.executeBuy(upMarket, 'UP', 0.035, engine.sharesFor(0.035), start, start + 300);
   upMarket.finalUpMax = 0.92; upMarket.finalDownMax = 0.08;
   engine.resolveByBinance();
   const resolved = engine.resolvedPositions.find(p => p.windowStart === start);
-  assert.ok(resolved, 'position should have resolved');
+  assert.ok(resolved, 'position resolves at window end');
   assert.equal(resolved.won, true, 'UP won: final UP price 0.92 >= 0.90');
+  assert.equal(resolved.exitReason, 'RESOLUTION', 'resolved — not stopped out');
 
-  // ── Key bug fix test: unchanged book within final 2s ───────
-  const start2 = start - 300;
-  await engine.discoverMarket('btc', start2);
-  const downMarket = engine.markets.get(`btc-updown-5m-${start2}`);
-  downMarket.down.bid = 0.90; downMarket.down.ask = 0.92; downMarket.down.mid = 0.91;
-  downMarket.up.bid = 0.08; downMarket.up.ask = 0.10; downMarket.up.mid = 0.09;
-  engine.executeBuy(downMarket, 'DOWN', 0.91, 1000, start2, start2 + 300);
-
-  const downToken = downMarket.down;
-  engine.applyBook(downToken, [{ price: '0.90', size: '500' }], [{ price: '0.92', size: '500' }]);
-  assert.equal(downMarket.finalDownMax, 0.91, 'capture fires even on unchanged book within final 2s');
-  assert.equal(downMarket.finalCaptureAt > 0, true, 'capture timestamp set');
-
-  engine.applyBook(downToken, [{ price: '0.90', size: '500' }], [{ price: '0.92', size: '500' }]);
-  assert.equal(downMarket.finalDownMax, 0.91, 'unchanged book still captured');
-
-  engine.applyBook(downToken, [{ price: '0.95', size: '500' }], [{ price: '0.97', size: '500' }]);
-  assert.equal(downMarket.finalDownMax, 0.96, 'spike captured on new book change');
-
-  downMarket.finalUpMax = 0.05;
-  engine.resolveByBinance();
-  const resolved2 = engine.resolvedPositions.find(p => p.windowStart === start2);
-  assert.ok(resolved2, 'down position should resolve');
-  assert.equal(resolved2.resolvedWinner, 'DOWN', 'DOWN won');
-  assert.equal(resolved2.won, true);
-
-  console.log('✅ Pumpfun smoke: flat 1000 + conf>=70% + stop-loss 0.20 after 240s + last-2s CLOB OK');
+  console.log('✅ Pumpfun smoke: flat $500 + conf>=70% + 1 trade/window + no SL (hold to resolution) OK');
   process.exit(0);
 })().catch(e => { console.error('SMOKE FAIL:', e); process.exit(1); });

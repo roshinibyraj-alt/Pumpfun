@@ -1,7 +1,7 @@
 {
-  "name": "martingale-bot",
-  "version": "4.2.0",
-  "description": "MartingaleBot — BTC 5m signal follower: buy signal side when confidence >= 70% (flat 1000 shares), stop-loss 0.20 after 240s, hold to resolution",
+  "name": "flatline-bot",
+  "version": "5.0.0",
+  "description": "FlatlineBot — BTC 5m signal follower: buy signal side when confidence >=70%, flat $500 per trade, one trade per window, NO stop loss, hold to resolution",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
