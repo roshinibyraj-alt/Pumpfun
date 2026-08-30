@@ -13,18 +13,17 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
-const ENTRY_CONF         = Number(process.env.ENTRY_CONF || 0.65); // buy signal side when confidence > this
+const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
 const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
-const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000); // flat 1000 shares per buy
+const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
+const STOP_LOSS_PRICE   = Number(process.env.STOP_LOSS_PRICE || 0.20); // intra-window stop loss trigger price
+const STOP_LOSS_AFTER   = Number(process.env.STOP_LOSS_AFTER || 240);  // only stop-loss once window elapsed >= this (s)
 const FINAL_WIN_PRICE   = Number(process.env.FINAL_WIN_PRICE || 0.90); // resolve by last-2s price >= this
 const FINAL_WINDOW_MS   = Number(process.env.FINAL_WINDOW_MS || 2000);   // scope of final price capture
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
 const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
 const MIN_BET           = Number(process.env.MIN_BET || 1);
-// Stability gate: how many consecutive signal evaluations the same high-confidence
-// lean must hold before an entry fires (at 200ms cadence, 15 ≈ 3 seconds).
-const SIGNAL_CONFIRM_N  = Number(process.env.SIGNAL_CONFIRM_N || 15);
 
 // Polymarket fee
 const TAKER_FEE_RATE  = Number(process.env.TAKER_FEE_RATE || 0.07);
@@ -86,7 +85,6 @@ class BotEngine {
     // Signal
     this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
     this.lastSignalEvalAt = 0;
-    this.signalStreak = 0;         // consecutive evaluations with same high-conf lean
     this.entryWindow = null;   // first window allowed to enter (set post-init to avoid mid-window start)
 
     // Position (one at a time, max)
@@ -331,19 +329,6 @@ class BotEngine {
     const confidence = Math.min(Math.abs(score) / 7.0, 1.0);
     const lean = score > 0 ? 'UP' : score < 0 ? 'DOWN' : 'NEUTRAL';
     this.signal = { score: round5(score), confidence: round5(confidence), lean, updatedAt: Date.now(), indicators };
-    // Maintain a confirmation streak: count consecutive evaluations with the same
-    // directional signal above ENTRY_CONF. Any disagreement resets it.
-    if (confidence > ENTRY_CONF && (lean === 'UP' || lean === 'DOWN')) {
-      if (this.lastSignalLean === lean && Date.now() - (this.lastSignalAt || 0) < 5000) {
-        this.signalStreak += 1;
-      } else {
-        this.signalStreak = 1;
-      }
-    } else {
-      this.signalStreak = 0;
-    }
-    this.lastSignalLean = lean;
-    this.lastSignalAt = Date.now();
   }
 
   _windowDelta(candles, windowStart) {
@@ -455,22 +440,25 @@ class BotEngine {
 
     const conf = this.signal.confidence;
     const lean = this.signal.lean;
+    if (lean !== 'UP' && lean !== 'DOWN') return;
 
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
 
-    const held = this.positions.find(p => p.windowStart === cs && p.status === 'open');
+    // No stop loss and no intra-window flip: at most one trade per window.
+    // If a position is already open this window, never sell or re-enter.
+    const alreadyOpen = this.positions.find(p => p.windowStart === cs && p.status === 'open');
+    if (alreadyOpen) return;
 
-    // Entry: buy the signal side whenever confidence is ABOVE ENTRY_CONF (flat
-    // 1000 shares). The confirmation gate rejects sub-second blips. If already
-    // holding a position this window, do not stack.
-    if (!held && (lean === 'UP' || lean === 'DOWN') && conf > ENTRY_CONF && this.signalStreak >= SIGNAL_CONFIRM_N) {
-      this.tryBuy(market, lean, cs, market.windowEnd);
+    if (lean === 'UP' && conf >= HIGH_CONF) {
+      this.tryBuy(market, 'UP', cs, market.windowEnd);
+    } else if (lean === 'DOWN' && conf >= HIGH_CONF) {
+      this.tryBuy(market, 'DOWN', cs, market.windowEnd);
     }
   }
 
   nextShares() {
-    // Flat 1000 shares on every buy — no martingale, no dollar sizing.
+    // Flat 1000 shares on every bet — no recovery, no martingale.
     return FLAT_SHARES;
   }
 
@@ -482,7 +470,9 @@ class BotEngine {
   }
 
   executeBuy(market, outcome, price, shares, windowStart, windowEnd) {
-    if (shares <= 0) return;
+    // Hard guard: only one trade per window.
+    const windowTraded = this.positions.some(p => p.windowStart === windowStart && (p.status === 'open' || p.exitReason === 'RESOLUTION'));
+    if (windowTraded) return;
     const cost = round2(shares * price);
     const fee = takerFee(shares, price);
     const totalCost = round2(cost + fee);
@@ -499,6 +489,7 @@ class BotEngine {
       signalConf: conf, signalScore: this.signal.score,
       signalIndicators: { ...this.signal.indicators }, betLabel: outcome,
       exitReason: null, exitPrice: null, closedAt: null, pnl: null,
+      slArmed: false,
     };
     this.positions.push(pos);
     this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome, shares, price, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel: outcome });
@@ -508,14 +499,9 @@ class BotEngine {
 
 
   evaluateExit() {
-    const now = Date.now();
-    const cs = windowStartFor(now);
-    // "Neutral" = the signal side disappeared (lean NEUTRAL) OR confidence fell
-    // back to/below the entry threshold — i.e. the confidence score is no
-    // longer strong enough to hold the position.
-    const conf = this.signal.confidence ?? 0;
-    const neutral = (this.signal.lean !== 'UP' && this.signal.lean !== 'DOWN') || conf <= ENTRY_CONF;
-
+    // This only refreshes mark prices for open positions, plus the late-window
+    // stop loss. No other intra-window exits: hold to resolution.
+    const nowS = Date.now() / 1000;
     for (const p of this.positions) {
       if (p.status !== 'open') continue;
       const market = this.markets.get(p.slug);
@@ -523,10 +509,21 @@ class BotEngine {
       const token = p.outcome === 'UP' ? market.up : market.down;
       if (Number.isFinite(token?.mid)) p.markPrice = token.mid;
 
-      // Intra-window exit: once the confidence score goes neutral/weak, sell the
-      // held position immediately. (Only for the current window.)
-      if (p.windowStart === cs && neutral) {
-        this.sellPosition(p, 'NEUTRAL');
+      // Stop loss (applies to ANY position): once the window is at least
+      // STOP_LOSS_AFTER seconds old, if the held side's price drops BELOW
+      // STOP_LOSS_PRICE we arm the stop. Then we wait for it to come back up
+      // to STOP_LOSS_PRICE and sell at that level (never dump below it).
+      const elapsed = nowS - p.windowStart;
+      if (elapsed >= STOP_LOSS_AFTER) {
+        const px = token.ask ?? token.mid ?? token.bid;
+        if (Number.isFinite(px)) {
+          if (p.slArmed && px >= STOP_LOSS_PRICE) {
+            p.markPrice = STOP_LOSS_PRICE;
+            this.sellPosition(p, 'STOP_LOSS');
+          } else if (px < STOP_LOSS_PRICE) {
+            p.slArmed = true;
+          }
+        }
       }
     }
   }
@@ -553,14 +550,16 @@ class BotEngine {
     this.recordEquity();
   }
 
+  // ── Resolution (Binance-based) ────────────────────────────
   // ── Resolution: last-2s CLOB-based, no Binance fallback ────
   async resolveByBinance() {
     const openPositions = this.positions.filter(p => p.status === 'open');
     if (!openPositions.length) return;
     const nowMs = Date.now();
     const nowS = nowMs / 1000;
-    // Resolve immediately once the window has ended — winner is determined purely
-    // by the CLOB prices captured in the final 2 seconds of the window.
+    // Resolve immediately once the window has ended — we don't need Binance
+    // candles at all: the winner is determined purely by the CLOB prices
+    // captured in the final 2 seconds of the window.
     const pending = [];
     for (const p of openPositions) {
       if (nowS < p.windowEnd) continue;
@@ -568,6 +567,9 @@ class BotEngine {
       if (!m) continue;
       const finalUp  = m.finalUpMax  ?? 0;
       const finalDown = m.finalDownMax ?? 0;
+      // Highest final-2s price wins; if one side >= 0.90 it almost certainly
+      // is the winner; if both did, higher wins; if neither hit 0.90, higher wins.
+      // All determined from live CLOB data — no Binance candle fallback.
       let winner;
       if (finalUp > 0 && finalUp > finalDown) winner = 'UP';
       else if (finalDown > 0 && finalDown > finalUp) winner = 'DOWN';
@@ -660,18 +662,19 @@ class BotEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
       signal: this.signal,
+      slStatus: (() => { const p = openPos[0]; if (!p) return ''; if (p.slArmed) return 'ARMED · waiting for ' + STOP_LOSS_PRICE.toFixed(2); const el = Math.floor(Date.now() / 1000 - p.windowStart); return el >= STOP_LOSS_AFTER ? 'WATCHING (≥' + STOP_LOSS_AFTER + 's)' : ''; })(),
       nextShares: this.nextShares(),
       positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
         betLabel: p.betLabel, markPrice: p.markPrice,
         unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
-        confidence: p.signalConf, openedAt: p.openedAt, side: p.outcome })),
+        confidence: p.signalConf, openedAt: p.openedAt, side: p.outcome, slArmed: p.slArmed })),
 
       markets: this.publicMarkets(),
       resolvedPositions: this.resolvedPositions.slice(0, 30),
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { entryConf: ENTRY_CONF, minConfidence: ENTRY_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingShares: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
+      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingFactor: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE, stopLossPrice: STOP_LOSS_PRICE, stopLossAfter: STOP_LOSS_AFTER },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
@@ -706,8 +709,8 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 ConfidenceBot started | conf>${(ENTRY_CONF*100).toFixed(0)}% → buy signal side ${FLAT_SHARES}sh · sell on neutral · re-enter on signal · after ${ENTRY_ELAPSED}s wait · hold to resolution`);
+    this.log(`🚀 MartingaleBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · ${FLAT_SHARES}sh · after ${ENTRY_ELAPSED}s wait · SL ${STOP_LOSS_PRICE.toFixed(2)} after ${STOP_LOSS_AFTER}s · hold to resolution`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, ENTRY_CONF, LOW_CONF, FLAT_SHARES, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, STOP_LOSS_PRICE, STOP_LOSS_AFTER, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };

@@ -1,26 +1,20 @@
-# ConfidenceBot — BTC 5m Signal Follower
+# MartingaleBot — BTC 5m Signal Follower
 
-BTC-led 5-minute Polymarket paper bot driven by a 7-indicator Binance signal composite.
+BTC-led 5-minute Polymarket paper bot driven by the same 7-indicator Binance signal composite as the recovery bot (EMA, RSI, momentum, acceleration, volume surge, tick trend, window delta).
 
 ## Strategy
 - Watch the `btc-updown-5m-*` market only.
-- Compute a composite score from 7 indicators on Binance 1m candles + tick data:
-  Window Delta, Micro Momentum, Acceleration, EMA 9/21, RSI 14, Volume Surge, Tick Trend.
-- Lean = UP (score > 0) or DOWN (score < 0). Confidence = |score| / 7.0.
-- Wait 10 seconds after the window opens, then buy the signal side (UP/DOWN)
-  whenever **confidence is above `ENTRY_CONF` (0.65)** with a flat 1000 shares.
-- **Confirmation gate**: the >0.65 lean must hold for `SIGNAL_CONFIRM_N`
-  consecutive signal evaluations (default 15 ≈ 3s at the 200ms cadence) before
-  an entry fires, rejecting sub-second blips.
-- **Intra-window exit**: when the confidence score becomes neutral (no UP/DOWN
-  lean) **or drops back to/below the 0.65 entry threshold**, the held position
-  is sold immediately at the current mark/ask.
-- **Re-entry**: if the signal comes back (>0.65) after a neutral/weak sell, the
-  bot buys again — multiple round trips are allowed within one window.
-- No stop loss; anything still open at window end is held to resolution.
+- Compute a composite score from 7 indicators; lean = UP (score > 0) or DOWN (score < 0). Confidence = |score| / 7.0.
+- Wait `ENTRY_ELAPSED` (10s) after the window opens, then buy the signal side (UP/DOWN) whenever **confidence is ≥ 70%**.
+- **Flat 1000 shares** per buy. No martingale and no recovery mode.
+- Single trade per window, hold to resolution.
 
-## Sizing
-- Flat 1000 shares per buy (`FLAT_SHARES`), no martingale and no dollar sizing.
+## Stop Loss
+- Applies to **any** open position: once the window has elapsed ≥ `STOP_LOSS_AFTER` (240s), if the held side's price drops **below** `STOP_LOSS_PRICE` (0.20), the stop is armed.
+- The bot then **waits for the price to come back up to 0.20** before selling at 0.20 (never dumping below the stop level).
+
+## Resolution
+- Winner determined by the CLOB book in the last 2 seconds of the window (price ≥ 0.90 side wins). No fallback.
 
 ## Pricing
 All market prices come from batched CLOB `/books` snapshots. Signal data comes from Binance public REST (candles + tick price).

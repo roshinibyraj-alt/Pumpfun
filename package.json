@@ -1,11 +1,11 @@
 {
-  "name": "confidence-bot",
-  "version": "4.1.1",
-  "description": "ConfidenceBot — 7-indicator BTC 5m signal follower: buy signal side when confidence > 0.65 (flat 1000 shares), sell on neutral, re-enter on signal",
+  "name": "martingale-bot",
+  "version": "4.2.0",
+  "description": "MartingaleBot — BTC 5m signal follower: buy signal side when confidence >= 70% (flat 1000 shares), stop-loss 0.20 after 240s, hold to resolution",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "smoke": "node test/engine-smoke.js && node test/signal-gate.test.js"
+    "smoke": "node test/engine-smoke.js"
   },
   "engines": {
     "node": ">=18.0.0"

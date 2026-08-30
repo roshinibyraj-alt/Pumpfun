@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>ConfidenceBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF > 0.65 · FLAT 1000 SH · SELL ON NEUTRAL · RE-ENTER</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>MartingaleBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · FLAT 1000 SH · SL 0.20 AFTER 240s</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -78,7 +78,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Window</div><div class="value" id="windowTime">—</div><div class="small" id="entryWindow"></div></div>
 <div class="box"><div class="label">Wins / Losses</div><div class="value" id="winLoss">0 / 0</div><div class="small" id="winRate"></div></div>
 <div class="box"><div class="label">Max Drawdown</div><div class="value neg" id="maxDrawdown">$0</div></div>
-<div class="box"><div class="label">Shares / Signal</div><div class="value" id="nextShares">1,000</div><div class="small" id="lossStreak"></div></div>
+<div class="box"><div class="label">Shares / SL</div><div class="value" id="nextShares">1,000</div><div class="small" id="lossStreak"></div></div>
 </div>
 <div class="two-col">
 <div>
@@ -168,10 +168,11 @@ return '<div class="trade-item"><div><span class="'+cls+'">'+tr.type+' '+ESC(tr.
 function renderLogs(a){const b=$('logBody'),ct=$('logCount');ct.textContent=a.length+' LINES';b.innerHTML=a.slice(-50).map(l=>{let c='';if(l.includes('WIN'))c='log-win';else if(l.includes('LOSS'))c='log-loss';else if(l.includes('💰'))c='log-tp';else if(l.includes('ENTRY')||l.includes('EXIT')||l.includes('RESOLUTION'))c='log-info';return '<div class="'+c+'">'+ESC(l)+'</div>'}).join('')}
 function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Entry After</div><div class="value">'+(c.entryMinElapsed??c.entryElapsed??0)+'s</div></div>'
 +'<div class="mini"><div class="label">Min Conf</div><div class="value">'+((c.minConfidence??c.highConf??0)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">Sizing</div><div class="value">'+(c.flatShares??c.sizingShares??1000)+' sh</div></div>'
++'<div class="mini"><div class="label">Sizing</div><div class="value">'+(c.flatShares??0)+' sh</div></div>'
 +'<div class="mini"><div class="label">Reversal</div><div class="value">'+(c.reversalPct??0)+'%</div></div>'
 +'<div class="mini"><div class="label">Reversal ≥</div><div class="value">'+((c.reversalConsist??0)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'}
++'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'
++'<div class="mini"><div class="label">Stop Loss</div><div class="value">'+(c.stopLossPrice??0.20).toFixed(2)+' after '+(c.stopLossAfter??240)+'s</div></div>'}
 function renderChart(c){const svg=$('equityChart');if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
 const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);
@@ -183,8 +184,8 @@ const tp=d.totalPnl||0;const te=$('totalPnl');te.textContent=money(tp);te.classN
 const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.className='value '+tone(rp);
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
 $('maxDrawdown').textContent=cash(d.maxDrawdown);
-const ns=$('nextShares');if(ns){const sh=d.config?.flatShares??d.config?.sizingShares??1000;const lean=d.signal?.lean||'NEUTRAL';ns.textContent=num(sh)+' SH';ns.style.color=lean==='UP'?'var(--up)':lean==='DOWN'?'var(--down)':'var(--muted)';}
-const ls=$('lossStreak');if(ls){const lean=d.signal?.lean||'NEUTRAL';const conf=d.signal?.confidence??0;const ec=d.config?.entryConf??0.65;const sellNeutral=!(lean==='UP'||lean==='DOWN')||conf<=ec;ls.textContent=sellNeutral?'NEUTRAL/WEAK · SELL HELD':'SIGNAL '+lean+' · HOLDING';}
+const ns=$('nextShares');if(ns){const sh=d.config?.flatShares??d.config?.sizingShares??1000;ns.textContent=num(sh)+' SH';}
+const ls=$('lossStreak');if(ls){const slp=d.config?.stopLossPrice??0.20;const sla=d.config?.stopLossAfter??240;const sl=d.slStatus||'';ls.textContent='SL '+slp.toFixed(2)+' after '+sla+'s'+(sl?' · '+sl:'');}
 polls++;const wp=$('waitPill');if(wp){if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Window.now()/1000)));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
