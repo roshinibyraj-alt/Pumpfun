@@ -13,11 +13,11 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
-const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
+const HIGH_CONF         = Number(process.env.HIGH_CONF || 1.0); // confidence must hit 100%
 const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
-const FLAT_SHARES       = Number(process.env.FLAT_SHARES || 1000);
-const MARTINGALE_FACTOR = Number(process.env.MARTINGALE_FACTOR || 1.5);
+const DOLLAR_AMOUNT     = Number(process.env.DOLLAR_AMOUNT || 100); // $100 base bet per leg
+const REBUY_PRICE       = Number(process.env.REBUY_PRICE || 0.40);  // rebuy trigger if held side dips below
 const FINAL_WIN_PRICE   = Number(process.env.FINAL_WIN_PRICE || 0.90); // resolve by last-2s price >= this
 const FINAL_WINDOW_MS   = Number(process.env.FINAL_WINDOW_MS || 2000);   // scope of final price capture
 const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
@@ -25,7 +25,7 @@ const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
 const MIN_BET           = Number(process.env.MIN_BET || 1);
 // Stability gate: how many consecutive signal evaluations the same high-confidence
 // lean must hold before an entry fires (at 200ms cadence, 15 ≈ 3 seconds).
-const SIGNAL_CONFIRM_N   = Number(process.env.SIGNAL_CONFIRM_N || 15);
+const SIGNAL_CONFIRM_N  = Number(process.env.SIGNAL_CONFIRM_N || 15);
 
 // Polymarket fee
 const TAKER_FEE_RATE  = Number(process.env.TAKER_FEE_RATE || 0.07);
@@ -89,6 +89,7 @@ class BotEngine {
     this.lastSignalEvalAt = 0;
     this.signalStreak = 0;         // consecutive evaluations with same high-conf lean
     this.entryWindow = null;   // first window allowed to enter (set post-init to avoid mid-window start)
+    this.rebuyDone = new Set();  // window starts where the one rebuy was already placed
 
     // Position (one at a time, max)
     this.positions = [];
@@ -98,7 +99,6 @@ class BotEngine {
     this.trades = [];
     this.wins = 0;
     this.losses = 0;
-    this.consecutiveLosses = 0;
     this.realizedPnl = 0;
     this.peakEquity = START_BANKROLL;
     this.maxDrawdown = 0;
@@ -454,46 +454,54 @@ class BotEngine {
     const remaining = WINDOW_SECONDS - elapsed;
     if (remaining <= 0) return;
     if (elapsed < ENTRY_ELAPSED) return;
+    // Rebuy tracking is per-window: drop any stale window keys.
+    for (const k of this.rebuyDone) { if (k !== cs) this.rebuyDone.delete(k); }
 
     const conf = this.signal.confidence;
     const lean = this.signal.lean;
-    if (lean !== 'UP' && lean !== 'DOWN') return;
-
-    // Confirmation gate: only enter once the high-confidence direction has held
-    // for SIGNAL_CONFIRM_N consecutive evaluations (rejects sub-second blips).
-    if (this.signalStreak < SIGNAL_CONFIRM_N) return;
 
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
 
-    // No stop loss and no intra-window flip: at most one trade per window.
-    // If a position is already open this window, never sell or re-enter.
     const alreadyOpen = this.positions.find(p => p.windowStart === cs && p.status === 'open');
-    if (alreadyOpen) return;
 
-    if (lean === 'UP' && conf >= HIGH_CONF) {
-      this.tryBuy(market, 'UP', cs, market.windowEnd);
-    } else if (lean === 'DOWN' && conf >= HIGH_CONF) {
-      this.tryBuy(market, 'DOWN', cs, market.windowEnd);
+    // Initial entry: flat $100 bet, only when confidence is exactly 100% (and
+    // no position is open yet this window). The confirmation gate rejects
+    // sub-second 100% blips — the lean must hold for SIGNAL_CONFIRM_N evals.
+    if (!alreadyOpen && (lean === 'UP' || lean === 'DOWN') && conf >= HIGH_CONF && this.signalStreak >= SIGNAL_CONFIRM_N) {
+      this.tryBuy(market, lean, cs, market.windowEnd, 'INITIAL');
+      return;
+    }
+
+    // One rebuy per window: if the held side's ask drops below REBUY_PRICE,
+    // buy another $100 worth of the same side. Purely price-based — it does not
+    // depend on the current signal.
+    if (alreadyOpen && !this.rebuyDone.has(cs)) {
+      const held = alreadyOpen;
+      const token = held.outcome === 'UP' ? market.up : market.down;
+      if (token.ask != null && token.ask < REBUY_PRICE) {
+        this.tryBuy(market, held.outcome, cs, market.windowEnd, 'REBUY');
+      }
     }
   }
 
-  nextShares() {
-    // 1.5x martingale: base shares multiplied by factor per consecutive loss.
-    return Math.round(FLAT_SHARES * Math.pow(MARTINGALE_FACTOR, this.consecutiveLosses));
+  sharesFor(price) {
+    // $100 flat bet regardless of wins/losses: shares = round(dollar / price).
+    if (!Number.isFinite(price) || price <= 0) return 0;
+    return Math.round(DOLLAR_AMOUNT / price);
   }
 
-  tryBuy(market, outcome, windowStart, windowEnd) {
+  tryBuy(market, outcome, windowStart, windowEnd, kind) {
     const token = outcome === 'UP' ? market.up : market.down;
     const price = token.ask ?? token.mid ?? token.bid;
     if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
-    this.executeBuy(market, outcome, price, this.nextShares(), windowStart, windowEnd);
+    this.executeBuy(market, outcome, price, this.sharesFor(price), windowStart, windowEnd, kind);
   }
 
-  executeBuy(market, outcome, price, shares, windowStart, windowEnd) {
-    // Hard guard: only one trade per window.
-    const windowTraded = this.positions.some(p => p.windowStart === windowStart && (p.status === 'open' || p.exitReason === 'RESOLUTION'));
-    if (windowTraded) return;
+  executeBuy(market, outcome, price, shares, windowStart, windowEnd, kind) {
+    // Initial entry is gated by the no-open-position check in evaluateEntry.
+    // Rebuy is gated by the one-rebuy-per-window check.
+    if (shares <= 0) return;
     const cost = round2(shares * price);
     const fee = takerFee(shares, price);
     const totalCost = round2(cost + fee);
@@ -509,11 +517,12 @@ class BotEngine {
       windowStart, windowEnd,
       signalConf: conf, signalScore: this.signal.score,
       signalIndicators: { ...this.signal.indicators }, betLabel: outcome,
-      exitReason: null, exitPrice: null, closedAt: null, pnl: null,
+      exitReason: null, exitPrice: null, closedAt: null, pnl: null, kind: kind || 'INITIAL',
     };
+    if (kind === 'REBUY' && !this.rebuyDone.has(windowStart)) this.rebuyDone.add(windowStart);
     this.positions.push(pos);
-    this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome, shares, price, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel: outcome });
-    this.log(`⚡ BUY ${outcome} ${shares}sh @${price.toFixed(3)} · conf ${(conf * 100).toFixed(0)}% · cost $${cost.toFixed(2)}`);
+    this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome, shares, price, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel: outcome, kind: kind || 'INITIAL' });
+    this.log(`⚡ ${kind || 'INITIAL'} BUY ${outcome} ${shares}sh @${price.toFixed(3)} · conf ${(conf * 100).toFixed(0)}% · cost $${cost.toFixed(2)}`);
     this.recordEquity();
   }
 
@@ -540,8 +549,8 @@ class BotEngine {
     p.closedAt = Date.now(); p.pnl = pnl; p.won = pnl >= 0;
     this.bankroll = round2(this.bankroll + netProceeds);
     this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (pnl >= 0) { this.wins++; this.consecutiveLosses = 0; }
-    else { this.losses++; this.consecutiveLosses++; }
+    if (pnl >= 0) { this.wins++; }
+    else { this.losses++; }
     this.log(`💰 EXIT ${reason} ${p.betLabel||''} ${p.outcome} ${p.shares}sh @${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.resolvedPositions.unshift({ ...p });
     this.resolvedPositions = this.resolvedPositions.slice(0, 50);
@@ -590,8 +599,8 @@ class BotEngine {
 
       this.bankroll = round2(this.bankroll + netPayout);
       this.realizedPnl = round2(this.realizedPnl + pnl);
-      if (won) { this.wins++; this.consecutiveLosses = 0; }
-      else { this.losses++; this.consecutiveLosses++; }
+      if (won) { this.wins++; }
+      else { this.losses++; }
 
       this.log(`🏁 RESOLUTION ${winner} (up=${finalUp.toFixed(3)} down=${finalDown.toFixed(3)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
       this.resolvedPositions.unshift({ ...p });
@@ -643,6 +652,16 @@ class BotEngine {
       }));
   }
 
+  _refPrice() {
+    const cs = windowStartFor(Date.now());
+    const m = [...this.markets.values()].find(x => x.windowStart === cs);
+    if (m) {
+      const p = m.up?.ask ?? m.down?.ask ?? m.up?.mid ?? m.down?.mid;
+      if (Number.isFinite(p) && p > 0 && p < 1) return p;
+    }
+    return 0.5;
+  }
+
   buildState() {
     const openPos = this.positions.filter(p => p.status === 'open');
     const openMarkValue = openPos.reduce((s, p) => s + p.shares * (p.markPrice ?? p.entryPrice), 0);
@@ -657,8 +676,9 @@ class BotEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
       signal: this.signal,
-      consecutiveLosses: this.consecutiveLosses,
-      nextShares: this.nextShares(),
+      betValue: this.sharesFor(this._refPrice()),
+      rebuyPrice: REBUY_PRICE,
+      rebuyDone: [...this.rebuyDone],
       positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
         betLabel: p.betLabel, markPrice: p.markPrice,
         unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
@@ -669,7 +689,7 @@ class BotEngine {
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatShares: FLAT_SHARES, sizingFactor: FLAT_SHARES, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
+      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, dollarAmount: DOLLAR_AMOUNT, sizingDollars: DOLLAR_AMOUNT, rebuyPrice: REBUY_PRICE, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
@@ -704,8 +724,8 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 ConfidenceBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · ${FLAT_SHARES}sh · after ${ENTRY_ELAPSED}s wait · hold to resolution`);
+    this.log(`🚀 ConfidenceBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · $${DOLLAR_AMOUNT} flat · after ${ENTRY_ELAPSED}s wait · one rebuy below $${REBUY_PRICE.toFixed(2)} · hold to resolution`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_SHARES, MARTINGALE_FACTOR, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, DOLLAR_AMOUNT, REBUY_PRICE, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };

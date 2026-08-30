@@ -7,19 +7,20 @@ BTC-led 5-minute Polymarket paper bot driven by a 7-indicator Binance signal com
 - Compute a composite score from 7 indicators on Binance 1m candles + tick data:
   Window Delta, Micro Momentum, Acceleration, EMA 9/21, RSI 14, Volume Surge, Tick Trend.
 - Lean = UP (score > 0) or DOWN (score < 0). Confidence = |score| / 7.0.
-- Wait 10 seconds after the window opens, then:
-  - lean UP and confidence >= 70% → buy UP 1000 shares
-  - lean DOWN and confidence >= 70% → buy DOWN 1000 shares
-- **Confirmation gate**: the lean must hold at confidence >= 70% for
-  `SIGNAL_CONFIRM_N` consecutive signal evaluations (default 15 ≈ 3s at the
-  200ms cadence) before an entry fires. This rejects transient/blip signal
-  readings that would otherwise flip the direction against the true trend.
-- Single trade per window, no stop loss, hold to resolution (Binance open vs close).
-- After a loss, the next window's shares are 1.5x per consecutive loss (1000 → 1500 → 2250 → ...), reset on win.
+- Wait 10 seconds after the window opens, then buy the signal side **only when
+  confidence is exactly 100%** (`HIGH_CONF = 1.0`).
+- **Confirmation gate**: the 100% lean must hold for `SIGNAL_CONFIRM_N`
+  consecutive signal evaluations (default 15 ≈ 3s at the 200ms cadence) before
+  an entry fires, rejecting sub-second blips.
+- **Flat $100 bet**: shares = `round(DOLLAR_AMOUNT / price)` — never martingales.
+- **One rebuy per window**: after a position is open, if the held side's ask
+  drops below `REBUY_PRICE` (0.40) intra-window, buy another $100 of the same
+  side. Purely price-based; at most one rebuy per window.
+- No stop loss; hold to resolution (CLOB final-2s winner).
 
 ## Sizing
-- Base shares: 1000 (`FLAT_SHARES`)
-- Martingale: `1.5^lossStreak` (`MARTINGALE_FACTOR`)
+- Base bet: $100 (`DOLLAR_AMOUNT`) per leg, flat regardless of wins/losses.
+- Rebuy trigger: held side ask < 0.40 (`REBUY_PRICE`).
 
 ## Pricing
 All market prices come from batched CLOB `/books` snapshots. Signal data comes from Binance public REST (candles + tick price).
