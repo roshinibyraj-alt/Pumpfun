@@ -25,12 +25,21 @@ async function setup() {
   const engine = await setup();
   const BUDGET = config.FLAT_BUDGET; // 500
 
-  // ── Flat $ budget sizing (no martingale) ─────────────────
-  assert.equal(engine.sharesFor(0.50), Math.floor(BUDGET / 0.50), 'flat $budget / price');
-  assert.equal(engine.sharesFor(0.70), Math.floor(BUDGET / 0.70), 'flat $budget / price');
-  // no martingale — sizing identical regardless of prior losses
-  engine.losses = 5;
-  assert.equal(engine.sharesFor(0.70), Math.floor(BUDGET / 0.70), 'still flat $ after losses');
+  // ── Dynamic base sizing: $500, +$100 per loss, -$100 per win ─
+  assert.equal(engine.flatBudget, 500, 'base starts at $500');
+  assert.equal(engine.sharesFor(0.50), Math.floor(500 / 0.50), 'budget $500 / price');
+  assert.equal(engine.sharesFor(0.70), Math.floor(500 / 0.70), 'budget $500 / price');
+  // losses add $100 each
+  engine.adjustBudget(false); assert.equal(engine.flatBudget, 600, '+$100 after loss');
+  engine.adjustBudget(false); assert.equal(engine.flatBudget, 700, '+$100 after 2nd loss');
+  engine.adjustBudget(false); assert.equal(engine.flatBudget, 800, '+$100 after 3rd loss');
+  engine.flatBudget = 1400; engine.adjustBudget(false); assert.equal(engine.flatBudget, 1500, 'cap at $1500');
+  // wins deduct $100 each
+  engine.adjustBudget(true);  assert.equal(engine.flatBudget, 1400, '-$100 after win');
+  engine.adjustBudget(true);  assert.equal(engine.flatBudget, 1300, '-$100 after 2 wins');
+  // floor at $500: start from 500, win again stays 500
+  engine.flatBudget = 500; engine.adjustBudget(true); assert.equal(engine.flatBudget, 500, 'floor at $500');
+  engine.flatBudget = BUDGET;
 
   // ── Entry: confidence >= 70% → buy signal side $500 worth ─
   const cs = Math.floor((Date.now() - 30000) / 1000 / 300) * 300; // ~30s in

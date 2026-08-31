@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>FlatlineBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · FLAT $500/TRADE · 1 TRADE/WINDOW · NO SL · HOLD TO RESOLUTION</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>FlatlineBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · DYNAMIC $500–$1,500/TRADE · 1 TRADE/WINDOW · NO SL · HOLD TO RESOLUTION</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -184,7 +184,7 @@ const tp=d.totalPnl||0;const te=$('totalPnl');te.textContent=money(tp);te.classN
 const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.className='value '+tone(rp);
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
 $('maxDrawdown').textContent=cash(d.maxDrawdown);
-const ns=$('nextShares');if(ns){const b=d.config?.flatBudget??500;ns.textContent='$'+num(b)+' → '+num(Math.max(1,Math.floor(b/0.70)))+' SH @0.70';}
+const ns=$('nextShares');if(ns){const b=d.flatBudget??d.config?.flatBudget??500;const adds=d.budgetAdditions||0;const sh=num(Math.max(1,Math.floor(b/0.70)));ns.textContent='$'+num(b)+' → '+sh+' SH @0.70';const ls=$('lossStreak');if(ls){ls.textContent=adds+' additions · ±$100 per win/loss';}}
 const ls=$('lossStreak');if(ls){ls.textContent='HOLD TO RESOLUTION · NO SL';}
 polls++;const wp=$('waitPill');if(wp){if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Window.now()/1000)));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);

@@ -96,6 +96,7 @@ class BotEngine {
     this.realizedPnl = 0;
     this.peakEquity = START_BANKROLL;
     this.maxDrawdown = 0;
+    this.flatBudget = FLAT_BUDGET;
     this.logs = [];
     this.pollCount = 0;
 
@@ -455,9 +456,18 @@ class BotEngine {
     }
   }
 
+
+  // Dynamic base sizing: +$100 on loss, -$100 on win, floor $500, max $1500.
+  adjustBudget(won) {
+    if (won) {
+      this.flatBudget = Math.max(500, this.flatBudget - 100);
+    } else {
+      this.flatBudget = Math.min(1500, this.flatBudget + 100);
+    }
+  }
   // Shares for a given entry price so the spend is a flat $budget.
   sharesFor(price) {
-    return Math.max(1, Math.floor(FLAT_BUDGET / price));
+    return Math.max(1, Math.floor(this.flatBudget / price));
   }
 
   tryBuy(market, outcome, windowStart, windowEnd) {
@@ -521,8 +531,8 @@ class BotEngine {
     p.closedAt = Date.now(); p.pnl = pnl; p.won = pnl >= 0;
     this.bankroll = round2(this.bankroll + netProceeds);
     this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (pnl >= 0) { this.wins++; }
-    else { this.losses++; }
+    if (pnl >= 0) { this.wins++; this.adjustBudget(true); }
+    else { this.losses++; this.adjustBudget(false); }
     this.log(`💰 EXIT ${reason} ${p.betLabel||''} ${p.outcome} ${p.shares}sh @${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.resolvedPositions.unshift({ ...p });
     this.resolvedPositions = this.resolvedPositions.slice(0, 50);
@@ -576,8 +586,8 @@ class BotEngine {
 
       this.bankroll = round2(this.bankroll + netPayout);
       this.realizedPnl = round2(this.realizedPnl + pnl);
-      if (won) { this.wins++; }
-      else { this.losses++; }
+      if (won) { this.wins++; this.adjustBudget(true); }
+      else { this.losses++; this.adjustBudget(false); }
 
       this.log(`🏁 RESOLUTION ${winner} (up=${finalUp.toFixed(3)} down=${finalDown.toFixed(3)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
       this.resolvedPositions.unshift({ ...p });
@@ -643,7 +653,9 @@ class BotEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
       signal: this.signal,
-      nextShares: this.sharesFor(0.70), // representative ~flat $budget / 0.70
+      nextShares: this.sharesFor(0.70),
+      flatBudget: this.flatBudget,
+      budgetAdditions: Math.max(0, Math.round((this.flatBudget - 500) / 100)),
       positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
         betLabel: p.betLabel, markPrice: p.markPrice,
         unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
@@ -654,7 +666,7 @@ class BotEngine {
       trades: this.trades.slice(-80).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-220),
-      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatBudget: FLAT_BUDGET, sizingFactor: FLAT_BUDGET, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
+      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatBudget: this.flatBudget, sizingFactor: this.flatBudget, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
       connected: this.isClobFresh(),
       uptime: Math.floor((now - this.startedAt) / 1000),
       tickCount: this.tickHistory.length,
@@ -689,7 +701,7 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 FlatlineBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · flat $${FLAT_BUDGET}/trade · 1 trade/window · NO stop loss · hold to resolution`);
+    this.log(`🚀 FlatlineBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · base $${this.flatBudget}/trade · ±$100 per win/loss · floor $500 · max $1,500 · hold to resolution`);
   }
 }
 
