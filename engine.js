@@ -11,22 +11,17 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 100);
 const EQUITY_FILE    = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
-const BUY_PRICE  = Number(process.env.BUY_PRICE || 0.01);   // limit buy at this price
-const SELL_PRICE = Number(process.env.SELL_PRICE || 0.02);  // limit sell at this price
-const SHARES     = Number(process.env.SHARES || 100);       // shares per order
-const MAKER_FEE_RATE = Number(process.env.MAKER_FEE_RATE || 0);  // 0 for limit orders
-const MAKER_REBATE   = Number(process.env.MAKER_REBATE || 0.001); // 0.1% rebate per filled order
-const FINAL_WIN_PRICE = Number(process.env.FINAL_WIN_PRICE || 0.90);
-const FINAL_WINDOW_MS = Number(process.env.FINAL_WINDOW_MS || 2000);
+const BUY_PRICE   = Number(process.env.BUY_PRICE || 0.01);   // limit buy price per side
+const SHARES      = Number(process.env.SHARES || 100);       // shares per order
+const MAKER_FEE   = Number(process.env.MAKER_FEE || 0);      // 0 for limit orders
+const MAKER_REBATE = Number(process.env.MAKER_REBATE || 0.001); // 0.1% rebate
 
 const fs = require('fs');
 
-// ── Helpers ─────────────────────────────────────────────────
 function round2(v) { return Math.round(v * 100) / 100; }
 function round5(v) { return Math.round(v * 100000) / 100000; }
 function windowStartFor(ms) { return Math.floor(ms / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(a, s) { return `${a}-updown-5m-${s}`; }
-function makerFee(shares, price) { return round5(shares * MAKER_FEE_RATE * price * (1 - price)); }
 function makerRebate(shares, price) { return round5(shares * MAKER_REBATE * price); }
 function loadEquityFile(f) {
   try { const d = JSON.parse(fs.readFileSync(f, 'utf8')); return Array.isArray(d) ? d : []; } catch (_) { return []; }
@@ -40,7 +35,6 @@ function sampleCurve(c, max = 1500) {
   return out;
 }
 
-// ── Engine ──────────────────────────────────────────────────
 class BotEngine {
   constructor(opts = {}) {
     this.fetchImpl = opts.fetchImpl || fetch;
@@ -48,7 +42,6 @@ class BotEngine {
     this.capital = { value: START_BANKROLL };
     Object.defineProperty(this, 'bankroll', { get: () => this.capital.value, set: v => { this.capital.value = v; } });
 
-    // Market data
     this.markets = new Map();
     this.tokens = new Map();
     this.history = new Map();
@@ -58,11 +51,11 @@ class BotEngine {
     this.lastSuccessfulPollAt = null;
     this.lastPollErrorAt = null;
 
-    // Orders: { id, slug, outcome, type: 'BUY'|'SELL', price, shares, status: 'PENDING'|'FILLED'|'CANCELLED'|'SOLD', createdAt, filledAt, closedAt, fillPrice, sellOrderId }
+    // Orders: one BUY per side per window, hold to resolution
     this.orders = [];
     this.nextOrderId = 1;
+    this.entryWindow = null;   // don't trade mid-window on deploy
 
-    // Tracking
     this.trades = [];
     this.wins = 0;
     this.losses = 0;
@@ -71,12 +64,9 @@ class BotEngine {
     this.maxDrawdown = 0;
     this.logs = [];
     this.pollCount = 0;
-    this.windowsTraded = 0;
 
-    // Equity
     const seeded = (opts.initialEquity && Array.isArray(opts.initialEquity) && opts.initialEquity.length) ? opts.initialEquity.slice() : null;
     this.equityCurve = seeded || [{ t: Date.now(), equity: START_BANKROLL }];
-    this.lastEquitySaveAt = 0;
   }
 
   log(msg) {
@@ -126,10 +116,9 @@ class BotEngine {
       const rec = {
         slug, asset, conditionId: market.conditionId, title: market.question || slug,
         windowStart: start, windowEnd: start + WINDOW_SECONDS,
-        resolved: false, winner: null, tradingClosed: false,
-        finalUpMax: 0, finalDownMax: 0, finalCaptureAt: 0,
-        up: { tokenId: tokenIds[ui], slug, asset, outcome: 'UP', bid: null, ask: null, mid: null, spread: null, updatedAt: null, bookAsks: [], bookBids: [] },
-        down: { tokenId: tokenIds[di], slug, asset, outcome: 'DOWN', bid: null, ask: null, mid: null, spread: null, updatedAt: null, bookAsks: [], bookBids: [] },
+        resolved: false, winner: null, resolvedOutcome: null, tradingClosed: false,
+        up: { tokenId: tokenIds[ui], slug, asset, outcome: 'UP', bid: null, ask: null, mid: null, updatedAt: null, bookAsks: [] },
+        down: { tokenId: tokenIds[di], slug, asset, outcome: 'DOWN', bid: null, ask: null, mid: null, updatedAt: null, bookAsks: [] },
       };
       this.markets.set(slug, rec);
       this.tokens.set(rec.up.tokenId, rec.up);
@@ -150,38 +139,6 @@ class BotEngine {
   }
 
   // ── CLOB Book Polling ─────────────────────────────────────
-  captureFinalPrice(token) {
-    if (token?.mid == null || token.mid <= 0) return;
-    const m = this.markets.get(token.slug);
-    if (!m) return;
-    const nowMs = Date.now();
-    const endMs = m.windowEnd * 1000;
-    if (nowMs < endMs - FINAL_WINDOW_MS) return;
-    if (token.outcome === 'UP') m.finalUpMax = Math.max(m.finalUpMax ?? 0, token.mid);
-    else if (token.outcome === 'DOWN') m.finalDownMax = Math.max(m.finalDownMax ?? 0, token.mid);
-    m.finalCaptureAt = nowMs;
-  }
-
-  applyBook(token, bids, asks) {
-    this.captureFinalPrice(token);
-    const validAsks = asks.filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
-    validAsks.sort((a, b) => a.price - b.price);
-    token.bookAsks = validAsks;
-    const validBids = bids.filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
-    validBids.sort((a, b) => b.price - a.price);
-    token.bookBids = validBids;
-    const bestBid = validBids[0]?.price ?? null;
-    const bestAsk = validAsks[0]?.price ?? null;
-    const cleanBid = Number.isFinite(bestBid) && bestBid > 0 && bestBid <= 1 ? bestBid : null;
-    const cleanAsk = Number.isFinite(bestAsk) && bestAsk > 0 && bestAsk <= 1 ? bestAsk : null;
-    if (cleanBid === token.bid && cleanAsk === token.ask) return;
-    token.bid = cleanBid; token.ask = cleanAsk;
-    token.spread = cleanBid != null && cleanAsk != null ? round5(cleanAsk - cleanBid) : null;
-    token.mid = cleanBid != null && cleanAsk != null ? round5((cleanBid + cleanAsk) / 2) : (cleanAsk ?? cleanBid);
-    token.updatedAt = Date.now();
-    this.captureFinalPrice(token);
-  }
-
   async pollClobBooks() {
     if (this.pollRunning) return;
     const now = Date.now(), cs = windowStartFor(now);
@@ -199,183 +156,164 @@ class BotEngine {
     } finally { this.pollRunning = false; }
   }
 
+  applyBook(token, bids, asks) {
+    const validAsks = asks.filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
+    validAsks.sort((a, b) => a.price - b.price);
+    token.bookAsks = validAsks;
+    const bestBid = (bids.filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price) })).sort((a,b) => b.price - a.price)[0]?.price) ?? null;
+    const bestAsk = validAsks[0]?.price ?? null;
+    const cleanBid = Number.isFinite(bestBid) && bestBid > 0 && bestBid <= 1 ? bestBid : null;
+    const cleanAsk = Number.isFinite(bestAsk) && bestAsk > 0 && bestAsk <= 1 ? bestAsk : null;
+    if (cleanBid === token.bid && cleanAsk === token.ask) return;
+    token.bid = cleanBid; token.ask = cleanAsk;
+    token.mid = cleanBid != null && cleanAsk != null ? round5((cleanBid + cleanAsk) / 2) : (cleanAsk ?? cleanBid);
+    token.updatedAt = Date.now();
+  }
+
   // ── Order Management ──────────────────────────────────────
+  // Place exactly ONE buy on each side when window opens (guard against duplicates)
   placeBuyOrders(market) {
     for (const side of ['up', 'down']) {
       const outcome = side === 'up' ? 'UP' : 'DOWN';
-      // Don't duplicate if we already have a pending buy this window
-      const existing = this.orders.find(o => o.slug === market.slug && o.outcome === outcome && o.type === 'BUY' && o.status === 'PENDING');
+      // Only place if NO buy order exists for this side/window in ANY status
+      const existing = this.orders.find(o => o.slug === market.slug && o.outcome === outcome && o.type === 'BUY');
       if (existing) continue;
 
       const order = {
         id: this.nextOrderId++,
         slug: market.slug,
-        outcome,
-        type: 'BUY',
-        price: BUY_PRICE,
-        shares: SHARES,
+        outcome, type: 'BUY',
+        price: BUY_PRICE, shares: SHARES,
         status: 'PENDING',
-        createdAt: Date.now(),
-        filledAt: null,
-        fillPrice: null,
-        sellOrderId: null,
+        createdAt: Date.now(), filledAt: null, fillPrice: null,
+        cost: null, fee: 0, rebate: 0, totalCost: null,
       };
       this.orders.push(order);
-      this.log(`📋 LIMIT BUY ${outcome} ${SHARES}sh @ $${BUY_PRICE.toFixed(2)} — order #${order.id}`);
+      this.log(`📋 LIMIT BUY ${outcome} ${SHARES}sh @ $${BUY_PRICE.toFixed(2)} · ord #${order.id}`);
     }
   }
 
-  checkOrderFills(market) {
-    const pendingBuys = this.orders.filter(o => o.slug === market.slug && o.type === 'BUY' && o.status === 'PENDING');
-    const pendingSells = this.orders.filter(o => o.slug === market.slug && o.type === 'SELL' && o.status === 'PENDING');
-
-    // Check buy fills: a buy at 0.01 fills when ask drops to 0.01 (someone sells to us)
-    for (const order of pendingBuys) {
+  checkBuyFill(market) {
+    const cs = market.windowStart;
+    const buys = this.orders.filter(o => o.slug === market.slug && o.type === 'BUY' && o.status === 'PENDING');
+    for (const order of buys) {
       const token = order.outcome === 'UP' ? market.up : market.down;
+      if (!token) return;
       const ask = token.ask ?? token.mid;
       if (ask != null && ask <= order.price + 0.001) {
-        this.fillBuyOrder(order, order.price, market);
-      }
-    }
-
-    // Check sell fills: a sell at 0.02 fills when bid rises to 0.02 (someone buys from us)
-    for (const order of pendingSells) {
-      const token = order.outcome === 'UP' ? market.up : market.down;
-      const bid = token.bid ?? token.mid;
-      if (bid != null && bid >= order.price - 0.001) {
-        this.fillSellOrder(order, order.price, market);
+        this.fillBuy(order, order.price);
       }
     }
   }
 
-  fillBuyOrder(order, price, market) {
+  fillBuy(order, price) {
     const cost = round2(order.shares * price);
-    const fee = makerFee(order.shares, price);
     const rebate = makerRebate(order.shares, price);
-    const totalCost = round2(cost + fee - rebate);
-    if (totalCost > this.bankroll) { this.log(`⚠️ SKIP BUY #${order.id} — need $${totalCost.toFixed(2)}, have $${this.bankroll.toFixed(2)}`); return; }
-
+    const totalCost = round2(cost - rebate);
+    if (totalCost > this.bankroll) { this.log(`⚠️ SKIP BUY #${order.id} ${order.outcome} — need $${totalCost.toFixed(2)}, have $${this.bankroll.toFixed(2)}`); return; }
     this.bankroll = round2(this.bankroll - totalCost);
     order.status = 'FILLED';
     order.filledAt = Date.now();
     order.fillPrice = price;
     order.cost = cost;
-    order.fee = fee;
     order.rebate = rebate;
     order.totalCost = totalCost;
-
-    this.log(`✅ BUY FILLED #${order.id} ${order.outcome} ${order.shares}sh @ $${price.toFixed(2)} · cost $${cost.toFixed(2)} · rebate $${rebate.toFixed(2)}`);
-
-    // Immediately place limit sell at SELL_PRICE
-    const sellOrder = {
-      id: this.nextOrderId++,
-      slug: order.slug,
-      outcome: order.outcome,
-      type: 'SELL',
-      price: SELL_PRICE,
-      shares: order.shares,
-      status: 'PENDING',
-      createdAt: Date.now(),
-      filledAt: null,
-      fillPrice: null,
-      buyOrderId: order.id,
-    };
-    order.sellOrderId = sellOrder.id;
-    this.orders.push(sellOrder);
-    this.log(`📋 LIMIT SELL ${order.outcome} ${order.shares}sh @ $${SELL_PRICE.toFixed(2)} — order #${sellOrder.id} (after buy #${order.id} filled)`);
+    this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome: order.outcome, shares: order.shares, price, cost: totalCost, rebate, orderId: order.id });
+    this.log(`✅ BUY FILLED ${order.outcome} ${order.shares}sh @ $${price.toFixed(2)} · cost $${cost.toFixed(2)} · rebate $${rebate.toFixed(2)}`);
     this.recordEquity();
   }
 
-  fillSellOrder(order, price, market) {
-    const proceeds = round2(order.shares * price);
-    const fee = makerFee(order.shares, price);
-    const rebate = makerRebate(order.shares, price);
-    const netProceeds = round2(proceeds - fee + rebate);
-
-    order.status = 'FILLED';
-    order.filledAt = Date.now();
-    order.fillPrice = price;
-    order.proceeds = proceeds;
-    order.fee = fee;
-    order.rebate = rebate;
-    order.netProceeds = netProceeds;
-
-    // Find the matching buy order
-    const buyOrder = this.orders.find(o => o.id === order.buyOrderId);
-    const buyCost = buyOrder ? buyOrder.totalCost : round2(order.shares * BUY_PRICE);
-    const pnl = round2(netProceeds - buyCost);
-
-    this.bankroll = round2(this.bankroll + netProceeds);
-    this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (pnl >= 0) this.wins++; else this.losses++;
-
-    const tag = '💰 SELL FILLED';
-    this.log(`${tag} #${order.id} ${order.outcome} ${order.shares}sh @ $${price.toFixed(2)} · revenue $${proceeds.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-    this.trades.push({ timestamp: Date.now(), type: 'SELL', outcome: order.outcome, shares: order.shares, price, cost: buyCost, fee, rebate, pnl, buyOrderId: order.buyOrderId });
-    this.recordEquity();
-  }
-
-  cancelUnfilledOrders(market) {
+  cancelUnfilled(market) {
     const pending = this.orders.filter(o => o.slug === market.slug && o.status === 'PENDING');
     for (const order of pending) {
       order.status = 'CANCELLED';
       order.closedAt = Date.now();
-      this.log(`❌ CANCELLED #${order.id} ${order.type} ${order.outcome} ${order.shares}sh @ $${order.price.toFixed(2)}`);
+      this.log(`❌ CANCELLED #${order.id} ${order.type} ${order.outcome} @ $${order.price.toFixed(2)}`);
     }
   }
 
-  // ── Resolution ────────────────────────────────────────────
-  resolveWindow(market) {
-    const finalUp  = market.finalUpMax  ?? 0;
-    const finalDown = market.finalDownMax ?? 0;
-    let winner;
-    if (finalUp > 0 && finalUp > finalDown) winner = 'UP';
-    else if (finalDown > 0 && finalDown > finalUp) winner = 'DOWN';
-    else if (finalUp >= FINAL_WIN_PRICE) winner = 'UP';
-    else if (finalDown >= FINAL_WIN_PRICE) winner = 'DOWN';
-    else winner = 'UP';
+  // ── Polymarket Resolution ─────────────────────────────────
+  // Load the actual Polymarket resolution outcome from Gamma API.
+  async fetchResolution(market) {
+    try {
+      const rows = await this.getJSON(`${GAMMA_API}/markets?slug=${encodeURIComponent(market.slug)}`);
+      const m = Array.isArray(rows) ? rows[0] : null;
+      if (!m) return null;
+      const outcome = m.outcomePrices ? m.outcomePrices : null;
+      if (outcome && Array.isArray(outcome)) {
+        const outcomes = typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : m.outcomes || [];
+        const upIdx = outcomes.findIndex(o => String(o).toLowerCase() === 'up');
+        const downIdx = outcomes.findIndex(o => String(o).toLowerCase() === 'down');
+        const upP = Number(outcome[upIdx]);
+        const downP = Number(outcome[downIdx]);
+        if (upP === 1) return 'UP';
+        if (downP === 1) return 'DOWN';
+      }
+      const winnerField = m.winner || m.resolvedBy;
+      return null;
+    } catch (e) {
+      this.log(`⚠️ Resolution fetch: ${e.message}`);
+      return null;
+    }
+  }
 
+  // Resolve filled positions using Polymarket's actual outcome; fallback to CLOB final price (last resort, never used when resolution available).
+  async resolveWindow(market, nowS) {
+    if (nowS < market.windowEnd) return false;
+    const finalUp = market.up.mid ?? 0;
+    const finalDown = market.down.mid ?? 0;
+    const resolved = await this.fetchResolution(market);
+    let winner = resolved;
+    if (!winner) {
+      // Last-resort: derive from final CLOB prices (only if Polymarket hasn't resolved yet)
+      if (finalUp > finalDown) winner = 'UP';
+      else if (finalDown > finalUp) winner = 'DOWN';
+      else winner = 'UP';
+    }
     market.resolved = true;
     market.winner = winner;
-    this.log(`🏁 RESOLUTION ${winner} (up=${finalUp.toFixed(3)} down=${finalDown.toFixed(3)})`);
+    this.log(`🏁 RESOLUTION ${winner} · ${resolved ? '(Polymarket confirmed)' : '(CLOB fallback)'}`);
 
-    // Resolve unfilled buy orders that became positions via resolution
-    const filledBuys = this.orders.filter(o => o.slug === market.slug && o.type === 'BUY' && o.status === 'FILLED' && o.sellOrderId);
-    for (const buyOrder of filledBuys) {
-      const sellOrder = this.orders.find(o => o.id === buyOrder.sellOrderId);
-      if (sellOrder && sellOrder.status === 'FILLED') continue; // already resolved via sell
-      // Buy was filled but sell wasn't — resolve by resolution
-      if (sellOrder) { sellOrder.status = 'CANCELLED'; sellOrder.closedAt = Date.now(); }
-      const won = buyOrder.outcome === winner;
-      const payout = won ? buyOrder.shares : 0;
-      const netPayout = round2(payout);
-      const pnl = round2(netPayout - buyOrder.totalCost);
+    // Cancel any unfilled orders
+    this.cancelUnfilled(market);
 
-      this.bankroll = round2(this.bankroll + netPayout);
+    // Resolve all filled buys
+    const filledBuys = this.orders.filter(o => o.slug === market.slug && o.type === 'BUY' && o.status === 'FILLED');
+    for (const order of filledBuys) {
+      const won = order.outcome === winner;
+      const payout = won ? order.shares : 0;
+      const pnl = round2(payout - order.totalCost);
+      this.bankroll = round2(this.bankroll + payout);
       this.realizedPnl = round2(this.realizedPnl + pnl);
       if (pnl >= 0) this.wins++; else this.losses++;
-
-      this.log(`🏁 RESOLVED #${buyOrder.id} ${buyOrder.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-      this.trades.push({ timestamp: Date.now(), type: 'RESOLVED', outcome: buyOrder.outcome, shares: buyOrder.shares, price: won ? 1 : 0, cost: buyOrder.totalCost, pnl, buyOrderId: buyOrder.id });
+      order.status = 'RESOLVED';
+      order.resolvedAt = Date.now();
+      order.pnl = pnl;
+      this.log(`🏁 ${order.outcome} ${won ? 'WIN' : 'LOSS'} #${order.id} @ $${order.fillPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+      this.trades.push({ timestamp: Date.now(), type: 'RESOLVED', outcome: order.outcome, shares: order.shares, price: won ? 1 : 0, cost: order.totalCost, pnl, orderId: order.id, winner });
     }
+    this.recordEquity();
+    return true;
   }
 
   // ── Main Loop ─────────────────────────────────────────────
   evaluate() {
     const now = Date.now();
     const cs = windowStartFor(now);
-    const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
-    if (!market) return;
-
+    const market = this.markets.get(slugFor('btc', cs));
+    if (this.entryWindow != null && cs < this.entryWindow) return;
+    if (!market || market.resolved || market.tradingClosed) return;
     const elapsed = Math.floor(now / 1000) - cs;
+    if (elapsed < 0 || elapsed >= WINDOW_SECONDS) return;
 
-    // Place buy orders once window starts (immediately)
-    if (elapsed >= 0 && elapsed < 5) {
+    // Place buy orders once (immediately at window open)
+    if (this.lastOrderWindow !== cs) {
+      this.lastOrderWindow = cs;
       this.placeBuyOrders(market);
     }
 
-    // Check fills on every tick
-    this.checkOrderFills(market);
+    // Check fills each tick
+    this.checkBuyFill(market);
   }
 
   // ── State ─────────────────────────────────────────────────
@@ -388,42 +326,36 @@ class BotEngine {
         resolved: m.resolved, winner: m.winner,
         elapsed: Math.max(0, Math.floor(Date.now() / 1000) - m.windowStart),
         remaining: Math.max(0, m.windowEnd - Math.floor(Date.now() / 1000)),
-        up: { bid: m.up.bid, ask: m.up.ask, mid: m.up.mid, spread: m.up.spread },
-        down: { bid: m.down.bid, ask: m.down.ask, mid: m.down.mid, spread: m.down.spread },
+        up: { bid: m.up.bid, ask: m.up.ask, mid: m.up.mid, spread: m.up.bid != null && m.up.ask != null ? round5(m.up.ask - m.up.bid) : null },
+        down: { bid: m.down.bid, ask: m.down.ask, mid: m.down.mid, spread: m.down.bid != null && m.down.ask != null ? round5(m.down.ask - m.down.bid) : null },
       }));
   }
 
   buildState() {
     const now = Date.now();
     const cs = windowStartFor(now);
-    const activeOrders = this.orders.filter(o => o.status === 'PENDING');
-    const filledOrders = this.orders.filter(o => o.status === 'FILLED');
     return {
       bankroll: this.bankroll,
       realizedPnl: this.realizedPnl,
       totalPnl: round2(this.bankroll - START_BANKROLL),
-      wins: this.wins,
-      losses: this.losses,
+      wins: this.wins, losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
-      orders: { pending: activeOrders.length, filled: filledOrders.length },
-      activeOrders: activeOrders.map(o => ({
-        id: o.id, outcome: o.outcome, type: o.type, price: o.price, shares: o.shares,
-        createdAt: o.createdAt, slug: o.slug,
-      })),
-      filledOrders: filledOrders.slice(-20).reverse().map(o => ({
-        id: o.id, outcome: o.outcome, type: o.type, price: o.price, shares: o.shares,
-        fillPrice: o.fillPrice, createdAt: o.createdAt, filledAt: o.filledAt,
-        cost: o.cost, proceeds: o.proceeds, pnl: o.pnl,
-      })),
+      orders: this.orders.slice(-30).reverse(),
+      activeOrders: this.orders.filter(o => o.status === 'PENDING').map(o => ({ id: o.id, outcome: o.outcome, type: o.type, price: o.price, shares: o.shares, createdAt: o.createdAt, slug: o.slug })),
+      pendingCount: this.orders.filter(o => o.status === 'PENDING').length,
+      filledCount: this.orders.filter(o => o.status === 'FILLED').length,
+      resolvedCount: this.orders.filter(o => o.status === 'RESOLVED').length,
       markets: this.publicMarkets(),
       trades: this.trades.slice(-50).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-200),
-      config: { buyPrice: BUY_PRICE, sellPrice: SELL_PRICE, shares: SHARES, makerFeeRate: MAKER_FEE_RATE, makerRebate: MAKER_REBATE, startBankroll: START_BANKROLL },
+      config: { buyPrice: BUY_PRICE, shares: SHARES, makerRebate: MAKER_REBATE, startBankroll: START_BANKROLL },
       connected: this.pollCount > 0,
       uptime: Math.floor((now - this.startedAt) / 1000),
       pollCount: this.pollCount,
+      entryWindow: this.entryWindow,
+      waitingForWindow: this.entryWindow != null && windowStartFor(now) < this.entryWindow,
     };
   }
 
@@ -437,31 +369,22 @@ class BotEngine {
     if (!last || now - last.t > 2000) this.equityCurve.push({ t: now, equity });
   }
 
-  // ── Init ──────────────────────────────────────────────────
   async init() {
     const start = windowStartFor(Date.now());
+    // Begin trading at next fresh window to avoid mid-window deploy
+    this.entryWindow = start + WINDOW_SECONDS;
+    this.lastOrderWindow = null;
+    this.log(`⏳ Started mid-window ${start} — will place orders at next window ${this.entryWindow}`);
     await Promise.all([this.discoverMarket('btc', start), this.discoverMarket('btc', start + WINDOW_SECONDS)]);
 
-    // CLOB polling
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
-    // Order evaluation (fast — check fills on every tick)
     setInterval(() => this.evaluate(), 100);
-    // Resolution check
-    setInterval(() => {
-      const now = Date.now(), cs = windowStartFor(now);
-      const market = this.markets.get(slugFor('btc', cs));
-      if (market && !market.resolved && now / 1000 >= market.windowEnd) {
-        this.cancelUnfilledOrders(market);
-        this.resolveWindow(market);
-      }
-    }, 250);
-    // Discovery retry
-    setInterval(() => this.retryDiscovery().catch(() => {}), 1500);
-    // Equity snapshot
+    setInterval(() => { const now = Date.now(), cs = windowStartFor(now); const m = this.markets.get(slugFor('btc', cs)); if (m && !m.resolved && now / 1000 >= m.windowEnd) this.resolveWindow(m, now / 1000).catch(() => {}); }, 250);
+    setInterval(() => this.retryDiscovery().catch(() => {}), 2000);
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 LimitBot started · BUY @ $${BUY_PRICE.toFixed(2)} · SELL @ $${SELL_PRICE.toFixed(2)} · ${SHARES}sh · maker fee ${(MAKER_FEE_RATE*100).toFixed(1)}% · rebate ${(MAKER_REBATE*100).toFixed(2)}%`);
+    this.log(`🚀 LimitBot started · BUY both @ $${BUY_PRICE.toFixed(2)} · ${SHARES}sh · hold to resolution · maker rebate ${(MAKER_REBATE*100).toFixed(2)}%`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, BUY_PRICE, SELL_PRICE, SHARES, MAKER_FEE_RATE, MAKER_REBATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, BUY_PRICE, SHARES, MAKER_FEE, MAKER_REBATE, WINDOW_SECONDS } };
