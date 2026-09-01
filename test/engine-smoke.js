@@ -71,6 +71,37 @@ async function setup() {
   assert.equal(buys.length, 1, 'at most one trade per window');
   engine.pendingSignal = null;
 
+
+  // ── Flip entry: signal flips from UP to DOWN → buy immediately at any price ─
+  const fStart = Math.floor((Date.now() - 60000) / 1000 / 300) * 300; // a past window
+  const fSlug = `btc-updown-5m-${fStart}`;
+  engine.markets.set(fSlug, {
+    slug: fSlug, asset: 'btc', conditionId: '0xcf', windowStart: fStart, windowEnd: fStart + 300,
+    resolved: false, tradingClosed: false,
+    up: { tokenId: 'up-id', ask: 0.80, bid: 0.75, mid: 0.77 },
+    down: { tokenId: 'down-id', ask: 0.40, bid: 0.35, mid: 0.37 },
+  });
+  engine.entryWindow = null;
+  engine.positions = []; // clear old positions
+  engine.pendingSignal = null;
+
+  // Signal is UP ≥65% → sets pending for pullback
+  engine.lastSignalSide = null;
+  engine.signal = { score: 5, confidence: 0.70, lean: 'UP', updatedAt: Date.now(), indicators: {} };
+  engine.evaluateEntry();
+  assert.ok(engine.pendingSignal, 'flip test: pending set for UP');
+  assert.equal(engine.pendingSignal.side, 'UP');
+  assert.equal(engine.positions.find(p => p.windowStart === fStart && p.status === 'open'), undefined, 'flip test: no buy yet');
+
+  // Signal flips to DOWN ≥65% → should buy DOWN immediately at any price
+  engine.signal = { score: -5, confidence: 0.75, lean: 'DOWN', updatedAt: Date.now(), indicators: {} };
+  engine.evaluateEntry();
+  const flipPos = engine.positions.find(p => p.windowStart === fStart && p.status === 'open');
+  assert.ok(flipPos, 'flip test: position opened on signal flip');
+  assert.equal(flipPos.outcome, 'DOWN', 'flip test: bought DOWN side');
+  assert.equal(engine.pendingSignal, null, 'flip test: pending cleared');
+  assert.equal(engine.positions.filter(p => p.windowStart === fStart).length, 1, 'flip test: only one trade per window');
+
   // ── No stop loss: position holds even if price crashes ───
   const slStart = Math.floor((Date.now() - 300000) / 1000 / 300) * 300;
   await engine.discoverMarket('btc', slStart);
@@ -99,6 +130,6 @@ async function setup() {
   assert.equal(resolved.won, true, 'UP won: final UP price 0.92 >= 0.90');
   assert.equal(resolved.exitReason, 'RESOLUTION', 'resolved — not stopped out');
 
-  console.log('✅ Pumpfun smoke: flat $500 + pullback entry + conf>=65% + 1 trade/window + no SL OK');
+  console.log('✅ Pumpfun smoke: flat $500 + pullback + flip entry + conf>=65% + 1 trade/window + no SL OK');
   process.exit(0);
 })().catch(e => { console.error('SMOKE FAIL:', e); process.exit(1); });

@@ -83,6 +83,7 @@ class BotEngine {
     // Signal
     this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
     this.pendingSignal = null;  // { side, confidence, marketSlug, startedAt }
+    this.lastSignalSide = null;  // track previous signal lean for flip detection
     this.lastSignalEvalAt = 0;
     this.entryWindow = null;   // first window allowed to enter (set post-init to avoid mid-window start)
 
@@ -450,13 +451,32 @@ class BotEngine {
     const alreadyOpen = this.positions.find(p => p.windowStart === cs && p.status === 'open');
     if (alreadyOpen) return;
 
-    // If we already have a pending signal, let checkPendingEntry handle it
+    if (lean !== 'UP' && lean !== 'DOWN') {
+      this.lastSignalSide = null;
+      return;
+    }
+
+    // ── Flip detection: signal changed from UP→DOWN or DOWN→UP ──
+    const flipped = this.lastSignalSide !== null && this.lastSignalSide !== lean;
+    if (flipped && conf >= HIGH_CONF) {
+      // Cancel any pending pullback for the old side
+      if (this.pendingSignal) {
+        this.log(`❌ PENDING CANCELLED ${this.pendingSignal.side} → signal flipped to ${lean}`);
+        this.pendingSignal = null;
+      }
+      this.lastSignalSide = lean;
+      this.log(`⚡ FLIP ENTRY ${lean} · conf ${(conf * 100).toFixed(0)}% · buying immediately`);
+      this.tryBuy(market, lean, cs, market.windowEnd);
+      return;
+    }
+
+    this.lastSignalSide = lean;
+
+    // If we already have a pending pullback signal, let checkPendingEntry handle it
     if (this.pendingSignal) return;
 
-    // Signal fires ≥ 65% → set pending, wait for price to drop below 0.50
-    if (lean !== 'UP' && lean !== 'DOWN') return;
+    // ── Same signal stays ≥ 65% → set pending, wait for pullback ≤ 0.50 ──
     if (conf < HIGH_CONF) return;
-
     this.pendingSignal = { side: lean, confidence: conf, windowStart: cs, windowEnd: market.windowEnd, startedAt: now };
     this.log(`🔍 PENDING ${lean} · conf ${(conf * 100).toFixed(0)}% · waiting for price ≤ 0.50`);
   }
