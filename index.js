@@ -120,6 +120,7 @@ const T=v=>Number(v||0)>=0?'pos':'neg';
 const P=v=>v!=null?'$'+Number(v).toFixed(2):'—';
 const N=v=>Number(v||0).toLocaleString();
 const U=s=>{const m=Math.floor(s/60),sec=s%60;return m+'m'+(sec<10?'0':'')+sec+'s'};
+const $=id=>document.getElementById(id);
 const S={};
 
 function renderMarket(m){if(!m)return;
