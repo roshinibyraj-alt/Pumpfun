@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>FlatlineBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥70% FOLLOW SIGNAL · DYNAMIC $500–$1,500/TRADE · 1 TRADE/WINDOW · NO SL · HOLD TO RESOLUTION</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>FlatlineBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥65% · PULLBACK ≤$0.50 ENTRY · FLAT $500/TRADE · 1 TRADE/WINDOW · NO SL · HOLD TO RESOLUTION</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -78,7 +78,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 <div class="box"><div class="label">Window</div><div class="value" id="windowTime">—</div><div class="small" id="entryWindow"></div></div>
 <div class="box"><div class="label">Wins / Losses</div><div class="value" id="winLoss">0 / 0</div><div class="small" id="winRate"></div></div>
 <div class="box"><div class="label">Max Drawdown</div><div class="value neg" id="maxDrawdown">$0</div></div>
-<div class="box"><div class="label">Flat Budget / Shares</div><div class="value" id="nextShares">1,000</div><div class="small" id="lossStreak"></div></div>
+<div class="box"><div class="label">Bet / Shares</div><div class="value" id="nextShares">1,000</div><div class="small" id="lossStreak"></div></div>
 </div>
 <div class="two-col">
 <div>
@@ -148,7 +148,12 @@ return '<div class="ind"><div><div class="ind-name">'+n+'</div></div><div class=
 const sc=sig.score||0;const cs=$('totalScore');cs.textContent='Score '+sc.toFixed(1)+' · '+(sig.lean||'NEUTRAL');
 cs.style.color=sc>0?'var(--up)':sc<0?'var(--down)':'var(--muted)';
 const conf=$('confidence');conf.textContent=sig.confidence!=null?(sig.confidence*100).toFixed(1)+'%':'—';
-const cl=$('confLean');if(sig.lean==='UP'){cl.textContent='→ BUY UP';cl.style.color='var(--up)'}else if(sig.lean==='DOWN'){cl.textContent='→ BUY DOWN';cl.style.color='var(--down)'}else{cl.textContent='→ NEUTRAL · no entry';cl.style.color='var(--muted)'}
+const cl=$('confLean');
+const ps=S.pendingSignal;
+if(ps){cl.textContent='🔍 PENDING '+ps.side+' · waiting ≤$0.50 · conf '+(ps.confidence*100).toFixed(0)+'%';cl.style.color='var(--amber)'}
+else if(sig.lean==='UP'){cl.textContent='→ BUY UP · waiting for pullback ≤$0.50';cl.style.color='var(--up)'}
+else if(sig.lean==='DOWN'){cl.textContent='→ BUY DOWN · waiting for pullback ≤$0.50';cl.style.color='var(--down)'}
+else{cl.textContent='→ NEUTRAL · no entry';cl.style.color='var(--muted)'}
 }
 function renderPosition(positions){const box=$('posBox'),b=$('posBody');if(!positions||!positions.length){box.style.display='none';return}
 box.style.display='';b.innerHTML=positions.map(p=>{const cls=p.outcome==='UP'?'pos-up':'pos-down';
@@ -169,10 +174,10 @@ function renderLogs(a){const b=$('logBody'),ct=$('logCount');ct.textContent=a.le
 function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Entry After</div><div class="value">'+(c.entryMinElapsed??c.entryElapsed??0)+'s</div></div>'
 +'<div class="mini"><div class="label">Min Conf</div><div class="value">'+((c.minConfidence??c.highConf??0)*100)+'%</div></div>'
 +'<div class="mini"><div class="label">Flat Budget</div><div class="value">$'+(c.flatBudget??500)+' / trade</div></div>'
-+'<div class="mini"><div class="label">Reversal</div><div class="value">'+(c.reversalPct??0)+'%</div></div>'
-+'<div class="mini"><div class="label">Reversal ≥</div><div class="value">'+((c.reversalConsist??0)*100)+'%</div></div>'
++'<div class="mini"><div class="label">Pullback</div><div class="value">≤$0.50</div></div>'
 +'<div class="mini"><div class="label">Fee</div><div class="value">'+((c.takerFeeRate??0)*100)+'%</div></div>'
-+'<div class="mini"><div class="label">Stop Loss</div><div class="value">NONE</div></div>'}
++'<div class="mini"><div class="label">Stop Loss</div><div class="value">NONE</div></div>'
++'<div class="mini"><div class="label">Holding</div><div class="value">TO RESOLUTION</div></div>'}
 function renderChart(c){const svg=$('equityChart');if(!c||!c.length){svg.innerHTML='';return}
 const v=c.map(p=>p.equity),lo=Math.min(...v),hi=Math.max(...v),rng=(hi-lo)||1;const W=700,H=120,P=12;
 const pts=c.map((p,i)=>[i/Math.max(1,c.length-1)*W,H-P-(p.equity-lo)/rng*(H-P*2)]);
@@ -184,8 +189,8 @@ const tp=d.totalPnl||0;const te=$('totalPnl');te.textContent=money(tp);te.classN
 const rp=d.realizedPnl||0;const re=$('realizedPnl');re.textContent=money(rp);re.className='value '+tone(rp);
 $('winLoss').textContent=(d.wins||0)+' / '+(d.losses||0);$('winRate').textContent=d.winRate!=null?'Win '+d.winRate+'%':'';
 $('maxDrawdown').textContent=cash(d.maxDrawdown);
-const ns=$('nextShares');if(ns){const b=d.flatBudget??d.config?.flatBudget??500;const sh=num(Math.max(1,Math.floor(b/0.70)));ns.textContent='$'+num(b)+' → '+sh+' SH @0.70';}
-const ls=$('lossStreak');if(ls){ls.textContent='HOLD TO RESOLUTION · NO SL';}
+const ns=$('nextShares');if(ns){const b=d.flatBudget??d.config?.flatBudget??500;const sh=num(Math.max(1,Math.floor(b/0.50)));ns.textContent='$'+num(b)+' → '+sh+' SH @0.50';}
+const ls=$('lossStreak');if(ls){ls.textContent='NO STOP LOSS · HOLD TO RESOLUTION';}
 polls++;const wp=$('waitPill');if(wp){if(d.waitingForWindow){const ww=Math.max(0,Math.ceil((d.entryWindow-Window.now()/1000)));wp.textContent='WAIT '+ww+'s';wp.className='pill warn'}else{wp.textContent='TRADING';wp.className='pill live'}};$('tickPill').textContent='TICKS '+(d.tickCount||0);
 $('uptimePill').textContent=uptimeFmt(d.uptime||0);
 const sp=$('statusPill');if(d.connected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
