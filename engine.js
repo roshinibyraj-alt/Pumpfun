@@ -239,17 +239,28 @@ class BotEngine {
       const rows = await this.getJSON(`${GAMMA_API}/markets?slug=${encodeURIComponent(market.slug)}`);
       const m = Array.isArray(rows) ? rows[0] : null;
       if (!m) return null;
-      const outcome = m.outcomePrices ? m.outcomePrices : null;
-      if (outcome && Array.isArray(outcome)) {
-        const outcomes = typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : m.outcomes || [];
-        const upIdx = outcomes.findIndex(o => String(o).toLowerCase() === 'up');
-        const downIdx = outcomes.findIndex(o => String(o).toLowerCase() === 'down');
-        const upP = Number(outcome[upIdx]);
-        const downP = Number(outcome[downIdx]);
-        if (upP === 1) return 'UP';
-        if (downP === 1) return 'DOWN';
+
+      // Check if market is resolved via Gamma API
+      if (m.resolved === true || m.closed === true) {
+        const outcome = m.outcomePrices ? m.outcomePrices : null;
+        if (outcome && Array.isArray(outcome)) {
+          const outcomes = typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : m.outcomes || [];
+          const upIdx = outcomes.findIndex(o => String(o).toLowerCase() === 'up');
+          const downIdx = outcomes.findIndex(o => String(o).toLowerCase() === 'down');
+          const upP = upIdx >= 0 ? Number(outcome[upIdx]) : 0;
+          const downP = downIdx >= 0 ? Number(outcome[downIdx]) : 0;
+          if (upP >= 0.99) return 'UP';
+          if (downP >= 0.99) return 'DOWN';
+        }
       }
-      const winnerField = m.winner || m.resolvedBy;
+
+      // Also check winner field
+      if (m.winner) {
+        const w = String(m.winner).toLowerCase();
+        if (w === 'up') return 'UP';
+        if (w === 'down') return 'DOWN';
+      }
+
       return null;
     } catch (e) {
       this.log(`⚠️ Resolution fetch: ${e.message}`);
@@ -379,7 +390,18 @@ class BotEngine {
 
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
     setInterval(() => this.evaluate(), 100);
-    setInterval(() => { const now = Date.now(), cs = windowStartFor(now); const m = this.markets.get(slugFor('btc', cs)); if (m && !m.resolved && now / 1000 >= m.windowEnd) this.resolveWindow(m, now / 1000).catch(() => {}); }, 250);
+    setInterval(() => {
+      const now = Date.now(), nowS = now / 1000;
+      // Resolve ALL past markets with filled orders, not just the current window
+      for (const [slug, m] of this.markets) {
+        if (m.resolved || m.tradingClosed) continue;
+        const hasFilled = this.orders.some(o => o.slug === slug && o.type === 'BUY' && o.status === 'FILLED');
+        if (!hasFilled) continue;
+        if (nowS >= m.windowEnd) {
+          this.resolveWindow(m, nowS).catch(e => this.log('⚠️ resolve: ' + e.message));
+        }
+      }
+    }, 250);
     setInterval(() => this.retryDiscovery().catch(() => {}), 2000);
     setInterval(() => this.recordEquity(), 2000);
 
