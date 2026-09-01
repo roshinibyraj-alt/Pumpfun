@@ -79,7 +79,7 @@ const { BotEngine, config } = require('../engine');
   const slug2 = `btc-updown-5m-${cs2}`;
   engine.markets.set(slug2, {
     slug: slug2, asset: 'btc', conditionId: '0xc1', title: 'test2',
-    windowStart: cs2, windowEnd: cs2 + 300, resolved: false, winner: null, tradingClosed: false,
+    windowStart: cs2, windowEnd: cs2 + 300, resolved: false, winner: null, tradingClosed: false, finalUpMax: 0.05, finalDownMax: 0.95,
     up: { tokenId: 'up-id', slug: slug2, asset: 'btc', outcome: 'UP', bid: 0.00, ask: 0.10, mid: 0.05, updatedAt: Date.now(), bookAsks: [] },
     down: { tokenId: 'down-id', slug: slug2, asset: 'btc', outcome: 'DOWN', bid: 0.90, ask: 0.95, mid: 0.925, updatedAt: Date.now(), bookAsks: [] },
   });
