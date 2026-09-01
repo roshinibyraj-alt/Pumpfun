@@ -50,6 +50,7 @@ class SniperEngine {
     const line = `[${new Date().toISOString().slice(11, 23)}] 🎯SNIPER ${msg}`;
     this.logs.push(line);
     if (this.logs.length > 500) this.logs.shift();
+    try { console.log(line); } catch (_) {}
   }
 
   // ── Main Loop (called every ~100ms) ────────────────────────

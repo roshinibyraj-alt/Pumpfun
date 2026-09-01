@@ -62,7 +62,7 @@ h1{font-size:18px;margin:0}.sub{font-size:9px;color:var(--muted);letter-spacing:
 <body><div class="wrap">
 <header class="topbar">
 <div class="brand"><div class="btc">₿</div><div><h1>BTC 5m Dual Bot</h1><div class="sub">LIMITBOT + SNIPERBOT</div></div></div>
-<div class="status"><span id="statusPill" class="pill bad">● OFFLINE</span><span id="uptimePill" class="pill"></span><span id="windowTime" class="pill amber">—</span></div>
+<div class="status"><span id="statusPill" class="pill bad">● OFFLINE</span><span id="lastPollPill" class="pill bad">NO POLL</span><span id="uptimePill" class="pill"></span><span id="windowTime" class="pill amber">—</span></div>
 </header>
 
 <div class="prices">
@@ -187,6 +187,12 @@ const sp=$('statusPill');
 const anyConnected=(d.connected||s.connected);
 if(anyConnected){sp.textContent='● LIVE';sp.className='pill live'}else{sp.textContent='● OFFLINE';sp.className='pill bad'}
 $('uptimePill').textContent=U(d.uptime||0);
+
+// Last poll pill (+ error tooltip)
+const lp=$('lastPollPill');
+if(d.lastPollAt){const age=Math.floor((Date.now()-d.lastPollAt)/1000);lp.textContent='POLL '+age+'s AGO';lp.className='pill '+(age<20?'live':'amber')}
+else{lp.textContent='NO POLL';lp.className='pill bad'}
+if(d.lastError){lp.textContent+=' ⚠';lp.title='Last error: '+d.lastError;lp.className='pill bad'}
 
 // Market
 renderMarket(data.markets&&data.markets[0]);

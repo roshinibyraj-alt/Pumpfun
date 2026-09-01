@@ -51,6 +51,7 @@ class BotEngine {
     this.pollRunning = false;
     this.lastSuccessfulPollAt = null;
     this.lastPollErrorAt = null;
+    this.lastErrorMsg = null;
 
     // Orders: one BUY per side per window, hold to resolution
     this.orders = [];
@@ -75,6 +76,7 @@ class BotEngine {
     const line = `[${new Date().toISOString().slice(11, 23)}] ${msg}`;
     this.logs.push(line);
     if (this.logs.length > 500) this.logs.shift();
+    try { console.log(line); } catch (_) {}
   }
 
   async getJSON(url, timeout = 8000) {
@@ -106,8 +108,37 @@ class BotEngine {
     const slug = slugFor(asset, start);
     if (this.discoveredWindows.has(slug)) return this.markets.get(slug) || null;
     try {
+      // Primary: markets endpoint by exact slug
       const rows = await this.getJSON(`${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`);
-      const market = Array.isArray(rows) ? rows[0] : null;
+      let market = Array.isArray(rows) ? rows[0] : null;
+
+      // Fallback: events endpoint with the same slug (btc5m-web pattern)
+      if (!market || !market.conditionId || !market.clobTokenIds || market.closed) {
+        try {
+          const evRows = await this.getJSON(`${GAMMA_API}/events?slug=${encodeURIComponent(slug)}`);
+          const ev = Array.isArray(evRows) ? evRows[0] : null;
+          market = (ev && Array.isArray(ev.markets) && ev.markets.length) ? ev.markets[0] : null;
+          if (market && (market.closed === true)) market = null;
+        } catch (_) {}
+      }
+
+      // Fallback 2: active BTC 5m windows by title (slug drift resilience)
+      if (!market || !market.conditionId || !market.clobTokenIds || market.closed) {
+        try {
+          const search = await this.getJSON(`${GAMMA_API}/markets?closed=false&active=true&limit=100&order=volume&ascending=false&search=${encodeURIComponent('Bitcoin Up or Down - 5')}`);
+          const list = Array.isArray(search) ? search : [];
+          const matched = list.filter(m => m.conditionId && m.clobTokenIds && !m.closed &&
+            String(m.question || '').toLowerCase().includes('bitcoin up or down') &&
+            String(m.question || '').toLowerCase().includes('5 minutes'));
+          const hit = matched[0] || null;
+          if (hit) {
+            const m = /(\d+)$/.exec(String(hit.slug || ''));
+            if (m) start = Number(m[1]);
+            market = hit;
+          }
+        } catch (_) {}
+      }
+
       if (!market || !market.conditionId || !market.clobTokenIds || market.closed) return null;
       this.discoveredWindows.add(slug);
       const outcomes = typeof market.outcomes === 'string' ? JSON.parse(market.outcomes) : market.outcomes || [];
@@ -144,16 +175,20 @@ class BotEngine {
   async pollClobBooks() {
     if (this.pollRunning) return;
     const now = Date.now(), cs = windowStartFor(now);
-    const tokens = [...this.tokens.values()].filter(t => { const m = this.markets.get(t.slug); return m?.windowStart === cs && !m.tradingClosed && !m.resolved; });
+    const starts = new Set([cs, cs + WINDOW_SECONDS]);
+    const tokens = [...this.tokens.values()].filter(t => { const m = this.markets.get(t.slug); return m && starts.has(m.windowStart) && !m.tradingClosed && !m.resolved; });
     if (!tokens.length) return;
     this.pollRunning = true;
     try {
-      const books = await this.postJSON(`${CLOB_REST}/books`, tokens.map(t => ({ token_id: t.tokenId })));
+      const books = await this.postJSON(`${CLOB_REST}/books`, tokens.map(t => ({ token_id: t.tokenId })), 6000);
       const byToken = new Map((Array.isArray(books) ? books : []).map(b => [String(b?.asset_id || ''), b]).filter(([id]) => this.tokens.has(id)));
       for (const t of tokens) { const b = byToken.get(t.tokenId); if (b) this.applyBook(t, b.bids || [], b.asks || []); }
       this.pollCount++;
       this.lastSuccessfulPollAt = Date.now();
+      this.lastPollErrorAt = null;
+      this.lastErrorMsg = null;
     } catch (e) {
+      this.lastErrorMsg = e.message;
       if (!this.lastPollErrorAt || Date.now() - this.lastPollErrorAt >= 5000) { this.log(`⚠️ CLOB poll: ${e.message}`); this.lastPollErrorAt = Date.now(); }
     } finally { this.pollRunning = false; }
   }
@@ -166,21 +201,22 @@ class BotEngine {
     const bestAsk = validAsks[0]?.price ?? null;
     const cleanBid = Number.isFinite(bestBid) && bestBid > 0 && bestBid <= 1 ? bestBid : null;
     const cleanAsk = Number.isFinite(bestAsk) && bestAsk > 0 && bestAsk <= 1 ? bestAsk : null;
-    if (cleanBid === token.bid && cleanAsk === token.ask) return;
-    token.bid = cleanBid; token.ask = cleanAsk;
-    token.mid = cleanBid != null && cleanAsk != null ? round5((cleanBid + cleanAsk) / 2) : (cleanAsk ?? cleanBid);
-    token.updatedAt = Date.now();
 
-    // Track max mid price in final 2 seconds for resolution
+    // Capture final-2s max prices on EVERY poll (before early-return check)
     const market = this.markets.get(token.slug);
     if (market && !market.resolved) {
       const nowS = Date.now() / 1000;
       if (nowS >= market.windowEnd - 2) {
-        const mid = token.mid ?? 0;
-        if (token.outcome === 'UP' && (market.finalUpMax == null || mid > market.finalUpMax)) market.finalUpMax = mid;
-        if (token.outcome === 'DOWN' && (market.finalDownMax == null || mid > market.finalDownMax)) market.finalDownMax = mid;
+        const probe = cleanAsk ?? cleanBid ?? token.mid ?? 0;
+        if (token.outcome === 'UP' && (market.finalUpMax == null || probe > market.finalUpMax)) market.finalUpMax = probe;
+        if (token.outcome === 'DOWN' && (market.finalDownMax == null || probe > market.finalDownMax)) market.finalDownMax = probe;
       }
     }
+
+    if (cleanBid === token.bid && cleanAsk === token.ask) return;
+    token.bid = cleanBid; token.ask = cleanAsk;
+    token.mid = cleanBid != null && cleanAsk != null ? round5((cleanBid + cleanAsk) / 2) : (cleanAsk ?? cleanBid);
+    token.updatedAt = Date.now();
   }
 
   // ── Order Management ──────────────────────────────────────
@@ -347,9 +383,11 @@ class BotEngine {
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-200),
       config: { buyPrices: BUY_PRICES, shares: SHARES, orderWindow: ORDER_WINDOW_SECONDS, makerRebate: MAKER_REBATE, startBankroll: START_BANKROLL },
-      connected: this.pollCount > 0,
+      connected: this.lastSuccessfulPollAt != null && (now - this.lastSuccessfulPollAt) < 20000,
       uptime: Math.floor((now - this.startedAt) / 1000),
       pollCount: this.pollCount,
+      lastPollAt: this.lastSuccessfulPollAt,
+      lastError: this.lastErrorMsg,
       entryWindow: this.entryWindow,
       waitingForWindow: this.entryWindow != null && windowStartFor(now) < this.entryWindow,
     };
@@ -372,6 +410,9 @@ class BotEngine {
     this.lastOrderWindow = null;
     this.log(`⏳ Started mid-window ${start} — will place orders at next window ${this.entryWindow}`);
     await Promise.all([this.discoverMarket('btc', start), this.discoverMarket('btc', start + WINDOW_SECONDS)]);
+
+    // Pre-warm: force CLOB polls immediately so prices show right away
+    for (let i = 0; i < 3; i++) { try { await this.pollClobBooks(); } catch (_) {} }
 
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
     setInterval(() => this.evaluate(), 100);
