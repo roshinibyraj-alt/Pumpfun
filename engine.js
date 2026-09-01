@@ -108,37 +108,8 @@ class BotEngine {
     const slug = slugFor(asset, start);
     if (this.discoveredWindows.has(slug)) return this.markets.get(slug) || null;
     try {
-      // Primary: markets endpoint by exact slug
       const rows = await this.getJSON(`${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`);
-      let market = Array.isArray(rows) ? rows[0] : null;
-
-      // Fallback: events endpoint with the same slug (btc5m-web pattern)
-      if (!market || !market.conditionId || !market.clobTokenIds || market.closed) {
-        try {
-          const evRows = await this.getJSON(`${GAMMA_API}/events?slug=${encodeURIComponent(slug)}`);
-          const ev = Array.isArray(evRows) ? evRows[0] : null;
-          market = (ev && Array.isArray(ev.markets) && ev.markets.length) ? ev.markets[0] : null;
-          if (market && (market.closed === true)) market = null;
-        } catch (_) {}
-      }
-
-      // Fallback 2: active BTC 5m windows by title (slug drift resilience)
-      if (!market || !market.conditionId || !market.clobTokenIds || market.closed) {
-        try {
-          const search = await this.getJSON(`${GAMMA_API}/markets?closed=false&active=true&limit=100&order=volume&ascending=false&search=${encodeURIComponent('Bitcoin Up or Down - 5')}`);
-          const list = Array.isArray(search) ? search : [];
-          const matched = list.filter(m => m.conditionId && m.clobTokenIds && !m.closed &&
-            String(m.question || '').toLowerCase().includes('bitcoin up or down') &&
-            String(m.question || '').toLowerCase().includes('5 minutes'));
-          const hit = matched[0] || null;
-          if (hit) {
-            const m = /(\d+)$/.exec(String(hit.slug || ''));
-            if (m) start = Number(m[1]);
-            market = hit;
-          }
-        } catch (_) {}
-      }
-
+      const market = Array.isArray(rows) ? rows[0] : null;
       if (!market || !market.conditionId || !market.clobTokenIds || market.closed) return null;
       this.discoveredWindows.add(slug);
       const outcomes = typeof market.outcomes === 'string' ? JSON.parse(market.outcomes) : market.outcomes || [];
@@ -409,10 +380,14 @@ class BotEngine {
     this.entryWindow = start + WINDOW_SECONDS;
     this.lastOrderWindow = null;
     this.log(`⏳ Started mid-window ${start} — will place orders at next window ${this.entryWindow}`);
-    await Promise.all([this.discoverMarket('btc', start), this.discoverMarket('btc', start + WINDOW_SECONDS)]);
 
-    // Pre-warm: force CLOB polls immediately so prices show right away
-    for (let i = 0; i < 3; i++) { try { await this.pollClobBooks(); } catch (_) {} }
+    // Warm up the CLOB connection (DNS/TLS) in parallel with discovery so the first
+    // books POST is fast instead of paying the cold handshake.
+    this.fetchImpl(CLOB_REST + '/').catch(() => {});
+
+    // Current window first (needed now), next window in background
+    await this.discoverMarket('btc', start);
+    this.discoverMarket('btc', start + WINDOW_SECONDS).catch(() => {});
 
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
     setInterval(() => this.evaluate(), 100);
