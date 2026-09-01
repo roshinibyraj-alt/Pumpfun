@@ -83,6 +83,8 @@ class BotEngine {
     // Signal
     this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
     this.pendingSignal = null;  // { side, confidence, marketSlug, startedAt }
+    this.flippedThisWindow = false;
+    this.lastWindowStart = null;
     this.lastSignalSide = null;  // track previous signal lean for flip detection
     this.lastSignalEvalAt = 0;
     this.entryWindow = null;   // first window allowed to enter (set post-init to avoid mid-window start)
@@ -437,6 +439,9 @@ class BotEngine {
     if (remaining <= 0) return;
     if (elapsed < ENTRY_ELAPSED) return;
 
+    // Reset flip tracker on new window
+    if (this.lastWindowStart !== cs) { this.lastWindowStart = cs; this.flippedThisWindow = false; }
+
     // Clear pending signal on new window
     if (this.pendingSignal && this.pendingSignal.windowStart !== cs) {
       this.pendingSignal = null;
@@ -447,7 +452,7 @@ class BotEngine {
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
 
-    // One trade per window — skip if already entered
+    // Skip if already have an open position this window
     const alreadyOpen = this.positions.find(p => p.windowStart === cs && p.status === 'open');
     if (alreadyOpen) return;
 
@@ -459,7 +464,6 @@ class BotEngine {
     // ── Flip detection: signal changed from UP→DOWN or DOWN→UP ──
     const flipped = this.lastSignalSide !== null && this.lastSignalSide !== lean;
     if (flipped && conf >= HIGH_CONF) {
-      // Cancel any pending pullback for the old side
       if (this.pendingSignal) {
         this.log(`❌ PENDING CANCELLED ${this.pendingSignal.side} → signal flipped to ${lean}`);
         this.pendingSignal = null;
@@ -475,10 +479,10 @@ class BotEngine {
     // If we already have a pending pullback signal, let checkPendingEntry handle it
     if (this.pendingSignal) return;
 
-    // ── Same signal stays ≥ 65% → set pending, wait for pullback ≤ 0.50 ──
+    // ── First signal ≥ 65% → buy immediately at any price ──
     if (conf < HIGH_CONF) return;
-    this.pendingSignal = { side: lean, confidence: conf, windowStart: cs, windowEnd: market.windowEnd, startedAt: now };
-    this.log(`🔍 PENDING ${lean} · conf ${(conf * 100).toFixed(0)}% · waiting for price ≤ 0.50`);
+    this.log(`⚡ FIRST SIGNAL ${lean} · conf ${(conf * 100).toFixed(0)}% · buying at market`);
+    this.tryBuy(market, lean, cs, market.windowEnd);
   }
 
   // Check if pending signal should execute (price ≤ 0.50 and signal still valid)
@@ -529,7 +533,7 @@ class BotEngine {
     this.executeBuy(market, outcome, price, shares, windowStart, windowEnd);
   }
 
-  executeBuy(market, outcome, price, shares, windowStart, windowEnd) {
+  executeBuy(market, outcome, price, shares, windowStart, windowEnd, betLabel) {
     // Hard guard: only one trade per window.
     const windowTraded = this.positions.some(p => p.windowStart === windowStart && (p.status === 'open' || p.exitReason === 'RESOLUTION'));
     if (windowTraded) return;
@@ -547,7 +551,7 @@ class BotEngine {
       status: 'open', openedAt: Date.now(), markPrice: token.mid,
       windowStart, windowEnd,
       signalConf: conf, signalScore: this.signal.score,
-      signalIndicators: { ...this.signal.indicators }, betLabel: outcome,
+      signalIndicators: { ...this.signal.indicators }, betLabel: betLabel || 'FIRST',
       exitReason: null, exitPrice: null, closedAt: null, pnl: null,
     };
     this.positions.push(pos);
@@ -558,17 +562,38 @@ class BotEngine {
 
 
   evaluateExit() {
-    // Clear pending signal if we moved to a new window
     const csNow = windowStartFor(Date.now());
     if (this.pendingSignal && csNow > windowStartFor(this.pendingSignal.startedAt)) { this.pendingSignal = null; }
-    // No stop loss and no intra-window sell: only refresh mark prices for open
-    // positions. Every position holds to resolution.
+
     for (const p of this.positions) {
       if (p.status !== 'open') continue;
       const market = this.markets.get(p.slug);
       if (!market) continue;
       const token = p.outcome === 'UP' ? market.up : market.down;
-      if (Number.isFinite(token?.mid)) p.markPrice = token.mid;
+      const ask = token.ask ?? token.mid ?? token.bid;
+      if (Number.isFinite(ask)) p.markPrice = token.ask ?? token.mid;
+
+      // ── Double-up stop loss at 0.40 ──
+      if (p.betLabel === 'DOUBLE-UP' && Number.isFinite(ask) && ask <= 0.40) {
+        this.log(`🛑 DOUBLE-UP STOP LOSS ${p.outcome} ask ${ask.toFixed(3)} ≤ 0.40`);
+        this.sellPosition(p, 'DOUBLE-UP_STOP');
+        continue;
+      }
+
+      // ── Flip trigger: first entry above 0.60 → sell when price falls to 0.40 ──
+      if (p.betLabel === 'FIRST' && !this.flippedThisWindow && p.entryPrice > 0.60 && Number.isFinite(ask) && ask <= 0.40) {
+        const opposite = p.outcome === 'UP' ? 'DOWN' : 'UP';
+        const doubleShares = p.shares * 2;
+        this.log(`🔄 FLIP TRIGGER ${p.outcome} ask ${ask.toFixed(3)} ≤ 0.40 → sell + buy ${opposite} 2x (${doubleShares}sh)`);
+        this.sellPosition(p, 'FLIP_TRIGGER');
+        const tokenFlip = opposite === 'UP' ? market.up : market.down;
+        const flipPrice = tokenFlip.ask ?? tokenFlip.mid ?? tokenFlip.bid;
+        if (Number.isFinite(flipPrice) && flipPrice > 0 && flipPrice < 1) {
+          this.flippedThisWindow = true;
+          this.executeBuy(market, opposite, flipPrice, doubleShares, p.windowStart, p.windowEnd, 'DOUBLE-UP');
+        }
+        continue;
+      }
     }
   }
 
