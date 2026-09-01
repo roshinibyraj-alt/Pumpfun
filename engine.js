@@ -82,6 +82,7 @@ class BotEngine {
 
     // Signal
     this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
+    this.pendingSignal = null;  // { side, confidence, marketSlug, startedAt }
     this.lastSignalEvalAt = 0;
     this.entryWindow = null;   // first window allowed to enter (set post-init to avoid mid-window start)
 
@@ -281,7 +282,7 @@ class BotEngine {
         const elapsed = Math.floor(now / 1000) - cs;
         if (elapsed >= ENTRY_ELAPSED && elapsed < WINDOW_SECONDS && now - (this.lastSignalEvalAt || 0) >= 50) {
           this.computeSignal();
-          this.evaluateEntry();
+          this.evaluateEntry(); this.checkPendingEntry();
         }
       }
     } catch (_) {} finally { this.tickFetching = false; }
@@ -429,42 +430,71 @@ class BotEngine {
   evaluateEntry() {
     const now = Date.now();
     const cs = windowStartFor(now);
-    // On (re)start we never enter the in-progress window — wait for the next
-    // full window so a push/redeploy doesn't fire mid-window.
     if (this.entryWindow != null && cs < this.entryWindow) return;
     const elapsed = Math.floor(now / 1000) - cs;
     const remaining = WINDOW_SECONDS - elapsed;
     if (remaining <= 0) return;
     if (elapsed < ENTRY_ELAPSED) return;
 
+    // Clear pending signal on new window
+    if (this.pendingSignal && this.pendingSignal.windowStart !== cs) {
+      this.pendingSignal = null;
+    }
+
     const conf = this.signal.confidence;
     const lean = this.signal.lean;
-    if (lean !== 'UP' && lean !== 'DOWN') return;
-
     const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
     if (!market) return;
 
-    // No stop loss and no intra-window flip: at most one trade per window.
-    // If a position is already open this window, never sell or re-enter.
+    // One trade per window — skip if already entered
     const alreadyOpen = this.positions.find(p => p.windowStart === cs && p.status === 'open');
     if (alreadyOpen) return;
 
-    if (lean === 'UP' && conf >= HIGH_CONF) {
-      this.tryBuy(market, 'UP', cs, market.windowEnd);
-    } else if (lean === 'DOWN' && conf >= HIGH_CONF) {
-      this.tryBuy(market, 'DOWN', cs, market.windowEnd);
+    // If we already have a pending signal, let checkPendingEntry handle it
+    if (this.pendingSignal) return;
+
+    // Signal fires ≥ 70% → set pending, wait for price to drop below 0.50
+    if (lean !== 'UP' && lean !== 'DOWN') return;
+    if (conf < HIGH_CONF) return;
+
+    this.pendingSignal = { side: lean, confidence: conf, windowStart: cs, windowEnd: market.windowEnd, startedAt: now };
+    this.log(`🔍 PENDING ${lean} · conf ${(conf * 100).toFixed(0)}% · waiting for price ≤ 0.50`);
+  }
+
+  // Check if pending signal should execute (price ≤ 0.50 and signal still valid)
+  checkPendingEntry() {
+    if (!this.pendingSignal) return;
+    const now = Date.now();
+    const cs = windowStartFor(now);
+    const ps = this.pendingSignal;
+
+    // Clear if window expired
+    if (now / 1000 >= ps.windowEnd) { this.pendingSignal = null; return; }
+
+    // Clear if signal flipped to different side or went neutral
+    const lean = this.signal.lean;
+    const conf = this.signal.confidence;
+    if (lean !== ps.side || conf < HIGH_CONF) {
+      this.log(`❌ PENDING CANCELLED ${ps.side} → signal changed to ${lean} (${(conf * 100).toFixed(0)}%)`);
+      this.pendingSignal = null;
+      return;
+    }
+
+    // Check if price of the pending side ≤ 0.50
+    const market = this.markets.get(slugFor('btc', ps.windowStart));
+    if (!market) return;
+    const token = ps.side === 'UP' ? market.up : market.down;
+    const ask = token.ask ?? token.mid ?? token.bid;
+    if (!Number.isFinite(ask) || ask <= 0 || ask >= 1) return;
+
+    if (ask <= 0.50) {
+      this.log(`🎯 PRICE HIT ${ps.side} ask ${ask.toFixed(3)} ≤ 0.50 — executing buy`);
+      this.pendingSignal = null;
+      this.tryBuy(market, ps.side, ps.windowStart, ps.windowEnd);
     }
   }
 
 
-  // Binary sizing: win → $500 base, loss → $1 base.
-  adjustBudget(won) {
-    if (won) {
-      this.flatBudget = 500;
-    } else {
-      this.flatBudget = 1;
-    }
-  }
   // Shares for a given entry price so the spend is a flat $budget.
   sharesFor(price) {
     return Math.max(1, Math.floor(this.flatBudget / price));
@@ -508,6 +538,9 @@ class BotEngine {
 
 
   evaluateExit() {
+    // Clear pending signal if we moved to a new window
+    const csNow = windowStartFor(Date.now());
+    if (this.pendingSignal && csNow > windowStartFor(this.pendingSignal.startedAt)) { this.pendingSignal = null; }
     // No stop loss and no intra-window sell: only refresh mark prices for open
     // positions. Every position holds to resolution.
     for (const p of this.positions) {
@@ -531,8 +564,7 @@ class BotEngine {
     p.closedAt = Date.now(); p.pnl = pnl; p.won = pnl >= 0;
     this.bankroll = round2(this.bankroll + netProceeds);
     this.realizedPnl = round2(this.realizedPnl + pnl);
-    if (pnl >= 0) { this.wins++; this.adjustBudget(true); }
-    else { this.losses++; this.adjustBudget(false); }
+    if (pnl >= 0) this.wins++; else this.losses++;
     this.log(`💰 EXIT ${reason} ${p.betLabel||''} ${p.outcome} ${p.shares}sh @${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
     this.resolvedPositions.unshift({ ...p });
     this.resolvedPositions = this.resolvedPositions.slice(0, 50);
@@ -586,8 +618,7 @@ class BotEngine {
 
       this.bankroll = round2(this.bankroll + netPayout);
       this.realizedPnl = round2(this.realizedPnl + pnl);
-      if (won) { this.wins++; this.adjustBudget(true); }
-      else { this.losses++; this.adjustBudget(false); }
+      if (won) this.wins++; else this.losses++;
 
       this.log(`🏁 RESOLUTION ${winner} (up=${finalUp.toFixed(3)} down=${finalDown.toFixed(3)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
       this.resolvedPositions.unshift({ ...p });
@@ -653,6 +684,7 @@ class BotEngine {
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
       signal: this.signal,
+      pendingSignal: this.pendingSignal ? { side: this.pendingSignal.side, confidence: this.pendingSignal.confidence } : null,
       nextShares: this.sharesFor(0.70),
       flatBudget: this.flatBudget,
       budgetAdditions: 0, // removed $100 increments
@@ -701,7 +733,7 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 FlatlineBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · base $${this.flatBudget}/trade · win→$500 · loss→$1 · hold to resolution`);
+    this.log(`🚀 FlatlineBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · flat ${this.flatBudget}/trade · hold to resolution`);
   }
 }
 
