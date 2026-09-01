@@ -261,10 +261,10 @@ class BotEngine {
     const fUp = market.finalUpMax ?? 0;
     const fDown = market.finalDownMax ?? 0;
     let winner = null;
-    if (fUp >= 0.90) winner = 'UP';
-    else if (fDown >= 0.90) winner = 'DOWN';
+    if (fUp >= 0.95) winner = 'UP';
+    else if (fDown >= 0.95) winner = 'DOWN';
     if (!winner) {
-      this.log('⏳ RESOLUTION PENDING — neither side >= 0.90 (UP max=' + round5(fUp) + ', DOWN max=' + round5(fDown) + ')');
+      this.log('⏳ RESOLUTION PENDING — neither side >= 0.95 (UP max=' + round5(fUp) + ', DOWN max=' + round5(fDown) + ')');
       return false;
     }
     market.resolved = true;

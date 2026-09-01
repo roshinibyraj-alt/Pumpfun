@@ -211,8 +211,8 @@ class SniperEngine {
     const fDown = market.finalDownMax ?? 0;
 
     let winner = null;
-    if (fUp >= 0.90)      winner = 'UP';
-    else if (fDown >= 0.90) winner = 'DOWN';
+    if (fUp >= 0.95)      winner = 'UP';
+    else if (fDown >= 0.95) winner = 'DOWN';
     if (!winner) return false;
 
     const pos = this.windowPosition;
