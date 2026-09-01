@@ -25,20 +25,19 @@ async function setup() {
   const engine = await setup();
   const BUDGET = config.FLAT_BUDGET; // 500
 
-  // ── Dynamic base sizing: $500, +$100 per loss, -$100 per win ─
+  // ── Binary sizing: win → $500, loss → $1 ─
   assert.equal(engine.flatBudget, 500, 'base starts at $500');
   assert.equal(engine.sharesFor(0.50), Math.floor(500 / 0.50), 'budget $500 / price');
   assert.equal(engine.sharesFor(0.70), Math.floor(500 / 0.70), 'budget $500 / price');
-  // losses add $100 each
-  engine.adjustBudget(false); assert.equal(engine.flatBudget, 600, '+$100 after loss');
-  engine.adjustBudget(false); assert.equal(engine.flatBudget, 700, '+$100 after 2nd loss');
-  engine.adjustBudget(false); assert.equal(engine.flatBudget, 800, '+$100 after 3rd loss');
-  engine.flatBudget = 1400; engine.adjustBudget(false); assert.equal(engine.flatBudget, 1500, 'cap at $1500');
-  // wins deduct $100 each
-  engine.adjustBudget(true);  assert.equal(engine.flatBudget, 1400, '-$100 after win');
-  engine.adjustBudget(true);  assert.equal(engine.flatBudget, 1300, '-$100 after 2 wins');
-  // floor at $500: start from 500, win again stays 500
-  engine.flatBudget = 500; engine.adjustBudget(true); assert.equal(engine.flatBudget, 500, 'floor at $500');
+  // loss → $1
+  engine.adjustBudget(false); assert.equal(engine.flatBudget, 1, '$1 after loss');
+  engine.adjustBudget(false); assert.equal(engine.flatBudget, 1, 'stays $1 after consecutive loss');
+  // win → $500
+  engine.adjustBudget(true);  assert.equal(engine.flatBudget, 500, '$500 after win');
+  engine.adjustBudget(true);  assert.equal(engine.flatBudget, 500, 'stays $500 after consecutive win');
+  // loss then win cycle
+  engine.adjustBudget(false); assert.equal(engine.flatBudget, 1, '$1 after loss');
+  engine.adjustBudget(true);  assert.equal(engine.flatBudget, 500, '$500 after win');
   engine.flatBudget = BUDGET;
 
   // ── Entry: confidence >= 70% → buy signal side $500 worth ─
@@ -92,6 +91,6 @@ async function setup() {
   assert.equal(resolved.won, true, 'UP won: final UP price 0.92 >= 0.90');
   assert.equal(resolved.exitReason, 'RESOLUTION', 'resolved — not stopped out');
 
-  console.log('✅ Pumpfun smoke: flat $500 + conf>=70% + 1 trade/window + no SL (hold to resolution) OK');
+  console.log('✅ Pumpfun smoke: binary sizing (win→$500, loss→$1) + conf>=70% + 1 trade/window + no SL OK');
   process.exit(0);
 })().catch(e => { console.error('SMOKE FAIL:', e); process.exit(1); });

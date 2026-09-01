@@ -457,12 +457,12 @@ class BotEngine {
   }
 
 
-  // Dynamic base sizing: +$100 on loss, -$100 on win, floor $500, max $1500.
+  // Binary sizing: win → $500 base, loss → $1 base.
   adjustBudget(won) {
     if (won) {
-      this.flatBudget = Math.max(500, this.flatBudget - 100);
+      this.flatBudget = 500;
     } else {
-      this.flatBudget = Math.min(1500, this.flatBudget + 100);
+      this.flatBudget = 1;
     }
   }
   // Shares for a given entry price so the spend is a flat $budget.
@@ -655,7 +655,7 @@ class BotEngine {
       signal: this.signal,
       nextShares: this.sharesFor(0.70),
       flatBudget: this.flatBudget,
-      budgetAdditions: Math.max(0, Math.round((this.flatBudget - 500) / 100)),
+      budgetAdditions: 0, // removed $100 increments
       positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
         betLabel: p.betLabel, markPrice: p.markPrice,
         unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
@@ -701,7 +701,7 @@ class BotEngine {
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 FlatlineBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · base $${this.flatBudget}/trade · ±$100 per win/loss · floor $500 · max $1,500 · hold to resolution`);
+    this.log(`🚀 FlatlineBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · base $${this.flatBudget}/trade · win→$500 · loss→$1 · hold to resolution`);
   }
 }
 
