@@ -1,30 +1,23 @@
 'use strict';
 
 // ── Config ──────────────────────────────────────────────────
-const GAMMA_API     = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
-const CLOB_REST     = process.env.CLOB_REST || 'https://clob.polymarket.com';
-const BINANCE_API   = process.env.BINANCE_API || 'https://api.binance.com';
-const CLOB_POLL_MS  = Number(process.env.CLOB_POLL_MS || 200);
-const CLOB_FRESH_MS = Number(process.env.CLOB_FRESH_MS || 4000);
-const TICK_POLL_MS  = Number(process.env.TICK_POLL_MS || 200);
+const GAMMA_API      = process.env.GAMMA_API || 'https://gamma-api.polymarket.com';
+const CLOB_REST      = process.env.CLOB_REST || 'https://clob.polymarket.com';
+const CLOB_POLL_MS   = Number(process.env.CLOB_POLL_MS || 200);
+const CLOB_FRESH_MS  = Number(process.env.CLOB_FRESH_MS || 4000);
 const WINDOW_SECONDS = 300;
-const ASSETS        = ['btc'];
-const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
-const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
+const ASSETS         = ['btc'];
+const START_BANKROLL = Number(process.env.START_BANKROLL || 100);
+const EQUITY_FILE    = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
-const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.65);
-const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
-const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
-const FLAT_BUDGET       = Number(process.env.FLAT_BUDGET || 500); // flat $ notional per trade (no martingale)
-const FINAL_WIN_PRICE   = Number(process.env.FINAL_WIN_PRICE || 0.90); // resolve by last-2s price >= this
-const FINAL_WINDOW_MS   = Number(process.env.FINAL_WINDOW_MS || 2000);   // scope of final price capture
-const REVERSAL_PCT      = Number(process.env.REVERSAL_PCT || 0.05);
-const REVERSAL_CONSIST  = Number(process.env.REVERSAL_CONSIST || 0.60);
-const MIN_BET           = Number(process.env.MIN_BET || 1);
-
-// Polymarket fee
-const TAKER_FEE_RATE  = Number(process.env.TAKER_FEE_RATE || 0.07);
+const BUY_PRICE  = Number(process.env.BUY_PRICE || 0.01);   // limit buy at this price
+const SELL_PRICE = Number(process.env.SELL_PRICE || 0.02);  // limit sell at this price
+const SHARES     = Number(process.env.SHARES || 100);       // shares per order
+const MAKER_FEE_RATE = Number(process.env.MAKER_FEE_RATE || 0);  // 0 for limit orders
+const MAKER_REBATE   = Number(process.env.MAKER_REBATE || 0.001); // 0.1% rebate per filled order
+const FINAL_WIN_PRICE = Number(process.env.FINAL_WIN_PRICE || 0.90);
+const FINAL_WINDOW_MS = Number(process.env.FINAL_WINDOW_MS || 2000);
 
 const fs = require('fs');
 
@@ -33,12 +26,10 @@ function round2(v) { return Math.round(v * 100) / 100; }
 function round5(v) { return Math.round(v * 100000) / 100000; }
 function windowStartFor(ms) { return Math.floor(ms / 1000 / WINDOW_SECONDS) * WINDOW_SECONDS; }
 function slugFor(a, s) { return `${a}-updown-5m-${s}`; }
-function takerFee(shares, price) { return round5(shares * TAKER_FEE_RATE * price * (1 - price)); }
-function ema(data, period) {
-  const k = 2 / (period + 1);
-  let e = data[0];
-  for (let i = 1; i < data.length; i++) e = data[i] * k + e * (1 - k);
-  return e;
+function makerFee(shares, price) { return round5(shares * MAKER_FEE_RATE * price * (1 - price)); }
+function makerRebate(shares, price) { return round5(shares * MAKER_REBATE * price); }
+function loadEquityFile(f) {
+  try { const d = JSON.parse(fs.readFileSync(f, 'utf8')); return Array.isArray(d) ? d : []; } catch (_) { return []; }
 }
 function sampleCurve(c, max = 1500) {
   if (!Array.isArray(c) || c.length <= max) return c || [];
@@ -47,9 +38,6 @@ function sampleCurve(c, max = 1500) {
   for (let i = 0; i < max; i++) out.push(c[Math.round(i * step)]);
   out[max - 1] = c[c.length - 1];
   return out;
-}
-function loadEquityFile(f) {
-  try { const d = JSON.parse(fs.readFileSync(f, 'utf8')); return Array.isArray(d) ? d : []; } catch (_) { return []; }
 }
 
 // ── Engine ──────────────────────────────────────────────────
@@ -65,34 +53,14 @@ class BotEngine {
     this.tokens = new Map();
     this.history = new Map();
     this.discoveredWindows = new Set();
-    this.activeWindowStart = null;
     this.discoveryRunning = false;
     this.pollRunning = false;
-    this.loopRunning = false;
     this.lastSuccessfulPollAt = null;
     this.lastPollErrorAt = null;
 
-    // Binance data
-    this.binanceCandles = [];
-    this.tickHistory = [];
-    this.tickFetching = false;
-    this.tickFetchedAt = 0;
-    this.candleFetching = false;
-    this.candleFetchedAt = 0;
-
-    // Signal
-    this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
-    this.pendingSignal = null;  // { side, confidence, marketSlug, startedAt }
-    this.flippedThisWindow = false;
-    this.tradedThisWindow = false;
-    this.lastWindowStart = null;
-    this.lastSignalSide = null;  // track previous signal lean for flip detection
-    this.lastSignalEvalAt = 0;
-    this.entryWindow = null;   // first window allowed to enter (set post-init to avoid mid-window start)
-
-    // Position (one at a time, max)
-    this.positions = [];
-    this.resolvedPositions = [];
+    // Orders: { id, slug, outcome, type: 'BUY'|'SELL', price, shares, status: 'PENDING'|'FILLED'|'CANCELLED'|'SOLD', createdAt, filledAt, closedAt, fillPrice, sellOrderId }
+    this.orders = [];
+    this.nextOrderId = 1;
 
     // Tracking
     this.trades = [];
@@ -101,9 +69,9 @@ class BotEngine {
     this.realizedPnl = 0;
     this.peakEquity = START_BANKROLL;
     this.maxDrawdown = 0;
-    this.flatBudget = FLAT_BUDGET;
     this.logs = [];
     this.pollCount = 0;
+    this.windowsTraded = 0;
 
     // Equity
     const seeded = (opts.initialEquity && Array.isArray(opts.initialEquity) && opts.initialEquity.length) ? opts.initialEquity.slice() : null;
@@ -160,8 +128,8 @@ class BotEngine {
         windowStart: start, windowEnd: start + WINDOW_SECONDS,
         resolved: false, winner: null, tradingClosed: false,
         finalUpMax: 0, finalDownMax: 0, finalCaptureAt: 0,
-        up: { tokenId: tokenIds[ui], slug, asset, outcome: 'UP', bid: null, ask: null, mid: null, spread: null, updatedAt: null, bookAsks: [] },
-        down: { tokenId: tokenIds[di], slug, asset, outcome: 'DOWN', bid: null, ask: null, mid: null, spread: null, updatedAt: null, bookAsks: [] },
+        up: { tokenId: tokenIds[ui], slug, asset, outcome: 'UP', bid: null, ask: null, mid: null, spread: null, updatedAt: null, bookAsks: [], bookBids: [] },
+        down: { tokenId: tokenIds[di], slug, asset, outcome: 'DOWN', bid: null, ask: null, mid: null, spread: null, updatedAt: null, bookAsks: [], bookBids: [] },
       };
       this.markets.set(slug, rec);
       this.tokens.set(rec.up.tokenId, rec.up);
@@ -182,9 +150,6 @@ class BotEngine {
   }
 
   // ── CLOB Book Polling ─────────────────────────────────────
-  // Final-2s capture: record the max UP/DOWN mid seen during the last
-  // FINAL_WINDOW_MS of the window. Runs on EVERY book poll — even when the
-  // book is unchanged between polls — so a 0.90+ price is never skipped.
   captureFinalPrice(token) {
     if (token?.mid == null || token.mid <= 0) return;
     const m = this.markets.get(token.slug);
@@ -198,12 +163,14 @@ class BotEngine {
   }
 
   applyBook(token, bids, asks) {
-    // Capture the current mid first (fires even if the book is unchanged).
     this.captureFinalPrice(token);
     const validAsks = asks.filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
     validAsks.sort((a, b) => a.price - b.price);
     token.bookAsks = validAsks;
-    const bestBid = (bids.filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price) })).sort((a,b) => b.price - a.price)[0]?.price) ?? null;
+    const validBids = bids.filter(l => Number(l.size) > 0).map(l => ({ price: Number(l.price), size: Number(l.size) }));
+    validBids.sort((a, b) => b.price - a.price);
+    token.bookBids = validBids;
+    const bestBid = validBids[0]?.price ?? null;
     const bestAsk = validAsks[0]?.price ?? null;
     const cleanBid = Number.isFinite(bestBid) && bestBid > 0 && bestBid <= 1 ? bestBid : null;
     const cleanAsk = Number.isFinite(bestAsk) && bestAsk > 0 && bestAsk <= 1 ? bestAsk : null;
@@ -212,25 +179,7 @@ class BotEngine {
     token.spread = cleanBid != null && cleanAsk != null ? round5(cleanAsk - cleanBid) : null;
     token.mid = cleanBid != null && cleanAsk != null ? round5((cleanBid + cleanAsk) / 2) : (cleanAsk ?? cleanBid);
     token.updatedAt = Date.now();
-    this.pushHistory(token.tokenId, token.mid);
-    // Capture the freshly-updated mid when the book changed.
     this.captureFinalPrice(token);
-  }
-
-  pushHistory(tokenId, price) {
-    if (!Number.isFinite(price)) return;
-    const now = Date.now(), s = this.history.get(tokenId) || [];
-    s.push({ t: now, p: price });
-    while (s.length > 2 && now - s[0].t > 5000) s.shift();
-    this.history.set(tokenId, s.slice(-240));
-  }
-
-  simulateGtcBookFill(token, shares, ceiling) {
-    const asks = token.bookAsks || [];
-    let rem = shares, total = 0;
-    for (const lv of asks) { if (lv.price > ceiling) break; if (rem <= 0) break; const f = Math.min(lv.size, rem); total += round2(f * lv.price); rem -= f; }
-    const filled = shares - rem;
-    return filled > 0 ? { avgPrice: round5(total / filled), filled, totalCost: round2(total) } : null;
   }
 
   async pollClobBooks() {
@@ -250,462 +199,186 @@ class BotEngine {
     } finally { this.pollRunning = false; }
   }
 
-  // ── Binance Data ──────────────────────────────────────────
-  async fetchBinanceCandles(limit = 25) {
-    if (this.candleFetching) return;
-    const now = Date.now();
-    if (now - this.candleFetchedAt < 8000) return;
-    this.candleFetching = true;
-    try {
-      const data = await this.getJSON(`${BINANCE_API}/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=${limit}`);
-      if (Array.isArray(data) && data.length > 0) {
-        this.binanceCandles = data.map(c => ({
-          openTime: Number(c[0]) / 1000,
-          open: Number(c[1]), high: Number(c[2]), low: Number(c[3]), close: Number(c[4]),
-          volume: Number(c[5]),
-        }));
-        this.candleFetchedAt = now;
+  // ── Order Management ──────────────────────────────────────
+  placeBuyOrders(market) {
+    for (const side of ['up', 'down']) {
+      const outcome = side === 'up' ? 'UP' : 'DOWN';
+      // Don't duplicate if we already have a pending buy this window
+      const existing = this.orders.find(o => o.slug === market.slug && o.outcome === outcome && o.type === 'BUY' && o.status === 'PENDING');
+      if (existing) continue;
+
+      const order = {
+        id: this.nextOrderId++,
+        slug: market.slug,
+        outcome,
+        type: 'BUY',
+        price: BUY_PRICE,
+        shares: SHARES,
+        status: 'PENDING',
+        createdAt: Date.now(),
+        filledAt: null,
+        fillPrice: null,
+        sellOrderId: null,
+      };
+      this.orders.push(order);
+      this.log(`📋 LIMIT BUY ${outcome} ${SHARES}sh @ $${BUY_PRICE.toFixed(2)} — order #${order.id}`);
+    }
+  }
+
+  checkOrderFills(market) {
+    const pendingBuys = this.orders.filter(o => o.slug === market.slug && o.type === 'BUY' && o.status === 'PENDING');
+    const pendingSells = this.orders.filter(o => o.slug === market.slug && o.type === 'SELL' && o.status === 'PENDING');
+
+    // Check buy fills: a buy at 0.01 fills when ask drops to 0.01 (someone sells to us)
+    for (const order of pendingBuys) {
+      const token = order.outcome === 'UP' ? market.up : market.down;
+      const ask = token.ask ?? token.mid;
+      if (ask != null && ask <= order.price + 0.001) {
+        this.fillBuyOrder(order, order.price, market);
       }
-    } catch (_) {} finally { this.candleFetching = false; }
-  }
+    }
 
-  async fetchBinanceTick() {
-    if (this.tickFetching) return;
-    const now = Date.now();
-    if (now - this.tickFetchedAt < TICK_POLL_MS - 200) return;
-    this.tickFetching = true;
-    try {
-      const data = await this.getJSON(`${BINANCE_API}/api/v3/ticker/price?symbol=BTCUSDT`, 4000);
-      const price = Number(data?.price);
-      if (Number.isFinite(price)) {
-        this.tickHistory.push({ t: now, p: price });
-        if (this.tickHistory.length > 120) this.tickHistory.shift();
-        this.tickFetchedAt = now;
-        // React immediately on fresh market data instead of waiting for the next loop tick.
-        const cs = windowStartFor(now);
-        const elapsed = Math.floor(now / 1000) - cs;
-        if (elapsed >= ENTRY_ELAPSED && elapsed < WINDOW_SECONDS && now - (this.lastSignalEvalAt || 0) >= 50) {
-          this.computeSignal();
-          this.evaluateEntry(); this.checkPendingEntry();
-        }
+    // Check sell fills: a sell at 0.02 fills when bid rises to 0.02 (someone buys from us)
+    for (const order of pendingSells) {
+      const token = order.outcome === 'UP' ? market.up : market.down;
+      const bid = token.bid ?? token.mid;
+      if (bid != null && bid >= order.price - 0.001) {
+        this.fillSellOrder(order, order.price, market);
       }
-    } catch (_) {} finally { this.tickFetching = false; }
-  }
-
-  // ── Signal: 7-Indicator Composite ─────────────────────────
-  // Score > 0 → UP, score < 0 → DOWN
-  // Confidence = |score| / 7.0, capped at 1.0
-  computeSignal() {
-    const candles = this.binanceCandles;
-    const cs = windowStartFor(Date.now());
-    if (!candles || candles.length < 5) { this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: Date.now(), indicators: {} }; return; }
-    const indicators = {};
-
-    // 1. Window Delta (weight 5-7)
-    const ind1 = this._windowDelta(candles, cs);
-    indicators.windowDelta = ind1;
-
-    // 2. Micro Momentum (weight 2)
-    const ind2 = this._microMomentum(candles);
-    indicators.microMomentum = ind2;
-
-    // 3. Acceleration (weight 1.5)
-    const ind3 = this._acceleration(candles);
-    indicators.acceleration = ind3;
-
-    // 4. EMA 9/21 (weight 1)
-    const ind4 = this._ema921(candles);
-    indicators.ema921 = ind4;
-
-    // 5. RSI 14 (weight 1-2)
-    const ind5 = this._rsi14(candles);
-    indicators.rsi14 = ind5;
-
-    // 6. Volume Surge (weight 1)
-    const ind6 = this._volumeSurge(candles);
-    indicators.volumeSurge = ind6;
-
-    // 7. Tick Trend (weight 2)
-    const ind7 = this._tickTrend();
-    indicators.tickTrend = ind7;
-
-    const score = ind1.score + ind2.score + ind3.score + ind4.score + ind5.score + ind6.score + ind7.score;
-    const confidence = Math.min(Math.abs(score) / 7.0, 1.0);
-    const lean = score > 0 ? 'UP' : score < 0 ? 'DOWN' : 'NEUTRAL';
-    this.signal = { score: round5(score), confidence: round5(confidence), lean, updatedAt: Date.now(), indicators };
-  }
-
-  _windowDelta(candles, windowStart) {
-    let openPrice = null;
-    for (const c of candles) { if (c.openTime <= windowStart && c.openTime + 60 > windowStart) { openPrice = c.open; break; } }
-    if (openPrice == null) openPrice = candles[0]?.open;
-    const current = candles[candles.length - 1]?.close;
-    if (!Number.isFinite(openPrice) || !Number.isFinite(current) || openPrice <= 0) return { deltaPct: 0, score: 0 };
-    const deltaPct = round5((current - openPrice) / openPrice * 100);
-    let score = 0;
-    const abs = Math.abs(deltaPct);
-    const dir = deltaPct >= 0 ? 1 : -1;
-    if (abs > 0.10) score = dir * 7;
-    else if (abs > 0.02) score = dir * 5;
-    else if (abs > 0.005) score = dir * 3;
-    else if (abs > 0.001) score = dir * 1;
-    return { deltaPct, score };
-  }
-
-  _microMomentum(candles) {
-    if (candles.length < 3) return { score: 0 };
-    const last = candles[candles.length - 1], prev = candles[candles.length - 2];
-    let count = 0;
-    if (last.close > last.open) count++;
-    else if (last.close < last.open) count--;
-    if (prev.close > prev.open) count++;
-    else if (prev.close < prev.open) count--;
-    return { score: count === 2 ? 2 : count === -2 ? -2 : 0 };
-  }
-
-  _acceleration(candles) {
-    if (candles.length < 4) return { score: 0 };
-    const latest = candles[candles.length - 1], ago2 = candles[candles.length - 3];
-    const lm = latest.close - latest.open, am = ago2.close - ago2.open;
-    if (lm > 0 && am > 0) return { score: lm > am ? 1.5 : -0.5 };
-    if (lm < 0 && am < 0) return { score: lm < am ? -1.5 : 0.5 };
-    if (lm > 0) return { score: 0.75 };
-    if (lm < 0) return { score: -0.75 };
-    return { score: 0 };
-  }
-
-  _ema921(candles) {
-    if (candles.length < 21) return { score: 0 };
-    const closes = candles.map(c => c.close);
-    const e9 = ema(closes, 9), e21 = ema(closes, 21);
-    return { ema9: round2(e9), ema21: round2(e21), score: e9 > e21 ? 1 : -1 };
-  }
-
-  _rsi14(candles) {
-    if (candles.length < 15) return { score: 0 };
-    const closes = candles.slice(-15).map(c => c.close);
-    let gains = 0, losses = 0;
-    for (let i = 1; i < closes.length; i++) { const d = closes[i] - closes[i - 1]; if (d > 0) gains += d; else losses -= d; }
-    if (losses === 0) return { rsi: 100, score: -2 };
-    const rsi = round2(100 - 100 / (1 + gains / losses));
-    return { rsi, score: rsi > 75 ? -2 : rsi < 25 ? 2 : 0 };
-  }
-
-  _volumeSurge(candles) {
-    if (candles.length < 6) return { score: 0 };
-    const r3 = candles.slice(-3), p3 = candles.slice(-6, -3);
-    const ra = r3.reduce((s, c) => s + c.volume, 0) / 3;
-    const pa = p3.reduce((s, c) => s + c.volume, 0) / 3;
-    if (pa === 0 || ra / pa < 1.5) return { score: 0 };
-    const dir = r3[2].close > r3[0].open ? 1 : -1;
-    return { surge: round2(ra / pa), score: dir };
-  }
-
-  _tickTrend() {
-    const ticks = this.tickHistory.slice(-30);
-    if (ticks.length < 6) return { score: 0, consistency: 0, direction: 'NONE' };
-    let ups = 0, downs = 0;
-    for (let i = 1; i < ticks.length; i++) { if (ticks[i].p > ticks[i - 1].p) ups++; else if (ticks[i].p < ticks[i - 1].p) downs++; }
-    const total = ups + downs;
-    if (total === 0) return { score: 0, consistency: 0, direction: 'NONE' };
-    const consistency = round2(Math.max(ups, downs) / total);
-    const move = (ticks[ticks.length - 1].p - ticks[0].p) / ticks[0].p * 100;
-    if (consistency < REVERSAL_CONSIST || Math.abs(move) < 0.005) return { score: 0, consistency, direction: 'NONE' };
-    const dir = ups > downs ? 'UP' : 'DOWN';
-    return { score: dir === 'UP' ? 2 : -2, consistency, direction: dir, move: round5(move) };
-  }
-
-  // ── Tick Reversal Detection ───────────────────────────────
-  // After entry: if ticks reverse >60% consistency AND move > 0.05%, return true
-  isTickReversal(entrySide) {
-    const ticks = this.tickHistory.slice(-15); // last 30 seconds
-    if (ticks.length < 6) return false;
-    let against = 0;
-    for (let i = 1; i < ticks.length; i++) {
-      if (entrySide === 'UP' && ticks[i].p < ticks[i - 1].p) against++;
-      else if (entrySide === 'DOWN' && ticks[i].p > ticks[i - 1].p) against++;
-    }
-    const consistency = against / (ticks.length - 1);
-    const move = Math.abs(ticks[ticks.length - 1].p - ticks[0].p) / ticks[0].p * 100;
-    return consistency >= REVERSAL_CONSIST && move >= REVERSAL_PCT;
-  }
-
-  // ── Strategy: Model-Driven Entry / Exit ───────────────────
-  evaluateEntry() {
-    const now = Date.now();
-    const cs = windowStartFor(now);
-    if (this.entryWindow != null && cs < this.entryWindow) return;
-    const elapsed = Math.floor(now / 1000) - cs;
-    const remaining = WINDOW_SECONDS - elapsed;
-    if (remaining <= 0) return;
-    if (elapsed < ENTRY_ELAPSED) return;
-
-    // Reset flip tracker on new window
-    if (this.lastWindowStart !== cs) { this.lastWindowStart = cs; this.flippedThisWindow = false;
-    this.tradedThisWindow = false; }
-
-    // Clear pending signal on new window
-    if (this.pendingSignal && this.pendingSignal.windowStart !== cs) {
-      this.pendingSignal = null;
-    }
-
-    const conf = this.signal.confidence;
-    const lean = this.signal.lean;
-    const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
-    if (!market) return;
-
-    // Skip if already have an open position this window
-    const alreadyOpen = this.positions.find(p => p.windowStart === cs && p.status === 'open');
-    if (alreadyOpen) return;
-
-    // Skip if we already traded (entry + optional flip) this window
-    if (this.tradedThisWindow) return;
-
-    if (lean !== 'UP' && lean !== 'DOWN') {
-      this.lastSignalSide = null;
-      return;
-    }
-
-    // ── Flip detection: signal changed from UP→DOWN or DOWN→UP ──
-    const flipped = this.lastSignalSide !== null && this.lastSignalSide !== lean;
-    if (flipped && conf >= HIGH_CONF) {
-      if (this.pendingSignal) {
-        this.log(`❌ PENDING CANCELLED ${this.pendingSignal.side} → signal flipped to ${lean}`);
-        this.pendingSignal = null;
-      }
-      this.lastSignalSide = lean;
-      this.log(`⚡ FLIP ENTRY ${lean} · conf ${(conf * 100).toFixed(0)}% · buying immediately`);
-      this.tradedThisWindow = true;
-      this.tryBuy(market, lean, cs, market.windowEnd);
-      return;
-    }
-
-    this.lastSignalSide = lean;
-
-    // If we already have a pending pullback signal, let checkPendingEntry handle it
-    if (this.pendingSignal) return;
-
-    // ── First signal ≥ 65% → buy immediately at any price ──
-    if (conf < HIGH_CONF) return;
-    this.log(`⚡ FIRST SIGNAL ${lean} · conf ${(conf * 100).toFixed(0)}% · buying at market`);
-    this.tradedThisWindow = true;
-    this.tryBuy(market, lean, cs, market.windowEnd);
-  }
-
-  // Check if pending signal should execute (price ≤ 0.50 and signal still valid)
-  checkPendingEntry() {
-    if (!this.pendingSignal) return;
-    const now = Date.now();
-    const cs = windowStartFor(now);
-    const ps = this.pendingSignal;
-
-    // Clear if window expired
-    if (now / 1000 >= ps.windowEnd) { this.pendingSignal = null; return; }
-
-    // Clear if signal flipped to different side or went neutral
-    const lean = this.signal.lean;
-    const conf = this.signal.confidence;
-    if (lean !== ps.side || conf < HIGH_CONF) {
-      this.log(`❌ PENDING CANCELLED ${ps.side} → signal changed to ${lean} (${(conf * 100).toFixed(0)}%)`);
-      this.pendingSignal = null;
-      return;
-    }
-
-    // Check if price of the pending side ≤ 0.50
-    const market = this.markets.get(slugFor('btc', ps.windowStart));
-    if (!market) return;
-    const token = ps.side === 'UP' ? market.up : market.down;
-    const ask = token.ask ?? token.mid ?? token.bid;
-    if (!Number.isFinite(ask) || ask <= 0 || ask >= 1) return;
-
-    if (ask <= 0.50) {
-      this.log(`🎯 PRICE HIT ${ps.side} ask ${ask.toFixed(3)} ≤ 0.50 — executing buy`);
-      this.pendingSignal = null;
-      this.tryBuy(market, ps.side, ps.windowStart, ps.windowEnd);
     }
   }
 
+  fillBuyOrder(order, price, market) {
+    const cost = round2(order.shares * price);
+    const fee = makerFee(order.shares, price);
+    const rebate = makerRebate(order.shares, price);
+    const totalCost = round2(cost + fee - rebate);
+    if (totalCost > this.bankroll) { this.log(`⚠️ SKIP BUY #${order.id} — need $${totalCost.toFixed(2)}, have $${this.bankroll.toFixed(2)}`); return; }
 
-  // Shares for a given entry price so the spend is a flat $budget.
-  sharesFor(price) {
-    return Math.max(1, Math.floor(this.flatBudget / price));
-  }
-
-  tryBuy(market, outcome, windowStart, windowEnd) {
-    const token = outcome === 'UP' ? market.up : market.down;
-    const price = token.ask ?? token.mid ?? token.bid;
-    if (!Number.isFinite(price) || price <= 0 || price >= 1) return;
-    const shares = this.sharesFor(price);
-    if (shares < 1) return;
-    this.executeBuy(market, outcome, price, shares, windowStart, windowEnd);
-  }
-
-  executeBuy(market, outcome, price, shares, windowStart, windowEnd, betLabel) {
-    // Hard guard: only one trade per window.
-    const windowTraded = this.positions.some(p => p.windowStart === windowStart && (p.status === 'open' || p.exitReason === 'RESOLUTION'));
-    if (windowTraded) return;
-    const cost = round2(shares * price);
-    const fee = takerFee(shares, price);
-    const totalCost = round2(cost + fee);
-    if (totalCost > this.bankroll) { this.log(`⚠️ SKIP ${outcome} ${shares}sh — need $${totalCost.toFixed(2)}, have $${this.bankroll.toFixed(2)}`); return; }
     this.bankroll = round2(this.bankroll - totalCost);
-    const token = outcome === 'UP' ? market.up : market.down;
-    const conf = this.signal.confidence;
-    const pos = {
-      slug: market.slug, asset: market.asset, conditionId: market.conditionId,
-      outcome, tokenId: token.tokenId,
-      shares, entryPrice: price, cost, fee, totalCost,
-      status: 'open', openedAt: Date.now(), markPrice: token.mid,
-      windowStart, windowEnd,
-      signalConf: conf, signalScore: this.signal.score,
-      signalIndicators: { ...this.signal.indicators }, betLabel: betLabel || 'FIRST',
-      exitReason: null, exitPrice: null, closedAt: null, pnl: null,
+    order.status = 'FILLED';
+    order.filledAt = Date.now();
+    order.fillPrice = price;
+    order.cost = cost;
+    order.fee = fee;
+    order.rebate = rebate;
+    order.totalCost = totalCost;
+
+    this.log(`✅ BUY FILLED #${order.id} ${order.outcome} ${order.shares}sh @ $${price.toFixed(2)} · cost $${cost.toFixed(2)} · rebate $${rebate.toFixed(2)}`);
+
+    // Immediately place limit sell at SELL_PRICE
+    const sellOrder = {
+      id: this.nextOrderId++,
+      slug: order.slug,
+      outcome: order.outcome,
+      type: 'SELL',
+      price: SELL_PRICE,
+      shares: order.shares,
+      status: 'PENDING',
+      createdAt: Date.now(),
+      filledAt: null,
+      fillPrice: null,
+      buyOrderId: order.id,
     };
-    this.positions.push(pos);
-    this.trades.push({ timestamp: Date.now(), type: 'BUY', outcome, shares, price, cost, fee, confidence: conf, score: this.signal.score, markPrice: token.mid, betLabel: outcome });
-    this.log(`⚡ BUY ${outcome} ${shares}sh @${price.toFixed(3)} · conf ${(conf * 100).toFixed(0)}% · cost $${cost.toFixed(2)}`);
+    order.sellOrderId = sellOrder.id;
+    this.orders.push(sellOrder);
+    this.log(`📋 LIMIT SELL ${order.outcome} ${order.shares}sh @ $${SELL_PRICE.toFixed(2)} — order #${sellOrder.id} (after buy #${order.id} filled)`);
     this.recordEquity();
   }
 
+  fillSellOrder(order, price, market) {
+    const proceeds = round2(order.shares * price);
+    const fee = makerFee(order.shares, price);
+    const rebate = makerRebate(order.shares, price);
+    const netProceeds = round2(proceeds - fee + rebate);
 
-  evaluateExit() {
-    const csNow = windowStartFor(Date.now());
-    if (this.pendingSignal && csNow > windowStartFor(this.pendingSignal.startedAt)) { this.pendingSignal = null; }
+    order.status = 'FILLED';
+    order.filledAt = Date.now();
+    order.fillPrice = price;
+    order.proceeds = proceeds;
+    order.fee = fee;
+    order.rebate = rebate;
+    order.netProceeds = netProceeds;
 
-    for (const p of this.positions) {
-      if (p.status !== 'open') continue;
-      const market = this.markets.get(p.slug);
-      if (!market) continue;
-      const token = p.outcome === 'UP' ? market.up : market.down;
-      const ask = token.ask ?? token.mid ?? token.bid;
-      if (Number.isFinite(ask)) p.markPrice = token.ask ?? token.mid;
+    // Find the matching buy order
+    const buyOrder = this.orders.find(o => o.id === order.buyOrderId);
+    const buyCost = buyOrder ? buyOrder.totalCost : round2(order.shares * BUY_PRICE);
+    const pnl = round2(netProceeds - buyCost);
 
-      // ── Double-up stop loss at 0.40 ──
-      if (p.betLabel === 'DOUBLE-UP' && Number.isFinite(ask) && ask <= 0.40) {
-        this.log(`🛑 DOUBLE-UP STOP LOSS ${p.outcome} ask ${ask.toFixed(3)} ≤ 0.40`);
-        this.sellPosition(p, 'DOUBLE-UP_STOP');
-        continue;
-      }
-
-      // ── Flip trigger: first entry above 0.60 → sell when price falls to 0.40 ──
-      if (p.betLabel === 'FIRST' && !this.flippedThisWindow && p.entryPrice > 0.60 && Number.isFinite(ask) && ask <= 0.40) {
-        const opposite = p.outcome === 'UP' ? 'DOWN' : 'UP';
-        const doubleShares = p.shares * 2;
-        this.log(`🔄 FLIP TRIGGER ${p.outcome} ask ${ask.toFixed(3)} ≤ 0.40 → sell + buy ${opposite} 2x (${doubleShares}sh)`);
-        this.sellPosition(p, 'FLIP_TRIGGER');
-        const tokenFlip = opposite === 'UP' ? market.up : market.down;
-        const flipPrice = tokenFlip.ask ?? tokenFlip.mid ?? tokenFlip.bid;
-        if (Number.isFinite(flipPrice) && flipPrice > 0 && flipPrice < 1) {
-          this.flippedThisWindow = true;
-          this.tradedThisWindow = true;
-          this.executeBuy(market, opposite, flipPrice, doubleShares, p.windowStart, p.windowEnd, 'DOUBLE-UP');
-        }
-        continue;
-      }
-    }
-  }
-
-
-  sellPosition(p, reason) {
-    if (!p || p.status !== 'open') return;
-    const exitPrice = p.markPrice ?? p.entryPrice;
-    const proceeds = round2(p.shares * exitPrice);
-    const exitFee = takerFee(p.shares, exitPrice);
-    const netProceeds = round2(proceeds - exitFee);
-    const pnl = round2(netProceeds - p.cost - p.fee);
-    p.status = 'closed'; p.exitReason = reason; p.exitPrice = exitPrice; p.exitFee = exitFee;
-    p.closedAt = Date.now(); p.pnl = pnl; p.won = pnl >= 0;
     this.bankroll = round2(this.bankroll + netProceeds);
     this.realizedPnl = round2(this.realizedPnl + pnl);
     if (pnl >= 0) this.wins++; else this.losses++;
-    this.log(`💰 EXIT ${reason} ${p.betLabel||''} ${p.outcome} ${p.shares}sh @${exitPrice.toFixed(3)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-    this.resolvedPositions.unshift({ ...p });
-    this.resolvedPositions = this.resolvedPositions.slice(0, 50);
-    this.trades.push({ timestamp: p.closedAt, type: 'SELL', outcome: p.outcome, shares: p.shares, price: exitPrice, cost: p.cost, fee: exitFee, pnl });
-    this.positions = this.positions.filter(x => x !== p);
+
+    const tag = '💰 SELL FILLED';
+    this.log(`${tag} #${order.id} ${order.outcome} ${order.shares}sh @ $${price.toFixed(2)} · revenue $${proceeds.toFixed(2)} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+    this.trades.push({ timestamp: Date.now(), type: 'SELL', outcome: order.outcome, shares: order.shares, price, cost: buyCost, fee, rebate, pnl, buyOrderId: order.buyOrderId });
     this.recordEquity();
   }
 
-  // ── Resolution (Binance-based) ────────────────────────────
-  // ── Resolution: last-2s CLOB-based, no Binance fallback ────
-  async resolveByBinance() {
-    const openPositions = this.positions.filter(p => p.status === 'open');
-    if (!openPositions.length) return;
-    const nowMs = Date.now();
-    const nowS = nowMs / 1000;
-    // Resolve immediately once the window has ended — we don't need Binance
-    // candles at all: the winner is determined purely by the CLOB prices
-    // captured in the final 2 seconds of the window.
-    const pending = [];
-    for (const p of openPositions) {
-      if (nowS < p.windowEnd) continue;
-      const m = this.markets.get(p.slug);
-      if (!m) continue;
-      const finalUp  = m.finalUpMax  ?? 0;
-      const finalDown = m.finalDownMax ?? 0;
-      // Highest final-2s price wins; if one side >= 0.90 it almost certainly
-      // is the winner; if both did, higher wins; if neither hit 0.90, higher wins.
-      // All determined from live CLOB data — no Binance candle fallback.
-      let winner;
-      if (finalUp > 0 && finalUp > finalDown) winner = 'UP';
-      else if (finalDown > 0 && finalDown > finalUp) winner = 'DOWN';
-      else if (finalUp >= FINAL_WIN_PRICE) winner = 'UP';
-      else if (finalDown >= FINAL_WIN_PRICE) winner = 'DOWN';
-      else winner = 'UP'; // absolute edge: never leave unresolved
+  cancelUnfilledOrders(market) {
+    const pending = this.orders.filter(o => o.slug === market.slug && o.status === 'PENDING');
+    for (const order of pending) {
+      order.status = 'CANCELLED';
+      order.closedAt = Date.now();
+      this.log(`❌ CANCELLED #${order.id} ${order.type} ${order.outcome} ${order.shares}sh @ $${order.price.toFixed(2)}`);
+    }
+  }
 
-      const won = p.outcome === winner;
-      const payout = won ? p.shares : 0;
+  // ── Resolution ────────────────────────────────────────────
+  resolveWindow(market) {
+    const finalUp  = market.finalUpMax  ?? 0;
+    const finalDown = market.finalDownMax ?? 0;
+    let winner;
+    if (finalUp > 0 && finalUp > finalDown) winner = 'UP';
+    else if (finalDown > 0 && finalDown > finalUp) winner = 'DOWN';
+    else if (finalUp >= FINAL_WIN_PRICE) winner = 'UP';
+    else if (finalDown >= FINAL_WIN_PRICE) winner = 'DOWN';
+    else winner = 'UP';
+
+    market.resolved = true;
+    market.winner = winner;
+    this.log(`🏁 RESOLUTION ${winner} (up=${finalUp.toFixed(3)} down=${finalDown.toFixed(3)})`);
+
+    // Resolve unfilled buy orders that became positions via resolution
+    const filledBuys = this.orders.filter(o => o.slug === market.slug && o.type === 'BUY' && o.status === 'FILLED' && o.sellOrderId);
+    for (const buyOrder of filledBuys) {
+      const sellOrder = this.orders.find(o => o.id === buyOrder.sellOrderId);
+      if (sellOrder && sellOrder.status === 'FILLED') continue; // already resolved via sell
+      // Buy was filled but sell wasn't — resolve by resolution
+      if (sellOrder) { sellOrder.status = 'CANCELLED'; sellOrder.closedAt = Date.now(); }
+      const won = buyOrder.outcome === winner;
+      const payout = won ? buyOrder.shares : 0;
       const netPayout = round2(payout);
-      const pnl = round2(netPayout - p.cost - p.fee);
-
-      p.status = 'closed';
-      p.won = won;
-      p.exitReason = 'RESOLUTION';
-      p.exitPrice = won ? 1 : 0;
-      p.exitFee = 0;
-      p.closedAt = nowMs;
-      p.pnl = pnl;
-      p.resolvedWinner = winner;
-      p.resolvedFinalUp  = finalUp;
-      p.resolvedFinalDown = finalDown;
+      const pnl = round2(netPayout - buyOrder.totalCost);
 
       this.bankroll = round2(this.bankroll + netPayout);
       this.realizedPnl = round2(this.realizedPnl + pnl);
-      if (won) this.wins++; else this.losses++;
+      if (pnl >= 0) this.wins++; else this.losses++;
 
-      this.log(`🏁 RESOLUTION ${winner} (up=${finalUp.toFixed(3)} down=${finalDown.toFixed(3)}) · ${p.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
-      this.resolvedPositions.unshift({ ...p });
-      this.resolvedPositions = this.resolvedPositions.slice(0, 50);
-      this.trades.push({ timestamp: p.closedAt, type: 'RESOLVED', outcome: p.outcome, shares: p.shares, price: won ? 1 : 0, cost: p.cost, fee: p.fee, pnl });
-      pending.push(p);
-    }
-    if (pending.length) {
-      const ids = new Set(pending.map(p => p));
-      this.positions = this.positions.filter(x => !ids.has(x));
-      this.recordEquity();
+      this.log(`🏁 RESOLVED #${buyOrder.id} ${buyOrder.outcome} ${won ? 'WIN' : 'LOSS'} · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+      this.trades.push({ timestamp: Date.now(), type: 'RESOLVED', outcome: buyOrder.outcome, shares: buyOrder.shares, price: won ? 1 : 0, cost: buyOrder.totalCost, pnl, buyOrderId: buyOrder.id });
     }
   }
 
-  // ── Equity Curve ──────────────────────────────────────────
-  recordEquity() {
-    const openMark = this.positions.filter(p => p.status === 'open').reduce((s, p) => s + p.shares * (p.markPrice ?? p.entryPrice), 0);
-    const markValue = round2(this.bankroll + openMark);
-    const last = this.equityCurve[this.equityCurve.length - 1];
-    if (!last || Date.now() - last.t > 1000 || Math.abs(last.equity - markValue) > 0.001) {
-      this.equityCurve.push({ t: Date.now(), equity: markValue });
-      if (this.equityCurve.length > 4000) this.equityCurve = sampleCurve(this.equityCurve, 2000);
-      if (Date.now() - this.lastEquitySaveAt > 5000) {
-        this.lastEquitySaveAt = Date.now();
-        try { fs.writeFileSync(EQUITY_FILE, JSON.stringify(sampleCurve(this.equityCurve, 2000))); } catch (_) {}
-      }
+  // ── Main Loop ─────────────────────────────────────────────
+  evaluate() {
+    const now = Date.now();
+    const cs = windowStartFor(now);
+    const market = [...this.markets.values()].find(m => m.windowStart === cs && !m.resolved && !m.tradingClosed);
+    if (!market) return;
+
+    const elapsed = Math.floor(now / 1000) - cs;
+
+    // Place buy orders once window starts (immediately)
+    if (elapsed >= 0 && elapsed < 5) {
+      this.placeBuyOrders(market);
     }
-    if (markValue > this.peakEquity) this.peakEquity = markValue;
-    const dd = this.peakEquity - markValue;
-    if (dd > this.maxDrawdown) this.maxDrawdown = dd;
+
+    // Check fills on every tick
+    this.checkOrderFills(market);
   }
 
-  isClobFresh() { return Boolean(this.lastSuccessfulPollAt && Date.now() - this.lastSuccessfulPollAt <= CLOB_FRESH_MS); }
-
+  // ── State ─────────────────────────────────────────────────
   publicMarkets() {
     const cs = windowStartFor(Date.now());
     return [...this.markets.values()].filter(m => m.windowStart === cs)
@@ -713,81 +386,82 @@ class BotEngine {
         slug: m.slug, asset: m.asset, title: m.title,
         windowStart: m.windowStart, windowEnd: m.windowEnd,
         resolved: m.resolved, winner: m.winner,
-        elapsed: Math.max(0, Math.floor(Date.now() / 1000 - m.windowStart)),
+        elapsed: Math.max(0, Math.floor(Date.now() / 1000) - m.windowStart),
         remaining: Math.max(0, m.windowEnd - Math.floor(Date.now() / 1000)),
-        finalUpMax: m.finalUpMax ?? 0,
-        finalDownMax: m.finalDownMax ?? 0,
-        finalCaptureAt: m.finalCaptureAt || 0,
-        up: { bid: m.up.bid, ask: m.up.ask, mid: m.up.mid, spread: m.up.spread, updatedAt: m.up.updatedAt },
-        down: { bid: m.down.bid, ask: m.down.ask, mid: m.down.mid, spread: m.down.spread, updatedAt: m.down.updatedAt },
+        up: { bid: m.up.bid, ask: m.up.ask, mid: m.up.mid, spread: m.up.spread },
+        down: { bid: m.down.bid, ask: m.down.ask, mid: m.down.mid, spread: m.down.spread },
       }));
   }
 
   buildState() {
-    const openPos = this.positions.filter(p => p.status === 'open');
-    const openMarkValue = openPos.reduce((s, p) => s + p.shares * (p.markPrice ?? p.entryPrice), 0);
-    const unrealizedPnl = openPos.reduce((s, p) => s + round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee), 0);
-    const markValue = round2(this.bankroll + openMarkValue);
     const now = Date.now();
     const cs = windowStartFor(now);
+    const activeOrders = this.orders.filter(o => o.status === 'PENDING');
+    const filledOrders = this.orders.filter(o => o.status === 'FILLED');
     return {
-      bankroll: this.bankroll, markValue, realizedPnl: this.realizedPnl,
-      unrealizedPnl, totalPnl: round2(markValue - START_BANKROLL),
-      wins: this.wins, losses: this.losses,
+      bankroll: this.bankroll,
+      realizedPnl: this.realizedPnl,
+      totalPnl: round2(this.bankroll - START_BANKROLL),
+      wins: this.wins,
+      losses: this.losses,
       winRate: this.wins + this.losses ? round2(this.wins / (this.wins + this.losses) * 100) : null,
       maxDrawdown: this.maxDrawdown,
-      signal: this.signal,
-      pendingSignal: this.pendingSignal ? { side: this.pendingSignal.side, confidence: this.pendingSignal.confidence } : null,
-      nextShares: this.sharesFor(0.70),
-      flatBudget: this.flatBudget,
-      budgetAdditions: 0, // removed $100 increments
-      positions: openPos.map(p => ({ outcome: p.outcome, shares: p.shares, entryPrice: p.entryPrice, cost: p.cost,
-        betLabel: p.betLabel, markPrice: p.markPrice,
-        unrealized: round2(p.shares * (p.markPrice ?? p.entryPrice) - p.cost - p.fee),
-        confidence: p.signalConf, openedAt: p.openedAt, side: p.outcome })),
-
+      orders: { pending: activeOrders.length, filled: filledOrders.length },
+      activeOrders: activeOrders.map(o => ({
+        id: o.id, outcome: o.outcome, type: o.type, price: o.price, shares: o.shares,
+        createdAt: o.createdAt, slug: o.slug,
+      })),
+      filledOrders: filledOrders.slice(-20).reverse().map(o => ({
+        id: o.id, outcome: o.outcome, type: o.type, price: o.price, shares: o.shares,
+        fillPrice: o.fillPrice, createdAt: o.createdAt, filledAt: o.filledAt,
+        cost: o.cost, proceeds: o.proceeds, pnl: o.pnl,
+      })),
       markets: this.publicMarkets(),
-      resolvedPositions: this.resolvedPositions.slice(0, 30),
-      trades: this.trades.slice(-80).reverse(),
+      trades: this.trades.slice(-50).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
-      logs: this.logs.slice(-220),
-      config: { highConf: HIGH_CONF, minConfidence: HIGH_CONF, lowConf: LOW_CONF, flatBudget: this.flatBudget, sizingFactor: this.flatBudget, entryElapsed: ENTRY_ELAPSED, entryMinElapsed: ENTRY_ELAPSED, reversalPct: REVERSAL_PCT, reversalConsist: REVERSAL_CONSIST, takerFeeRate: TAKER_FEE_RATE },
-      connected: this.isClobFresh(),
+      logs: this.logs.slice(-200),
+      config: { buyPrice: BUY_PRICE, sellPrice: SELL_PRICE, shares: SHARES, makerFeeRate: MAKER_FEE_RATE, makerRebate: MAKER_REBATE, startBankroll: START_BANKROLL },
+      connected: this.pollCount > 0,
       uptime: Math.floor((now - this.startedAt) / 1000),
-      tickCount: this.tickHistory.length,
-      entryWindow: this.entryWindow,
-      waitingForWindow: this.entryWindow != null && windowStartFor(now) < this.entryWindow,
+      pollCount: this.pollCount,
     };
   }
 
-  // ── Main Loop ─────────────────────────────────────────────
+  recordEquity() {
+    const equity = round2(this.bankroll);
+    const now = Date.now();
+    if (equity > this.peakEquity) this.peakEquity = equity;
+    const dd = round2(this.peakEquity - equity);
+    if (dd > this.maxDrawdown) this.maxDrawdown = dd;
+    const last = this.equityCurve[this.equityCurve.length - 1];
+    if (!last || now - last.t > 2000) this.equityCurve.push({ t: now, equity });
+  }
+
+  // ── Init ──────────────────────────────────────────────────
   async init() {
     const start = windowStartFor(Date.now());
-    // Begin trading only when a fresh window starts (avoid mid-window start on deploy).
-    this.entryWindow = start + WINDOW_SECONDS;
-    this.log(`⏳ Started mid-window ${start} — will begin trading at next window ${this.entryWindow}`);
     await Promise.all([this.discoverMarket('btc', start), this.discoverMarket('btc', start + WINDOW_SECONDS)]);
-    await this.fetchBinanceCandles();
 
-    // CLOB polling (fast)
+    // CLOB polling
     setInterval(() => this.pollClobBooks(), CLOB_POLL_MS);
-    // Binance tick polling (fast)
-    setInterval(() => this.fetchBinanceTick().catch(() => {}), TICK_POLL_MS);
-    // Binance candle refresh
-    setInterval(() => this.fetchBinanceCandles().catch(() => {}), 5000);
-    // Signal recomputation (fast)
-    setInterval(() => { this.lastSignalEvalAt = Date.now(); this.computeSignal(); this.evaluateEntry(); this.checkPendingEntry(); }, 200);
-    // Exit check (fast)
-    setInterval(() => { this.evaluateExit(); }, 200);
-    // Resolution check (fast)
-    setInterval(() => { this.resolveByBinance().catch(() => {}); }, 250);
+    // Order evaluation (fast — check fills on every tick)
+    setInterval(() => this.evaluate(), 100);
+    // Resolution check
+    setInterval(() => {
+      const now = Date.now(), cs = windowStartFor(now);
+      const market = this.markets.get(slugFor('btc', cs));
+      if (market && !market.resolved && now / 1000 >= market.windowEnd) {
+        this.cancelUnfilledOrders(market);
+        this.resolveWindow(market);
+      }
+    }, 250);
     // Discovery retry
     setInterval(() => this.retryDiscovery().catch(() => {}), 1500);
     // Equity snapshot
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 FlatlineBot started | conf≥${(HIGH_CONF*100).toFixed(0)}% → follow signal (UP/DOWN) · flat ${this.flatBudget}/trade · hold to resolution`);
+    this.log(`🚀 LimitBot started · BUY @ $${BUY_PRICE.toFixed(2)} · SELL @ $${SELL_PRICE.toFixed(2)} · ${SHARES}sh · maker fee ${(MAKER_FEE_RATE*100).toFixed(1)}% · rebate ${(MAKER_REBATE*100).toFixed(2)}%`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, HIGH_CONF, LOW_CONF, FLAT_BUDGET, ENTRY_ELAPSED, REVERSAL_PCT, REVERSAL_CONSIST, TAKER_FEE_RATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, BUY_PRICE, SELL_PRICE, SHARES, MAKER_FEE_RATE, MAKER_REBATE, WINDOW_SECONDS } };

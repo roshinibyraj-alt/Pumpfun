@@ -1,7 +1,7 @@
 {
-  "name": "flatline-bot",
-  "version": "5.0.0",
-  "description": "FlatlineBot — BTC 5m signal follower: buy signal side when confidence >=70%, flat $500 per trade, one trade per window, NO stop loss, hold to resolution",
+  "name": "limit-bot",
+  "version": "1.0.0",
+  "description": "LimitBot \u2014 BTC 5m: limit buy both sides @ $0.01, sell @ $0.02, cancel unfilled, demo $100",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
