@@ -7,12 +7,13 @@ const CLOB_POLL_MS   = Number(process.env.CLOB_POLL_MS || 200);
 const CLOB_FRESH_MS  = Number(process.env.CLOB_FRESH_MS || 4000);
 const WINDOW_SECONDS = 300;
 const ASSETS         = ['btc'];
-const START_BANKROLL = Number(process.env.START_BANKROLL || 100);
+const START_BANKROLL = Number(process.env.START_BANKROLL || 500);
 const EQUITY_FILE    = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
-const BUY_PRICE   = Number(process.env.BUY_PRICE || 0.01);   // limit buy price per side
-const SHARES      = Number(process.env.SHARES || 100);       // shares per order
+const BUY_PRICES = (process.env.BUY_PRICES || '0.10,0.05').split(',').map(Number); // limit buy price levels
+const SHARES      = Number(process.env.SHARES || 100);       // shares per order per level
+const ORDER_WINDOW_SECONDS = Number(process.env.ORDER_WINDOW_SECONDS || 150); // cancel unfilled after this
 const MAKER_FEE   = Number(process.env.MAKER_FEE || 0);      // 0 for limit orders
 const MAKER_REBATE = Number(process.env.MAKER_REBATE || 0.001); // 0.1% rebate
 
@@ -55,6 +56,7 @@ class BotEngine {
     this.orders = [];
     this.nextOrderId = 1;
     this.entryWindow = null;   // don't trade mid-window on deploy
+    this.lastCancelWindow = null;
 
     this.trades = [];
     this.wins = 0;
@@ -175,21 +177,23 @@ class BotEngine {
   placeBuyOrders(market) {
     for (const side of ['up', 'down']) {
       const outcome = side === 'up' ? 'UP' : 'DOWN';
-      // Only place if NO buy order exists for this side/window in ANY status
-      const existing = this.orders.find(o => o.slug === market.slug && o.outcome === outcome && o.type === 'BUY');
-      if (existing) continue;
+      for (const price of BUY_PRICES) {
+        // Only place if no order exists for this side+price/window in ANY status
+        const existing = this.orders.find(o => o.slug === market.slug && o.outcome === outcome && o.type === 'BUY' && o.price === price);
+        if (existing) continue;
 
-      const order = {
-        id: this.nextOrderId++,
-        slug: market.slug,
-        outcome, type: 'BUY',
-        price: BUY_PRICE, shares: SHARES,
-        status: 'PENDING',
-        createdAt: Date.now(), filledAt: null, fillPrice: null,
-        cost: null, fee: 0, rebate: 0, totalCost: null,
-      };
-      this.orders.push(order);
-      this.log(`📋 LIMIT BUY ${outcome} ${SHARES}sh @ $${BUY_PRICE.toFixed(2)} · ord #${order.id}`);
+        const order = {
+          id: this.nextOrderId++,
+          slug: market.slug,
+          outcome, type: 'BUY',
+          price, shares: SHARES,
+          status: 'PENDING',
+          createdAt: Date.now(), filledAt: null, fillPrice: null,
+          cost: null, fee: 0, rebate: 0, totalCost: null,
+        };
+        this.orders.push(order);
+        this.log(`📋 LIMIT BUY ${outcome} ${SHARES}sh @ $${price.toFixed(2)} · ord #${order.id}`);
+      }
     }
   }
 
@@ -323,8 +327,14 @@ class BotEngine {
       this.placeBuyOrders(market);
     }
 
-    // Check fills each tick
-    this.checkBuyFill(market);
+    // Cancel unfilled orders after ORDER_WINDOW_SECONDS
+    if (elapsed >= ORDER_WINDOW_SECONDS && this.lastCancelWindow !== cs) {
+      this.lastCancelWindow = cs;
+      this.cancelUnfilled(market);
+    }
+
+    // Check fills each tick (only while orders can still fill)
+    if (elapsed < ORDER_WINDOW_SECONDS) this.checkBuyFill(market);
   }
 
   // ── State ─────────────────────────────────────────────────
@@ -361,7 +371,7 @@ class BotEngine {
       trades: this.trades.slice(-50).reverse(),
       equityCurve: sampleCurve(this.equityCurve, 1500),
       logs: this.logs.slice(-200),
-      config: { buyPrice: BUY_PRICE, shares: SHARES, makerRebate: MAKER_REBATE, startBankroll: START_BANKROLL },
+      config: { buyPrices: BUY_PRICES, shares: SHARES, orderWindow: ORDER_WINDOW_SECONDS, makerRebate: MAKER_REBATE, startBankroll: START_BANKROLL },
       connected: this.pollCount > 0,
       uptime: Math.floor((now - this.startedAt) / 1000),
       pollCount: this.pollCount,
@@ -405,8 +415,8 @@ class BotEngine {
     setInterval(() => this.retryDiscovery().catch(() => {}), 2000);
     setInterval(() => this.recordEquity(), 2000);
 
-    this.log(`🚀 LimitBot started · BUY both @ $${BUY_PRICE.toFixed(2)} · ${SHARES}sh · hold to resolution · maker rebate ${(MAKER_REBATE*100).toFixed(2)}%`);
+    this.log(`🚀 LimitBot started · BUY both @ ${BUY_PRICES.map(p => '$' + p.toFixed(2)).join(' + ')} · ${SHARES}sh each · cancel @ ${ORDER_WINDOW_SECONDS}s · hold to resolution`);
   }
 }
 
-module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, BUY_PRICE, SHARES, MAKER_FEE, MAKER_REBATE, WINDOW_SECONDS } };
+module.exports = { BotEngine, loadEquityFile, config: { ASSETS, START_BANKROLL, BUY_PRICES, SHARES, ORDER_WINDOW_SECONDS, MAKER_FEE, MAKER_REBATE, WINDOW_SECONDS } };

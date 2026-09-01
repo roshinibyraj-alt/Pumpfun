@@ -58,7 +58,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>LimitBot</h1><div class="sub">BUY BOTH SIDES @ $0.01 · 100 SH · HOLD TO POLYMARKET RESOLUTION</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>LimitBot</h1><div class="sub">BUY BOTH @ $0.10 + $0.05 · 100 SH EACH · CANCEL @ 150s · HOLD TO RESOLUTION</div></div></div>
 <div class="status"><span id="waitPill" class="pill amber">WAIT</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
