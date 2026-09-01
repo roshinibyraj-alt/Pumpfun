@@ -723,7 +723,7 @@ class BotEngine {
     // Binance candle refresh
     setInterval(() => this.fetchBinanceCandles().catch(() => {}), 5000);
     // Signal recomputation (fast)
-    setInterval(() => { this.lastSignalEvalAt = Date.now(); this.computeSignal(); this.evaluateEntry(); }, 200);
+    setInterval(() => { this.lastSignalEvalAt = Date.now(); this.computeSignal(); this.evaluateEntry(); this.checkPendingEntry(); }, 200);
     // Exit check (fast)
     setInterval(() => { this.evaluateExit(); }, 200);
     // Resolution check (fast)
