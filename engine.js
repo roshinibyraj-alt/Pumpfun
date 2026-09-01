@@ -84,6 +84,7 @@ class BotEngine {
     this.signal = { score: 0, confidence: 0, lean: 'NEUTRAL', updatedAt: null, indicators: {} };
     this.pendingSignal = null;  // { side, confidence, marketSlug, startedAt }
     this.flippedThisWindow = false;
+    this.tradedThisWindow = false;
     this.lastWindowStart = null;
     this.lastSignalSide = null;  // track previous signal lean for flip detection
     this.lastSignalEvalAt = 0;
@@ -440,7 +441,8 @@ class BotEngine {
     if (elapsed < ENTRY_ELAPSED) return;
 
     // Reset flip tracker on new window
-    if (this.lastWindowStart !== cs) { this.lastWindowStart = cs; this.flippedThisWindow = false; }
+    if (this.lastWindowStart !== cs) { this.lastWindowStart = cs; this.flippedThisWindow = false;
+    this.tradedThisWindow = false; }
 
     // Clear pending signal on new window
     if (this.pendingSignal && this.pendingSignal.windowStart !== cs) {
@@ -456,6 +458,9 @@ class BotEngine {
     const alreadyOpen = this.positions.find(p => p.windowStart === cs && p.status === 'open');
     if (alreadyOpen) return;
 
+    // Skip if we already traded (entry + optional flip) this window
+    if (this.tradedThisWindow) return;
+
     if (lean !== 'UP' && lean !== 'DOWN') {
       this.lastSignalSide = null;
       return;
@@ -470,6 +475,7 @@ class BotEngine {
       }
       this.lastSignalSide = lean;
       this.log(`⚡ FLIP ENTRY ${lean} · conf ${(conf * 100).toFixed(0)}% · buying immediately`);
+      this.tradedThisWindow = true;
       this.tryBuy(market, lean, cs, market.windowEnd);
       return;
     }
@@ -482,6 +488,7 @@ class BotEngine {
     // ── First signal ≥ 65% → buy immediately at any price ──
     if (conf < HIGH_CONF) return;
     this.log(`⚡ FIRST SIGNAL ${lean} · conf ${(conf * 100).toFixed(0)}% · buying at market`);
+    this.tradedThisWindow = true;
     this.tryBuy(market, lean, cs, market.windowEnd);
   }
 
@@ -590,6 +597,7 @@ class BotEngine {
         const flipPrice = tokenFlip.ask ?? tokenFlip.mid ?? tokenFlip.bid;
         if (Number.isFinite(flipPrice) && flipPrice > 0 && flipPrice < 1) {
           this.flippedThisWindow = true;
+          this.tradedThisWindow = true;
           this.executeBuy(market, opposite, flipPrice, doubleShares, p.windowStart, p.windowEnd, 'DOUBLE-UP');
         }
         continue;
