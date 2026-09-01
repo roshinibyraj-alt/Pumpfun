@@ -66,7 +66,7 @@ h1{font-size:19px;margin:0;line-height:1.1;text-transform:uppercase}
 </head>
 <body><div class="wrap">
 <header class="topbar">
-<div class="brand"><div class="btc">₿</div><div><h1>FlatlineBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥65% · PULLBACK ≤$0.50 ENTRY · FLAT $500/TRADE · 1 TRADE/WINDOW · NO SL · HOLD TO RESOLUTION</div></div></div>
+<div class="brand"><div class="btc">₿</div><div><h1>FlatlineBot</h1><div class="sub">7-INDICATOR SIGNAL · CONF≥65% · FIRST SIGNAL ANY PRICE + FLIP@0.40 · FLAT $500 · DOUBLE-UP 2X · SL@0.40</div></div></div>
 <div class="status"><span id="waitPill" class="pill warn">WAIT —</span><span id="statusPill" class="pill bad">OFFLINE</span><span id="tickPill" class="pill">TICKS 0</span><span id="uptimePill" class="pill blue">00:00:00</span></div>
 </header>
 <div class="metrics">
@@ -159,16 +159,16 @@ function renderPosition(positions){const box=$('posBox'),b=$('posBody');if(!posi
 box.style.display='';b.innerHTML=positions.map(p=>{const cls=p.outcome==='UP'?'pos-up':'pos-down';
 return '<div class="position-card" style="margin-bottom:6px"><div class="pos-head"><span class="pos-name">'+(p.outcome==='UP'?'▲':'▼')+' '+p.outcome+'</span><span class="pos-side '+cls+'">'+(p.betLabel||'HOLDING')+'</span></div>'
 +'<div class="pnl '+tone(p.unrealized)+'">'+money(p.unrealized)+'</div>'
-+'<div class="pos-meta">'+num(p.shares)+' SH @ '+prc(p.entryPrice)+' · cost '+cash(p.cost)+' · conf '+(p.confidence*100).toFixed(0)+'% · mark '+prc(p.markPrice)+'</div></div>'}).join('');
++'<div class="pos-meta">'+(p.openedAt?new Date(p.openedAt).toLocaleTimeString():'')+' · '+num(p.shares)+' SH @ '+prc(p.entryPrice)+' · cost '+cash(p.cost)+' · conf '+(p.confidence*100).toFixed(0)+'% · mark '+prc(p.markPrice)+'</div></div>'}).join('');
 }
 function renderResults(r){const b=$('resBody');if(!r||!r.length){b.innerHTML='<div class="empty">No resolved yet</div>';return}
 b.innerHTML=r.slice(0,15).map(p=>{const w=p.won===true;return '<div class="result"><div><span class="'+(w?'buy':'sell')+'">'+(w?'✅':'❌')+' '+ESC((p.asset||'').toUpperCase())+' '+(p.outcome||'')+'</span>'
-+'<div class="dim">conf '+(p.signalConf*100).toFixed(0)+'% · '+num(p.shares)+'sh @ '+prc(p.entryPrice)+(p.exitReason?' · '+p.exitReason:'')+'</div></div>'
++'<div class="dim">'+(p.openedAt?new Date(p.openedAt).toLocaleTimeString():'')+(p.closedAt?' → '+new Date(p.closedAt).toLocaleTimeString():'')+' · conf '+(p.signalConf*100).toFixed(0)+'% · '+num(p.shares)+'sh @ '+prc(p.entryPrice)+(p.exitReason?' · '+p.exitReason:'')+'</div></div>'
 +'<div class="'+(p.pnl>=0?'buy':'sell')+'">'+money(p.pnl)+'</div></div>'}).join('');$('resCount').textContent=r.length+' BETS'}
 function renderFeed(t){const b=$('feedBody'),ct=$('feedCount');if(!t||!t.length){b.innerHTML='<div class="empty">No trades</div>';ct.textContent='0';return}
 ct.textContent=t.length;b.innerHTML=t.slice(0,30).map(tr=>{const isBuy=tr.type==='BUY';const cls=isBuy?'buy':'sell';
 return '<div class="trade-item"><div><span class="'+cls+'">'+tr.type+' '+ESC(tr.outcome||'')+'</span>'
-+'<div class="dim">'+new Date(tr.timestamp).toLocaleTimeString()+' · '+num(tr.shares)+'sh @ '+prc(tr.price)+(tr.confidence!=null?' · conf '+(tr.confidence*100).toFixed(0)+'%':'')+'</div></div>'
++'<div class="dim">'+new Date(tr.timestamp).toLocaleTimeString()+' · '+ESC(tr.betLabel||tr.type)+' · '+num(tr.shares)+'sh @ '+prc(tr.price)+(tr.confidence!=null?' · conf '+(tr.confidence*100).toFixed(0)+'%':'')+'</div></div>'
 +'<div style="text-align:right">'+cash(tr.cost)+(tr.pnl!=null?'<div class="'+(tr.pnl>=0?'buy':'sell')+'">'+money(tr.pnl)+'</div>':'')+'</div></div>'}).join('')}
 function renderLogs(a){const b=$('logBody'),ct=$('logCount');ct.textContent=a.length+' LINES';b.innerHTML=a.slice(-50).map(l=>{let c='';if(l.includes('WIN'))c='log-win';else if(l.includes('LOSS'))c='log-loss';else if(l.includes('💰'))c='log-tp';else if(l.includes('ENTRY')||l.includes('EXIT')||l.includes('RESOLUTION'))c='log-info';return '<div class="'+c+'">'+ESC(l)+'</div>'}).join('')}
 function renderConfig(c){if(!c)return;const b=$('configBody');b.innerHTML='<div class="mini"><div class="label">Entry After</div><div class="value">'+(c.entryMinElapsed??c.entryElapsed??0)+'s</div></div>'
