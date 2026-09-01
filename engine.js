@@ -13,7 +13,7 @@ const START_BANKROLL = Number(process.env.START_BANKROLL || 20000);
 const EQUITY_FILE   = process.env.EQUITY_FILE || './equity.json';
 
 // Strategy params
-const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.70);
+const HIGH_CONF         = Number(process.env.HIGH_CONF || 0.65);
 const LOW_CONF          = Number(process.env.LOW_CONF || 0.30);
 const ENTRY_ELAPSED      = Number(process.env.ENTRY_ELAPSED || 10);
 const FLAT_BUDGET       = Number(process.env.FLAT_BUDGET || 500); // flat $ notional per trade (no martingale)
@@ -453,7 +453,7 @@ class BotEngine {
     // If we already have a pending signal, let checkPendingEntry handle it
     if (this.pendingSignal) return;
 
-    // Signal fires ≥ 70% → set pending, wait for price to drop below 0.50
+    // Signal fires ≥ 65% → set pending, wait for price to drop below 0.50
     if (lean !== 'UP' && lean !== 'DOWN') return;
     if (conf < HIGH_CONF) return;
 

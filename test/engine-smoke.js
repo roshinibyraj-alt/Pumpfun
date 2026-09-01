@@ -46,7 +46,7 @@ async function setup() {
   // Step 1: signal fires → pending set, no buy yet
   engine.signal = { score: 7, confidence: 0.80, lean: 'UP', updatedAt: Date.now(), indicators: {} };
   engine.evaluateEntry();
-  assert.ok(engine.pendingSignal, 'pending signal set after confidence >= 70%');
+  assert.ok(engine.pendingSignal, 'pending signal set after confidence >= 65%');
   assert.equal(engine.pendingSignal.side, 'UP');
   assert.equal(engine.positions.find(p => p.windowStart === cs && p.status === 'open'), undefined, 'no buy yet — waiting for price ≤ 0.50');
   // Step 2: price still above 0.50 → no entry
@@ -99,6 +99,6 @@ async function setup() {
   assert.equal(resolved.won, true, 'UP won: final UP price 0.92 >= 0.90');
   assert.equal(resolved.exitReason, 'RESOLUTION', 'resolved — not stopped out');
 
-  console.log('✅ Pumpfun smoke: flat $500 + pullback entry + conf>=70% + 1 trade/window + no SL OK');
+  console.log('✅ Pumpfun smoke: flat $500 + pullback entry + conf>=65% + 1 trade/window + no SL OK');
   process.exit(0);
 })().catch(e => { console.error('SMOKE FAIL:', e); process.exit(1); });
