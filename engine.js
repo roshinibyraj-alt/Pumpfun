@@ -118,7 +118,7 @@ class BotEngine {
       const rec = {
         slug, asset, conditionId: market.conditionId, title: market.question || slug,
         windowStart: start, windowEnd: start + WINDOW_SECONDS,
-        resolved: false, winner: null, resolvedOutcome: null, tradingClosed: false,
+        resolved: false, winner: null, resolvedOutcome: null, tradingClosed: false, finalUpMax: null, finalDownMax: null,
         up: { tokenId: tokenIds[ui], slug, asset, outcome: 'UP', bid: null, ask: null, mid: null, updatedAt: null, bookAsks: [] },
         down: { tokenId: tokenIds[di], slug, asset, outcome: 'DOWN', bid: null, ask: null, mid: null, updatedAt: null, bookAsks: [] },
       };
@@ -170,6 +170,17 @@ class BotEngine {
     token.bid = cleanBid; token.ask = cleanAsk;
     token.mid = cleanBid != null && cleanAsk != null ? round5((cleanBid + cleanAsk) / 2) : (cleanAsk ?? cleanBid);
     token.updatedAt = Date.now();
+
+    // Track max mid price in final 2 seconds for resolution
+    const market = this.markets.get(token.slug);
+    if (market && !market.resolved) {
+      const nowS = Date.now() / 1000;
+      if (nowS >= market.windowEnd - 2) {
+        const mid = token.mid ?? 0;
+        if (token.outcome === 'UP' && (market.finalUpMax == null || mid > market.finalUpMax)) market.finalUpMax = mid;
+        if (token.outcome === 'DOWN' && (market.finalDownMax == null || mid > market.finalDownMax)) market.finalDownMax = mid;
+      }
+    }
   }
 
   // ── Order Management ──────────────────────────────────────
@@ -236,58 +247,22 @@ class BotEngine {
     }
   }
 
-  // ── Polymarket Resolution ─────────────────────────────────
-  // Load the actual Polymarket resolution outcome from Gamma API.
-  async fetchResolution(market) {
-    try {
-      const rows = await this.getJSON(`${GAMMA_API}/markets?slug=${encodeURIComponent(market.slug)}`);
-      const m = Array.isArray(rows) ? rows[0] : null;
-      if (!m) return null;
-
-      // Check if market is resolved via Gamma API
-      if (m.resolved === true || m.closed === true) {
-        const outcome = m.outcomePrices ? m.outcomePrices : null;
-        if (outcome && Array.isArray(outcome)) {
-          const outcomes = typeof m.outcomes === 'string' ? JSON.parse(m.outcomes) : m.outcomes || [];
-          const upIdx = outcomes.findIndex(o => String(o).toLowerCase() === 'up');
-          const downIdx = outcomes.findIndex(o => String(o).toLowerCase() === 'down');
-          const upP = upIdx >= 0 ? Number(outcome[upIdx]) : 0;
-          const downP = downIdx >= 0 ? Number(outcome[downIdx]) : 0;
-          if (upP >= 0.99) return 'UP';
-          if (downP >= 0.99) return 'DOWN';
-        }
-      }
-
-      // Also check winner field
-      if (m.winner) {
-        const w = String(m.winner).toLowerCase();
-        if (w === 'up') return 'UP';
-        if (w === 'down') return 'DOWN';
-      }
-
-      return null;
-    } catch (e) {
-      this.log(`⚠️ Resolution fetch: ${e.message}`);
-      return null;
-    }
-  }
-
-  // Resolve filled positions using Polymarket's actual outcome; fallback to CLOB final price (last resort, never used when resolution available).
-  async resolveWindow(market, nowS) {
+  // ── Resolution (CLOB final 2s prices, no API) ─────────────────
+  // Resolve based on final 2-second max prices only. No API fallback.
+  resolveWindow(market, nowS) {
     if (nowS < market.windowEnd) return false;
-    const finalUp = market.up.mid ?? 0;
-    const finalDown = market.down.mid ?? 0;
-    const resolved = await this.fetchResolution(market);
-    let winner = resolved;
+    const fUp = market.finalUpMax ?? 0;
+    const fDown = market.finalDownMax ?? 0;
+    let winner = null;
+    if (fUp >= 0.90) winner = 'UP';
+    else if (fDown >= 0.90) winner = 'DOWN';
     if (!winner) {
-      // Last-resort: derive from final CLOB prices (only if Polymarket hasn't resolved yet)
-      if (finalUp > finalDown) winner = 'UP';
-      else if (finalDown > finalUp) winner = 'DOWN';
-      else winner = 'UP';
+      this.log('⏳ RESOLUTION PENDING — neither side >= 0.90 (UP max=' + round5(fUp) + ', DOWN max=' + round5(fDown) + ')');
+      return false;
     }
     market.resolved = true;
     market.winner = winner;
-    this.log(`🏁 RESOLUTION ${winner} · ${resolved ? '(Polymarket confirmed)' : '(CLOB fallback)'}`);
+    this.log('🏁 RESOLUTION ' + winner + ' · UP max=' + round5(fUp) + ' · DOWN max=' + round5(fDown) + ' (final 2s CLOB)');
 
     // Cancel any unfilled orders
     this.cancelUnfilled(market);
@@ -304,7 +279,7 @@ class BotEngine {
       order.status = 'RESOLVED';
       order.resolvedAt = Date.now();
       order.pnl = pnl;
-      this.log(`🏁 ${order.outcome} ${won ? 'WIN' : 'LOSS'} #${order.id} @ $${order.fillPrice.toFixed(2)} → P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`);
+      this.log('🏁 ' + order.outcome + ' ' + (won ? 'WIN' : 'LOSS') + ' #' + order.id + ' @ $' + order.fillPrice.toFixed(2) + ' → P&L ' + (pnl >= 0 ? '+' : '-') + '$' + Math.abs(pnl).toFixed(2));
       this.trades.push({ timestamp: Date.now(), type: 'RESOLVED', outcome: order.outcome, shares: order.shares, price: won ? 1 : 0, cost: order.totalCost, pnl, orderId: order.id, winner });
     }
     this.recordEquity();
@@ -408,7 +383,7 @@ class BotEngine {
         const hasFilled = this.orders.some(o => o.slug === slug && o.type === 'BUY' && o.status === 'FILLED');
         if (!hasFilled) continue;
         if (nowS >= m.windowEnd) {
-          this.resolveWindow(m, nowS).catch(e => this.log('⚠️ resolve: ' + e.message));
+          this.resolveWindow(m, nowS);
         }
       }
     }, 250);
