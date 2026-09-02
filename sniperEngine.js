@@ -9,6 +9,7 @@ const CEILING_PRICE   = 0.99;  // aggressive slippage ceiling for buy & sell
 const BASE_PCT        = 0.067; // 6.7% of capital per trade
 const MART_MULT       = 2.5;   // martingale multiplier after loss
 const START_CAPITAL   = 150;
+const SETTLE_GRACE_MS = 2500;  // ms to wait for final-2s maxes before refund
 
 function round2(v) { return Math.round(v * 100) / 100; }
 function round5(v) { return Math.round(v * 100000) / 100000; }
@@ -41,6 +42,8 @@ class SniperEngine {
     this.windowTraded   = new Set();
     this.prevAsks       = new Map();  // previous ask per side for cross detection
     this.lastWindow     = null;
+    this.pendingSettle  = null;   // { position, windowStart, ts } deferred end-of-window settlement
+    this.entryWindow    = null;   // first window allowed to enter (no mid-window deploy)
 
     // Connected flag
     this.connected = false;
@@ -63,28 +66,44 @@ class SniperEngine {
     // Mark connected on first tick with market data
     if (!this.connected && this.markets.size > 0) this.connected = true;
 
+    // First time we have a real market, lock entry to the next fresh window
+    // so we never fire mid-window right after a deploy/restart.
+    if (this.entryWindow == null && this.markets.has(`btc-updown-5m-${cs}`)) {
+      this.entryWindow = cs + WINDOW_SECONDS;
+      this.log(`⏳ Started mid-window ${cs} — SniperBot will trade from window ${this.entryWindow}`);
+    }
+
     // ── Window transition ──────────────────────────────────────
+    // When a new window begins, defer settlement of any held position from the
+    // previous window. The final-2s CLOB max prices may not be captured on the
+    // exact transition tick (LimitBot resolves ~75ms later via its own interval),
+    // so we retry up to SETTLE_GRACE_MS before falling back to a cost refund.
     if (cs !== this.lastWindow) {
-      // Return capital for any unresolved position from previous window
-      if (this.windowPosition) {
-        this.log(`⚠️ UNRESOLVED pos from window ${this.windowPosition.windowStart} — returning cost $${this.windowPosition.cost.toFixed(2)}`);
-        this.capital = round2(this.capital + this.windowPosition.cost);
+      const wasWindow = this.lastWindow;
+      if (this.windowPosition && this.windowPosition.windowStart === wasWindow) {
+        this.pendingSettle = { position: this.windowPosition, windowStart: this.windowPosition.windowStart, ts: Date.now() };
         this.windowPosition = null;
       }
-      this.lastWindow   = cs;
+      this.lastWindow = cs;
       this.prevAsks.clear();
-      // Don't clear windowTraded — it's per-window and won't collide
     }
+
+    // Deferred settlement: try to resolve using final-2s maxes, else refund.
+    if (this.pendingSettle) {
+      if (this.trySettle(this.pendingSettle)) {
+        this.pendingSettle = null;
+      } else if (Date.now() - this.pendingSettle.ts >= SETTLE_GRACE_MS) {
+        this.refundPosition(this.pendingSettle);
+        this.pendingSettle = null;
+      }
+    }
+
+    // Don't trade until the first allowed window (cold/deploy gate)
+    if (this.entryWindow != null && cs < this.entryWindow) return;
 
     const slug    = `btc-updown-5m-${cs}`;
     const market  = this.markets.get(slug);
     if (!market || market.resolved) return;
-
-    // ── Resolution at window end ───────────────────────────────
-    if (nowS >= market.windowEnd && this.windowPosition && this.windowPosition.windowStart === cs) {
-      this.resolveWindow(market);
-      return;
-    }
 
     // ── Wait period ────────────────────────────────────────────
     if (elapsed < SNIPER_WAIT) return;
@@ -205,7 +224,57 @@ class SniperEngine {
     this.recordEquity();
   }
 
-  // ── Resolution (same method as LimitBot) ────────────────────
+  // ── Deferred Resolution Helpers ──────────────────────────
+  // Attempts to resolve a pending position using the previous window's final-2s
+  // max prices. Returns true if settled (WIN, LOSS, or REFUND), false to retry.
+  trySettle(pending) {
+    const prevMarket = this.markets.get(`btc-updown-5m-${pending.windowStart}`);
+    if (!prevMarket) {
+      // Market not discovered — refund after grace period (handled by caller)
+      return false;
+    }
+    const fUp   = prevMarket.finalUpMax   ?? 0;
+    const fDown = prevMarket.finalDownMax ?? 0;
+    if (fUp < 0.95 && fDown < 0.95) return false;  // no winner yet — retry next tick
+
+    const win  = fUp >= 0.95 ? 'UP' : 'DOWN';
+    const pos  = pending.position;
+    const won  = pos.side === win;
+    const payout = won ? pos.shares : 0;
+    const pnl  = round2(payout - pos.cost);
+
+    this.capital     = round2(this.capital + payout);
+    this.realizedPnl = round2(this.realizedPnl + pnl);
+
+    if (pnl >= 0) {
+      this.wins++;
+      this.consecutiveLosses = 0;
+      this.currentBet = round2(BASE_PCT * this.startCapital);
+    } else {
+      this.losses++;
+      this.consecutiveLosses++;
+      this.currentBet = round2(this.currentBet * MART_MULT);
+    }
+
+    this.log(`RES ${pos.side} ${won ? 'WIN' : 'LOSS'} @ final-2s (${win}=${round5(win==='UP'?fUp:fDown)}) · ${pos.shares}sh · P&L ${pnl >= 0 ? '+' : '-'}$${Math.abs(pnl).toFixed(2)} · next bet $${this.currentBet.toFixed(2)}`);
+    this.trades.push({
+      timestamp: Date.now(), type: 'RESOLVED', bot: 'sniper',
+      outcome: pos.side, shares: pos.shares, price: won ? 1 : 0,
+      cost: pos.cost, pnl, orderId: this.nextOrderId++, winner: win,
+    });
+    this.recordEquity();
+    return true;
+  }
+
+  // Refund position cost when no winner can be determined within the grace period.
+  refundPosition(pending) {
+    const pos = pending.position;
+    this.log(`⚠️ UNRESOLVED pos from window ${pending.windowStart} — returning cost $${pos.cost.toFixed(2)}`);
+    this.capital = round2(this.capital + pos.cost);
+    return null;
+  }
+
+  // ── Resolution (same method as LimitBot) ─────────────
   resolveWindow(market) {
     const fUp   = market.finalUpMax   ?? 0;
     const fDown = market.finalDownMax ?? 0;
@@ -263,6 +332,7 @@ class SniperEngine {
   buildState() {
     return {
       name: 'SniperBot',
+      waitingForWindow: this.entryWindow != null && Math.floor(Date.now()/1000) < this.entryWindow,
       capital: this.capital,
       startCapital: this.startCapital,
       realizedPnl: this.realizedPnl,
