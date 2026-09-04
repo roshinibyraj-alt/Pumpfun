@@ -282,6 +282,71 @@ class Bot:
         await self.clob.close()
 
     # ----------------------------------------------------------- status view
+    def _market_snapshot(self) -> dict:
+        """Live Up/Down prices for BTC and ETH in the current window, for
+        the dashboard's primary price panel."""
+        now = time.time()
+        out = {}
+        for asset, win in self.windows.items():
+            outcomes = {}
+            for name, tok in win.tokens.items():
+                b = self.last_books.get(tok.token_id)
+                best_bid = b.best_bid if b else None
+                best_ask = b.best_ask if b else None
+                mid = None
+                if best_bid is not None and best_ask is not None:
+                    mid = round((best_bid + best_ask) / 2, 4)
+                outcomes[name] = {
+                    "best_bid": best_bid,
+                    "best_ask": best_ask,
+                    "mid": mid,
+                    "last_trade_price": b.last_trade_price if b else None,
+                }
+            out[asset] = {
+                "slug": win.slug,
+                "window_start": win.window_start,
+                "window_end": win.window_end,
+                "seconds_left": max(0, round(win.window_end - now)),
+                "closed": win.closed,
+                "outcomes": outcomes,
+            }
+        return out
+
+    def _pair_snapshot(self) -> dict:
+        """Live combined ask/bid for each cross-asset pair vs. thresholds."""
+        refs = pair_leg_refs(self.windows)
+        out = {}
+        for pair_id, legs in refs.items():
+            leg_prices = {}
+            asks, bids = [], []
+            for leg in legs:
+                b = self.last_books.get(leg.token_id)
+                bb = b.best_bid if b else None
+                ba = b.best_ask if b else None
+                leg_prices[f"{leg.asset}:{leg.outcome}"] = {"best_bid": bb, "best_ask": ba}
+                if ba is not None:
+                    asks.append(ba)
+                if bb is not None:
+                    bids.append(bb)
+            combined_ask = round(sum(asks), 4) if len(asks) == len(legs) else None
+            combined_bid = round(sum(bids), 4) if len(bids) == len(legs) else None
+            has_position = pair_id in self.engine.open_positions
+            out[pair_id] = {
+                "legs": leg_prices,
+                "combined_ask": combined_ask,
+                "combined_bid": combined_bid,
+                "distance_to_entry": (
+                    round(combined_ask - config.ENTRY_COMBINED_PRICE, 4)
+                    if combined_ask is not None else None
+                ),
+                "distance_to_exit": (
+                    round(config.EXIT_COMBINED_PRICE - combined_bid, 4)
+                    if combined_bid is not None and has_position else None
+                ),
+                "has_open_position": has_position,
+            }
+        return out
+
     def status(self) -> dict:
         current_bids = {}
         for pair_id in config.PAIR_DEFS:
@@ -323,10 +388,13 @@ class Bot:
         return {
             "status": self.status_note,
             "tick": self.tick_count,
+            "server_time": time.time(),
             "balance_cash": round(self.engine.balance, 2),
             "equity": round(equity, 2),
             "starting_capital": self.engine.starting_capital,
             "windows": {a: {"slug": w.slug, "window_end": w.window_end} for a, w in self.windows.items()},
+            "markets": self._market_snapshot(),
+            "pairs": self._pair_snapshot(),
             "open_positions": open_positions,
             "awaiting_resolution": awaiting,
             "recent_trades": recent,
