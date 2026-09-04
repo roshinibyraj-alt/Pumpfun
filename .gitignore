@@ -1,3 +1,5 @@
-node_modules/
+__pycache__/
+*.pyc
 .env
-equity.json
+*.db
+.venv/
