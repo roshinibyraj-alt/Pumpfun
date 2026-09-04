@@ -60,7 +60,8 @@ RESOLUTION_POLL_TIMEOUT_SECONDS = _f("RESOLUTION_POLL_TIMEOUT_SECONDS", 180.0)
 
 # ---- Assets / market discovery ---------------------------------------------
 ASSETS = ["btc", "eth"]  # gamma slug prefixes
-WINDOW_SECONDS = 300
+WINDOW_SECONDS = _i("WINDOW_SECONDS", 900)   # 15-minute windows
+WINDOW_LABEL = os.getenv("WINDOW_LABEL", "15m")  # used in the gamma slug: "{asset}-updown-{WINDOW_LABEL}-{ts}"
 
 GAMMA_BASE = os.getenv("GAMMA_BASE", "https://gamma-api.polymarket.com")
 CLOB_BASE = os.getenv("CLOB_BASE", "https://clob.polymarket.com")

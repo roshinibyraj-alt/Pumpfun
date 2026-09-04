@@ -1,6 +1,6 @@
 # Polymarket 5-Minute Cross-Market Bot (Paper / Demo Mode)
 
-Trades a cross-asset divergence strategy across Polymarket's 5-minute
+Trades a cross-asset divergence strategy across Polymarket's 15-minute
 BTC and ETH Up/Down markets. **This bot is paper-trading only** — it reads
 Polymarket's real, public order books but never signs or submits a real
 order. All fills, fees, and P&L are simulated against a virtual $2,000
@@ -8,7 +8,7 @@ bankroll (configurable).
 
 ## Strategy
 
-Each 5-minute window has two independent binary markets: `BTC Up/Down`
+Each 15-minute window has two independent binary markets: `BTC Up/Down`
 and `ETH Up/Down`. The bot watches two synthetic pairs:
 
 - **Pair A**: BTC-Up + ETH-Down
@@ -56,7 +56,7 @@ settlement compares the real spot price to the opening strike. This bot:
 ## Fees
 
 Confirmed against Polymarket's own docs and a live market's fee schedule:
-crypto-category 5-minute markets charge a **taker-only** dynamic fee —
+crypto-category 15-minute markets charge a **taker-only** dynamic fee —
 makers pay $0.
 
 ```
@@ -64,7 +64,7 @@ fee_usd = shares * fee_rate * price * (1 - price)
 ```
 
 `fee_rate` is read live per-market from Gamma's `feeSchedule.rate` field
-(observed at `0.07` for BTC/ETH 5-min markets, i.e. up to 1.75% of
+(observed at `0.07` for BTC/ETH 15-min markets, i.e. up to 1.75% of
 notional at a $0.50 price, shrinking toward the extremes). This bot is
 taker-only by design — every entry and exit crosses the spread — so this
 fee is applied to every simulated fill.

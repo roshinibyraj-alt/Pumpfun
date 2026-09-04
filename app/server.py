@@ -3,7 +3,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from .strategy import Bot
 
-app = FastAPI(title="Polymarket 5m Cross-Market Bot (paper)")
+app = FastAPI(title="Polymarket 15m Cross-Market Bot (paper)")
 bot: Bot = None  # set by main.py
 
 
@@ -24,7 +24,7 @@ DASHBOARD_HTML = """
 <html>
 <head>
 <meta charset="utf-8">
-<title>Polymarket 5m Cross-Market Bot</title>
+<title>Polymarket 15m Cross-Market Bot</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root {
@@ -98,7 +98,7 @@ DASHBOARD_HTML = """
 </head>
 <body>
   <div class="top">
-    <h1><span class="pulse"></span>Polymarket 5-Minute Cross-Market Bot</h1>
+    <h1><span class="pulse"></span>Polymarket 15-Minute Cross-Market Bot</h1>
     <span class="badge">PAPER / DEMO MODE — NO REAL ORDERS</span>
   </div>
 

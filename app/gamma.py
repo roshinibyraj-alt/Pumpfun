@@ -1,10 +1,12 @@
 """
 Market discovery via Polymarket's public Gamma API.
 
-Polymarket's 5-minute crypto up/down markets are published as Events with
-a deterministic slug: "{asset}-updown-5m-{window_start_unix}", where the
-window start is the Unix epoch second floored to a 300s boundary (UTC).
-Each event contains exactly one Market with two outcomes, "Up" and "Down".
+Polymarket's short-dated crypto up/down markets are published as Events
+with a deterministic slug: "{asset}-updown-{window_label}-{window_start_unix}",
+e.g. "btc-updown-15m-1788519600", where the window start is the Unix
+epoch second floored to a WINDOW_SECONDS boundary (UTC) -- confirmed
+against a live 15-minute BTC event. Each event contains exactly one
+Market with two outcomes, "Up" and "Down".
 
 Gamma quirk (confirmed against real responses): /markets?slug=... returns
 an empty list for these short-dated markets; you must use /events?slug=...
@@ -28,7 +30,7 @@ def current_window_start(now: Optional[float] = None) -> int:
 
 
 def slug_for(asset: str, window_start: int) -> str:
-    return f"{asset}-updown-5m-{window_start}"
+    return f"{asset}-updown-{config.WINDOW_LABEL}-{window_start}"
 
 
 @dataclass

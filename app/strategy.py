@@ -2,8 +2,8 @@
 Main trading loop.
 
 Every POLL_INTERVAL_SECONDS:
-  1. Make sure we have the current 5-min window's market data for BTC & ETH
-     (rolling to the next window at each 300s boundary; any position still
+  1. Make sure we have the current window's market data for BTC & ETH
+     (rolling to the next window at each WINDOW_SECONDS boundary; any position still
      open when its window ends moves to "awaiting resolution", and the
      first-fired/TP-lock state resets for the new window).
   2. Fetch live order books for all 4 outcome tokens.
