@@ -28,27 +28,23 @@ PAPER_MODE = True
 
 # ---- Bankroll / sizing --------------------------------------------------
 STARTING_CAPITAL_USD = _f("STARTING_CAPITAL_USD", 2000.0)
-SHARES_PER_LEG = _i("SHARES_PER_LEG", 100)
+SHARES_PER_LEG = _i("SHARES_PER_LEG", 300)
 
 # ---- Strategy thresholds -------------------------------------------------
 ENTRY_COMBINED_PRICE = _f("ENTRY_COMBINED_PRICE", 0.85)   # buy when combined ask < this
-EXIT_COMBINED_PRICE = _f("EXIT_COMBINED_PRICE", 1.15)     # sell when combined bid >= this
+# No intra-window take-profit: once a pair fires, it is held to
+# resolution every time. There is also no re-entry: at most ONE combo
+# (either pair) may fire per 5-minute window -- whichever pair's combined
+# ask first drops below ENTRY_COMBINED_PRICE wins the window, and the
+# other pair is locked out until the next window.
 
 # Taker-only execution: we always cross the spread so fills are (almost)
-# guaranteed, capped by a slippage ceiling/floor so we never chase a
-# runaway book.
+# guaranteed, capped by a slippage ceiling so we never chase a runaway book.
 BUY_SLIPPAGE_CEILING = _f("BUY_SLIPPAGE_CEILING", 0.99)   # never pay more than this per share
-SELL_SLIPPAGE_FLOOR = _f("SELL_SLIPPAGE_FLOOR", 0.01)     # never accept less than this per share
 
 # How many ticks after firing an order we wait before logging the
 # "post-fill" book snapshot (impact check requested by the user).
 POST_FILL_CHECK_TICKS = _i("POST_FILL_CHECK_TICKS", 2)
-
-# ---- Re-entry rule --------------------------------------------------------
-# A pair may only be re-entered, within the same window, after its
-# previous position on that exact pair was sold (take-profit exit).
-# There is no other re-entry cap.
-ALLOW_REENTRY_AFTER_RESOLUTION = _b("ALLOW_REENTRY_AFTER_RESOLUTION", False)
 
 # ---- Fees -----------------------------------------------------------------
 # Polymarket crypto-category markets charge a dynamic TAKER-only fee:

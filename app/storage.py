@@ -74,7 +74,7 @@ def load_balance(default: float) -> float:
 
 
 def record_trade(position):
-    """position: engine.Position (already CLOSED_TP or RESOLVED)"""
+    """position: engine.Position (already RESOLVED)"""
     conn = _connect()
 
     def leg_to_dict(lf):

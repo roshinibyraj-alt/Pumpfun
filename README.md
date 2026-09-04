@@ -14,21 +14,23 @@ and `ETH Up/Down`. The bot watches two synthetic pairs:
 - **Pair A**: BTC-Up + ETH-Down
 - **Pair B**: BTC-Down + ETH-Up
 
-For each pair:
+Rules, per window:
 
-1. **Entry** — when the combined ask price (best-ask-BTC-leg +
-   best-ask-ETH-leg) drops below `ENTRY_COMBINED_PRICE` (default `0.85`),
-   buy `SHARES_PER_LEG` (default `100`) shares of *both* legs.
-2. **Take-profit** — if the combined bid price of an open pair rises to
-   `EXIT_COMBINED_PRICE` (default `1.15`) or above at any point before the
-   window closes, sell both legs immediately, realize the profit, and the
-   pair becomes eligible for re-entry (re-entry only happens after the
-   prior position on that exact pair has been sold — no stacking).
-3. **Fallback (hold to resolution)** — if take-profit never triggers, the
-   position is held. Once the market closes, Polymarket settles it based
+1. **Entry (at most once per window, across BOTH pairs)** — whichever
+   pair's combined ask price (best-ask-BTC-leg + best-ask-ETH-leg) first
+   drops below `ENTRY_COMBINED_PRICE` (default `0.85`) fires first: buy
+   `SHARES_PER_LEG` (default `300`) shares of *both* legs. The instant
+   one pair fires, the other pair is **locked out for the rest of that
+   window** — no re-entry, no second combo, even if its own combined ask
+   also dips below the threshold.
+2. **No intra-window take-profit.** There is no selling mid-window.
+   Whatever fires is held to resolution, every time.
+3. **Resolution** — once the market closes, Polymarket settles it based
    on the real BTC/ETH price vs. the window's opening strike (via its
-   oracle price feed) — **not** by any CLOB price threshold. Each leg pays
-   $1/share if its outcome won, $0/share if it lost.
+   oracle price feed) — **not** by any CLOB price threshold. Each leg
+   pays $1/share if its outcome won, $0/share if it lost.
+4. Next window, both pairs are live again and it's first-trigger-wins
+   once more.
 
 ### A correction worth knowing
 
@@ -62,13 +64,13 @@ fee is applied to every simulated fill.
 ## Execution model
 
 - **Taker only**, capped by a slippage ceiling on buys (`0.99`, i.e. never
-  pay more) and a slippage floor on sells (`0.01`, i.e. never accept
-  less), so orders effectively always fill.
+  pay more than that per share), so the single entry per window
+  effectively always fills.
 - Fills are simulated by walking the **real live order book** (not just
   top-of-book), so partial fills / slippage on thin books show up
   honestly in the fill price, and are logged if a leg can't be fully
   filled inside the cap.
-- A few polling ticks after every fill, the bot re-checks the book on
+- A few polling ticks after the fill, the bot re-checks the book on
   those same tokens and logs a snapshot (`post_fill_check` in `/status`)
   so you can see how much the market moved right after you traded.
 
