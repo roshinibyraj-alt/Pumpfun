@@ -38,7 +38,10 @@ class Position:
     entry_legs: Dict[str, LegFill]        # key "{asset}:{outcome}"
     entry_cost: float                      # notional paid, excl. fees
     entry_fees: float
-    status: str = "OPEN"                   # OPEN | RESOLVED
+    status: str = "OPEN"                   # OPEN | CLOSED_TP | RESOLVED
+    has_tp: bool = False                    # set by strategy: True if this
+                                             # was the first pair to fire in
+                                             # its window (gets intra-window TP)
     closed_at: Optional[float] = None
     exit_legs: Optional[Dict[str, LegFill]] = None
     exit_proceeds: Optional[float] = None
@@ -74,6 +77,26 @@ class PaperEngine:
         log.info(
             "OPEN %s window=%s cost=%.4f fees=%.4f balance=%.2f",
             pair_id, window_start, total_shares_cost, total_fees, self.balance,
+        )
+        return pos
+
+    # ---- take-profit exit (only for pairs in config.TP_PAIR_IDS) -------------
+    def close_position_tp(self, pos: Position, leg_fills: Dict[str, LegFill]) -> Position:
+        proceeds = sum(lf.shares * lf.avg_price for lf in leg_fills.values())
+        exit_fees = sum(lf.fee for lf in leg_fills.values())
+        pos.exit_legs = leg_fills
+        pos.exit_proceeds = proceeds
+        pos.exit_fees = exit_fees
+        pos.status = "CLOSED_TP"
+        pos.closed_at = time.time()
+        pos.realized_pnl = (proceeds - exit_fees) - (pos.entry_cost + pos.entry_fees)
+
+        self.balance += (proceeds - exit_fees)
+        self.open_positions.pop(pos.pair_id, None)
+        self.history.append(pos)
+        log.info(
+            "CLOSE_TP %s pnl=%.4f balance=%.2f",
+            pos.pair_id, pos.realized_pnl, self.balance,
         )
         return pos
 

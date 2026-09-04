@@ -32,15 +32,14 @@ SHARES_PER_LEG = _i("SHARES_PER_LEG", 300)
 
 # ---- Strategy thresholds -------------------------------------------------
 ENTRY_COMBINED_PRICE = _f("ENTRY_COMBINED_PRICE", 0.85)   # buy when combined ask < this
-# No intra-window take-profit: once a pair fires, it is held to
-# resolution every time. There is also no re-entry: at most ONE combo
-# (either pair) may fire per 5-minute window -- whichever pair's combined
-# ask first drops below ENTRY_COMBINED_PRICE wins the window, and the
-# other pair is locked out until the next window.
+EXIT_COMBINED_PRICE = _f("EXIT_COMBINED_PRICE", 1.15)     # sell when combined bid >= this
+# (only applies to pairs listed in TP_PAIR_IDS below)
 
 # Taker-only execution: we always cross the spread so fills are (almost)
-# guaranteed, capped by a slippage ceiling so we never chase a runaway book.
+# guaranteed, capped by a slippage ceiling/floor so we never chase a
+# runaway book.
 BUY_SLIPPAGE_CEILING = _f("BUY_SLIPPAGE_CEILING", 0.99)   # never pay more than this per share
+SELL_SLIPPAGE_FLOOR = _f("SELL_SLIPPAGE_FLOOR", 0.01)     # never accept less than this per share
 
 # How many ticks after firing an order we wait before logging the
 # "post-fill" book snapshot (impact check requested by the user).
@@ -75,6 +74,12 @@ PORT = _i("PORT", 8080)
 # ---- Pair definitions --------------------------------------------------------
 # Each pair buys/sells BOTH legs together. "Up"/"Down" refer to the
 # outcome index within each asset's own market (index 0 = Up, 1 = Down).
+#
+# TP assignment is DYNAMIC (decided at runtime by the strategy loop, not
+# fixed here): whichever pair fires first in a window gets the
+# intra-window take-profit and is locked (no re-entry) once it hits;
+# whichever pair fires second gets no take-profit at all and is simply
+# held to resolution. See app/strategy.py.
 PAIR_DEFS = {
     "BTC_UP_ETH_DOWN": (("btc", "Up"), ("eth", "Down")),
     "BTC_DOWN_ETH_UP": (("btc", "Down"), ("eth", "Up")),

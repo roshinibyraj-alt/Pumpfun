@@ -16,21 +16,29 @@ and `ETH Up/Down`. The bot watches two synthetic pairs:
 
 Rules, per window:
 
-1. **Entry (at most once per window, across BOTH pairs)** — whichever
-   pair's combined ask price (best-ask-BTC-leg + best-ask-ETH-leg) first
-   drops below `ENTRY_COMBINED_PRICE` (default `0.85`) fires first: buy
-   `SHARES_PER_LEG` (default `300`) shares of *both* legs. The instant
-   one pair fires, the other pair is **locked out for the rest of that
-   window** — no re-entry, no second combo, even if its own combined ask
-   also dips below the threshold.
-2. **No intra-window take-profit.** There is no selling mid-window.
-   Whatever fires is held to resolution, every time.
-3. **Resolution** — once the market closes, Polymarket settles it based
-   on the real BTC/ETH price vs. the window's opening strike (via its
-   oracle price feed) — **not** by any CLOB price threshold. Each leg
-   pays $1/share if its outcome won, $0/share if it lost.
-4. Next window, both pairs are live again and it's first-trigger-wins
-   once more.
+1. **Entry** — either pair can fire (buy `SHARES_PER_LEG`, default `300`,
+   shares of both legs) when its own combined ask price
+   (best-ask-BTC-leg + best-ask-ETH-leg) drops below
+   `ENTRY_COMBINED_PRICE` (default `0.85`). Each pair fires **at most once
+   per window**.
+2. **Take-profit is dynamic, decided by trigger order, not by which pair
+   it is:**
+   - Whichever pair fires **first** in the window gets an intra-window
+     take-profit: if its combined bid rises to `EXIT_COMBINED_PRICE`
+     (default `1.15`) or above, both legs are sold immediately, profit is
+     realized, and that pair is then **locked for the rest of the
+     window** — no re-entry, even if it dips below 0.85 again.
+   - Whichever pair fires **second** (or is the only one that fires that
+     window) gets **no take-profit at all** — once bought, it is simply
+     held to resolution.
+3. **Resolution** — for any position still open when its window closes
+   (the no-TP pair always; the first-fired pair only if TP never
+   triggered), Polymarket settles the market based on the real BTC/ETH
+   price vs. the window's opening strike (via its oracle price feed) —
+   **not** by any CLOB price threshold. Each leg pays $1/share if its
+   outcome won, $0/share if it lost.
+4. Next window, the first-fired/TP-lock state resets and it's
+   first-trigger-wins-TP again.
 
 ### A correction worth knowing
 
@@ -64,13 +72,13 @@ fee is applied to every simulated fill.
 ## Execution model
 
 - **Taker only**, capped by a slippage ceiling on buys (`0.99`, i.e. never
-  pay more than that per share), so the single entry per window
-  effectively always fills.
+  pay more than that per share) and a slippage floor on Pair A's sells
+  (`0.01`, i.e. never accept less), so orders effectively always fill.
 - Fills are simulated by walking the **real live order book** (not just
   top-of-book), so partial fills / slippage on thin books show up
   honestly in the fill price, and are logged if a leg can't be fully
   filled inside the cap.
-- A few polling ticks after the fill, the bot re-checks the book on
+- A few polling ticks after every fill, the bot re-checks the book on
   those same tokens and logs a snapshot (`post_fill_check` in `/status`)
   so you can see how much the market moved right after you traded.
 

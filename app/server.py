@@ -73,10 +73,12 @@ DASHBOARD_HTML = """
   .pcard.locked { opacity: 0.55; }
   .pcard .phead { display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; }
   .pcard .pname { font-weight:700; font-size:13px; }
+  .pcard .ptag { font-size:9.5px; color:var(--muted); font-weight:600; letter-spacing:0.4px; text-transform:uppercase; }
   .chip { font-size:10px; padding:2px 8px; border-radius:20px; font-weight:700; letter-spacing:0.3px; }
   .chip.armed { background:#1c2430; color:var(--muted); }
   .chip.fired-chip { background:#123424; color:var(--up); border:1px solid #1e5c3d; }
   .chip.locked-chip { background:#2a1414; color:var(--down); border:1px solid #4a1e1e; }
+  .chip.notp-chip { background:#1e2a3a; color:var(--accent); border:1px solid #2c4a6b; }
   .prow { display:flex; justify-content:space-between; font-size:12px; color:var(--muted); margin:4px 0; }
   .prow b { color: var(--text); font-variant-numeric: tabular-nums; }
   .threshbar { height:8px; border-radius:4px; background:#0d1219; border:1px solid var(--border); margin-top:8px; position:relative; overflow:hidden; }
@@ -171,26 +173,39 @@ async function refresh() {
     const state = p.state || 'ARMED';
     const ask = p.combined_ask, bid = p.combined_bid;
     const entryT = (d.config?.entry_combined_price) ?? 0.85;
-    const cardClass = state === 'FIRED' ? 'fired' : (state === 'LOCKED' ? 'locked' : '');
-    const chipClass = state === 'FIRED' ? 'fired-chip' : (state === 'LOCKED' ? 'locked-chip' : 'armed');
-    let fillLabel;
-    let fillPct = clamp((1 - clamp((ask ?? entryT), 0, entryT*2) / entryT) * 100, 0, 100);
-    if (state === 'FIRED') {
-      fillLabel = `fired this window &middot; holding to resolution (no take-profit)`;
+    const exitT = (d.config?.exit_combined_price) ?? 1.15;
+    const cardClass = state === 'ARMED' ? '' : 'fired';
+    const chipMap = {
+      ARMED: ['armed', 'ARMED'],
+      HOLDING_TP: ['fired-chip', 'HOLDING (TP armed)'],
+      HOLDING_NO_TP: ['notp-chip', 'HOLDING (no TP)'],
+      LOCKED: ['locked-chip', 'LOCKED (TP hit)'],
+    };
+    const [chipClass, chipLabel] = chipMap[state] || chipMap.ARMED;
+    let fillPct, fillLabel;
+    if (state === 'HOLDING_TP') {
+      fillPct = clamp(((bid ?? entryT) - entryT) / (exitT - entryT) * 100, 0, 100);
+      fillLabel = `first to fire this window &middot; bid ${fmt(bid)} &rarr; take-profit at ${exitT}`;
+    } else if (state === 'HOLDING_NO_TP') {
+      fillPct = 100;
+      fillLabel = `fired second this window &middot; no take-profit &middot; holding to resolution`;
     } else if (state === 'LOCKED') {
-      fillLabel = `other pair already fired &middot; paused until next window`;
+      fillPct = 100;
+      fillLabel = `take-profit already hit this window &middot; locked, no re-entry`;
     } else {
+      fillPct = clamp((1 - clamp((ask ?? entryT), 0, entryT*2) / entryT) * 100, 0, 100);
       fillLabel = `ask ${fmt(ask)} &rarr; fires below ${entryT}`;
     }
     return `
       <div class="pcard ${cardClass}">
         <div class="phead">
           <span class="pname">${pid.replace(/_/g,' ')}</span>
-          <span class="chip ${chipClass}">${state}</span>
+          <span class="chip ${chipClass}">${chipLabel}</span>
         </div>
         <div class="prow"><span>Combined ask (entry cost)</span><b>${fmt(ask)}</b></div>
-        <div class="prow"><span>Combined bid (mark value)</span><b>${fmt(bid)}</b></div>
-        <div class="prow"><span>Distance to entry</span><b>${fmt(p.distance_to_entry)}</b></div>
+        <div class="prow"><span>Combined bid (mark / exit value)</span><b>${fmt(bid)}</b></div>
+        <div class="prow"><span>${state === 'HOLDING_TP' ? 'Distance to take-profit' : 'Distance to entry'}</span>
+          <b>${state === 'HOLDING_TP' ? fmt(p.distance_to_exit) : fmt(p.distance_to_entry)}</b></div>
         <div class="threshbar"><div class="threshfill" style="width:${fillPct}%"></div></div>
         <div class="prow" style="margin-top:4px;font-size:10.5px;">${fillLabel}</div>
       </div>`;

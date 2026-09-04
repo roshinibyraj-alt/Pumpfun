@@ -4,17 +4,23 @@ Main trading loop.
 Every POLL_INTERVAL_SECONDS:
   1. Make sure we have the current 5-min window's market data for BTC & ETH
      (rolling to the next window at each 300s boundary; any position still
-     open when its window ends moves to "awaiting resolution").
+     open when its window ends moves to "awaiting resolution", and the
+     first-fired/TP-lock state resets for the new window).
   2. Fetch live order books for all 4 outcome tokens.
-  3. At most ONE combo fires per window, across BOTH pairs (BTC-Up+ETH-Down,
-     BTC-Down+ETH-Up): whichever pair's combined ask first drops below
-     ENTRY_COMBINED_PRICE buys SHARES_PER_LEG shares of each leg (taker,
-     capped at BUY_SLIPPAGE_CEILING). The moment one pair fires, the other
-     is locked out for the rest of that window -- no re-entry, no
-     intra-window take-profit. Every fired position is simply held to
-     resolution.
-  4. Once a window ends, its (at most one) position is resolved once
-     Polymarket settles the market (see resolver task).
+  3. Each pair (BTC-Up+ETH-Down, BTC-Down+ETH-Up) can fire at most once per
+     window, when its combined ask drops below ENTRY_COMBINED_PRICE (buy
+     SHARES_PER_LEG shares of each leg, taker, capped at
+     BUY_SLIPPAGE_CEILING). TP eligibility is decided dynamically by
+     trigger order, not by which pair it is:
+       - whichever pair fires FIRST in the window gets an intra-window
+         take-profit: if its combined bid rises to EXIT_COMBINED_PRICE or
+         above, both legs are sold immediately and that pair is then
+         LOCKED for the rest of the window (no re-entry).
+       - whichever pair fires SECOND (or is the only one that fires) gets
+         no take-profit at all -- it's simply held to resolution.
+  4. Positions still open when their window ends (no TP, or TP never
+     triggered) are resolved once Polymarket settles the market (see
+     resolver task).
 """
 import asyncio
 import logging
@@ -42,9 +48,24 @@ class Bot:
         self.tick_count = 0
         self.status_note = "starting"
 
+        # Dynamic per-window TP assignment: whichever pair fires FIRST in a
+        # window gets the intra-window take-profit; once that TP hits, the
+        # pair is locked (no re-entry) for the rest of the window. Whichever
+        # pair fires SECOND (or the only one that fires) gets no TP at all
+        # and is simply held to resolution. Both reset every time the
+        # window rolls.
+        self.current_window_start: Optional[int] = None
+        self.window_first_fired: Optional[str] = None
+        self.fired_pairs_this_window: set = set()
+
     # ---------------------------------------------------------------- windows
     async def _ensure_windows(self):
         ws = current_window_start()
+        if self.current_window_start is not None and ws != self.current_window_start:
+            self.window_first_fired = None
+            self.fired_pairs_this_window = set()
+        self.current_window_start = ws
+
         for asset in config.ASSETS:
             win = self.windows.get(asset)
             if win is None or win.window_start != ws:
@@ -137,6 +158,29 @@ class Bot:
         self._queue_post_fill_check(pos)
         return pos
 
+    def _sell_pair(self, pos: Position, pb: PairBooks):
+        leg_fills = {}
+        for key, entry_lf in pos.entry_legs.items():
+            book = pb.legs[key]
+            fr = fills.simulate_sell(book.bids, entry_lf.shares)
+            if fr.filled_shares <= 0:
+                log.warning("SELL %s leg %s got 0 fill; holding to resolution instead", pos.pair_id, key)
+                return None
+            if not fr.fully_filled:
+                log.warning("SELL %s leg %s partially filled %.1f/%.1f",
+                            pos.pair_id, key, fr.filled_shares, entry_lf.shares)
+            from . import fees as fees_mod
+            fee = fees_mod.fee_for_lots(fr.lots, self._fee_rate_for_asset(entry_lf.asset))
+            leg_fills[key] = LegFill(
+                asset=entry_lf.asset, outcome=entry_lf.outcome, token_id=entry_lf.token_id,
+                shares=fr.filled_shares, avg_price=fr.avg_price, fee=fee,
+                fully_filled=fr.fully_filled,
+            )
+        closed = self.engine.close_position_tp(pos, leg_fills)
+        storage.record_trade(closed)
+        storage.save_balance(self.engine.balance)
+        return closed
+
     def _queue_post_fill_check(self, pos: Position):
         self.pending_fill_checks.append({
             "pos": pos,
@@ -172,15 +216,36 @@ class Bot:
         await self._process_post_fill_checks(books)
         pairs = self._pair_books(books)
 
-        # At most ONE combo (either pair) may fire per window. Whichever
-        # pair's combined ask first drops below the entry threshold wins;
-        # the other pair is locked out until the next window rolls.
         for pair_id, pb in pairs.items():
-            if self.engine.open_positions:
-                break  # something already fired this window -- stay paused
-            ask = pb.combined_ask()
-            if ask is not None and ask < config.ENTRY_COMBINED_PRICE:
-                self._buy_pair(pair_id, pb)
+            open_pos = self.engine.open_positions.get(pair_id)
+
+            if open_pos is None:
+                # A pair that already fired (and, if it had TP, already hit
+                # it and got locked) does not get to fire again this window.
+                if pair_id in self.fired_pairs_this_window:
+                    continue
+                ask = pb.combined_ask()
+                if ask is not None and ask < config.ENTRY_COMBINED_PRICE:
+                    pos = self._buy_pair(pair_id, pb)
+                    if pos is not None:
+                        self.fired_pairs_this_window.add(pair_id)
+                        if self.window_first_fired is None:
+                            # first pair to trigger this window -> gets TP
+                            self.window_first_fired = pair_id
+                            pos.has_tp = True
+                            log.info("%s is the first pair to fire in window %s -> TP armed at %.2f",
+                                     pair_id, pos.window_start, config.EXIT_COMBINED_PRICE)
+                        else:
+                            pos.has_tp = False
+                            log.info("%s fired second in window %s -> no TP, holding to resolution",
+                                     pair_id, pos.window_start)
+            elif open_pos.has_tp:
+                bid = pb.combined_bid()
+                if bid is not None and bid >= config.EXIT_COMBINED_PRICE:
+                    # Selling frees the pair_id from open_positions, but it
+                    # stays in fired_pairs_this_window -> locked, no re-entry.
+                    self._sell_pair(open_pos, pb)
+            # else: no TP for this pair's current position -- just hold.
 
         self.status_note = "running"
 
@@ -289,10 +354,10 @@ class Bot:
         return out
 
     def _pair_snapshot(self) -> dict:
-        """Live combined ask/bid for each cross-asset pair vs. the entry
-        threshold, plus fire/lock state for the current window."""
+        """Live combined ask/bid for each cross-asset pair vs. its
+        applicable thresholds (entry always; exit only if this pair won
+        the "fired first" race for the current window)."""
         refs = pair_leg_refs(self.windows)
-        window_fired = len(self.engine.open_positions) > 0
         out = {}
         for pair_id, legs in refs.items():
             leg_prices = {}
@@ -308,23 +373,36 @@ class Bot:
                     bids.append(bb)
             combined_ask = round(sum(asks), 4) if len(asks) == len(legs) else None
             combined_bid = round(sum(bids), 4) if len(bids) == len(legs) else None
-            has_position = pair_id in self.engine.open_positions
-            if has_position:
-                state = "FIRED"
-            elif window_fired:
-                state = "LOCKED"
+            open_pos = self.engine.open_positions.get(pair_id)
+            has_position = open_pos is not None
+            already_fired = pair_id in self.fired_pairs_this_window
+            has_tp = bool(open_pos.has_tp) if open_pos is not None else (
+                self.window_first_fired == pair_id if self.window_first_fired else None
+            )
+
+            if has_position and open_pos.has_tp:
+                state = "HOLDING_TP"
+            elif has_position:
+                state = "HOLDING_NO_TP"
+            elif already_fired:
+                state = "LOCKED"          # fired earlier, TP hit (or n/a), no re-entry
             else:
                 state = "ARMED"
+
             out[pair_id] = {
                 "legs": leg_prices,
                 "combined_ask": combined_ask,
                 "combined_bid": combined_bid,
+                "has_tp": has_tp,
                 "distance_to_entry": (
                     round(combined_ask - config.ENTRY_COMBINED_PRICE, 4)
                     if combined_ask is not None else None
                 ),
+                "distance_to_exit": (
+                    round(config.EXIT_COMBINED_PRICE - combined_bid, 4)
+                    if combined_bid is not None and has_position and open_pos.has_tp else None
+                ),
                 "has_open_position": has_position,
-                "window_fired": window_fired,
                 "state": state,
             }
         return out
@@ -350,6 +428,7 @@ class Bot:
                 "window_start": pos.window_start,
                 "entry_cost": round(pos.entry_cost, 4),
                 "entry_fees": round(pos.entry_fees, 4),
+                "has_tp": pos.has_tp,
                 "unrealized_pnl": round(u, 4) if u is not None else None,
                 "legs": {k: {"shares": v.shares, "avg_price": v.avg_price} for k, v in pos.entry_legs.items()},
             })
@@ -382,8 +461,10 @@ class Bot:
             "recent_trades": recent,
             "config": {
                 "entry_combined_price": config.ENTRY_COMBINED_PRICE,
+                "exit_combined_price": config.EXIT_COMBINED_PRICE,
                 "shares_per_leg": config.SHARES_PER_LEG,
                 "buy_slippage_ceiling": config.BUY_SLIPPAGE_CEILING,
-                "one_fire_per_window": True,
+                "sell_slippage_floor": config.SELL_SLIPPAGE_FLOOR,
+                "window_first_fired": self.window_first_fired,
             },
         }
