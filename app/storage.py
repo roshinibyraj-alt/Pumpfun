@@ -91,6 +91,8 @@ def record_trade(position):
         "status": position.status,
         "opened_at": position.opened_at,
         "closed_at": position.closed_at,
+        "has_tp": position.has_tp,
+        "entry_shares_per_leg": position.entry_shares_per_leg,
         "entry_legs": {k: leg_to_dict(v) for k, v in position.entry_legs.items()},
         "entry_cost": position.entry_cost,
         "entry_fees": position.entry_fees,

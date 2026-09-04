@@ -1,4 +1,4 @@
-# Polymarket 5-Minute Cross-Market Bot (Paper / Demo Mode)
+# Polymarket 15-Minute Cross-Market Bot (Paper / Demo Mode)
 
 Trades a cross-asset divergence strategy across Polymarket's 15-minute
 BTC and ETH Up/Down markets. **This bot is paper-trading only** — it reads
@@ -16,9 +16,8 @@ and `ETH Up/Down`. The bot watches two synthetic pairs:
 
 Rules, per window:
 
-1. **Entry** — either pair can fire (buy `SHARES_PER_LEG`, default `300`,
-   shares of both legs) when its own combined ask price
-   (best-ask-BTC-leg + best-ask-ETH-leg) drops below
+1. **Entry** — either pair can fire (buy both legs) when its own combined
+   ask price (best-ask-BTC-leg + best-ask-ETH-leg) drops below
    `ENTRY_COMBINED_PRICE` (default `0.85`). Each pair fires **at most once
    per window**.
 2. **Take-profit is dynamic, decided by trigger order, not by which pair
@@ -31,27 +30,47 @@ Rules, per window:
    - Whichever pair fires **second** (or is the only one that fires that
      window) gets **no take-profit at all** — once bought, it is simply
      held to resolution.
-3. **Resolution** — for any position still open when its window closes
-   (the no-TP pair always; the first-fired pair only if TP never
-   triggered), Polymarket settles the market based on the real BTC/ETH
-   price vs. the window's opening strike (via its oracle price feed) —
-   **not** by any CLOB price threshold. Each leg pays $1/share if its
-   outcome won, $0/share if it lost.
+3. **Resolution — CLOB price only, no Gamma fallback.** For any position
+   still open when its window closes (the no-TP pair always; the
+   first-fired pair only if TP never triggered), the bot resolves it
+   using **only** the live CLOB order book: once the window has ended,
+   each leg the position actually holds is re-priced from its own token's
+   book (last trade price, or best bid if no trade yet). A leg is a
+   confirmed **winner ($1/share)** at price ≥ `RESOLUTION_PRICE_THRESHOLD`
+   (default `0.90`), or a confirmed **loser ($0/share)** at price ≤ `1 -
+   RESOLUTION_PRICE_THRESHOLD` (`0.10`). If either leg's price is still
+   ambiguous, the bot keeps polling every `RESOLUTION_POLL_SECONDS`
+   instead of guessing — there is no Gamma `outcomePrices`/`closed` check
+   and no other fallback path.
 4. Next window, the first-fired/TP-lock state resets and it's
    first-trigger-wins-TP again.
 
-### A correction worth knowing
+### Sizing: base 10, decorrelation boosts to 300
 
-Polymarket doesn't resolve these markets by "whichever side's CLOB price
-is above $0.90 in the last two seconds" — that's just a *symptom* of the
-book pricing in a near-certain outcome as the window closes. The actual
-settlement compares the real spot price to the opening strike. This bot:
+- Every window starts at `BASE_SHARES_PER_LEG` (default **10** shares per
+  leg).
+- **Decorrelation** = a resolved position where **both legs lost** (total
+  payout $0) — i.e. the actual BTC/ETH outcome was the exact opposite
+  combo of the pair that was bought (bet BTC-Up+ETH-Down, but BTC
+  actually went Down and ETH actually went Up, or vice versa). A
+  take-profit close never counts — that's a win by definition; only an
+  actual resolution can decorrelate.
+- The moment any resolved position shows a full double-loss, the boost is
+  armed: the **next window whose entries haven't fired yet** uses
+  `BOOSTED_SHARES_PER_LEG` (default **300**) instead of base, for
+  whichever pair(s) fire in that window.
+- The window after the boosted one always reverts to base (`10`),
+  regardless of whether the boosted window won, partially lost, or
+  decorrelated again (which would just re-arm the boost for one more
+  window — it doesn't compound beyond that).
+- Because Polymarket's/the CLOB's resolution price can take a little
+  while to become unambiguous after a window ends, the boost sometimes
+  lands on the window after next rather than literally the next one on
+  the clock — it always targets whichever window hasn't fired entries
+  yet at the moment the decorrelation is confirmed.
 
-- Uses Polymarket's own resolution field (`outcomePrices` /
-  `closed` on the Gamma event) as the source of truth once available.
-- Uses the ">= 0.90 late in the window" idea only as a **fallback estimate**
-  if Gamma hasn't flipped to `closed` yet by the time you check — clearly
-  logged as an estimate, never as the authoritative settlement.
+The live dashboard shows the current window's shares/leg and whether the
+boost is armed for the next window.
 
 ## Fees
 

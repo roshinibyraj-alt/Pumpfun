@@ -42,6 +42,7 @@ class Position:
     has_tp: bool = False                    # set by strategy: True if this
                                              # was the first pair to fire in
                                              # its window (gets intra-window TP)
+    entry_shares_per_leg: Optional[int] = None  # 10 (base) or 300 (post-decorrelation boost)
     closed_at: Optional[float] = None
     exit_legs: Optional[Dict[str, LegFill]] = None
     exit_proceeds: Optional[float] = None
@@ -101,6 +102,35 @@ class PaperEngine:
         return pos
 
     # ---- resolution (held to window close) -----------------------------------
+    def resolve_position_by_leg(self, pos: Position, leg_won: Dict[str, bool]) -> Position:
+        """
+        Resolve using an explicit per-leg win/loss decision (as determined
+        by the strategy from live CLOB prices -- see strategy._try_resolve).
+        Each leg pays $1/share if leg_won[key] is True, else $0/share.
+        """
+        payout = 0.0
+        detail = {}
+        for key, lf in pos.entry_legs.items():
+            won = bool(leg_won.get(key, False))
+            leg_payout = lf.shares * (1.0 if won else 0.0)
+            payout += leg_payout
+            detail[key] = {"won": won, "shares": lf.shares, "payout": leg_payout}
+
+        pos.status = "RESOLVED"
+        pos.closed_at = time.time()
+        pos.resolution_payout = payout
+        pos.resolution_detail = detail
+        pos.realized_pnl = payout - (pos.entry_cost + pos.entry_fees)
+
+        self.balance += payout
+        self.open_positions.pop(pos.pair_id, None)
+        self.history.append(pos)
+        log.info(
+            "RESOLVE %s payout=%.4f pnl=%.4f balance=%.2f",
+            pos.pair_id, payout, pos.realized_pnl, self.balance,
+        )
+        return pos
+
     def resolve_position(self, pos: Position, winning_outcome_by_asset: Dict[str, str]) -> Position:
         """
         winning_outcome_by_asset: {"btc": "Up"/"Down", "eth": "Up"/"Down"}

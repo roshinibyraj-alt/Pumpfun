@@ -141,6 +141,8 @@ async function refresh() {
     <div class="card"><div class="label">Equity (mark-to-market)</div><div class="val ${(d.equity - d.starting_capital)>=0?'pnl-pos':'pnl-neg'}">$${fmt(d.equity,2)}</div></div>
     <div class="card"><div class="label">Starting capital</div><div class="val">$${fmt(d.starting_capital,2)}</div></div>
     <div class="card"><div class="label">Total P&amp;L</div><div class="val ${(d.equity - d.starting_capital)>=0?'pnl-pos':'pnl-neg'}">${(d.equity-d.starting_capital)>=0?'+':''}$${fmt(d.equity-d.starting_capital,2)}</div></div>
+    <div class="card"><div class="label">Shares/leg this window</div><div class="val" style="${d.sizing?.current_window_shares_per_leg === d.sizing?.boosted_shares_per_leg ? 'color:var(--amber)' : ''}">${d.sizing?.current_window_shares_per_leg ?? '-'}</div></div>
+    <div class="card"><div class="label">Boost armed (next window)</div><div class="val" style="${d.sizing?.boost_armed_for_next_window ? 'color:var(--amber)' : ''}">${d.sizing?.boost_armed_for_next_window ? 'YES' : 'no'}</div></div>
   `;
 
   const markets = d.markets || {};
@@ -213,19 +215,19 @@ async function refresh() {
 
   document.getElementById('open').innerHTML = (d.open_positions||[]).map(p => `
     <div class="pos">
-      <div class="row"><b>${p.pair_id.replace(/_/g,' ')}</b><span>window ${p.window_start}</span></div>
+      <div class="row"><b>${p.pair_id.replace(/_/g,' ')}</b><span>window ${p.window_start} &middot; ${p.shares_per_leg ?? '?'} sh/leg</span></div>
       <div class="row"><span>cost $${fmt(p.entry_cost,2)} + fee $${fmt(p.entry_fees,3)}</span>
       <span class="${(p.unrealized_pnl||0)>=0?'pnl-pos':'pnl-neg'}">unrealized ${(p.unrealized_pnl||0)>=0?'+':''}$${fmt(p.unrealized_pnl,3)}</span></div>
     </div>`).join('') || '<div class="empty">No open positions right now.</div>';
 
   document.getElementById('awaiting').innerHTML = (d.awaiting_resolution||[]).map(p => `
     <div class="pos" style="border-left-color:var(--amber);">
-      <div class="row"><b>${p.pair_id.replace(/_/g,' ')}</b><span>window ${p.window_start}</span></div>
-      <div class="row"><span>cost $${fmt(p.entry_cost,2)}</span><span>waiting for settlement&hellip;</span></div>
+      <div class="row"><b>${p.pair_id.replace(/_/g,' ')}</b><span>window ${p.window_start} &middot; ${p.shares_per_leg ?? '?'} sh/leg</span></div>
+      <div class="row"><span>cost $${fmt(p.entry_cost,2)}</span><span>waiting for CLOB price to confirm&hellip;</span></div>
     </div>`).join('') || '<div class="empty">Nothing awaiting resolution.</div>';
 
   document.querySelector('#recent tbody').innerHTML = (d.recent_trades||[]).map(t => `
-    <tr><td>${t.id}</td><td>${t.pair_id.replace(/_/g,' ')}</td><td>${t.status}</td>
+    <tr><td>${t.id}</td><td>${t.pair_id.replace(/_/g,' ')}${t.decorrelated ? ' <span style=\"color:var(--down);font-size:10px;\">(decorrelated)</span>' : ''}</td><td>${t.status}</td>
     <td class="${(t.realized_pnl||0)>=0?'pnl-pos':'pnl-neg'}">${(t.realized_pnl||0)>=0?'+':''}$${fmt(t.realized_pnl,3)}</td></tr>`).join('')
     || '<tr><td colspan="4" class="empty">No trades yet.</td></tr>';
 

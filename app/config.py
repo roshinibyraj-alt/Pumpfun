@@ -28,7 +28,18 @@ PAPER_MODE = True
 
 # ---- Bankroll / sizing --------------------------------------------------
 STARTING_CAPITAL_USD = _f("STARTING_CAPITAL_USD", 2000.0)
-SHARES_PER_LEG = _i("SHARES_PER_LEG", 300)
+
+# Base size for every window, unless a decorrelation boost is active (see
+# below). "Decorrelation" = a resolved position where BOTH legs lost --
+# i.e. the actual BTC/ETH outcome was the exact opposite combo of the
+# pair that was bought (e.g. bet BTC-Up+ETH-Down, but BTC actually went
+# Down and ETH actually went Up). When that happens, the very next window
+# whose entries haven't fired yet uses BOOSTED_SHARES_PER_LEG instead of
+# BASE_SHARES_PER_LEG; the window after that reverts to base regardless
+# of how the boosted window turned out (win, partial loss, or another
+# decorrelation -- which would just re-arm the boost for one more window).
+BASE_SHARES_PER_LEG = _i("BASE_SHARES_PER_LEG", 10)
+BOOSTED_SHARES_PER_LEG = _i("BOOSTED_SHARES_PER_LEG", 300)
 
 # ---- Strategy thresholds -------------------------------------------------
 ENTRY_COMBINED_PRICE = _f("ENTRY_COMBINED_PRICE", 0.85)   # buy when combined ask < this
@@ -52,6 +63,17 @@ POST_FILL_CHECK_TICKS = _i("POST_FILL_CHECK_TICKS", 2)
 # feeSchedule via Gamma at discovery time; this is only the fallback
 # used if that field is ever missing.
 FALLBACK_TAKER_FEE_RATE = _f("FALLBACK_TAKER_FEE_RATE", 0.07)
+
+# ---- Resolution -------------------------------------------------------------
+# Resolution is determined PURELY from live CLOB prices -- no Gamma
+# outcomePrices/closed check, no fallback path. Once a position's window
+# has ended, each leg the position actually holds is re-priced from its
+# own order book (last trade price, or best bid if no trade yet). A leg
+# is a confirmed winner at price >= RESOLUTION_PRICE_THRESHOLD ($1/share)
+# or a confirmed loser at price <= 1 - RESOLUTION_PRICE_THRESHOLD
+# ($0/share). If a leg's price is still ambiguous, resolution keeps
+# polling (see RESOLUTION_POLL_SECONDS) rather than guessing.
+RESOLUTION_PRICE_THRESHOLD = _f("RESOLUTION_PRICE_THRESHOLD", 0.90)
 
 # ---- Polling ---------------------------------------------------------------
 POLL_INTERVAL_SECONDS = _f("POLL_INTERVAL_SECONDS", 1.5)

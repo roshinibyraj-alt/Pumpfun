@@ -3,15 +3,19 @@ Main trading loop.
 
 Every POLL_INTERVAL_SECONDS:
   1. Make sure we have the current window's market data for BTC & ETH
-     (rolling to the next window at each WINDOW_SECONDS boundary; any position still
-     open when its window ends moves to "awaiting resolution", and the
-     first-fired/TP-lock state resets for the new window).
+     (rolling to the next window at each WINDOW_SECONDS boundary; any
+     position still open when its window ends moves to "awaiting
+     resolution"; the first-fired/TP-lock state resets for the new
+     window; and the decorrelation sizing boost, if armed, is consumed
+     here -- see step 5).
   2. Fetch live order books for all 4 outcome tokens.
   3. Each pair (BTC-Up+ETH-Down, BTC-Down+ETH-Up) can fire at most once per
      window, when its combined ask drops below ENTRY_COMBINED_PRICE (buy
-     SHARES_PER_LEG shares of each leg, taker, capped at
-     BUY_SLIPPAGE_CEILING). TP eligibility is decided dynamically by
-     trigger order, not by which pair it is:
+     the window's current shares/leg of each leg -- BASE_SHARES_PER_LEG
+     normally, or BOOSTED_SHARES_PER_LEG for one window after a
+     decorrelation -- taker, capped at BUY_SLIPPAGE_CEILING). TP
+     eligibility is decided dynamically by trigger order, not by which
+     pair it is:
        - whichever pair fires FIRST in the window gets an intra-window
          take-profit: if its combined bid rises to EXIT_COMBINED_PRICE or
          above, both legs are sold immediately and that pair is then
@@ -21,6 +25,13 @@ Every POLL_INTERVAL_SECONDS:
   4. Positions still open when their window ends (no TP, or TP never
      triggered) are resolved once Polymarket settles the market (see
      resolver task).
+  5. Decorrelation sizing: if a resolved position shows BOTH legs lost
+     (payout == $0 -- the actual BTC/ETH outcome was the exact opposite
+     combo of what was bought), the boost is armed. It's consumed at the
+     next window roll (whichever window hasn't fired entries yet at that
+     point), bumping that one window's entries to BOOSTED_SHARES_PER_LEG.
+     The window after that always reverts to BASE_SHARES_PER_LEG,
+     regardless of how the boosted window turned out.
 """
 import asyncio
 import logging
@@ -58,12 +69,32 @@ class Bot:
         self.window_first_fired: Optional[str] = None
         self.fired_pairs_this_window: set = set()
 
+        # Decorrelation-triggered sizing boost. current_shares_per_leg is
+        # what new entries use for the ACTIVE window; it's decided once,
+        # at the moment a window rolls, based on whether a decorrelation
+        # was flagged (pending_boost) since the last roll. It always
+        # reverts to base the roll after a boosted window, win or lose.
+        self.current_shares_per_leg: int = config.BASE_SHARES_PER_LEG
+        self.pending_boost: bool = False
+
+        # Diagnostics: when a position entered awaiting_resolution, and
+        # which ones we've already warned about taking too long.
+        self.awaiting_since: Dict[int, float] = {}
+        self._warned_stale_ids: set = set()
+
     # ---------------------------------------------------------------- windows
     async def _ensure_windows(self):
         ws = current_window_start()
         if self.current_window_start is not None and ws != self.current_window_start:
             self.window_first_fired = None
             self.fired_pairs_this_window = set()
+            if self.pending_boost:
+                self.current_shares_per_leg = config.BOOSTED_SHARES_PER_LEG
+                self.pending_boost = False
+                log.info("decorrelation boost ARMED for window %s -> %d shares/leg",
+                         ws, self.current_shares_per_leg)
+            else:
+                self.current_shares_per_leg = config.BASE_SHARES_PER_LEG
         self.current_window_start = ws
 
         for asset in config.ASSETS:
@@ -87,6 +118,7 @@ class Bot:
             ):
                 self.engine.open_positions.pop(pair_id, None)
                 self.awaiting_resolution.append(pos)
+                self.awaiting_since[pos.id] = time.time()
                 log.info("window %s rolled; moving %s position to awaiting_resolution", old_win.slug, pair_id)
 
     # ------------------------------------------------------------------ books
@@ -135,17 +167,18 @@ class Bot:
 
     def _buy_pair(self, pair_id: str, pb: PairBooks):
         refs = pair_leg_refs(self.windows)[pair_id]
+        shares_wanted = self.current_shares_per_leg
         leg_fills = {}
         for leg in refs:
             book = pb.legs[f"{leg.asset}:{leg.outcome}"]
-            fr = fills.simulate_buy(book.asks, config.SHARES_PER_LEG)
+            fr = fills.simulate_buy(book.asks, shares_wanted)
             if fr.filled_shares <= 0:
                 log.warning("BUY %s leg %s:%s got 0 fill (book too thin under slippage cap)",
                             pair_id, leg.asset, leg.outcome)
                 return None
             if not fr.fully_filled:
                 log.warning("BUY %s leg %s:%s partially filled %.1f/%.1f",
-                            pair_id, leg.asset, leg.outcome, fr.filled_shares, config.SHARES_PER_LEG)
+                            pair_id, leg.asset, leg.outcome, fr.filled_shares, shares_wanted)
             from . import fees as fees_mod
             fee = fees_mod.fee_for_lots(fr.lots, self._fee_rate_for_asset(leg.asset))
             leg_fills[f"{leg.asset}:{leg.outcome}"] = LegFill(
@@ -155,6 +188,7 @@ class Bot:
             )
         win_start = self.windows[refs[0].asset].window_start
         pos = self.engine.open_position(pair_id, win_start, leg_fills)
+        pos.entry_shares_per_leg = shares_wanted
         self._queue_post_fill_check(pos)
         return pos
 
@@ -258,54 +292,75 @@ class Bot:
             still_waiting = []
             for pos in self.awaiting_resolution:
                 resolved = await self._try_resolve(pos)
-                if not resolved:
+                if resolved:
+                    self.awaiting_since.pop(pos.id, None)
+                    self._warned_stale_ids.discard(pos.id)
+                else:
                     still_waiting.append(pos)
+                    elapsed = time.time() - self.awaiting_since.get(pos.id, time.time())
+                    if elapsed > config.RESOLUTION_POLL_TIMEOUT_SECONDS and pos.id not in self._warned_stale_ids:
+                        self._warned_stale_ids.add(pos.id)
+                        log.warning(
+                            "position %s (%s, window %s) has been awaiting resolution for %.0fs "
+                            "with no confident CLOB price on one or both legs -- still polling",
+                            pos.id, pos.pair_id, pos.window_start, elapsed,
+                        )
             self.awaiting_resolution = still_waiting
 
     async def _try_resolve(self, pos: Position) -> bool:
-        assets = {lf.asset for lf in pos.entry_legs.values()}
-        winners = {}
-        for asset in assets:
-            win_start = pos.window_start
-            win = await self.gamma.get_window(asset, win_start)
-            if win is None:
-                return False
-            if not win.closed or not win.outcome_prices:
-                # fallback heuristic (only used if Gamma hasn't flipped
-                # `closed` yet but the book already shows a near-certain
-                # price): if either token's last trade / best bid is above
-                # 0.90 this late, treat it as the settled winner. This is a
-                # convenience estimate, not the authoritative resolution.
-                fallback = self._fallback_winner_from_book(win)
-                if fallback is None:
-                    return False
-                winners[asset] = fallback
-                continue
-            names = list(win.tokens.keys())
+        """
+        Resolve using ONLY the CLOB order book (no Gamma outcomePrices /
+        closed check, no fallback path). For each leg the position
+        actually holds, fetch a fresh book for that leg's own token: if
+        its price is confidently high (>= RESOLUTION_PRICE_THRESHOLD) the
+        leg is treated as the winner ($1/share); if confidently low
+        (<= 1 - RESOLUTION_PRICE_THRESHOLD) it's a loser ($0/share). If
+        any leg's price is still ambiguous, we keep waiting and re-poll.
+        """
+        window_end = pos.window_start + config.WINDOW_SECONDS
+        if time.time() < window_end:
+            return False  # window hasn't even closed yet
+
+        threshold = config.RESOLUTION_PRICE_THRESHOLD
+        leg_won: Dict[str, bool] = {}
+        for key, lf in pos.entry_legs.items():
             try:
-                idx_max = max(range(len(win.outcome_prices)), key=lambda i: win.outcome_prices[i])
-            except Exception:
+                book = await self.clob.get_book(lf.token_id)
+            except Exception as e:
+                log.warning("resolve: book fetch failed for %s (%s): %s", key, lf.token_id, e)
                 return False
-            if win.outcome_prices[idx_max] < 0.9:
-                return False  # not confidently resolved yet
-            winners[asset] = names[idx_max]
+            self.last_books[lf.token_id] = book
 
-        if len(winners) != len(assets):
-            return False
+            price = book.last_trade_price if book.last_trade_price is not None else book.best_bid
+            if price is None:
+                return False  # no price data yet -- keep polling
 
-        resolved = self.engine.resolve_position(pos, winners)
+            if price >= threshold:
+                leg_won[key] = True
+            elif price <= (1.0 - threshold):
+                leg_won[key] = False
+            else:
+                log.debug("resolve: %s price %.3f still ambiguous (need >=%.2f or <=%.2f)",
+                          key, price, threshold, 1.0 - threshold)
+                return False  # not confidently settled yet
+
+        resolved = self.engine.resolve_position_by_leg(pos, leg_won)
         storage.record_trade(resolved)
         storage.save_balance(self.engine.balance)
-        return True
 
-    def _fallback_winner_from_book(self, win: MarketWindow) -> Optional[str]:
-        if time.time() < win.window_end:
-            return None  # window hasn't even closed yet
-        for name, tok in win.tokens.items():
-            b = self.last_books.get(tok.token_id)
-            if b and (b.best_bid or 0) >= 0.90:
-                return name
-        return None
+        # Decorrelation check: both legs lost (payout == 0) means the
+        # actual outcome was the exact opposite combo of the pair bought.
+        # Arm the sizing boost for the next window whose entries haven't
+        # fired yet (consumed in _ensure_windows on the next roll).
+        if resolved.resolution_payout is not None and resolved.resolution_payout <= 1e-9:
+            self.pending_boost = True
+            log.info(
+                "DECORRELATION on %s (window %s): both legs lost -> "
+                "boost armed, next window's entries will use %d shares/leg",
+                resolved.pair_id, resolved.window_start, config.BOOSTED_SHARES_PER_LEG,
+            )
+
+        return True
 
     # ----------------------------------------------------------------- loop
     async def run_forever(self):
@@ -429,6 +484,7 @@ class Bot:
                 "entry_cost": round(pos.entry_cost, 4),
                 "entry_fees": round(pos.entry_fees, 4),
                 "has_tp": pos.has_tp,
+                "shares_per_leg": pos.entry_shares_per_leg,
                 "unrealized_pnl": round(u, 4) if u is not None else None,
                 "legs": {k: {"shares": v.shares, "avg_price": v.avg_price} for k, v in pos.entry_legs.items()},
             })
@@ -436,12 +492,15 @@ class Bot:
         awaiting = [{
             "pair_id": p.pair_id, "window_start": p.window_start,
             "entry_cost": round(p.entry_cost, 4), "entry_fees": round(p.entry_fees, 4),
+            "shares_per_leg": p.entry_shares_per_leg,
         } for p in self.awaiting_resolution]
 
         recent = [{
             "id": p.id, "pair_id": p.pair_id, "status": p.status,
             "realized_pnl": round(p.realized_pnl, 4) if p.realized_pnl is not None else None,
             "closed_at": p.closed_at,
+            "shares_per_leg": p.entry_shares_per_leg,
+            "decorrelated": bool(p.status == "RESOLVED" and (p.resolution_payout or 0) <= 1e-9),
         } for p in self.engine.history[-25:][::-1]]
 
         equity = self.engine.equity({pid: current_bids.get(pid, {}) for pid in config.PAIR_DEFS})
@@ -459,10 +518,15 @@ class Bot:
             "open_positions": open_positions,
             "awaiting_resolution": awaiting,
             "recent_trades": recent,
+            "sizing": {
+                "base_shares_per_leg": config.BASE_SHARES_PER_LEG,
+                "boosted_shares_per_leg": config.BOOSTED_SHARES_PER_LEG,
+                "current_window_shares_per_leg": self.current_shares_per_leg,
+                "boost_armed_for_next_window": self.pending_boost,
+            },
             "config": {
                 "entry_combined_price": config.ENTRY_COMBINED_PRICE,
                 "exit_combined_price": config.EXIT_COMBINED_PRICE,
-                "shares_per_leg": config.SHARES_PER_LEG,
                 "buy_slippage_ceiling": config.BUY_SLIPPAGE_CEILING,
                 "sell_slippage_floor": config.SELL_SLIPPAGE_FLOOR,
                 "window_first_fired": self.window_first_fired,
