@@ -27,7 +27,8 @@ def _b(name: str, default: bool) -> bool:
 PAPER_MODE = True
 
 # ---- Bankroll / sizing --------------------------------------------------
-STARTING_CAPITAL_USD = _f("STARTING_CAPITAL_USD", 2000.0)
+# NOTE: starting capital is now per-instance (5m and 15m are fully
+# independent bankrolls) -- see INSTANCES at the bottom of this file.
 
 # Base size for every window, unless a decorrelation boost is active (see
 # below). "Decorrelation" = a resolved position where BOTH legs lost --
@@ -38,13 +39,17 @@ STARTING_CAPITAL_USD = _f("STARTING_CAPITAL_USD", 2000.0)
 # BASE_SHARES_PER_LEG; the window after that reverts to base regardless
 # of how the boosted window turned out (win, partial loss, or another
 # decorrelation -- which would just re-arm the boost for one more window).
+# This sizing rule is shared by both the 5m and 15m instances, but each
+# tracks its own boost state independently (a decorrelation on 5m never
+# affects 15m's sizing, and vice versa).
 BASE_SHARES_PER_LEG = _i("BASE_SHARES_PER_LEG", 10)
 BOOSTED_SHARES_PER_LEG = _i("BOOSTED_SHARES_PER_LEG", 300)
 
 # ---- Strategy thresholds -------------------------------------------------
 ENTRY_COMBINED_PRICE = _f("ENTRY_COMBINED_PRICE", 0.85)   # buy when combined ask < this
 EXIT_COMBINED_PRICE = _f("EXIT_COMBINED_PRICE", 1.15)     # sell when combined bid >= this
-# (only applies to pairs listed in TP_PAIR_IDS below)
+# (TP eligibility is decided dynamically at runtime by trigger order --
+# whichever pair fires first in a window gets it -- see app/strategy.py)
 
 # Taker-only execution: we always cross the spread so fills are (almost)
 # guaranteed, capped by a slippage ceiling/floor so we never chase a
@@ -73,7 +78,7 @@ FALLBACK_TAKER_FEE_RATE = _f("FALLBACK_TAKER_FEE_RATE", 0.07)
 # or a confirmed loser at price <= 1 - RESOLUTION_PRICE_THRESHOLD
 # ($0/share). If a leg's price is still ambiguous, resolution keeps
 # polling (see RESOLUTION_POLL_SECONDS) rather than guessing.
-RESOLUTION_PRICE_THRESHOLD = _f("RESOLUTION_PRICE_THRESHOLD", 0.90)
+RESOLUTION_PRICE_THRESHOLD = _f("RESOLUTION_PRICE_THRESHOLD", 0.97)
 
 # ---- Polling ---------------------------------------------------------------
 POLL_INTERVAL_SECONDS = _f("POLL_INTERVAL_SECONDS", 1.5)
@@ -82,8 +87,6 @@ RESOLUTION_POLL_TIMEOUT_SECONDS = _f("RESOLUTION_POLL_TIMEOUT_SECONDS", 180.0)
 
 # ---- Assets / market discovery ---------------------------------------------
 ASSETS = ["btc", "eth"]  # gamma slug prefixes
-WINDOW_SECONDS = _i("WINDOW_SECONDS", 900)   # 15-minute windows
-WINDOW_LABEL = os.getenv("WINDOW_LABEL", "15m")  # used in the gamma slug: "{asset}-updown-{WINDOW_LABEL}-{ts}"
 
 GAMMA_BASE = os.getenv("GAMMA_BASE", "https://gamma-api.polymarket.com")
 CLOB_BASE = os.getenv("CLOB_BASE", "https://clob.polymarket.com")
@@ -107,3 +110,41 @@ PAIR_DEFS = {
     "BTC_UP_ETH_DOWN": (("btc", "Up"), ("eth", "Down")),
     "BTC_DOWN_ETH_UP": (("btc", "Down"), ("eth", "Up")),
 }
+
+# ---- Window instances -------------------------------------------------------
+# The bot runs TWO completely independent trading instances side by side:
+# a 5-minute window bot and a 15-minute window bot. "Independent" means
+# independent everything -- separate virtual bankroll, separate open
+# positions / awaiting-resolution queues, separate decorrelation-boost
+# state, separate storage rows, separate loggers (with their own color),
+# and their own panel on the dashboard. They never share capital or state.
+# Every other strategy parameter above (entry/exit thresholds, sizing,
+# fees, resolution threshold, etc.) is applied identically to both.
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class WindowInstanceConfig:
+    label: str            # "5m" / "15m" -- used in logger names, storage keys, dashboard
+    window_seconds: int
+    slug_label: str        # gamma slug segment: "{asset}-updown-{slug_label}-{ts}"
+    starting_capital: float
+    color: str              # ANSI color name used by the logging formatter
+
+
+INSTANCES = [
+    WindowInstanceConfig(
+        label="5m",
+        window_seconds=_i("WINDOW_SECONDS_5M", 300),
+        slug_label=os.getenv("WINDOW_SLUG_5M", "5m"),
+        starting_capital=_f("STARTING_CAPITAL_5M", 2000.0),
+        color="cyan",
+    ),
+    WindowInstanceConfig(
+        label="15m",
+        window_seconds=_i("WINDOW_SECONDS_15M", 900),
+        slug_label=os.getenv("WINDOW_SLUG_15M", "15m"),
+        starting_capital=_f("STARTING_CAPITAL_15M", 2000.0),
+        color="magenta",
+    ),
+]

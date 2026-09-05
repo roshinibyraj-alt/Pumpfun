@@ -5,9 +5,10 @@ instead of assuming an instant fill at the top-of-book price.
 
 Buys walk the ask side upward, capped at BUY_SLIPPAGE_CEILING.
 Sells walk the bid side downward, capped at SELL_SLIPPAGE_FLOOR (used
-only for pairs with an intra-window take-profit; see config.TP_PAIR_IDS).
-Either can partially fill if the book doesn't have enough depth inside
-the cap -- this is logged so it's never silently assumed away.
+only when a pair's position wins the dynamic "fired first" take-profit
+race for its window; see strategy.py). Either can partially fill if the
+book doesn't have enough depth inside the cap -- this is logged so it's
+never silently assumed away.
 """
 from dataclasses import dataclass, field
 from typing import List, Tuple

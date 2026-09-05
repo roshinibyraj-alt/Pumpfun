@@ -1,13 +1,17 @@
 """
-Main trading loop.
+Main trading loop. Runs as one independent `Bot` instance per window
+duration (5m and 15m by default -- see config.INSTANCES and main.py,
+which creates one Bot per instance and runs them concurrently). Each Bot
+owns its own bankroll, positions, TP/lock state, decorrelation-boost
+state, and logger -- nothing is shared between instances.
 
 Every POLL_INTERVAL_SECONDS:
   1. Make sure we have the current window's market data for BTC & ETH
-     (rolling to the next window at each WINDOW_SECONDS boundary; any
-     position still open when its window ends moves to "awaiting
-     resolution"; the first-fired/TP-lock state resets for the new
-     window; and the decorrelation sizing boost, if armed, is consumed
-     here -- see step 5).
+     (rolling to the next window at each instance's own window_seconds
+     boundary; any position still open when its window ends moves to
+     "awaiting resolution"; the first-fired/TP-lock state resets for the
+     new window; and the decorrelation sizing boost, if armed, is
+     consumed here -- see step 5).
   2. Fetch live order books for all 4 outcome tokens.
   3. Each pair (BTC-Up+ETH-Down, BTC-Down+ETH-Up) can fire at most once per
      window, when its combined ask drops below ENTRY_COMBINED_PRICE (buy
@@ -23,15 +27,16 @@ Every POLL_INTERVAL_SECONDS:
        - whichever pair fires SECOND (or is the only one that fires) gets
          no take-profit at all -- it's simply held to resolution.
   4. Positions still open when their window ends (no TP, or TP never
-     triggered) are resolved once Polymarket settles the market (see
-     resolver task).
+     triggered) are resolved using ONLY live CLOB prices -- no Gamma
+     outcomePrices/closed check, no fallback path (see _try_resolve).
   5. Decorrelation sizing: if a resolved position shows BOTH legs lost
      (payout == $0 -- the actual BTC/ETH outcome was the exact opposite
-     combo of what was bought), the boost is armed. It's consumed at the
-     next window roll (whichever window hasn't fired entries yet at that
-     point), bumping that one window's entries to BOOSTED_SHARES_PER_LEG.
-     The window after that always reverts to BASE_SHARES_PER_LEG,
-     regardless of how the boosted window turned out.
+     combo of what was bought), the boost is armed for THIS instance
+     only. It's consumed at the next window roll (whichever window
+     hasn't fired entries yet at that point), bumping that one window's
+     entries to BOOSTED_SHARES_PER_LEG. The window after that always
+     reverts to BASE_SHARES_PER_LEG, regardless of how the boosted
+     window turned out.
 """
 import asyncio
 import logging
@@ -44,17 +49,24 @@ from .engine import LegFill, PaperEngine, Position
 from .gamma import GammaClient, MarketWindow, current_window_start
 from .pairs import PairBooks, pair_leg_refs
 
-log = logging.getLogger("strategy")
-
 
 class Bot:
-    def __init__(self):
-        self.gamma = GammaClient()
+    def __init__(self, label: str, window_seconds: int, slug_label: str,
+                 starting_capital: float, log: Optional[logging.Logger] = None):
+        self.label = label                  # "5m" or "15m" -- fully independent instance
+        self.window_seconds = window_seconds
+        self.slug_label = slug_label
+        self.log = log or logging.getLogger(f"strategy.{label}")
+
+        self.gamma = GammaClient(log=self.log)
         self.clob = ClobClient()
-        self.engine = PaperEngine(starting_capital=storage.load_balance(config.STARTING_CAPITAL_USD))
+        self.engine = PaperEngine(
+            starting_capital=storage.load_balance(label, starting_capital),
+            log=self.log,
+        )
         self.windows: Dict[str, MarketWindow] = {}          # asset -> current MarketWindow
-        self.awaiting_resolution: list[Position] = []
-        self.pending_fill_checks: list[dict] = []           # [{pos, legs: {key: token_id}, ticks_left}]
+        self.awaiting_resolution: list = []                  # list[Position]
+        self.pending_fill_checks: list = []                  # [{pos, legs: {key: token_id}, ticks_left}]
         self.last_books: Dict[str, OrderBook] = {}          # token_id -> OrderBook (latest snapshot)
         self.tick_count = 0
         self.status_note = "starting"
@@ -74,6 +86,7 @@ class Bot:
         # at the moment a window rolls, based on whether a decorrelation
         # was flagged (pending_boost) since the last roll. It always
         # reverts to base the roll after a boosted window, win or lose.
+        # This state is entirely local to this Bot instance.
         self.current_shares_per_leg: int = config.BASE_SHARES_PER_LEG
         self.pending_boost: bool = False
 
@@ -84,15 +97,15 @@ class Bot:
 
     # ---------------------------------------------------------------- windows
     async def _ensure_windows(self):
-        ws = current_window_start()
+        ws = current_window_start(self.window_seconds)
         if self.current_window_start is not None and ws != self.current_window_start:
             self.window_first_fired = None
             self.fired_pairs_this_window = set()
             if self.pending_boost:
                 self.current_shares_per_leg = config.BOOSTED_SHARES_PER_LEG
                 self.pending_boost = False
-                log.info("decorrelation boost ARMED for window %s -> %d shares/leg",
-                         ws, self.current_shares_per_leg)
+                self.log.info("[%s] decorrelation boost ARMED for window %s -> %d shares/leg",
+                              self.label, ws, self.current_shares_per_leg)
             else:
                 self.current_shares_per_leg = config.BASE_SHARES_PER_LEG
         self.current_window_start = ws
@@ -100,9 +113,9 @@ class Bot:
         for asset in config.ASSETS:
             win = self.windows.get(asset)
             if win is None or win.window_start != ws:
-                new_win = await self.gamma.get_window(asset, ws)
+                new_win = await self.gamma.get_window(asset, ws, self.window_seconds, self.slug_label)
                 if new_win is None:
-                    log.warning("could not load %s window for %s (will retry)", asset, ws)
+                    self.log.warning("[%s] could not load %s window for %s (will retry)", self.label, asset, ws)
                     continue
                 # any open position tied to the OLD window that never hit
                 # take-profit moves to awaiting-resolution, freeing the pair
@@ -119,7 +132,8 @@ class Bot:
                 self.engine.open_positions.pop(pair_id, None)
                 self.awaiting_resolution.append(pos)
                 self.awaiting_since[pos.id] = time.time()
-                log.info("window %s rolled; moving %s position to awaiting_resolution", old_win.slug, pair_id)
+                self.log.info("[%s] window %s rolled; moving %s position to awaiting_resolution",
+                              self.label, old_win.slug, pair_id)
 
     # ------------------------------------------------------------------ books
     async def _fetch_all_books(self) -> Dict[str, OrderBook]:
@@ -138,7 +152,7 @@ class Bot:
         books = {}
         for tok, res in zip(token_ids, results):
             if isinstance(res, Exception):
-                log.warning("book fetch failed for %s: %s", tok, res)
+                self.log.warning("[%s] book fetch failed for %s: %s", self.label, tok, res)
                 continue
             books[tok] = res
         self.last_books.update(books)
@@ -173,12 +187,12 @@ class Bot:
             book = pb.legs[f"{leg.asset}:{leg.outcome}"]
             fr = fills.simulate_buy(book.asks, shares_wanted)
             if fr.filled_shares <= 0:
-                log.warning("BUY %s leg %s:%s got 0 fill (book too thin under slippage cap)",
-                            pair_id, leg.asset, leg.outcome)
+                self.log.warning("[%s] BUY %s leg %s:%s got 0 fill (book too thin under slippage cap)",
+                                 self.label, pair_id, leg.asset, leg.outcome)
                 return None
             if not fr.fully_filled:
-                log.warning("BUY %s leg %s:%s partially filled %.1f/%.1f",
-                            pair_id, leg.asset, leg.outcome, fr.filled_shares, shares_wanted)
+                self.log.warning("[%s] BUY %s leg %s:%s partially filled %.1f/%.1f",
+                                 self.label, pair_id, leg.asset, leg.outcome, fr.filled_shares, shares_wanted)
             from . import fees as fees_mod
             fee = fees_mod.fee_for_lots(fr.lots, self._fee_rate_for_asset(leg.asset))
             leg_fills[f"{leg.asset}:{leg.outcome}"] = LegFill(
@@ -198,11 +212,12 @@ class Bot:
             book = pb.legs[key]
             fr = fills.simulate_sell(book.bids, entry_lf.shares)
             if fr.filled_shares <= 0:
-                log.warning("SELL %s leg %s got 0 fill; holding to resolution instead", pos.pair_id, key)
+                self.log.warning("[%s] SELL %s leg %s got 0 fill; holding to resolution instead",
+                                 self.label, pos.pair_id, key)
                 return None
             if not fr.fully_filled:
-                log.warning("SELL %s leg %s partially filled %.1f/%.1f",
-                            pos.pair_id, key, fr.filled_shares, entry_lf.shares)
+                self.log.warning("[%s] SELL %s leg %s partially filled %.1f/%.1f",
+                                 self.label, pos.pair_id, key, fr.filled_shares, entry_lf.shares)
             from . import fees as fees_mod
             fee = fees_mod.fee_for_lots(fr.lots, self._fee_rate_for_asset(entry_lf.asset))
             leg_fills[key] = LegFill(
@@ -211,8 +226,8 @@ class Bot:
                 fully_filled=fr.fully_filled,
             )
         closed = self.engine.close_position_tp(pos, leg_fills)
-        storage.record_trade(closed)
-        storage.save_balance(self.engine.balance)
+        storage.record_trade(self.label, closed)
+        storage.save_balance(self.label, self.engine.balance)
         return closed
 
     def _queue_post_fill_check(self, pos: Position):
@@ -235,7 +250,7 @@ class Bot:
                 if b:
                     snapshot[key] = {"best_bid": b.best_bid, "best_ask": b.best_ask}
             item["pos"].post_fill_check = snapshot
-            log.info("post-fill check for position %s: %s", item["pos"].id, snapshot)
+            self.log.info("[%s] post-fill check for position %s: %s", self.label, item["pos"].id, snapshot)
         self.pending_fill_checks = still_pending
 
     # -------------------------------------------------------------- one tick
@@ -267,12 +282,16 @@ class Bot:
                             # first pair to trigger this window -> gets TP
                             self.window_first_fired = pair_id
                             pos.has_tp = True
-                            log.info("%s is the first pair to fire in window %s -> TP armed at %.2f",
-                                     pair_id, pos.window_start, config.EXIT_COMBINED_PRICE)
+                            self.log.info(
+                                "[%s] %s is the first pair to fire in window %s -> TP armed at %.2f",
+                                self.label, pair_id, pos.window_start, config.EXIT_COMBINED_PRICE,
+                            )
                         else:
                             pos.has_tp = False
-                            log.info("%s fired second in window %s -> no TP, holding to resolution",
-                                     pair_id, pos.window_start)
+                            self.log.info(
+                                "[%s] %s fired second in window %s -> no TP, holding to resolution",
+                                self.label, pair_id, pos.window_start,
+                            )
             elif open_pos.has_tp:
                 bid = pb.combined_bid()
                 if bid is not None and bid >= config.EXIT_COMBINED_PRICE:
@@ -300,10 +319,10 @@ class Bot:
                     elapsed = time.time() - self.awaiting_since.get(pos.id, time.time())
                     if elapsed > config.RESOLUTION_POLL_TIMEOUT_SECONDS and pos.id not in self._warned_stale_ids:
                         self._warned_stale_ids.add(pos.id)
-                        log.warning(
-                            "position %s (%s, window %s) has been awaiting resolution for %.0fs "
+                        self.log.warning(
+                            "[%s] position %s (%s, window %s) has been awaiting resolution for %.0fs "
                             "with no confident CLOB price on one or both legs -- still polling",
-                            pos.id, pos.pair_id, pos.window_start, elapsed,
+                            self.label, pos.id, pos.pair_id, pos.window_start, elapsed,
                         )
             self.awaiting_resolution = still_waiting
 
@@ -317,7 +336,7 @@ class Bot:
         (<= 1 - RESOLUTION_PRICE_THRESHOLD) it's a loser ($0/share). If
         any leg's price is still ambiguous, we keep waiting and re-poll.
         """
-        window_end = pos.window_start + config.WINDOW_SECONDS
+        window_end = pos.window_start + self.window_seconds
         if time.time() < window_end:
             return False  # window hasn't even closed yet
 
@@ -327,7 +346,8 @@ class Bot:
             try:
                 book = await self.clob.get_book(lf.token_id)
             except Exception as e:
-                log.warning("resolve: book fetch failed for %s (%s): %s", key, lf.token_id, e)
+                self.log.warning("[%s] resolve: book fetch failed for %s (%s): %s",
+                                 self.label, key, lf.token_id, e)
                 return False
             self.last_books[lf.token_id] = book
 
@@ -340,13 +360,13 @@ class Bot:
             elif price <= (1.0 - threshold):
                 leg_won[key] = False
             else:
-                log.debug("resolve: %s price %.3f still ambiguous (need >=%.2f or <=%.2f)",
-                          key, price, threshold, 1.0 - threshold)
+                self.log.debug("[%s] resolve: %s price %.3f still ambiguous (need >=%.2f or <=%.2f)",
+                               self.label, key, price, threshold, 1.0 - threshold)
                 return False  # not confidently settled yet
 
         resolved = self.engine.resolve_position_by_leg(pos, leg_won)
-        storage.record_trade(resolved)
-        storage.save_balance(self.engine.balance)
+        storage.record_trade(self.label, resolved)
+        storage.save_balance(self.label, self.engine.balance)
 
         # Decorrelation check: both legs lost (payout == 0) means the
         # actual outcome was the exact opposite combo of the pair bought.
@@ -354,10 +374,10 @@ class Bot:
         # fired yet (consumed in _ensure_windows on the next roll).
         if resolved.resolution_payout is not None and resolved.resolution_payout <= 1e-9:
             self.pending_boost = True
-            log.info(
-                "DECORRELATION on %s (window %s): both legs lost -> "
+            self.log.info(
+                "[%s] DECORRELATION on %s (window %s): both legs lost -> "
                 "boost armed, next window's entries will use %d shares/leg",
-                resolved.pair_id, resolved.window_start, config.BOOSTED_SHARES_PER_LEG,
+                self.label, resolved.pair_id, resolved.window_start, config.BOOSTED_SHARES_PER_LEG,
             )
 
         return True
@@ -369,7 +389,7 @@ class Bot:
             try:
                 await self.tick()
             except Exception:
-                log.exception("tick failed")
+                self.log.exception("[%s] tick failed", self.label)
                 self.status_note = "error (see logs)"
             await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
 
@@ -506,6 +526,8 @@ class Bot:
         equity = self.engine.equity({pid: current_bids.get(pid, {}) for pid in config.PAIR_DEFS})
 
         return {
+            "label": self.label,
+            "window_seconds": self.window_seconds,
             "status": self.status_note,
             "tick": self.tick_count,
             "server_time": time.time(),
@@ -529,6 +551,7 @@ class Bot:
                 "exit_combined_price": config.EXIT_COMBINED_PRICE,
                 "buy_slippage_ceiling": config.BUY_SLIPPAGE_CEILING,
                 "sell_slippage_floor": config.SELL_SLIPPAGE_FLOOR,
+                "resolution_price_threshold": config.RESOLUTION_PRICE_THRESHOLD,
                 "window_first_fired": self.window_first_fired,
             },
         }

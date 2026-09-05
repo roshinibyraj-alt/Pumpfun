@@ -11,9 +11,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from . import config, fees
+from . import fees
 
-log = logging.getLogger("engine")
+_default_log = logging.getLogger("engine")
 
 _id_counter = itertools.count(1)
 
@@ -54,11 +54,12 @@ class Position:
 
 
 class PaperEngine:
-    def __init__(self, starting_capital: float = None):
-        self.balance = starting_capital if starting_capital is not None else config.STARTING_CAPITAL_USD
+    def __init__(self, starting_capital: float = 2000.0, log: Optional[logging.Logger] = None):
+        self.balance = starting_capital
         self.starting_capital = self.balance
         self.open_positions: Dict[str, Position] = {}   # pair_id -> Position (1 at a time per pair)
         self.history: List[Position] = []
+        self.log = log or _default_log
 
     # ---- entry ------------------------------------------------------------
     def open_position(self, pair_id: str, window_start: int, leg_fills: Dict[str, LegFill]) -> Position:
@@ -75,13 +76,14 @@ class PaperEngine:
         )
         self.balance -= (total_shares_cost + total_fees)
         self.open_positions[pair_id] = pos
-        log.info(
+        self.log.info(
             "OPEN %s window=%s cost=%.4f fees=%.4f balance=%.2f",
             pair_id, window_start, total_shares_cost, total_fees, self.balance,
         )
         return pos
 
-    # ---- take-profit exit (only for pairs in config.TP_PAIR_IDS) -------------
+    # ---- take-profit exit (only when this pair won the dynamic "fired
+    # first" race for its window -- see strategy.py) --------------------------
     def close_position_tp(self, pos: Position, leg_fills: Dict[str, LegFill]) -> Position:
         proceeds = sum(lf.shares * lf.avg_price for lf in leg_fills.values())
         exit_fees = sum(lf.fee for lf in leg_fills.values())
@@ -95,7 +97,7 @@ class PaperEngine:
         self.balance += (proceeds - exit_fees)
         self.open_positions.pop(pos.pair_id, None)
         self.history.append(pos)
-        log.info(
+        self.log.info(
             "CLOSE_TP %s pnl=%.4f balance=%.2f",
             pos.pair_id, pos.realized_pnl, self.balance,
         )
@@ -107,14 +109,46 @@ class PaperEngine:
         Resolve using an explicit per-leg win/loss decision (as determined
         by the strategy from live CLOB prices -- see strategy._try_resolve).
         Each leg pays $1/share if leg_won[key] is True, else $0/share.
+
+        Math invariant (worth spelling out, since it's easy to eyeball
+        wrong): payout is the sum of ONLY the winning legs' own share
+        counts, each at $1/share. For an N-shares-per-leg pair:
+          - both legs win  -> payout = 2N  (max possible)
+          - one leg wins   -> payout = N   (this is the only way to get
+            a "partial" outcome -- e.g. N=10 -> payout is exactly $10,
+            never more, since a leg can only ever pay $0 or $1/share)
+          - both legs lose -> payout = 0   (decorrelation)
+        realized_pnl = payout - (entry_cost + entry_fees), and entry_cost
+        + entry_fees is always > 0, so realized_pnl is always strictly
+        less than the payout -- e.g. a one-leg-wins result on a 10
+        shares/leg pair can NEVER show more than just under $10 profit,
+        let alone $11+. The assertions below make that structural
+        guarantee loud (not silent) if it's ever violated by a future
+        change.
         """
         payout = 0.0
         detail = {}
+        total_shares_committed = sum(lf.shares for lf in pos.entry_legs.values())
         for key, lf in pos.entry_legs.items():
             won = bool(leg_won.get(key, False))
             leg_payout = lf.shares * (1.0 if won else 0.0)
+            if leg_payout > lf.shares + 1e-9:
+                self.log.critical(
+                    "MATH BUG: leg %s payout %.4f exceeds its own share count %.4f -- "
+                    "a leg can never pay more than $1/share. Refusing to apply.",
+                    key, leg_payout, lf.shares,
+                )
+                raise AssertionError(f"leg payout {leg_payout} exceeds shares {lf.shares} for {key}")
             payout += leg_payout
             detail[key] = {"won": won, "shares": lf.shares, "payout": leg_payout}
+
+        if payout > total_shares_committed + 1e-9:
+            self.log.critical(
+                "MATH BUG: total payout %.4f exceeds total shares committed %.4f for position %s -- "
+                "refusing to apply.",
+                payout, total_shares_committed, pos.id,
+            )
+            raise AssertionError(f"payout {payout} exceeds total shares {total_shares_committed}")
 
         pos.status = "RESOLVED"
         pos.closed_at = time.time()
@@ -125,36 +159,7 @@ class PaperEngine:
         self.balance += payout
         self.open_positions.pop(pos.pair_id, None)
         self.history.append(pos)
-        log.info(
-            "RESOLVE %s payout=%.4f pnl=%.4f balance=%.2f",
-            pos.pair_id, payout, pos.realized_pnl, self.balance,
-        )
-        return pos
-
-    def resolve_position(self, pos: Position, winning_outcome_by_asset: Dict[str, str]) -> Position:
-        """
-        winning_outcome_by_asset: {"btc": "Up"/"Down", "eth": "Up"/"Down"}
-        Each leg pays $1/share if its outcome matches the winner for that
-        asset, else $0/share. No fee on redemption (it's a claim, not a trade).
-        """
-        payout = 0.0
-        detail = {}
-        for key, lf in pos.entry_legs.items():
-            won = winning_outcome_by_asset.get(lf.asset) == lf.outcome
-            leg_payout = lf.shares * (1.0 if won else 0.0)
-            payout += leg_payout
-            detail[key] = {"won": won, "shares": lf.shares, "payout": leg_payout}
-
-        pos.status = "RESOLVED"
-        pos.closed_at = time.time()
-        pos.resolution_payout = payout
-        pos.resolution_detail = detail
-        pos.realized_pnl = payout - (pos.entry_cost + pos.entry_fees)
-
-        self.balance += payout
-        self.open_positions.pop(pos.pair_id, None)
-        self.history.append(pos)
-        log.info(
+        self.log.info(
             "RESOLVE %s payout=%.4f pnl=%.4f balance=%.2f",
             pos.pair_id, payout, pos.realized_pnl, self.balance,
         )

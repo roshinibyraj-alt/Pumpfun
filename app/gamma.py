@@ -3,15 +3,21 @@ Market discovery via Polymarket's public Gamma API.
 
 Polymarket's short-dated crypto up/down markets are published as Events
 with a deterministic slug: "{asset}-updown-{window_label}-{window_start_unix}",
-e.g. "btc-updown-15m-1788519600", where the window start is the Unix
-epoch second floored to a WINDOW_SECONDS boundary (UTC) -- confirmed
-against a live 15-minute BTC event. Each event contains exactly one
-Market with two outcomes, "Up" and "Down".
+e.g. "btc-updown-15m-1788519600" or "btc-updown-5m-1788494400", where the
+window start is the Unix epoch second floored to that window's own
+duration boundary (UTC) -- confirmed against live 5-minute and 15-minute
+BTC events. Each event contains exactly one Market with two outcomes,
+"Up" and "Down".
+
+This module is fully parameterized by window_seconds/window_label rather
+than reading a single global -- the bot runs two independent instances
+(5m and 15m) concurrently, each discovering its own windows.
 
 Gamma quirk (confirmed against real responses): /markets?slug=... returns
 an empty list for these short-dated markets; you must use /events?slug=...
 and read the nested markets[0] object instead.
 """
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -21,16 +27,16 @@ import httpx
 
 from . import config
 
-log = logging.getLogger("gamma")
+_default_log = logging.getLogger("gamma")
 
 
-def current_window_start(now: Optional[float] = None) -> int:
+def current_window_start(window_seconds: int, now: Optional[float] = None) -> int:
     now = now if now is not None else time.time()
-    return int(now - (now % config.WINDOW_SECONDS))
+    return int(now - (now % window_seconds))
 
 
-def slug_for(asset: str, window_start: int) -> str:
-    return f"{asset}-updown-{config.WINDOW_LABEL}-{window_start}"
+def slug_for(asset: str, window_start: int, window_label: str) -> str:
+    return f"{asset}-updown-{window_label}-{window_start}"
 
 
 @dataclass
@@ -60,8 +66,9 @@ class MarketWindow:
 
 
 class GammaClient:
-    def __init__(self):
+    def __init__(self, log: Optional[logging.Logger] = None):
         self._client = httpx.AsyncClient(base_url=config.GAMMA_BASE, timeout=10.0)
+        self.log = log or _default_log
 
     async def close(self):
         await self._client.aclose()
@@ -78,16 +85,17 @@ class GammaClient:
                 return ev
         return data[0] if data else None
 
-    async def get_window(self, asset: str, window_start: int) -> Optional[MarketWindow]:
-        slug = slug_for(asset, window_start)
+    async def get_window(self, asset: str, window_start: int, window_seconds: int,
+                          window_label: str) -> Optional[MarketWindow]:
+        slug = slug_for(asset, window_start, window_label)
         event = await self.fetch_event_by_slug(slug)
         if not event:
-            log.warning("gamma: no event found for slug=%s (market may not be listed yet)", slug)
+            self.log.warning("gamma: no event found for slug=%s (market may not be listed yet)", slug)
             return None
 
         markets = event.get("markets") or []
         if not markets:
-            log.warning("gamma: event %s has no nested markets", slug)
+            self.log.warning("gamma: event %s has no nested markets", slug)
             return None
         market = markets[0]
 
@@ -95,7 +103,6 @@ class GammaClient:
         outcomes = market.get("outcomes")
         clob_token_ids = market.get("clobTokenIds")
         # Gamma sometimes serializes these list fields as JSON strings.
-        import json
         if isinstance(outcomes, str):
             outcomes = json.loads(outcomes)
         if isinstance(clob_token_ids, str):
@@ -119,7 +126,7 @@ class GammaClient:
         return MarketWindow(
             asset=asset,
             window_start=window_start,
-            window_end=window_start + config.WINDOW_SECONDS,
+            window_end=window_start + window_seconds,
             slug=slug,
             condition_id=condition_id,
             tokens=tokens,
@@ -130,8 +137,3 @@ class GammaClient:
             closed=bool(market.get("closed", False)),
             outcome_prices=outcome_prices,
         )
-
-    async def refresh_closed_state(self, window: MarketWindow) -> MarketWindow:
-        """Re-fetch a window to check for resolution (closed + outcomePrices)."""
-        updated = await self.get_window(window.asset, window.window_start)
-        return updated or window
