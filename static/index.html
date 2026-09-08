@@ -79,9 +79,18 @@
 
   .engine-pos{font-family:var(--mono); font-size:11.5px; padding:7px 10px; border-radius:7px; background:#0c1119;}
 
+  .halt-banner{
+    background:var(--down-dim); border:1px solid var(--down); color:var(--down);
+    font-size:11.5px; font-weight:700; padding:8px 10px; border-radius:8px;
+    font-family:var(--mono);
+  }
+  .capital-row{font-family:var(--mono); font-size:11px; color:var(--muted);}
+
   .engine-stats{display:flex; gap:10px; font-family:var(--mono); font-size:11px;}
   .engine-stats span b{display:block; font-size:15px; margin-top:2px;}
   .es-win b{color:var(--up);} .es-loss b{color:var(--down);} .es-none b{color:var(--muted);}
+
+  #e1Equity{height:70px !important; margin-top:2px;}
 
   .engine-bottom{display:flex; justify-content:space-between; align-items:baseline; margin-top:auto; padding-top:8px; border-top:1px solid var(--border);}
   .engine-pnl{font-family:var(--mono); font-weight:700; font-size:15px;}
@@ -150,10 +159,14 @@
   <div class="engine-grid">
     <div class="engine-card" id="e1Card">
       <div class="engine-top">
-        <span class="engine-name">Engine 1 — Race Entry</span>
+        <span class="engine-name">Engine 1 — Streak-Filtered Entry</span>
         <span class="engine-badge" id="e1Badge">waiting</span>
       </div>
+      <div class="halt-banner" id="e1HaltBanner" style="display:none;"></div>
       <div class="engine-def" id="e1Def"></div>
+      <div class="capital-row">
+        <span>balance <b id="e1Balance" style="color:var(--text);">$0.00</b> / $2,000 start</span>
+      </div>
       <div class="bet-row">
         <div>
           <div class="label">Next Bet</div>
@@ -166,7 +179,9 @@
         <span class="es-win">wins<b id="e1Wins">0</b></span>
         <span class="es-loss">losses<b id="e1Losses">0</b></span>
         <span class="es-none">no-trade<b id="e1NoTrade">0</b></span>
+        <span class="es-none">max streak<b id="e1MaxStreak">0</b></span>
       </div>
+      <canvas id="e1Equity" height="90"></canvas>
       <div class="engine-bottom">
         <span class="engine-pnl" id="e1Pnl">$0.00</span>
         <span class="last-pnl" id="e1LastPnl"></span>
@@ -191,6 +206,7 @@
         <span class="es-win">wins<b id="e2Wins">0</b></span>
         <span class="es-loss">losses<b id="e2Losses">0</b></span>
         <span class="es-none">no-trade<b id="e2NoTrade">0</b></span>
+        <span class="es-none">max streak<b id="e2MaxStreak">0</b></span>
       </div>
       <div class="engine-bottom">
         <span class="engine-pnl" id="e2Pnl">$0.00</span>
@@ -246,12 +262,51 @@ function drawChart(){
   line('down', '#ef4444');
 }
 
+function drawEquityCurve(canvasId, points, startingCapital){
+  const canvas = $(canvasId);
+  if(!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight || 70;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  if(!points || points.length < 2) return;
+
+  const pad = 4;
+  const vals = points.map(p=>p.balance);
+  let min = Math.min(...vals, startingCapital), max = Math.max(...vals, startingCapital);
+  const span = Math.max(max-min, 1);
+  min -= span*0.1; max += span*0.1;
+
+  const x = i => pad + (i/(points.length-1)) * (w-pad*2);
+  const y = v => h - pad - ((v-min)/(max-min)) * (h-pad*2);
+
+  // starting-capital reference line
+  ctx.strokeStyle = 'rgba(122,139,163,0.3)';
+  ctx.setLineDash([3,3]);
+  ctx.beginPath(); ctx.moveTo(pad, y(startingCapital)); ctx.lineTo(w-pad, y(startingCapital)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  const last = vals[vals.length-1];
+  ctx.strokeStyle = last >= startingCapital ? '#22c55e' : '#ef4444';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  points.forEach((p,i)=>{
+    const px = x(i), py = y(p.balance);
+    if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+  });
+  ctx.stroke();
+}
+
 function renderEngine(prefix, e, defHtml){
   $(prefix+'Def').innerHTML = defHtml;
   $(prefix+'Bet').textContent = fmt$(e.current_bet);
-  $(prefix+'Streak').textContent = e.martingale_streak > 0
-    ? `${e.martingale_streak} loss streak (base ${fmt$(e.base_bet)})`
-    : `at base bet`;
+  $(prefix+'Streak').textContent = e.skip_reason
+    ? e.skip_reason
+    : (e.martingale_streak > 0
+        ? `${e.martingale_streak} loss streak (base ${fmt$(e.base_bet)})`
+        : `at base bet`);
   $(prefix+'Badge').textContent = e.status;
   $(prefix+'Badge').className = 'engine-badge ' + e.status;
   $(prefix+'Card').className = 'engine-card' + (e.status==='open' ? ' open' : '');
@@ -276,6 +331,23 @@ function renderEngine(prefix, e, defHtml){
   $(prefix+'Wins').textContent = e.wins;
   $(prefix+'Losses').textContent = e.losses;
   $(prefix+'NoTrade').textContent = e.no_trades;
+  const maxStreakEl = $(prefix+'MaxStreak');
+  if(maxStreakEl) maxStreakEl.textContent = e.max_losing_streak || 0;
+
+  const balanceEl = $(prefix+'Balance');
+  if(balanceEl){
+    balanceEl.textContent = fmt$(e.balance);
+    balanceEl.style.color = e.balance < e.starting_capital ? 'var(--down)' : 'var(--up)';
+  }
+  const haltEl = $(prefix+'HaltBanner');
+  if(haltEl){
+    if(e.halted){
+      haltEl.style.display = 'block';
+      haltEl.textContent = `⛔ HALTED — balance dropped below $0. Engine stopped permanently.`;
+    } else {
+      haltEl.style.display = 'none';
+    }
+  }
 
   const pnlEl = $(prefix+'Pnl');
   pnlEl.textContent = (e.total_pnl>=0?'+':'') + fmt$(e.total_pnl);
@@ -352,8 +424,9 @@ async function poll(){
     floatEl.textContent = hasOpen ? (floating>=0?'+':'') + fmt$(floating) : '—';
     floatEl.className = 'val ' + (hasOpen ? (floating>=0?'pos':'neg') : '');
 
-    if(e1.def) renderEngine('e1', e1, `both sides @ <b>${fmtP(e1.def.entry)}</b> instantly · tp <b>${fmtP(e1.def.tp)}</b> · sl <b>${fmtP(e1.def.sl)}</b> · ×${e1.def.mult}`);
+    if(e1.def) renderEngine('e1', e1, `${e1.sitting_out ? 'sitting out' : `single side @ <b>${fmtP(e1.def.entry)}</b> (streak-filtered)`} · tp <b>${fmtP(e1.def.tp)}</b> · sl <b>${fmtP(e1.def.sl)}</b> · ×${e1.def.mult} · flip after ${e1.def.streak_filter_length} same-side closes`);
     if(e2.def) renderEngine('e2', e2, `wait <b>${e2.def.wait_seconds}s</b>, arm on touch @ <b>${fmtP(e2.def.entry)}</b>, fill on dip back · tp <b>${fmtP(e2.def.tp)}</b> · sl <b>${fmtP(e2.def.sl)}</b> · ×${e2.def.mult}`);
+    if(e1.equity_curve) drawEquityCurve('e1Equity', e1.equity_curve, e1.starting_capital || 2000);
 
     renderLog(s.log || []);
   }catch(err){

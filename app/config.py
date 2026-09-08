@@ -26,28 +26,41 @@ RESOLUTION_WINDOW_SECONDS = 2.0
 # falling back to a last-observed-price approximation.
 RESOLUTION_RETRY_SECONDS = 6
 
-# ---- Engine 1 (v7 -- dual-side race entry, martingale) -------------------
-# At window open, resting limit buys are placed on BOTH sides at
-# ENGINE1_ENTRY_PRICE simultaneously. Whichever side's price walks down
-# to that level first fills; the other side's order is cancelled. Only
-# one position per window. Exit via TP, SL, or Polymarket's real
-# resolution if neither fires by window close.
+# ---- Engine 1 (v8 -- streak-filtered single-side entry, martingale) -----
+# At window open, a resting limit buy is placed at ENGINE1_ENTRY_PRICE on
+# ONLY the side that won the PREVIOUS window (no more dual-side race).
+# If the same side has won ENGINE1_STREAK_FILTER_LENGTH windows in a row,
+# Engine 1 places no order at all and sits out entirely until a window
+# resolves with the opposite side winning -- that flip becomes the new
+# streak (count 1) and trading resumes on it next window. The very first
+# window ever has no prior result, so it's sat out too.
+#
+# Exit via TP, SL, or Polymarket's real resolution if neither fires by
+# window close.
 ENGINE1_ENTRY_PRICE = 0.30
 ENGINE1_TP = 0.99
 ENGINE1_SL = 0.05
 ENGINE1_BASE_BET = 30.0          # dollars
 ENGINE1_MARTINGALE_MULT = 1.7    # next bet = prev bet * this, after a loss
+ENGINE1_STREAK_FILTER_LENGTH = 3
 # A win (TP or resolution win) resets the next bet back to ENGINE1_BASE_BET.
-# A window where neither side ever reaches the entry price is not a trade
-# and does not affect the bet ladder.
+# A window with no trade -- whether from the streak filter or because
+# price never reached the entry price -- does not affect the bet ladder;
+# the martingale only moves on an actual trade result.
 
-# ---- Engine 2 (v7 -- delayed breakout entry, martingale) -----------------
+# Demo capital: Engine 1 tracks a real running balance starting here. If
+# it ever drops below $0 (can't cover the next bet), the engine halts and
+# places no further trades -- a hard bankruptcy stop, not just a warning.
+ENGINE1_STARTING_CAPITAL = 2000.0
+
+# ---- Engine 2 (v7 -- delayed dip-fill entry, martingale) -----------------
 # Does nothing for the first ENGINE2_WAIT_SECONDS of the window. After
-# that, watches both sides; the moment either one's price is observed at
-# or above ENGINE2_ENTRY_PRICE, fills a limit buy there immediately (no
-# separate dip/arm phase -- if price is already >= entry the instant the
-# wait elapses, it fires right then; if it's still below, it keeps
-# watching until price rises through it). Only one position per window.
+# that, watches both sides: the first time either side's price is
+# observed at or above ENGINE2_ENTRY_PRICE, a resting limit buy is armed
+# there -- but it only actually fills once price later trades back down
+# AT OR BELOW that level (real limit-order semantics; it does not fill
+# just because price is sitting above the level). If price never comes
+# back down, no trade happens that window. Only one position per window.
 ENGINE2_WAIT_SECONDS = 120
 ENGINE2_ENTRY_PRICE = 0.70
 ENGINE2_TP = 0.99
@@ -55,6 +68,8 @@ ENGINE2_SL = 0.40
 ENGINE2_BASE_BET = 100.0
 ENGINE2_MARTINGALE_MULT = 2.0
 # Same win-resets / no-trade-doesn't-affect-ladder rules as Engine 1.
+# Engine 2 has no capital cap / bankruptcy stop -- that's currently an
+# Engine-1-only feature, added at the user's request in that context.
 
 # Maker rebate on entry fills and take-profit fills (both are resting
 # limit orders, so no fee -- just a partial rebate). Stop-loss exits are

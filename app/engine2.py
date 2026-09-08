@@ -43,6 +43,7 @@ class Engine2State:
     no_trades: int = 0
     last_window_pnl: float = 0.0
     martingale_streak: int = 0
+    max_losing_streak: int = 0
     last_up_price: Optional[float] = None
     last_down_price: Optional[float] = None
 
@@ -165,6 +166,7 @@ class Engine2:
         else:
             self.s.losses += 1
             self.s.martingale_streak += 1
+            self.s.max_losing_streak = max(self.s.max_losing_streak, self.s.martingale_streak)
             self.s.current_bet = self.s.current_bet * config.ENGINE2_MARTINGALE_MULT
         event = "TP_CLOSE" if reason == "tp" else ("SL_CLOSE" if reason == "sl" else
                  ("RESOLVE_WIN" if won else "RESOLVE_LOSS"))
@@ -197,6 +199,7 @@ class Engine2:
             "current_bet": self.s.current_bet,
             "base_bet": config.ENGINE2_BASE_BET,
             "martingale_streak": self.s.martingale_streak,
+            "max_losing_streak": self.s.max_losing_streak,
             "total_pnl": self.s.total_pnl,
             "wins": self.s.wins,
             "losses": self.s.losses,
