@@ -1,12 +1,17 @@
 """
-Engine 2 -- delayed breakout entry, martingale.
+Engine 2 -- delayed dip-fill entry, martingale.
 
 Does nothing for the first ENGINE2_WAIT_SECONDS of the window. After
-that, watches both sides: the moment either one's price is at or above
-ENGINE2_ENTRY_PRICE, fills a limit buy there immediately -- if price is
-already >= entry the instant the wait elapses, it fires right then; if
-it's still below, it keeps watching until price rises through it.
-Only one position per window.
+that, watches both sides: the first time either side's price is
+observed at or above ENGINE2_ENTRY_PRICE, a resting limit buy is
+*armed* at that price -- but a limit buy order only actually fills
+when the market trades AT OR BELOW that price, never while price is
+sitting above it. So if price is already above entry the moment the
+wait elapses (or rises straight through it later), the order arms but
+does not fill; it only fills once price subsequently walks back down
+through ENGINE2_ENTRY_PRICE. If it never comes back down, no trade
+happens that window and the bet ladder is unaffected. Only one
+position per window.
 
 Same exit logic (SL checked first, then TP, then real resolution
 fallback) and same martingale rules (loss -> bet * ENGINE2_MARTINGALE_MULT,
@@ -15,8 +20,8 @@ ladder) as Engine 1 -- see engine1.py's docstring for the tail-risk
 caveat, which applies here too.
 """
 import time
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 from . import config
 from .models import Position, Side, WindowMarket
@@ -26,6 +31,7 @@ from .paper_broker import PaperBroker
 @dataclass
 class Engine2State:
     window: Optional[WindowMarket] = None
+    armed: Dict[Side, bool] = field(default_factory=lambda: {Side.UP: False, Side.DOWN: False})
     traded: bool = False
     position: Optional[Position] = None
     exit_reason: Optional[str] = None
@@ -37,6 +43,8 @@ class Engine2State:
     no_trades: int = 0
     last_window_pnl: float = 0.0
     martingale_streak: int = 0
+    last_up_price: Optional[float] = None
+    last_down_price: Optional[float] = None
 
 
 class Engine2:
@@ -48,6 +56,7 @@ class Engine2:
 
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
+        self.s.armed = {Side.UP: False, Side.DOWN: False}
         self.s.traded = False
         self.s.position = None
         self.s.exit_reason = None
@@ -55,15 +64,18 @@ class Engine2:
         self.s.last_window_pnl = 0.0
         self.broker.log_event(
             self.name, window.slug, "WINDOW_OPEN",
-            note=(f"waiting {config.ENGINE2_WAIT_SECONDS}s, then breakout buy @ "
-                  f"{config.ENGINE2_ENTRY_PRICE}, tp {config.ENGINE2_TP}, "
-                  f"sl {config.ENGINE2_SL}, next bet ${self.s.current_bet:.2f}"),
+            note=(f"waiting {config.ENGINE2_WAIT_SECONDS}s, then arm @ "
+                  f"{config.ENGINE2_ENTRY_PRICE} on touch, fill only on the dip back "
+                  f"through it -- tp {config.ENGINE2_TP}, sl {config.ENGINE2_SL}, "
+                  f"next bet ${self.s.current_bet:.2f}"),
         )
 
     def on_tick(self, up_price: Optional[float], down_price: Optional[float],
                 seconds_to_close: float, now: Optional[float] = None):
         if self.s.window is None or up_price is None or down_price is None:
             return
+        self.s.last_up_price = up_price
+        self.s.last_down_price = down_price
         now = now or time.time()
         elapsed = now - self.s.window.open_ts
         if elapsed < config.ENGINE2_WAIT_SECONDS:
@@ -75,15 +87,22 @@ class Engine2:
 
     def _check_entry(self, up_price: float, down_price: float):
         entry = config.ENGINE2_ENTRY_PRICE
-        up_hit = up_price >= entry
-        down_hit = down_price >= entry
-        if not up_hit and not down_hit:
-            return
-        if up_hit and down_hit:
-            side = Side.UP if up_price >= down_price else Side.DOWN
-        else:
-            side = Side.UP if up_hit else Side.DOWN
-        self._fill_entry(side, entry)
+        prices = {Side.UP: up_price, Side.DOWN: down_price}
+        for side in (Side.UP, Side.DOWN):
+            if self.s.traded:
+                return
+            price = prices[side]
+            if not self.s.armed[side]:
+                if price >= entry:
+                    self.s.armed[side] = True
+                    self.broker.log_event(
+                        self.name, self.s.window.slug, "ARMED", side=side.value, price=price,
+                        note=f"{side.value} touched {entry}, resting buy armed -- waiting for a fill on the dip back to {entry}",
+                    )
+                else:
+                    continue
+            if self.s.armed[side] and price <= entry:
+                self._fill_entry(side, entry)
 
     def _fill_entry(self, side: Side, fill_price: float):
         bet = self.s.current_bet
@@ -95,8 +114,9 @@ class Engine2:
         self.broker.log_event(
             self.name, self.s.window.slug, "BUY", side=side.value, price=fill_price,
             shares=shares, fee=-rebate,
-            note=(f"breakout entry: {side.value} @ {fill_price} (after "
-                  f"{config.ENGINE2_WAIT_SECONDS}s wait), bet ${bet:.2f} (rebate ${rebate:.4f})"),
+            note=(f"dip-fill entry: {side.value} @ {fill_price} (armed after "
+                  f"{config.ENGINE2_WAIT_SECONDS}s wait, filled on the pullback), "
+                  f"bet ${bet:.2f} (rebate ${rebate:.4f})"),
         )
 
     def _check_exit(self, up_price: float, down_price: float):
@@ -155,6 +175,23 @@ class Engine2:
         )
         self.s.position = None
 
+    def _mark_price(self) -> Optional[float]:
+        if self.s.position is None:
+            return None
+        return self.s.last_up_price if self.s.position.side == Side.UP else self.s.last_down_price
+
+    def _unrealized_pnl(self) -> Optional[float]:
+        """Mark-to-market PnL if the open position were sold at the last
+        observed price right now. Ignores the exit fee/rebate that would
+        actually apply, since we don't yet know whether it'll close via
+        TP, SL, or resolution -- this is a live floating estimate, not a
+        settled number."""
+        mark = self._mark_price()
+        if mark is None:
+            return None
+        pos = self.s.position
+        return pos.shares * (mark - pos.entry_price)
+
     def snapshot(self) -> dict:
         return {
             "current_bet": self.s.current_bet,
@@ -171,6 +208,8 @@ class Engine2:
                 "side": self.s.position.side.value,
                 "shares": self.s.position.shares,
                 "entry_price": self.s.position.entry_price,
+                "mark_price": self._mark_price(),
+                "unrealized_pnl": self._unrealized_pnl(),
             },
             "def": {
                 "wait_seconds": config.ENGINE2_WAIT_SECONDS,

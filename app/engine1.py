@@ -45,6 +45,8 @@ class Engine1State:
     no_trades: int = 0
     last_window_pnl: float = 0.0
     martingale_streak: int = 0  # consecutive losses feeding the current bet size
+    last_up_price: Optional[float] = None
+    last_down_price: Optional[float] = None
 
 
 class Engine1:
@@ -72,6 +74,8 @@ class Engine1:
                 seconds_to_close: float, now: Optional[float] = None):
         if self.s.window is None or up_price is None or down_price is None:
             return
+        self.s.last_up_price = up_price
+        self.s.last_down_price = down_price
         if not self.s.traded:
             self._check_entry(up_price, down_price)
         elif self.s.position is not None:
@@ -161,6 +165,23 @@ class Engine1:
         )
         self.s.position = None
 
+    def _mark_price(self) -> Optional[float]:
+        if self.s.position is None:
+            return None
+        return self.s.last_up_price if self.s.position.side == Side.UP else self.s.last_down_price
+
+    def _unrealized_pnl(self) -> Optional[float]:
+        """Mark-to-market PnL if the open position were sold at the last
+        observed price right now. Ignores the exit fee/rebate that would
+        actually apply, since we don't yet know whether it'll close via
+        TP, SL, or resolution -- this is a live floating estimate, not a
+        settled number."""
+        mark = self._mark_price()
+        if mark is None:
+            return None
+        pos = self.s.position
+        return pos.shares * (mark - pos.entry_price)
+
     def snapshot(self) -> dict:
         return {
             "current_bet": self.s.current_bet,
@@ -177,6 +198,8 @@ class Engine1:
                 "side": self.s.position.side.value,
                 "shares": self.s.position.shares,
                 "entry_price": self.s.position.entry_price,
+                "mark_price": self._mark_price(),
+                "unrealized_pnl": self._unrealized_pnl(),
             },
             "def": {
                 "entry": config.ENGINE1_ENTRY_PRICE,

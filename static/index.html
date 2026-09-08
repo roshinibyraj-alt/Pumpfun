@@ -31,7 +31,7 @@
   .dot.err{background:var(--down); box-shadow:0 0 8px var(--down);}
   @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
 
-  .stats{display:grid; grid-template-columns:repeat(3,1fr); gap:12px;}
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:12px;}
   .stat{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px;}
   .stat .label{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px;}
   .stat .val{font-family:var(--mono); font-size:22px; font-weight:600; margin-top:4px;}
@@ -100,6 +100,7 @@
   .ev.RESOLVE_LOSS{background:var(--down-dim); color:var(--down);}
   .ev.WINDOW_OPEN{background:var(--purple-dim); color:var(--purple);}
   .ev.NO_TRADE,.ev.RESOLUTION_FALLBACK{background:var(--amber-dim); color:var(--amber);}
+  .ev.ARMED{background:var(--blue-dim); color:#8fc4f5;}
   .log-row .note{color:#aab8c9; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .log-row .pnl{font-weight:700;}
   .empty{color:var(--muted); font-size:12.5px; padding:14px 4px; text-align:center;}
@@ -119,7 +120,8 @@
   </header>
 
   <div class="stats">
-    <div class="stat"><div class="label">Combined PnL</div><div class="val" id="statPnl">$0.00</div></div>
+    <div class="stat"><div class="label">Realized PnL</div><div class="val" id="statPnl">$0.00</div></div>
+    <div class="stat"><div class="label">Floating PnL</div><div class="val" id="statFloating">$0.00</div></div>
     <div class="stat"><div class="label">Engine 1 Next Bet</div><div class="val" id="statBet1">$0.00</div></div>
     <div class="stat"><div class="label">Engine 2 Next Bet</div><div class="val" id="statBet2">$0.00</div></div>
   </div>
@@ -173,7 +175,7 @@
 
     <div class="engine-card" id="e2Card">
       <div class="engine-top">
-        <span class="engine-name">Engine 2 — Breakout Entry</span>
+        <span class="engine-name">Engine 2 — Dip-Fill Entry</span>
         <span class="engine-badge" id="e2Badge">waiting</span>
       </div>
       <div class="engine-def" id="e2Def"></div>
@@ -257,7 +259,16 @@ function renderEngine(prefix, e, defHtml){
   const posEl = $(prefix+'Pos');
   if(e.position){
     posEl.style.display = 'block';
-    posEl.innerHTML = `<span style="color:${e.position.side==='UP'?'var(--up)':'var(--down)'}; font-weight:700;">${e.position.side}</span> ${e.position.shares.toFixed(2)} sh @ ${fmtP(e.position.entry_price)}`;
+    const upnl = e.position.unrealized_pnl;
+    const upnlColor = upnl===null||upnl===undefined ? 'var(--muted)' : (upnl>=0 ? 'var(--up)' : 'var(--down)');
+    const upnlTxt = upnl===null||upnl===undefined ? '—' : `${upnl>=0?'+':''}${fmt$(upnl)}`;
+    posEl.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span><span style="color:${e.position.side==='UP'?'var(--up)':'var(--down)'}; font-weight:700;">${e.position.side}</span> ${e.position.shares.toFixed(2)} sh @ ${fmtP(e.position.entry_price)}</span>
+        <span style="color:${upnlColor}; font-weight:700;">${upnlTxt}</span>
+      </div>
+      <div style="color:var(--muted); font-size:10px; margin-top:3px;">mark ${fmtP(e.position.mark_price)} · floating, updates live</div>
+    `;
   } else {
     posEl.style.display = 'none';
   }
@@ -334,8 +345,15 @@ async function poll(){
     $('statBet1').textContent = fmt$(e1.current_bet);
     $('statBet2').textContent = fmt$(e2.current_bet);
 
+    const floating = (e1.position && e1.position.unrealized_pnl!==null && e1.position.unrealized_pnl!==undefined ? e1.position.unrealized_pnl : 0)
+                    + (e2.position && e2.position.unrealized_pnl!==null && e2.position.unrealized_pnl!==undefined ? e2.position.unrealized_pnl : 0);
+    const hasOpen = !!(e1.position || e2.position);
+    const floatEl = $('statFloating');
+    floatEl.textContent = hasOpen ? (floating>=0?'+':'') + fmt$(floating) : '—';
+    floatEl.className = 'val ' + (hasOpen ? (floating>=0?'pos':'neg') : '');
+
     if(e1.def) renderEngine('e1', e1, `both sides @ <b>${fmtP(e1.def.entry)}</b> instantly · tp <b>${fmtP(e1.def.tp)}</b> · sl <b>${fmtP(e1.def.sl)}</b> · ×${e1.def.mult}`);
-    if(e2.def) renderEngine('e2', e2, `wait <b>${e2.def.wait_seconds}s</b>, breakout @ <b>${fmtP(e2.def.entry)}</b> · tp <b>${fmtP(e2.def.tp)}</b> · sl <b>${fmtP(e2.def.sl)}</b> · ×${e2.def.mult}`);
+    if(e2.def) renderEngine('e2', e2, `wait <b>${e2.def.wait_seconds}s</b>, arm on touch @ <b>${fmtP(e2.def.entry)}</b>, fill on dip back · tp <b>${fmtP(e2.def.tp)}</b> · sl <b>${fmtP(e2.def.sl)}</b> · ×${e2.def.mult}`);
 
     renderLog(s.log || []);
   }catch(err){
