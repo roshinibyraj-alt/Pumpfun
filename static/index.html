@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BTC 5m Up/Down — Martingale Engines</title>
+<style>
+  :root{
+    --bg:#0a0e14; --panel:#10151f; --panel-2:#141b28; --border:#1f2b3d;
+    --text:#e6edf3; --muted:#7a8ba3; --up:#22c55e; --up-dim:#16532f;
+    --down:#ef4444; --down-dim:#5c1d1d; --amber:#f5b942; --amber-dim:#3a2a12;
+    --blue:#3b82f6; --blue-dim:#16324a; --purple:#b39ddb; --purple-dim:#2a2340;
+    --mono:'SF Mono',ui-monospace,'Cascadia Code',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:radial-gradient(circle at 20% -10%,#122032,var(--bg) 55%);
+    color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    min-height:100vh; padding:18px; padding-bottom:60px;
+  }
+  .wrap{max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:16px;}
+
+  header{display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;}
+  .title{display:flex; align-items:center; gap:10px;}
+  .title h1{font-size:18px; margin:0; font-weight:700; letter-spacing:.2px;}
+  .title .sub{font-size:12px; color:var(--muted); font-family:var(--mono);}
+  .status-pill{display:flex; align-items:center; gap:6px; font-size:12px; padding:5px 10px;
+    border-radius:20px; background:var(--panel); border:1px solid var(--border); color:var(--muted);}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--muted);}
+  .dot.live{background:var(--up); box-shadow:0 0 8px var(--up); animation:pulse 1.6s infinite;}
+  .dot.err{background:var(--down); box-shadow:0 0 8px var(--down);}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+
+  .stats{display:grid; grid-template-columns:repeat(3,1fr); gap:12px;}
+  .stat{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px;}
+  .stat .label{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px;}
+  .stat .val{font-family:var(--mono); font-size:22px; font-weight:600; margin-top:4px;}
+  .val.pos{color:var(--up);} .val.neg{color:var(--down);}
+
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px;}
+  .card h2{margin:0 0 12px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.7px; font-weight:600;}
+  .window-top{display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:10px; margin-bottom:14px;}
+  .slug{font-family:var(--mono); font-size:13px; color:var(--muted);}
+  .countdown{font-family:var(--mono); font-size:28px; font-weight:700;}
+  .countdown.hot{color:var(--amber);}
+
+  .prices{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+  .price-box{border-radius:10px; padding:14px; position:relative; overflow:hidden; border:1px solid var(--border);}
+  .price-box.up{background:linear-gradient(135deg,var(--up-dim),transparent 70%);}
+  .price-box.down{background:linear-gradient(135deg,var(--down-dim),transparent 70%);}
+  .price-box .side-label{font-size:12px; font-weight:700; letter-spacing:1px;}
+  .price-box.up .side-label{color:var(--up);} .price-box.down .side-label{color:var(--down);}
+  .price-box .p{font-family:var(--mono); font-size:30px; font-weight:700; margin-top:4px;}
+  .bar-track{height:5px; background:#0006; border-radius:3px; margin-top:10px; overflow:hidden;}
+  .bar-fill{height:100%; border-radius:3px;}
+  .bar-fill.up{background:var(--up);} .bar-fill.down{background:var(--down);}
+
+  canvas{width:100%; height:150px; display:block; margin-top:14px;}
+
+  .engine-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
+  @media (max-width:700px){ .engine-grid{grid-template-columns:1fr;} .stats{grid-template-columns:repeat(2,1fr);} .prices{grid-template-columns:1fr;} }
+
+  .engine-card{background:var(--panel-2); border:1px solid var(--border); border-radius:12px; padding:16px; display:flex; flex-direction:column; gap:10px;}
+  .engine-card.open{border-color:var(--blue);}
+  .engine-top{display:flex; justify-content:space-between; align-items:center;}
+  .engine-name{font-weight:700; font-size:14px;}
+  .engine-badge{font-size:9.5px; font-weight:700; letter-spacing:.4px; padding:3px 8px; border-radius:5px; text-transform:uppercase;}
+  .engine-badge.waiting{background:#1a1f2b; color:#5a6579;}
+  .engine-badge.open{background:var(--blue-dim); color:#5eb3f0;}
+  .engine-badge.traded{background:#22262f; color:#9aa7ba;}
+
+  .engine-def{font-family:var(--mono); font-size:11px; color:var(--muted); line-height:1.6;}
+  .engine-def b{color:var(--text);}
+
+  .bet-row{display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-radius:8px; background:#0c1119;}
+  .bet-row .label{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px;}
+  .bet-row .amt{font-family:var(--mono); font-size:20px; font-weight:700; color:var(--amber);}
+  .bet-row .streak{font-family:var(--mono); font-size:11px; color:var(--muted); margin-top:2px;}
+
+  .engine-pos{font-family:var(--mono); font-size:11.5px; padding:7px 10px; border-radius:7px; background:#0c1119;}
+
+  .engine-stats{display:flex; gap:10px; font-family:var(--mono); font-size:11px;}
+  .engine-stats span b{display:block; font-size:15px; margin-top:2px;}
+  .es-win b{color:var(--up);} .es-loss b{color:var(--down);} .es-none b{color:var(--muted);}
+
+  .engine-bottom{display:flex; justify-content:space-between; align-items:baseline; margin-top:auto; padding-top:8px; border-top:1px solid var(--border);}
+  .engine-pnl{font-family:var(--mono); font-weight:700; font-size:15px;}
+  .engine-pnl.pos{color:var(--up);} .engine-pnl.neg{color:var(--down);} .engine-pnl.zero{color:var(--muted);}
+  .last-pnl{font-family:var(--mono); font-size:11px; color:var(--muted);}
+
+  .log-list{display:flex; flex-direction:column; gap:5px; max-height:420px; overflow-y:auto; padding-right:4px;}
+  .log-row{display:grid; grid-template-columns:56px 40px 1fr auto; gap:8px; align-items:center;
+    font-family:var(--mono); font-size:11.5px; padding:6px 8px; border-radius:7px; background:var(--panel-2);}
+  .log-row .t{color:var(--muted);}
+  .log-row .ev{font-weight:700; font-size:9.5px; padding:2px 6px; border-radius:5px; text-align:center;}
+  .ev.BUY{background:var(--blue-dim); color:#5eb3f0;}
+  .ev.TP_CLOSE{background:var(--up-dim); color:var(--up);}
+  .ev.SL_CLOSE{background:var(--down-dim); color:var(--down);}
+  .ev.RESOLVE_WIN{background:var(--up-dim); color:var(--up);}
+  .ev.RESOLVE_LOSS{background:var(--down-dim); color:var(--down);}
+  .ev.WINDOW_OPEN{background:var(--purple-dim); color:var(--purple);}
+  .ev.NO_TRADE,.ev.RESOLUTION_FALLBACK{background:var(--amber-dim); color:var(--amber);}
+  .log-row .note{color:#aab8c9; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .log-row .pnl{font-weight:700;}
+  .empty{color:var(--muted); font-size:12.5px; padding:14px 4px; text-align:center;}
+
+  footer{text-align:center; color:var(--muted); font-size:11px; margin-top:8px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="title">
+      <h1>BTC 5m Up/Down</h1>
+      <span class="sub">2 parallel martingale engines</span>
+    </div>
+    <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></div>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="label">Combined PnL</div><div class="val" id="statPnl">$0.00</div></div>
+    <div class="stat"><div class="label">Engine 1 Next Bet</div><div class="val" id="statBet1">$0.00</div></div>
+    <div class="stat"><div class="label">Engine 2 Next Bet</div><div class="val" id="statBet2">$0.00</div></div>
+  </div>
+
+  <div class="card">
+    <h2>Active Window</h2>
+    <div class="window-top">
+      <div class="slug" id="windowSlug">—</div>
+      <div class="countdown" id="countdown">--:--</div>
+    </div>
+    <div class="prices">
+      <div class="price-box up">
+        <div class="side-label">UP</div>
+        <div class="p" id="priceUp">—</div>
+        <div class="bar-track"><div class="bar-fill up" id="barUp" style="width:0%"></div></div>
+      </div>
+      <div class="price-box down">
+        <div class="side-label">DOWN</div>
+        <div class="p" id="priceDown">—</div>
+        <div class="bar-track"><div class="bar-fill down" id="barDown" style="width:0%"></div></div>
+      </div>
+    </div>
+    <canvas id="chart" height="150"></canvas>
+  </div>
+
+  <div class="engine-grid">
+    <div class="engine-card" id="e1Card">
+      <div class="engine-top">
+        <span class="engine-name">Engine 1 — Race Entry</span>
+        <span class="engine-badge" id="e1Badge">waiting</span>
+      </div>
+      <div class="engine-def" id="e1Def"></div>
+      <div class="bet-row">
+        <div>
+          <div class="label">Next Bet</div>
+          <div class="streak" id="e1Streak"></div>
+        </div>
+        <div class="amt" id="e1Bet">$0.00</div>
+      </div>
+      <div class="engine-pos" id="e1Pos" style="display:none;"></div>
+      <div class="engine-stats">
+        <span class="es-win">wins<b id="e1Wins">0</b></span>
+        <span class="es-loss">losses<b id="e1Losses">0</b></span>
+        <span class="es-none">no-trade<b id="e1NoTrade">0</b></span>
+      </div>
+      <div class="engine-bottom">
+        <span class="engine-pnl" id="e1Pnl">$0.00</span>
+        <span class="last-pnl" id="e1LastPnl"></span>
+      </div>
+    </div>
+
+    <div class="engine-card" id="e2Card">
+      <div class="engine-top">
+        <span class="engine-name">Engine 2 — Breakout Entry</span>
+        <span class="engine-badge" id="e2Badge">waiting</span>
+      </div>
+      <div class="engine-def" id="e2Def"></div>
+      <div class="bet-row">
+        <div>
+          <div class="label">Next Bet</div>
+          <div class="streak" id="e2Streak"></div>
+        </div>
+        <div class="amt" id="e2Bet">$0.00</div>
+      </div>
+      <div class="engine-pos" id="e2Pos" style="display:none;"></div>
+      <div class="engine-stats">
+        <span class="es-win">wins<b id="e2Wins">0</b></span>
+        <span class="es-loss">losses<b id="e2Losses">0</b></span>
+        <span class="es-none">no-trade<b id="e2NoTrade">0</b></span>
+      </div>
+      <div class="engine-bottom">
+        <span class="engine-pnl" id="e2Pnl">$0.00</span>
+        <span class="last-pnl" id="e2LastPnl"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Trade Log</h2>
+    <div class="log-list" id="logList"></div>
+  </div>
+
+  <footer>polling /api/state every 1s · martingale ladders: E1 ×1.7 on loss, E2 ×2.0 on loss, both reset to base on a win</footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt$ = n => (n === null || n === undefined) ? '—' : (n<0?'-$':'$') + Math.abs(Number(n)).toFixed(2);
+const fmtP = n => (n === null || n === undefined) ? '—' : Number(n).toFixed(3);
+
+let history = [];
+
+function drawChart(){
+  const canvas = $('chart');
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight || 150;
+  canvas.width = w*dpr; canvas.height = h*dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+  if(history.length < 2) return;
+  const pad = 6;
+  const vals = history.flatMap(p => [p.up, p.down]).filter(v => v !== null && v !== undefined);
+  if(!vals.length) return;
+  let min = Math.min(...vals, 0.05), max = Math.max(...vals, 0.95);
+  const span = Math.max(max-min, 0.05);
+  min -= span*0.08; max += span*0.08;
+  const x = i => pad + (i/(history.length-1)) * (w-pad*2);
+  const y = v => h - pad - ((v-min)/(max-min)) * (h-pad*2);
+  function line(key, color){
+    ctx.beginPath();
+    let started = false;
+    history.forEach((p,i)=>{
+      const v = p[key];
+      if(v === null || v === undefined) return;
+      const px = x(i), py = y(v);
+      if(!started){ ctx.moveTo(px,py); started = true; } else { ctx.lineTo(px,py); }
+    });
+    ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.stroke();
+  }
+  line('up', '#22c55e');
+  line('down', '#ef4444');
+}
+
+function renderEngine(prefix, e, defHtml){
+  $(prefix+'Def').innerHTML = defHtml;
+  $(prefix+'Bet').textContent = fmt$(e.current_bet);
+  $(prefix+'Streak').textContent = e.martingale_streak > 0
+    ? `${e.martingale_streak} loss streak (base ${fmt$(e.base_bet)})`
+    : `at base bet`;
+  $(prefix+'Badge').textContent = e.status;
+  $(prefix+'Badge').className = 'engine-badge ' + e.status;
+  $(prefix+'Card').className = 'engine-card' + (e.status==='open' ? ' open' : '');
+
+  const posEl = $(prefix+'Pos');
+  if(e.position){
+    posEl.style.display = 'block';
+    posEl.innerHTML = `<span style="color:${e.position.side==='UP'?'var(--up)':'var(--down)'}; font-weight:700;">${e.position.side}</span> ${e.position.shares.toFixed(2)} sh @ ${fmtP(e.position.entry_price)}`;
+  } else {
+    posEl.style.display = 'none';
+  }
+
+  $(prefix+'Wins').textContent = e.wins;
+  $(prefix+'Losses').textContent = e.losses;
+  $(prefix+'NoTrade').textContent = e.no_trades;
+
+  const pnlEl = $(prefix+'Pnl');
+  pnlEl.textContent = (e.total_pnl>=0?'+':'') + fmt$(e.total_pnl);
+  pnlEl.className = 'engine-pnl ' + (e.total_pnl>0.005?'pos':(e.total_pnl<-0.005?'neg':'zero'));
+
+  $(prefix+'LastPnl').textContent = e.last_window_pnl
+    ? `last window: ${e.last_window_pnl>=0?'+':''}${fmt$(e.last_window_pnl)}`
+    : '';
+}
+
+function renderLog(entries){
+  const list = $('logList');
+  list.innerHTML = '';
+  if(!entries.length){ list.innerHTML = '<div class="empty">No events yet</div>'; return; }
+  entries.forEach(e=>{
+    const row = document.createElement('div');
+    row.className = 'log-row';
+    const t = new Date(e.ts*1000).toLocaleTimeString();
+    const sideTag = e.side ? `<span style="color:${e.side==='UP'?'var(--up)':'var(--down)'}; font-weight:700;">${e.side}</span>` : '';
+    let pnlHtml = '';
+    if(e.pnl !== null && e.pnl !== undefined){
+      pnlHtml = `<span class="pnl" style="color:${e.pnl>=0?'#22c55e':'#ef4444'}">${e.pnl>=0?'+':''}${Number(e.pnl).toFixed(2)}</span>`;
+    }
+    row.innerHTML = `
+      <span class="t">${t}</span>
+      <span class="ev ${e.event}">${e.engine||e.event}</span>
+      <span class="note">${sideTag} ${e.note || ''} ${e.price!==null&&e.price!==undefined? '@ '+fmtP(e.price):''}</span>
+      ${pnlHtml}
+    `;
+    list.appendChild(row);
+  });
+}
+
+async function poll(){
+  try{
+    const res = await fetch('/api/state');
+    const s = await res.json();
+
+    const dot = $('statusDot'), text = $('statusText');
+    if(s.error){ dot.className='dot err'; text.textContent = s.error; }
+    else { dot.className='dot live'; text.textContent = 'live'; }
+
+    const pnl = s.pnl_total;
+    const pnlEl = $('statPnl');
+    pnlEl.textContent = (pnl>=0?'+':'') + fmt$(pnl);
+    pnlEl.className = 'val ' + (pnl>=0?'pos':'neg');
+
+    $('windowSlug').textContent = s.window ? s.window.slug : 'waiting for window…';
+    if(s.window){
+      const remaining = Math.max(0, s.window.close_ts - s.server_time);
+      const m = Math.floor(remaining/60), sec = Math.floor(remaining%60);
+      const cd = $('countdown');
+      cd.textContent = `${m}:${String(sec).padStart(2,'0')}`;
+      cd.className = 'countdown' + (remaining <= 20 ? ' hot' : '');
+    }
+
+    const up = s.prices.up, down = s.prices.down;
+    $('priceUp').textContent = fmtP(up);
+    $('priceDown').textContent = fmtP(down);
+    $('barUp').style.width = (up!==null && up!==undefined ? up*100 : 0) + '%';
+    $('barDown').style.width = (down!==null && down!==undefined ? down*100 : 0) + '%';
+
+    history = (s.price_history || []).map(p=>({ts:p.ts, up:p.up, down:p.down}));
+    drawChart();
+
+    const e1 = s.engine1 || {}, e2 = s.engine2 || {};
+    $('statBet1').textContent = fmt$(e1.current_bet);
+    $('statBet2').textContent = fmt$(e2.current_bet);
+
+    if(e1.def) renderEngine('e1', e1, `both sides @ <b>${fmtP(e1.def.entry)}</b> instantly · tp <b>${fmtP(e1.def.tp)}</b> · sl <b>${fmtP(e1.def.sl)}</b> · ×${e1.def.mult}`);
+    if(e2.def) renderEngine('e2', e2, `wait <b>${e2.def.wait_seconds}s</b>, breakout @ <b>${fmtP(e2.def.entry)}</b> · tp <b>${fmtP(e2.def.tp)}</b> · sl <b>${fmtP(e2.def.sl)}</b> · ×${e2.def.mult}`);
+
+    renderLog(s.log || []);
+  }catch(err){
+    $('statusDot').className = 'dot err';
+    $('statusText').textContent = 'disconnected';
+  }
+}
+
+poll();
+setInterval(poll, 1000);
+window.addEventListener('resize', drawChart);
+</script>
+</body>
+</html>

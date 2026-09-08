@@ -1,89 +1,85 @@
 """
-Central configuration, all overridable via environment variables
-(set these in Railway's Variables tab).
+Central configuration for the BTC 5-min up/down paper-trading bot.
+Engine A has been removed. Engine B is the only strategy running.
 """
 import os
-from dataclasses import dataclass
-
-
-def _f(name: str, default: float) -> float:
-    return float(os.getenv(name, default))
-
-
-def _i(name: str, default: int) -> int:
-    return int(os.getenv(name, default))
-
 
 # ---- Mode -------------------------------------------------------------
-# PAPER (demo) mode only: reads Polymarket's real, public order books but
-# never signs or submits a real order. All fills, balances, and P&L are
-# simulated against virtual bankrolls.
-PAPER_MODE = True
+TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 
-# ---- Window -------------------------------------------------------------
-WINDOW_SECONDS = _i("WINDOW_SECONDS", 300)     # 5-minute windows
-WINDOW_LABEL = os.getenv("WINDOW_LABEL", "5m")  # gamma slug segment: "{asset}-updown-5m-{ts}"
+# ---- Capital ------------------------------------------------------------
+STARTING_BALANCE_USDC = float(os.getenv("STARTING_BALANCE_USDC", "5000"))
 
-# ---- Engines --------------------------------------------------------------
-# 4 independent engines, each dedicated to ONE outcome token. Each fires
-# exactly one $ENTRY_DOLLARS entry per window, at (or very near) window
-# open -- when the token price is closest to a coin-flip ($0.50) -- so
-# the win rate is close to 50% "by time decay": with no directional edge
-# at entry, the price simply decays toward $0 or $1 as the window
-# resolves, and a symmetric TP/SL around 0.50 catches roughly half of
-# that decay each way.
-@dataclass(frozen=True)
-class EngineConfig:
-    label: str      # "E1_BTC_UP" etc -- used in logs, storage keys, dashboard
-    asset: str      # "btc" / "eth"
-    outcome: str    # "Up" / "Down"
-    color: str      # ANSI color name for logging
+# ---- Market discovery ---------------------------------------------------
+GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
+CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
+SLUG_PREFIX = "btc-updown-5m-"
+WINDOW_SECONDS = 300
 
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-ENGINES = [
-    EngineConfig(label="E1_BTC_UP",   asset="btc", outcome="Up",   color="cyan"),
-    EngineConfig(label="E2_BTC_DOWN", asset="btc", outcome="Down", color="magenta"),
-    EngineConfig(label="E3_ETH_UP",   asset="eth", outcome="Up",   color="green"),
-    EngineConfig(label="E4_ETH_DOWN", asset="eth", outcome="Down", color="yellow"),
-]
+# How many seconds before window close counts as the "resolution window"
+# for the logging-only 0.90+ signal.
+RESOLUTION_WINDOW_SECONDS = 2.0
 
-STARTING_CAPITAL_PER_ENGINE = _f("STARTING_CAPITAL_PER_ENGINE", 1000.0)
-ENTRY_DOLLARS = _f("ENTRY_DOLLARS", 100.0)   # flat $ notional per engine per window
+# How many seconds to retry Polymarket's real settlement outcome before
+# falling back to a last-observed-price approximation.
+RESOLUTION_RETRY_SECONDS = 6
 
-# ---- Take-profit / stop-loss -----------------------------------------------
-# Token price levels (entry is near $0.50). Default +-40%.
-TAKE_PROFIT_PRICE = _f("TAKE_PROFIT_PRICE", 0.70)
-STOP_LOSS_PRICE = _f("STOP_LOSS_PRICE", 0.30)
+# ---- Engine 1 (v7 -- dual-side race entry, martingale) -------------------
+# At window open, resting limit buys are placed on BOTH sides at
+# ENGINE1_ENTRY_PRICE simultaneously. Whichever side's price walks down
+# to that level first fills; the other side's order is cancelled. Only
+# one position per window. Exit via TP, SL, or Polymarket's real
+# resolution if neither fires by window close.
+ENGINE1_ENTRY_PRICE = 0.30
+ENGINE1_TP = 0.99
+ENGINE1_SL = 0.05
+ENGINE1_BASE_BET = 30.0          # dollars
+ENGINE1_MARTINGALE_MULT = 1.7    # next bet = prev bet * this, after a loss
+# A win (TP or resolution win) resets the next bet back to ENGINE1_BASE_BET.
+# A window where neither side ever reaches the entry price is not a trade
+# and does not affect the bet ladder.
 
-# ---- Execution --------------------------------------------------------------
-BUY_SLIPPAGE_CEILING = _f("BUY_SLIPPAGE_CEILING", 0.99)
-SELL_SLIPPAGE_FLOOR = _f("SELL_SLIPPAGE_FLOOR", 0.01)
+# ---- Engine 2 (v7 -- delayed breakout entry, martingale) -----------------
+# Does nothing for the first ENGINE2_WAIT_SECONDS of the window. After
+# that, watches both sides; the moment either one's price is observed at
+# or above ENGINE2_ENTRY_PRICE, fills a limit buy there immediately (no
+# separate dip/arm phase -- if price is already >= entry the instant the
+# wait elapses, it fires right then; if it's still below, it keeps
+# watching until price rises through it). Only one position per window.
+ENGINE2_WAIT_SECONDS = 120
+ENGINE2_ENTRY_PRICE = 0.70
+ENGINE2_TP = 0.99
+ENGINE2_SL = 0.40
+ENGINE2_BASE_BET = 100.0
+ENGINE2_MARTINGALE_MULT = 2.0
+# Same win-resets / no-trade-doesn't-affect-ladder rules as Engine 1.
 
-# ---- Fees -------------------------------------------------------------------
-FALLBACK_TAKER_FEE_RATE = _f("FALLBACK_TAKER_FEE_RATE", 0.07)
+# Maker rebate on entry fills and take-profit fills (both are resting
+# limit orders, so no fee -- just a partial rebate). Stop-loss exits are
+# market orders and pay the full taker fee with no rebate, matching
+# Polymarket's real maker/taker treatment.
+MAKER_REBATE_FRACTION = 0.20
 
-# ---- Resolution (time decay / hold-to-close path) ----------------------------
-# Primary: Polymarket's own official resolution via Gamma (closed +
-# outcomePrices) -- the real oracle-based settlement. If Gamma hasn't
-# confirmed within GAMMA_RESOLUTION_TIMEOUT_SECONDS of window close, fall
-# back to the CLOB's actual last-traded price (never bid/ask/midpoint --
-# those are unsafe right at window close; see app/clobbook.py notes).
-GAMMA_RESOLUTION_CONFIDENCE = _f("GAMMA_RESOLUTION_CONFIDENCE", 0.99)
-GAMMA_RESOLUTION_TIMEOUT_SECONDS = _f("GAMMA_RESOLUTION_TIMEOUT_SECONDS", 90.0)
-CLOB_FALLBACK_PRICE_THRESHOLD = _f("CLOB_FALLBACK_PRICE_THRESHOLD", 0.97)
+# Every fill that hits neither TP nor SL by window close is settled at
+# Polymarket's real binary resolution ($1/share win, $0/share loss),
+# fee-free.
 
-# ---- Polling ---------------------------------------------------------------
-POLL_INTERVAL_SECONDS = _f("POLL_INTERVAL_SECONDS", 1.5)
-RESOLUTION_POLL_SECONDS = _f("RESOLUTION_POLL_SECONDS", 2.0)
-RESOLUTION_POLL_TIMEOUT_SECONDS = _f("RESOLUTION_POLL_TIMEOUT_SECONDS", 180.0)
+# ---- Trading fees ---------------------------------------------------------
+# Polymarket taker fee (per docs.polymarket.com/trading/fees, Crypto
+# category). Charged only on stop-loss market-order exits here; entry
+# and take-profit fills are maker orders and pay no fee (see
+# MAKER_REBATE_FRACTION above). Formula:
+#   fee = shares * price * FEE_RATE * (price * (1 - price)) ** FEE_EXPONENT
+# NOTE: Polymarket has revised this fee schedule multiple times in 2026
+# and third-party sources disagree on the exact current rate for the
+# 5-min/15-min crypto sub-category specifically -- verify against
+# GET https://clob.polymarket.com/fee-rate?token_id=... before trading
+# real money. APPLY_TAKER_FEES can be set False to model a fee-free run.
+APPLY_TAKER_FEES = True
+TAKER_FEE_RATE = 0.07
+TAKER_FEE_EXPONENT = 1
 
-# ---- Market discovery ---------------------------------------------------------
-ASSETS = ["btc", "eth"]
-GAMMA_BASE = os.getenv("GAMMA_BASE", "https://gamma-api.polymarket.com")
-CLOB_BASE = os.getenv("CLOB_BASE", "https://clob.polymarket.com")
-
-# ---- Storage ---------------------------------------------------------------
-DB_PATH = os.getenv("DB_PATH", "/data/pool_bot_state.db" if os.path.isdir("/data") else "pool_bot_state.db")
-
-# ---- Web server -------------------------------------------------------------
-PORT = _i("PORT", 8080)
+# ---- Misc -----------------------------------------------------------------
+LOG_MAX_ENTRIES = 500
