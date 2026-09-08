@@ -1,13 +1,11 @@
-"""Shared runtime state + the background loop that drives Engine 1 and
-Engine 2."""
+"""Shared runtime state + the background loop that drives the engine."""
 import asyncio
 import time
 from collections import deque
 from typing import Optional
 
 from . import config
-from .engine1 import Engine1
-from .engine2 import Engine2
+from .engine import Engine
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
 from .polymarket_client import PolymarketClient
@@ -15,9 +13,8 @@ from .polymarket_client import PolymarketClient
 
 class BotState:
     def __init__(self):
-        self.broker = PaperBroker(config.STARTING_BALANCE_USDC)
-        self.engine1 = Engine1(self.broker)
-        self.engine2 = Engine2(self.broker)
+        self.broker = PaperBroker()
+        self.engine = Engine(self.broker)
         self.client = PolymarketClient()
         self.current_window: Optional[WindowMarket] = None
         self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
@@ -61,20 +58,17 @@ class BotState:
         self.price_history.append(PricePoint(ts=now, up=up_price, down=down_price))
 
         seconds_to_close = self.current_window.close_ts - now
-        self.engine1.on_tick(up_price, down_price, seconds_to_close, now=now)
-        self.engine2.on_tick(up_price, down_price, seconds_to_close, now=now)
+        self.engine.on_tick(up_price, down_price, seconds_to_close, now=now)
 
     async def _roll_window(self, new_window: WindowMarket):
         # Finalize the previous window before starting the new one.
         if self.current_window is not None:
             winning_side = await self._resolve_previous_window(self.current_window)
-            self.engine1.finalize_window(winning_side)
-            self.engine2.finalize_window(winning_side)
+            self.engine.finalize_window(winning_side)
 
         self.current_window = new_window
         self.price_history.clear()
-        self.engine1.reset_for_window(new_window)
-        self.engine2.reset_for_window(new_window)
+        self.engine.reset_for_window(new_window)
 
     async def _resolve_previous_window(self, window: WindowMarket) -> Optional[Side]:
         """Use Polymarket's actual settled outcome, not a price guess.
@@ -104,7 +98,7 @@ class BotState:
     # ---- dashboard payload -------------------------------------------------
 
     def snapshot(self) -> dict:
-        total_pnl = self.engine1.s.total_pnl + self.engine2.s.total_pnl
+        eng = self.engine.snapshot()
         return {
             "status": self.status,
             "error": self.error,
@@ -122,9 +116,17 @@ class BotState:
                 {"ts": p.ts, "up": p.up, "down": p.down}
                 for p in list(self.price_history)[-120:]
             ],
-            "pnl_total": round(total_pnl, 2),
-            "engine1": self.engine1.snapshot(),
-            "engine2": self.engine2.snapshot(),
+            "pnl_total": round(eng["total_pnl"], 2),
+            # Demo capital: this is the single balance the whole app
+            # tracks -- see engine.py / config.STARTING_CAPITAL. Exposed
+            # at the top level too so the dashboard can feature it
+            # prominently without digging into the engine block.
+            "demo_capital": {
+                "balance": eng["balance"],
+                "starting_capital": eng["starting_capital"],
+                "halted": eng["halted"],
+            },
+            "engine": eng,
             "log": [
                 {
                     "ts": e.ts, "engine": e.engine, "window": e.window_slug,

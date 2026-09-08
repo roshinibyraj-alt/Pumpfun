@@ -1,36 +1,43 @@
 """
-Engine 1 -- streak-filtered single-side entry, martingale, hard capital
-stop.
+Trading engine -- streak-filtered single-side entry, martingale, hard
+capital stop. No stop loss: every open position rides to take-profit or
+Polymarket's real resolution.
 
 Entry filter: at window open, a resting limit buy is placed at
-ENGINE1_ENTRY_PRICE on ONLY the side that won the PREVIOUS window (real
+ENGINE_ENTRY_PRICE on ONLY the side that won the PREVIOUS window (real
 resolution, not this engine's own trade outcome). If that side has won
-ENGINE1_STREAK_FILTER_LENGTH windows in a row, Engine 1 places no order
+ENGINE_STREAK_FILTER_LENGTH windows in a row, the engine places no order
 at all and sits out until a window resolves with the opposite side
 winning -- that flip starts a new streak (count 1) and trading resumes
 on it the following window. The very first window ever has no prior
 result, so it's sat out too.
 
-Exit: SL (checked first) via a market order, TP via a limit sell, or
-Polymarket's real resolution if neither fires by window close.
+Exit: TP via a limit sell, or Polymarket's real resolution if TP isn't
+hit by window close. There is no stop loss -- a losing trade always
+rides all the way to resolution ($0/share if it loses), rather than
+being cut early at a partial loss. That makes each loss more expensive
+than it would be with an SL, though it doesn't change how often a side
+wins.
 
-Bet sizing is a martingale ladder: a loss (SL or resolution loss)
-multiplies the next TRADED window's bet by ENGINE1_MARTINGALE_MULT; a
-win resets it to ENGINE1_BASE_BET. Windows with no trade -- whether
-from the streak filter or because price never reached the entry price
--- never move the ladder.
+Bet sizing is a martingale ladder: a loss (resolution loss) multiplies
+the next TRADED window's bet by ENGINE_MARTINGALE_MULT; a win resets it
+to ENGINE_BASE_BET. Windows with no trade -- whether from the streak
+filter or because price never reached the entry price -- never move the
+ladder.
 
-Capital: Engine 1 tracks a real balance starting at
-ENGINE1_STARTING_CAPITAL. If a loss ever takes it below $0, the engine
-halts permanently (no further entries) -- a hard bankruptcy stop.
+Capital: the engine tracks the app's one and only balance, starting at
+config.STARTING_CAPITAL. This is what the dashboard's "Demo Capital"
+figure shows. If a loss ever takes it below $0, the engine halts
+permanently (no further entries) -- a hard bankruptcy stop.
 
 This entry filter changes WHICH windows get traded; it does not change
-the market's underlying odds on any individual trade, and Engine 1's
+the market's underlying odds on any individual trade, and the engine's
 own win/loss outcome is a different thing from which side wins the
 market each window. If 5-minute BTC windows are close to independent,
 this filter may not meaningfully reduce real losing-streak risk -- the
-martingale ladder itself remains the dominant source of tail risk.
-Validate in paper mode before this ever touches real money.
+martingale ladder itself (made steeper here by the lack of an SL)
+remains the dominant source of tail risk. Validate in paper mode before
+this ever touches real money.
 """
 import time
 from dataclasses import dataclass, field
@@ -42,7 +49,7 @@ from .paper_broker import PaperBroker
 
 
 @dataclass
-class Engine1State:
+class EngineState:
     window: Optional[WindowMarket] = None
     traded: bool = False
     position: Optional[Position] = None
@@ -71,15 +78,15 @@ class Engine1State:
     equity_curve: List[dict] = field(default_factory=list)  # [{window, balance}, ...]
 
 
-class Engine1:
-    name = "E1"
+class Engine:
+    name = "BOT"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
-        self.s = Engine1State(current_bet=config.ENGINE1_BASE_BET,
-                               balance=config.ENGINE1_STARTING_CAPITAL,
-                               trade_side_this_window=None,
-                               skip_reason="no prior window result yet")
+        self.s = EngineState(current_bet=config.ENGINE_BASE_BET,
+                              balance=config.STARTING_CAPITAL,
+                              trade_side_this_window=None,
+                              skip_reason="no prior window result yet")
 
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
@@ -108,9 +115,9 @@ class Engine1:
             self.broker.log_event(
                 self.name, window.slug, "WINDOW_OPEN",
                 side=side.value,
-                note=(f"resting buy on {side.value} only @ {config.ENGINE1_ENTRY_PRICE} "
+                note=(f"resting buy on {side.value} only @ {config.ENGINE_ENTRY_PRICE} "
                       f"(streak: {side.value} has won {self.s.streak_count} in a row), "
-                      f"tp {config.ENGINE1_TP}, sl {config.ENGINE1_SL}, "
+                      f"tp {config.ENGINE_TP}, no SL -- rides to resolution otherwise, "
                       f"next bet ${self.s.current_bet:.2f}"),
                 balance_after=self.s.balance,
             )
@@ -132,7 +139,7 @@ class Engine1:
         side = self.s.trade_side_this_window
         if side is None:
             return  # sitting out this window (streak filter or no prior result)
-        entry = config.ENGINE1_ENTRY_PRICE
+        entry = config.ENGINE_ENTRY_PRICE
         price = up_price if side == Side.UP else down_price
         if price <= entry:
             self._fill_entry(side, entry)
@@ -153,10 +160,7 @@ class Engine1:
     def _check_exit(self, up_price: float, down_price: float):
         pos = self.s.position
         price = up_price if pos.side == Side.UP else down_price
-        if price <= config.ENGINE1_SL:
-            self._close(price, "sl", fee=self.broker.taker_fee_amount(pos.shares, price), rebate=0.0)
-            return
-        if price >= config.ENGINE1_TP:
+        if price >= config.ENGINE_TP:
             rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(pos.shares, price)
             self._close(price, "tp", fee=0.0, rebate=rebate)
 
@@ -164,8 +168,7 @@ class Engine1:
         pos = self.s.position
         proceeds = pos.shares * price
         pnl = proceeds - pos.notional - fee + rebate + self.s.entry_rebate
-        self._settle(pos, pnl, reason, price, fee, rebate,
-                     note=f"{'take-profit' if reason=='tp' else 'stop-loss (market order)'}")
+        self._settle(pos, pnl, reason, price, fee, rebate, note="take-profit")
 
     def finalize_window(self, winning_side: Optional[Side]):
         if self.s.halted:
@@ -180,7 +183,7 @@ class Engine1:
             proceeds = pos.shares * (1.0 if won else 0.0)
             pnl = proceeds - pos.notional + self.s.entry_rebate
             self._settle(pos, pnl, "resolution", 1.0 if won else 0.0, 0.0, 0.0,
-                         note="held to resolution (no TP/SL hit)")
+                         note="held to resolution (no TP hit, no SL to cut it early)")
         elif not self.s.traded:
             self.s.no_trades += 1
             reason = "streak filter" if self.s.trade_side_this_window is None and self.s.window is not None else "price never reached entry"
@@ -208,7 +211,7 @@ class Engine1:
         else:
             self.s.streak_count += 1
 
-        if self.s.streak_count >= config.ENGINE1_STREAK_FILTER_LENGTH:
+        if self.s.streak_count >= config.ENGINE_STREAK_FILTER_LENGTH:
             self.s.trade_side_this_window = None
             self.s.skip_reason = (f"{self.s.streak_side.value} has closed "
                                    f"{self.s.streak_count} in a row; waiting for a reversal")
@@ -235,14 +238,13 @@ class Engine1:
         if won:
             self.s.wins += 1
             self.s.martingale_streak = 0
-            self.s.current_bet = config.ENGINE1_BASE_BET
+            self.s.current_bet = config.ENGINE_BASE_BET
         else:
             self.s.losses += 1
             self.s.martingale_streak += 1
             self.s.max_losing_streak = max(self.s.max_losing_streak, self.s.martingale_streak)
-            self.s.current_bet = self.s.current_bet * config.ENGINE1_MARTINGALE_MULT
-        event = "TP_CLOSE" if reason == "tp" else ("SL_CLOSE" if reason == "sl" else
-                 ("RESOLVE_WIN" if won else "RESOLVE_LOSS"))
+            self.s.current_bet = self.s.current_bet * config.ENGINE_MARTINGALE_MULT
+        event = "TP_CLOSE" if reason == "tp" else ("RESOLVE_WIN" if won else "RESOLVE_LOSS")
         self.broker.log_event(
             self.name, self.s.window.slug if self.s.window else "", event,
             side=pos.side.value, price=exit_price, shares=pos.shares, fee=fee, pnl=pnl,
@@ -272,20 +274,23 @@ class Engine1:
         return pos.shares * (mark - pos.entry_price)
 
     def snapshot(self) -> dict:
+        win_total = self.s.wins + self.s.losses
+        win_rate = (self.s.wins / win_total * 100) if win_total else None
         return {
             "current_bet": self.s.current_bet,
-            "base_bet": config.ENGINE1_BASE_BET,
+            "base_bet": config.ENGINE_BASE_BET,
             "martingale_streak": self.s.martingale_streak,
             "max_losing_streak": self.s.max_losing_streak,
             "total_pnl": self.s.total_pnl,
             "wins": self.s.wins,
             "losses": self.s.losses,
+            "win_rate": win_rate,
             "no_trades": self.s.no_trades,
             "last_window_pnl": self.s.last_window_pnl,
             "balance": round(self.s.balance, 2),
-            "starting_capital": config.ENGINE1_STARTING_CAPITAL,
+            "starting_capital": config.STARTING_CAPITAL,
             "halted": self.s.halted,
-            "equity_curve": self.s.equity_curve[-100:],
+            "equity_curve": self.s.equity_curve[-150:],
             "streak_side": self.s.streak_side.value if self.s.streak_side else None,
             "streak_count": self.s.streak_count,
             "sitting_out": self.s.trade_side_this_window is None,
@@ -302,10 +307,9 @@ class Engine1:
                 "unrealized_pnl": self._unrealized_pnl(),
             },
             "def": {
-                "entry": config.ENGINE1_ENTRY_PRICE,
-                "tp": config.ENGINE1_TP,
-                "sl": config.ENGINE1_SL,
-                "mult": config.ENGINE1_MARTINGALE_MULT,
-                "streak_filter_length": config.ENGINE1_STREAK_FILTER_LENGTH,
+                "entry": config.ENGINE_ENTRY_PRICE,
+                "tp": config.ENGINE_TP,
+                "mult": config.ENGINE_MARTINGALE_MULT,
+                "streak_filter_length": config.ENGINE_STREAK_FILTER_LENGTH,
             },
         }

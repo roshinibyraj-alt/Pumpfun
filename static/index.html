@@ -3,27 +3,31 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BTC 5m Up/Down — Martingale Engines</title>
+<title>BTC 5m Up/Down — Paper Trading Bot</title>
 <style>
   :root{
-    --bg:#0a0e14; --panel:#10151f; --panel-2:#141b28; --border:#1f2b3d;
-    --text:#e6edf3; --muted:#7a8ba3; --up:#22c55e; --up-dim:#16532f;
-    --down:#ef4444; --down-dim:#5c1d1d; --amber:#f5b942; --amber-dim:#3a2a12;
-    --blue:#3b82f6; --blue-dim:#16324a; --purple:#b39ddb; --purple-dim:#2a2340;
+    --bg:#0a0e14; --panel:#10151f; --panel-2:#141b28; --panel-3:#0c1119; --border:#1f2b3d;
+    --text:#e6edf3; --muted:#7a8ba3; --faint:#4c5b70;
+    --up:#22c55e; --up-dim:#16532f; --up-glow:rgba(34,197,94,.18);
+    --down:#ef4444; --down-dim:#5c1d1d; --down-glow:rgba(239,68,68,.16);
+    --amber:#f5b942; --amber-dim:#3a2a12;
+    --blue:#3b82f6; --blue-dim:#16324a;
+    --purple:#b39ddb; --purple-dim:#2a2340;
     --mono:'SF Mono',ui-monospace,'Cascadia Code',Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
   }
   *{box-sizing:border-box;}
   body{
-    margin:0; background:radial-gradient(circle at 20% -10%,#122032,var(--bg) 55%);
-    color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-    min-height:100vh; padding:18px; padding-bottom:60px;
+    margin:0; background:radial-gradient(circle at 15% -10%,#122032,var(--bg) 55%);
+    color:var(--text); font-family:var(--sans);
+    min-height:100vh; padding:16px; padding-bottom:50px;
   }
-  .wrap{max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:16px;}
+  .wrap{max-width:1120px; margin:0 auto; display:flex; flex-direction:column; gap:14px;}
 
-  header{display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;}
+  header{display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;}
   .title{display:flex; align-items:center; gap:10px;}
-  .title h1{font-size:18px; margin:0; font-weight:700; letter-spacing:.2px;}
-  .title .sub{font-size:12px; color:var(--muted); font-family:var(--mono);}
+  .title h1{font-size:17px; margin:0; font-weight:700; letter-spacing:.2px;}
+  .title .sub{font-size:11.5px; color:var(--muted); font-family:var(--mono);}
   .status-pill{display:flex; align-items:center; gap:6px; font-size:12px; padding:5px 10px;
     border-radius:20px; background:var(--panel); border:1px solid var(--border); color:var(--muted);}
   .dot{width:7px; height:7px; border-radius:50%; background:var(--muted);}
@@ -31,90 +35,118 @@
   .dot.err{background:var(--down); box-shadow:0 0 8px var(--down);}
   @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
 
+  /* ---- hero: demo capital ---- */
+  .hero{
+    background:linear-gradient(160deg,var(--panel) 0%,var(--panel-2) 100%);
+    border:1px solid var(--border); border-radius:16px; padding:20px 22px;
+    display:grid; grid-template-columns:1.1fr 1fr; gap:22px; align-items:center;
+    position:relative; overflow:hidden;
+  }
+  .hero::before{
+    content:''; position:absolute; inset:0; pointer-events:none; opacity:.5;
+    background:radial-gradient(420px 160px at 0% 0%, var(--up-glow), transparent 70%);
+  }
+  .hero.down::before{background:radial-gradient(420px 160px at 0% 0%, var(--down-glow), transparent 70%);}
+  .hero-left{position:relative; z-index:1;}
+  .hero-label{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px; font-weight:600;}
+  .hero-balance{font-family:var(--mono); font-size:44px; font-weight:800; margin-top:6px; line-height:1;}
+  .hero-balance.pos{color:var(--up);} .hero-balance.neg{color:var(--down);}
+  .hero-delta{font-family:var(--mono); font-size:13px; margin-top:8px; color:var(--muted);}
+  .hero-delta b.pos{color:var(--up);} .hero-delta b.neg{color:var(--down);}
+  .hero-start{font-size:11px; color:var(--faint); margin-top:2px; font-family:var(--mono);}
+  .hero-right{position:relative; z-index:1;}
+  #heroEquity{height:110px !important; width:100%; display:block;}
+  .halt-banner{
+    background:var(--down-dim); border:1px solid var(--down); color:var(--down);
+    font-size:12px; font-weight:700; padding:9px 12px; border-radius:9px;
+    font-family:var(--mono); margin-top:12px; grid-column:1/-1; position:relative; z-index:1;
+  }
+  @media (max-width:760px){ .hero{grid-template-columns:1fr;} .hero-balance{font-size:36px;} }
+
   .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:12px;}
   .stat{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px;}
-  .stat .label{font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px;}
-  .stat .val{font-family:var(--mono); font-size:22px; font-weight:600; margin-top:4px;}
+  .stat .label{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px;}
+  .stat .val{font-family:var(--mono); font-size:21px; font-weight:700; margin-top:4px;}
   .val.pos{color:var(--up);} .val.neg{color:var(--down);}
+  @media (max-width:700px){ .stats{grid-template-columns:repeat(2,1fr);} }
 
   .card{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px;}
-  .card h2{margin:0 0 12px; font-size:13px; color:var(--muted); text-transform:uppercase; letter-spacing:.7px; font-weight:600;}
+  .card h2{margin:0 0 12px; font-size:12.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.7px; font-weight:600; display:flex; align-items:center; justify-content:space-between;}
+  .card h2 .tag{font-size:10px; padding:2px 7px; border-radius:5px; background:var(--panel-3); color:var(--faint); text-transform:none; letter-spacing:0; font-family:var(--mono);}
+
   .window-top{display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:10px; margin-bottom:14px;}
-  .slug{font-family:var(--mono); font-size:13px; color:var(--muted);}
-  .countdown{font-family:var(--mono); font-size:28px; font-weight:700;}
+  .slug{font-family:var(--mono); font-size:12.5px; color:var(--muted);}
+  .countdown{font-family:var(--mono); font-size:26px; font-weight:700;}
   .countdown.hot{color:var(--amber);}
 
   .prices{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
   .price-box{border-radius:10px; padding:14px; position:relative; overflow:hidden; border:1px solid var(--border);}
   .price-box.up{background:linear-gradient(135deg,var(--up-dim),transparent 70%);}
   .price-box.down{background:linear-gradient(135deg,var(--down-dim),transparent 70%);}
-  .price-box .side-label{font-size:12px; font-weight:700; letter-spacing:1px;}
+  .price-box .side-label{font-size:11.5px; font-weight:700; letter-spacing:1px;}
   .price-box.up .side-label{color:var(--up);} .price-box.down .side-label{color:var(--down);}
-  .price-box .p{font-family:var(--mono); font-size:30px; font-weight:700; margin-top:4px;}
+  .price-box .p{font-family:var(--mono); font-size:28px; font-weight:700; margin-top:4px;}
   .bar-track{height:5px; background:#0006; border-radius:3px; margin-top:10px; overflow:hidden;}
   .bar-fill{height:100%; border-radius:3px;}
   .bar-fill.up{background:var(--up);} .bar-fill.down{background:var(--down);}
 
-  canvas{width:100%; height:150px; display:block; margin-top:14px;}
+  canvas{width:100%; display:block;}
+  #chart{height:140px; margin-top:14px;}
 
-  .engine-grid{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
-  @media (max-width:700px){ .engine-grid{grid-template-columns:1fr;} .stats{grid-template-columns:repeat(2,1fr);} .prices{grid-template-columns:1fr;} }
+  .two-col{display:grid; grid-template-columns:1fr 1fr; gap:14px;}
+  @media (max-width:820px){ .two-col{grid-template-columns:1fr;} }
 
-  .engine-card{background:var(--panel-2); border:1px solid var(--border); border-radius:12px; padding:16px; display:flex; flex-direction:column; gap:10px;}
-  .engine-card.open{border-color:var(--blue);}
-  .engine-top{display:flex; justify-content:space-between; align-items:center;}
-  .engine-name{font-weight:700; font-size:14px;}
-  .engine-badge{font-size:9.5px; font-weight:700; letter-spacing:.4px; padding:3px 8px; border-radius:5px; text-transform:uppercase;}
+  .def-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-bottom:14px;}
+  .def-item{background:var(--panel-3); border-radius:8px; padding:9px 11px;}
+  .def-item .k{font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px;}
+  .def-item .v{font-family:var(--mono); font-size:14px; font-weight:700; margin-top:2px;}
+  .def-item.no-sl .v{color:var(--amber);}
+
+  .status-row{display:flex; align-items:center; gap:8px; margin-bottom:12px;}
+  .engine-badge{font-size:10px; font-weight:700; letter-spacing:.4px; padding:4px 9px; border-radius:6px; text-transform:uppercase;}
   .engine-badge.waiting{background:#1a1f2b; color:#5a6579;}
   .engine-badge.open{background:var(--blue-dim); color:#5eb3f0;}
   .engine-badge.traded{background:#22262f; color:#9aa7ba;}
+  .engine-badge.sitting_out{background:var(--amber-dim); color:var(--amber);}
+  .engine-badge.halted{background:var(--down-dim); color:var(--down);}
+  .streak-note{font-size:12px; color:var(--muted); font-family:var(--mono);}
 
-  .engine-def{font-family:var(--mono); font-size:11px; color:var(--muted); line-height:1.6;}
-  .engine-def b{color:var(--text);}
-
-  .bet-row{display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-radius:8px; background:#0c1119;}
+  .bet-row{display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-radius:8px; background:var(--panel-3); margin-bottom:12px;}
   .bet-row .label{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px;}
   .bet-row .amt{font-family:var(--mono); font-size:20px; font-weight:700; color:var(--amber);}
   .bet-row .streak{font-family:var(--mono); font-size:11px; color:var(--muted); margin-top:2px;}
 
-  .engine-pos{font-family:var(--mono); font-size:11.5px; padding:7px 10px; border-radius:7px; background:#0c1119;}
+  .engine-pos{font-family:var(--mono); font-size:12px; padding:9px 11px; border-radius:8px; background:var(--panel-3); margin-bottom:12px;}
 
-  .halt-banner{
-    background:var(--down-dim); border:1px solid var(--down); color:var(--down);
-    font-size:11.5px; font-weight:700; padding:8px 10px; border-radius:8px;
-    font-family:var(--mono);
-  }
-  .capital-row{font-family:var(--mono); font-size:11px; color:var(--muted);}
+  .engine-stats{display:flex; gap:10px; font-family:var(--mono); font-size:11px; margin-bottom:4px;}
+  .engine-stats span{flex:1; background:var(--panel-3); border-radius:8px; padding:8px 10px; text-align:center;}
+  .engine-stats span b{display:block; font-size:16px; margin-top:2px;}
+  .es-win b{color:var(--up);} .es-loss b{color:var(--down);} .es-none b{color:var(--muted);} .es-rate b{color:var(--text);}
 
-  .engine-stats{display:flex; gap:10px; font-family:var(--mono); font-size:11px;}
-  .engine-stats span b{display:block; font-size:15px; margin-top:2px;}
-  .es-win b{color:var(--up);} .es-loss b{color:var(--down);} .es-none b{color:var(--muted);}
+  #e1Equity{height:80px !important; margin-top:12px;}
 
-  #e1Equity{height:70px !important; margin-top:2px;}
-
-  .engine-bottom{display:flex; justify-content:space-between; align-items:baseline; margin-top:auto; padding-top:8px; border-top:1px solid var(--border);}
-  .engine-pnl{font-family:var(--mono); font-weight:700; font-size:15px;}
+  .engine-bottom{display:flex; justify-content:space-between; align-items:baseline; margin-top:12px; padding-top:10px; border-top:1px solid var(--border);}
+  .engine-pnl{font-family:var(--mono); font-weight:700; font-size:16px;}
   .engine-pnl.pos{color:var(--up);} .engine-pnl.neg{color:var(--down);} .engine-pnl.zero{color:var(--muted);}
   .last-pnl{font-family:var(--mono); font-size:11px; color:var(--muted);}
 
-  .log-list{display:flex; flex-direction:column; gap:5px; max-height:420px; overflow-y:auto; padding-right:4px;}
-  .log-row{display:grid; grid-template-columns:56px 40px 1fr auto; gap:8px; align-items:center;
-    font-family:var(--mono); font-size:11.5px; padding:6px 8px; border-radius:7px; background:var(--panel-2);}
+  .log-list{display:flex; flex-direction:column; gap:5px; max-height:440px; overflow-y:auto; padding-right:4px;}
+  .log-row{display:grid; grid-template-columns:56px 42px 1fr auto; gap:8px; align-items:center;
+    font-family:var(--mono); font-size:11.5px; padding:7px 9px; border-radius:7px; background:var(--panel-2);}
   .log-row .t{color:var(--muted);}
   .log-row .ev{font-weight:700; font-size:9.5px; padding:2px 6px; border-radius:5px; text-align:center;}
   .ev.BUY{background:var(--blue-dim); color:#5eb3f0;}
   .ev.TP_CLOSE{background:var(--up-dim); color:var(--up);}
-  .ev.SL_CLOSE{background:var(--down-dim); color:var(--down);}
   .ev.RESOLVE_WIN{background:var(--up-dim); color:var(--up);}
   .ev.RESOLVE_LOSS{background:var(--down-dim); color:var(--down);}
   .ev.WINDOW_OPEN{background:var(--purple-dim); color:var(--purple);}
   .ev.NO_TRADE,.ev.RESOLUTION_FALLBACK{background:var(--amber-dim); color:var(--amber);}
-  .ev.ARMED{background:var(--blue-dim); color:#8fc4f5;}
+  .ev.HALTED{background:var(--down-dim); color:var(--down);}
   .log-row .note{color:#aab8c9; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .log-row .pnl{font-weight:700;}
   .empty{color:var(--muted); font-size:12.5px; padding:14px 4px; text-align:center;}
 
-  footer{text-align:center; color:var(--muted); font-size:11px; margin-top:8px;}
+  footer{text-align:center; color:var(--faint); font-size:11px; margin-top:4px;}
 </style>
 </head>
 <body>
@@ -123,16 +155,29 @@
   <header>
     <div class="title">
       <h1>BTC 5m Up/Down</h1>
-      <span class="sub">2 parallel martingale engines</span>
+      <span class="sub">paper trading · single engine · no stop loss</span>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></div>
   </header>
 
+  <div class="hero" id="heroCard">
+    <div class="hero-left">
+      <div class="hero-label">Demo Capital</div>
+      <div class="hero-balance" id="heroBalance">$0.00</div>
+      <div class="hero-delta" id="heroDelta">—</div>
+      <div class="hero-start" id="heroStart">starting balance —</div>
+    </div>
+    <div class="hero-right">
+      <canvas id="heroEquity"></canvas>
+    </div>
+    <div class="halt-banner" id="heroHalt" style="display:none;"></div>
+  </div>
+
   <div class="stats">
     <div class="stat"><div class="label">Realized PnL</div><div class="val" id="statPnl">$0.00</div></div>
     <div class="stat"><div class="label">Floating PnL</div><div class="val" id="statFloating">$0.00</div></div>
-    <div class="stat"><div class="label">Engine 1 Next Bet</div><div class="val" id="statBet1">$0.00</div></div>
-    <div class="stat"><div class="label">Engine 2 Next Bet</div><div class="val" id="statBet2">$0.00</div></div>
+    <div class="stat"><div class="label">Win Rate</div><div class="val" id="statWinRate">—</div></div>
+    <div class="stat"><div class="label">Next Bet</div><div class="val" id="statBet">$0.00</div></div>
   </div>
 
   <div class="card">
@@ -153,120 +198,105 @@
         <div class="bar-track"><div class="bar-fill down" id="barDown" style="width:0%"></div></div>
       </div>
     </div>
-    <canvas id="chart" height="150"></canvas>
+    <canvas id="chart"></canvas>
   </div>
 
-  <div class="engine-grid">
-    <div class="engine-card" id="e1Card">
-      <div class="engine-top">
-        <span class="engine-name">Engine 1 — Streak-Filtered Entry</span>
-        <span class="engine-badge" id="e1Badge">waiting</span>
+  <div class="two-col">
+    <div class="card" id="e1Card">
+      <h2>Strategy <span class="tag" id="e1Badge">—</span></h2>
+
+      <div class="def-grid" id="e1DefGrid"></div>
+
+      <div class="status-row">
+        <span class="streak-note" id="e1Streak">—</span>
       </div>
-      <div class="halt-banner" id="e1HaltBanner" style="display:none;"></div>
-      <div class="engine-def" id="e1Def"></div>
-      <div class="capital-row">
-        <span>balance <b id="e1Balance" style="color:var(--text);">$0.00</b> / $2,000 start</span>
-      </div>
+
       <div class="bet-row">
         <div>
           <div class="label">Next Bet</div>
-          <div class="streak" id="e1Streak"></div>
+          <div class="streak" id="e1BetNote"></div>
         </div>
         <div class="amt" id="e1Bet">$0.00</div>
       </div>
+
       <div class="engine-pos" id="e1Pos" style="display:none;"></div>
+
       <div class="engine-stats">
-        <span class="es-win">wins<b id="e1Wins">0</b></span>
-        <span class="es-loss">losses<b id="e1Losses">0</b></span>
-        <span class="es-none">no-trade<b id="e1NoTrade">0</b></span>
-        <span class="es-none">max streak<b id="e1MaxStreak">0</b></span>
+        <span class="es-win">Wins<b id="e1Wins">0</b></span>
+        <span class="es-loss">Losses<b id="e1Losses">0</b></span>
+        <span class="es-none">No-Trade<b id="e1NoTrade">0</b></span>
+        <span class="es-rate">Max Streak<b id="e1MaxStreak">0</b></span>
       </div>
-      <canvas id="e1Equity" height="90"></canvas>
+
       <div class="engine-bottom">
-        <span class="engine-pnl" id="e1Pnl">$0.00</span>
-        <span class="last-pnl" id="e1LastPnl"></span>
+        <div class="engine-pnl" id="e1Pnl">$0.00</div>
+        <div class="last-pnl" id="e1LastPnl"></div>
       </div>
     </div>
 
-    <div class="engine-card" id="e2Card">
-      <div class="engine-top">
-        <span class="engine-name">Engine 2 — Dip-Fill Entry</span>
-        <span class="engine-badge" id="e2Badge">waiting</span>
-      </div>
-      <div class="engine-def" id="e2Def"></div>
-      <div class="bet-row">
-        <div>
-          <div class="label">Next Bet</div>
-          <div class="streak" id="e2Streak"></div>
-        </div>
-        <div class="amt" id="e2Bet">$0.00</div>
-      </div>
-      <div class="engine-pos" id="e2Pos" style="display:none;"></div>
-      <div class="engine-stats">
-        <span class="es-win">wins<b id="e2Wins">0</b></span>
-        <span class="es-loss">losses<b id="e2Losses">0</b></span>
-        <span class="es-none">no-trade<b id="e2NoTrade">0</b></span>
-        <span class="es-none">max streak<b id="e2MaxStreak">0</b></span>
-      </div>
-      <div class="engine-bottom">
-        <span class="engine-pnl" id="e2Pnl">$0.00</span>
-        <span class="last-pnl" id="e2LastPnl"></span>
-      </div>
+    <div class="card">
+      <h2>Equity Curve</h2>
+      <canvas id="e1Equity"></canvas>
     </div>
   </div>
 
   <div class="card">
-    <h2>Trade Log</h2>
-    <div class="log-list" id="logList"></div>
+    <h2>Event Log</h2>
+    <div class="log-list" id="logList"><div class="empty">Loading…</div></div>
   </div>
 
-  <footer>polling /api/state every 1s · martingale ladders: E1 ×1.7 on loss, E2 ×2.0 on loss, both reset to base on a win</footer>
+  <footer>polling every second · Polymarket real resolution settles every window</footer>
 </div>
 
 <script>
-const $ = id => document.getElementById(id);
-const fmt$ = n => (n === null || n === undefined) ? '—' : (n<0?'-$':'$') + Math.abs(Number(n)).toFixed(2);
-const fmtP = n => (n === null || n === undefined) ? '—' : Number(n).toFixed(3);
+function $(id){ return document.getElementById(id); }
+function fmt$(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return '$' + Number(n).toFixed(2); }
+function fmtP(n){ if(n===null||n===undefined) return '—'; return Number(n).toFixed(3); }
 
 let history = [];
 
 function drawChart(){
   const canvas = $('chart');
   const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = canvas.clientHeight || 150;
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width, h = 140;
   canvas.width = w*dpr; canvas.height = h*dpr;
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.clearRect(0,0,w,h);
   if(history.length < 2) return;
+
   const pad = 6;
-  const vals = history.flatMap(p => [p.up, p.down]).filter(v => v !== null && v !== undefined);
-  if(!vals.length) return;
-  let min = Math.min(...vals, 0.05), max = Math.max(...vals, 0.95);
-  const span = Math.max(max-min, 0.05);
-  min -= span*0.08; max += span*0.08;
-  const x = i => pad + (i/(history.length-1)) * (w-pad*2);
-  const y = v => h - pad - ((v-min)/(max-min)) * (h-pad*2);
-  function line(key, color){
+  const x = i => pad + (i/(history.length-1)) * (w-2*pad);
+  const y = v => h - pad - v*(h-2*pad);
+
+  ctx.strokeStyle = 'rgba(122,139,163,0.15)';
+  ctx.lineWidth = 1;
+  [0.25,0.5,0.75].forEach(v=>{
+    ctx.beginPath(); ctx.moveTo(pad, y(v)); ctx.lineTo(w-pad, y(v)); ctx.stroke();
+  });
+
+  function drawLine(key, color){
+    ctx.strokeStyle = color; ctx.lineWidth = 1.8;
     ctx.beginPath();
     let started = false;
     history.forEach((p,i)=>{
       const v = p[key];
-      if(v === null || v === undefined) return;
+      if(v===null||v===undefined) return;
       const px = x(i), py = y(v);
       if(!started){ ctx.moveTo(px,py); started = true; } else { ctx.lineTo(px,py); }
     });
-    ctx.strokeStyle = color; ctx.lineWidth = 1.8; ctx.stroke();
+    ctx.stroke();
   }
-  line('up', '#22c55e');
-  line('down', '#ef4444');
+  drawLine('up', '#22c55e');
+  drawLine('down', '#ef4444');
 }
 
 function drawEquityCurve(canvasId, points, startingCapital){
   const canvas = $(canvasId);
-  if(!canvas) return;
   const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = canvas.clientHeight || 70;
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width, h = rect.height || 80;
   canvas.width = w*dpr; canvas.height = h*dpr;
   const ctx = canvas.getContext('2d');
   ctx.setTransform(dpr,0,0,dpr,0,0);
@@ -276,11 +306,9 @@ function drawEquityCurve(canvasId, points, startingCapital){
   const pad = 4;
   const vals = points.map(p=>p.balance);
   let min = Math.min(...vals, startingCapital), max = Math.max(...vals, startingCapital);
-  const span = Math.max(max-min, 1);
-  min -= span*0.1; max += span*0.1;
-
-  const x = i => pad + (i/(points.length-1)) * (w-pad*2);
-  const y = v => h - pad - ((v-min)/(max-min)) * (h-pad*2);
+  if(min===max){ min -= 1; max += 1; }
+  const x = i => pad + (i/(points.length-1)) * (w-2*pad);
+  const y = v => h - pad - ((v-min)/(max-min)) * (h-2*pad);
 
   // starting-capital reference line
   ctx.strokeStyle = 'rgba(122,139,163,0.3)';
@@ -289,8 +317,22 @@ function drawEquityCurve(canvasId, points, startingCapital){
   ctx.setLineDash([]);
 
   const last = vals[vals.length-1];
-  ctx.strokeStyle = last >= startingCapital ? '#22c55e' : '#ef4444';
-  ctx.lineWidth = 1.8;
+  const lineColor = last >= startingCapital ? '#22c55e' : '#ef4444';
+
+  // filled area under the curve for a bit more visual weight
+  const grad = ctx.createLinearGradient(0,0,0,h);
+  grad.addColorStop(0, last >= startingCapital ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.22)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  points.forEach((p,i)=>{
+    const px = x(i), py = y(p.balance);
+    if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+  });
+  ctx.lineTo(x(points.length-1), h-pad); ctx.lineTo(x(0), h-pad); ctx.closePath(); ctx.fill();
+
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 2;
   ctx.beginPath();
   points.forEach((p,i)=>{
     const px = x(i), py = y(p.balance);
@@ -299,17 +341,28 @@ function drawEquityCurve(canvasId, points, startingCapital){
   ctx.stroke();
 }
 
-function renderEngine(prefix, e, defHtml){
-  $(prefix+'Def').innerHTML = defHtml;
+function renderEngine(prefix, e){
+  const defItems = [
+    {k:'Entry (streak side)', v: fmtP(e.def.entry)},
+    {k:'Take Profit', v: fmtP(e.def.tp)},
+    {k:'Stop Loss', v: 'none', cls:'no-sl'},
+    {k:'Martingale ×', v: e.def.mult},
+  ];
+  $(prefix+'DefGrid').innerHTML = defItems.map(d=>`
+    <div class="def-item ${d.cls||''}"><div class="k">${d.k}</div><div class="v">${d.v}</div></div>
+  `).join('');
+
+  $(prefix+'Streak').textContent = e.sitting_out
+    ? `sitting out — ${e.skip_reason}`
+    : `trading ${e.streak_side || '—'} (${e.streak_count} win streak, flips after ${e.def.streak_filter_length})`;
+
   $(prefix+'Bet').textContent = fmt$(e.current_bet);
-  $(prefix+'Streak').textContent = e.skip_reason
-    ? e.skip_reason
-    : (e.martingale_streak > 0
-        ? `${e.martingale_streak} loss streak (base ${fmt$(e.base_bet)})`
-        : `at base bet`);
+  $(prefix+'BetNote').textContent = e.martingale_streak > 0
+    ? `${e.martingale_streak} loss streak (base ${fmt$(e.base_bet)})`
+    : 'at base bet';
+
   $(prefix+'Badge').textContent = e.status;
-  $(prefix+'Badge').className = 'engine-badge ' + e.status;
-  $(prefix+'Card').className = 'engine-card' + (e.status==='open' ? ' open' : '');
+  $(prefix+'Badge').className = 'tag engine-badge ' + e.status;
 
   const posEl = $(prefix+'Pos');
   if(e.position){
@@ -322,7 +375,7 @@ function renderEngine(prefix, e, defHtml){
         <span><span style="color:${e.position.side==='UP'?'var(--up)':'var(--down)'}; font-weight:700;">${e.position.side}</span> ${e.position.shares.toFixed(2)} sh @ ${fmtP(e.position.entry_price)}</span>
         <span style="color:${upnlColor}; font-weight:700;">${upnlTxt}</span>
       </div>
-      <div style="color:var(--muted); font-size:10px; margin-top:3px;">mark ${fmtP(e.position.mark_price)} · floating, updates live</div>
+      <div style="color:var(--muted); font-size:10px; margin-top:3px;">mark ${fmtP(e.position.mark_price)} · no SL, rides to TP or resolution</div>
     `;
   } else {
     posEl.style.display = 'none';
@@ -333,21 +386,6 @@ function renderEngine(prefix, e, defHtml){
   $(prefix+'NoTrade').textContent = e.no_trades;
   const maxStreakEl = $(prefix+'MaxStreak');
   if(maxStreakEl) maxStreakEl.textContent = e.max_losing_streak || 0;
-
-  const balanceEl = $(prefix+'Balance');
-  if(balanceEl){
-    balanceEl.textContent = fmt$(e.balance);
-    balanceEl.style.color = e.balance < e.starting_capital ? 'var(--down)' : 'var(--up)';
-  }
-  const haltEl = $(prefix+'HaltBanner');
-  if(haltEl){
-    if(e.halted){
-      haltEl.style.display = 'block';
-      haltEl.textContent = `⛔ HALTED — balance dropped below $0. Engine stopped permanently.`;
-    } else {
-      haltEl.style.display = 'none';
-    }
-  }
 
   const pnlEl = $(prefix+'Pnl');
   pnlEl.textContent = (e.total_pnl>=0?'+':'') + fmt$(e.total_pnl);
@@ -390,6 +428,26 @@ async function poll(){
     if(s.error){ dot.className='dot err'; text.textContent = s.error; }
     else { dot.className='dot live'; text.textContent = 'live'; }
 
+    // ---- hero: demo capital ----
+    const dc = s.demo_capital || {};
+    const heroCard = $('heroCard');
+    const above = dc.balance >= dc.starting_capital;
+    heroCard.className = 'hero' + (above ? '' : ' down');
+    const heroBalance = $('heroBalance');
+    heroBalance.textContent = fmt$(dc.balance);
+    heroBalance.className = 'hero-balance ' + (above ? 'pos' : 'neg');
+    const delta = (dc.balance||0) - (dc.starting_capital||0);
+    const deltaPct = dc.starting_capital ? (delta/dc.starting_capital*100) : 0;
+    $('heroDelta').innerHTML = `<b class="${delta>=0?'pos':'neg'}">${delta>=0?'+':''}${fmt$(delta)} (${delta>=0?'+':''}${deltaPct.toFixed(1)}%)</b> since start`;
+    $('heroStart').textContent = `starting balance ${fmt$(dc.starting_capital)}`;
+    const haltEl = $('heroHalt');
+    if(dc.halted){
+      haltEl.style.display = 'block';
+      haltEl.textContent = '⛔ HALTED — balance dropped below $0. Engine stopped permanently, no further trades.';
+    } else {
+      haltEl.style.display = 'none';
+    }
+
     const pnl = s.pnl_total;
     const pnlEl = $('statPnl');
     pnlEl.textContent = (pnl>=0?'+':'') + fmt$(pnl);
@@ -413,20 +471,21 @@ async function poll(){
     history = (s.price_history || []).map(p=>({ts:p.ts, up:p.up, down:p.down}));
     drawChart();
 
-    const e1 = s.engine1 || {}, e2 = s.engine2 || {};
-    $('statBet1').textContent = fmt$(e1.current_bet);
-    $('statBet2').textContent = fmt$(e2.current_bet);
+    const e = s.engine || {};
+    $('statBet').textContent = fmt$(e.current_bet);
+    $('statWinRate').textContent = (e.win_rate===null||e.win_rate===undefined) ? '—' : `${e.win_rate.toFixed(0)}%`;
 
-    const floating = (e1.position && e1.position.unrealized_pnl!==null && e1.position.unrealized_pnl!==undefined ? e1.position.unrealized_pnl : 0)
-                    + (e2.position && e2.position.unrealized_pnl!==null && e2.position.unrealized_pnl!==undefined ? e2.position.unrealized_pnl : 0);
-    const hasOpen = !!(e1.position || e2.position);
+    const floating = (e.position && e.position.unrealized_pnl!==null && e.position.unrealized_pnl!==undefined) ? e.position.unrealized_pnl : 0;
+    const hasOpen = !!e.position;
     const floatEl = $('statFloating');
     floatEl.textContent = hasOpen ? (floating>=0?'+':'') + fmt$(floating) : '—';
     floatEl.className = 'val ' + (hasOpen ? (floating>=0?'pos':'neg') : '');
 
-    if(e1.def) renderEngine('e1', e1, `${e1.sitting_out ? 'sitting out' : `single side @ <b>${fmtP(e1.def.entry)}</b> (streak-filtered)`} · tp <b>${fmtP(e1.def.tp)}</b> · sl <b>${fmtP(e1.def.sl)}</b> · ×${e1.def.mult} · flip after ${e1.def.streak_filter_length} same-side closes`);
-    if(e2.def) renderEngine('e2', e2, `wait <b>${e2.def.wait_seconds}s</b>, arm on touch @ <b>${fmtP(e2.def.entry)}</b>, fill on dip back · tp <b>${fmtP(e2.def.tp)}</b> · sl <b>${fmtP(e2.def.sl)}</b> · ×${e2.def.mult}`);
-    if(e1.equity_curve) drawEquityCurve('e1Equity', e1.equity_curve, e1.starting_capital || 2000);
+    if(e.def) renderEngine('e1', e);
+    if(e.equity_curve){
+      drawEquityCurve('e1Equity', e.equity_curve, e.starting_capital || dc.starting_capital || 2000);
+      drawEquityCurve('heroEquity', e.equity_curve, e.starting_capital || dc.starting_capital || 2000);
+    }
 
     renderLog(s.log || []);
   }catch(err){
@@ -437,7 +496,7 @@ async function poll(){
 
 poll();
 setInterval(poll, 1000);
-window.addEventListener('resize', drawChart);
+window.addEventListener('resize', ()=>{ drawChart(); });
 </script>
 </body>
 </html>

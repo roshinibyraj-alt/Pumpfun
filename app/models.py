@@ -42,7 +42,7 @@ class Position:
 @dataclass
 class TradeLogEntry:
     ts: float
-    engine: str          # "A" or "B"
+    engine: str          # "BOT" or "SYS"
     window_slug: str
     event: str            # human readable event name
     side: Optional[str] = None
