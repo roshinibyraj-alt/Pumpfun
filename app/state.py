@@ -63,34 +63,28 @@ class BotState:
     async def _roll_window(self, new_window: WindowMarket):
         # Finalize the previous window before starting the new one.
         if self.current_window is not None:
-            winning_side = await self._resolve_previous_window(self.current_window)
+            winning_side = self._infer_winner()
+            self.broker.log_event(
+                "SYS", self.current_window.slug, "SETTLED_BY_PRICE",
+                side=winning_side.value if winning_side else None,
+                note=(f"settled by last observed CLOB price: up={self.last_up_price}, "
+                      f"down={self.last_down_price} (no Polymarket resolution check)"),
+            )
             self.engine.finalize_window(winning_side)
 
         self.current_window = new_window
         self.price_history.clear()
         self.engine.reset_for_window(new_window)
 
-    async def _resolve_previous_window(self, window: WindowMarket) -> Optional[Side]:
-        """Use Polymarket's actual settled outcome, not a price guess.
-        These 5-minute crypto markets typically settle within a couple of
-        seconds of close, so we retry briefly before giving up."""
-        for _ in range(config.RESOLUTION_RETRY_SECONDS):
-            winner = await self.client.fetch_resolution(window.slug)
-            if winner is not None:
-                return winner
-            await asyncio.sleep(1.0)
-        fallback = self._infer_winner()
-        self.broker.log_event(
-            "SYS", window.slug, "RESOLUTION_FALLBACK",
-            side=fallback.value if fallback else None,
-            note="Polymarket outcome not confirmed within retry window; settled by last observed price instead",
-        )
-        return fallback
-
     def _infer_winner(self) -> Optional[Side]:
-        """Fallback only -- used when Polymarket's real settlement isn't
-        confirmed within the retry window. Approximates the winner as
-        whichever side's last observed price was higher."""
+        """The sole outcome source: whichever side's last observed CLOB
+        price (up to POLL_INTERVAL_SECONDS stale) was higher when the
+        window rolled over. This is a live-market read, not Polymarket's
+        settled resolution -- it can occasionally disagree with the real
+        outcome if the last tick was noisy or a beat late. Traded off
+        deliberately for simplicity/determinism over that small accuracy
+        gap; see fetch_resolution() in polymarket_client.py if you want
+        to reintroduce real-resolution settlement later."""
         if self.last_up_price is None or self.last_down_price is None:
             return None
         return Side.UP if self.last_up_price >= self.last_down_price else Side.DOWN

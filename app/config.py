@@ -17,10 +17,6 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# How many seconds to retry Polymarket's real settlement outcome before
-# falling back to a last-observed-price approximation.
-RESOLUTION_RETRY_SECONDS = 6
-
 # ---- Engine (v9 -- streak-filtered single-side entry, martingale, no SL) -
 # At window open, a resting limit buy is placed at ENGINE_ENTRY_PRICE on
 # ONLY the side that won the PREVIOUS window (real resolution, not a

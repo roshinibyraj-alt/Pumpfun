@@ -11,12 +11,12 @@ dashboard.
    window. If that side has won **3** windows in a row, sit out
    entirely and wait for a reversal — that flip starts a new streak and
    trading resumes the following window.
-2. **Exit:** take-profit at **0.99**, or hold to Polymarket's real
-   resolution if TP isn't hit by window close. **There is no stop
-   loss** — a losing position always rides all the way to settlement
-   ($0/share if it loses) rather than being cut early at a partial
-   loss. This makes each loss more expensive than it would be with an
-   SL; it does not change how often either side wins.
+2. **Exit:** take-profit at **0.99**, or hold to window close if TP
+   isn't hit. **There is no stop loss** — a losing position always
+   rides all the way to settlement ($0/share if it loses) rather than
+   being cut early at a partial loss. This makes each loss more
+   expensive than it would be with an SL; it does not change how often
+   either side wins.
 3. **Bet sizing (martingale):** a loss multiplies the next traded
    window's bet by **1.7×**; a win resets it to the base bet of **$30**.
    Windows with no trade (streak filter, or price never reached entry)
@@ -25,10 +25,15 @@ dashboard.
    balance, starting at **$2,000** (`STARTING_CAPITAL`). If a loss ever
    takes it below $0, the engine halts permanently — no further trades.
 
-Every window is settled against Polymarket's real outcome (via
-`fetch_resolution`, with a short retry + last-price fallback — see the
-"resolution" section below), which pays $1/share on the winning side
-and $0 on the losing side.
+**Settlement:** every window is settled purely off the last observed
+CLOB price for each side at the moment the window rolls over — whichever
+side was priced higher wins, paying $1/share, and the other pays $0.
+This is deliberately *not* checked against Polymarket's real resolution
+oracle (that code path, `fetch_resolution` in `polymarket_client.py`, is
+still there but unused) — it's simpler and fully deterministic, at the
+cost of occasionally disagreeing with the real outcome if the last price
+tick was noisy or a beat stale. `SETTLED_BY_PRICE` log entries record
+which prices decided each window.
 
 **Because there's no stop loss, the martingale ladder is the dominant
 source of tail risk here** — a multi-window losing streak on a fixed
