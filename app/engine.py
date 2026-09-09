@@ -1,43 +1,38 @@
 """
-Trading engine -- streak-filtered single-side entry, martingale, hard
-capital stop. No stop loss: every open position rides to take-profit or
-Polymarket's real resolution.
+Trading engine -- single-side entry on the previous window's winner,
+martingale, hard capital stop. No stop loss: every open position rides
+to take-profit or window resolution.
 
-Entry filter: at window open, a resting limit buy is placed at
-ENGINE_ENTRY_PRICE on ONLY the side that won the PREVIOUS window (real
-resolution, not this engine's own trade outcome). If that side has won
-ENGINE_STREAK_FILTER_LENGTH windows in a row, the engine places no order
-at all and sits out until a window resolves with the opposite side
-winning -- that flip starts a new streak (count 1) and trading resumes
-on it the following window. The very first window ever has no prior
-result, so it's sat out too.
+Entry: at window open, a resting limit buy is placed at
+ENGINE_ENTRY_PRICE on whichever side won the PREVIOUS window -- no
+filter, no sitting out on a streak. Up won last window -> bet up this
+window. Down won -> bet down. Every window trades except the very first
+one ever (no prior result yet) and any window whose predecessor's
+outcome couldn't be determined.
 
-Exit: TP via a limit sell, or Polymarket's real resolution if TP isn't
-hit by window close. There is no stop loss -- a losing trade always
-rides all the way to resolution ($0/share if it loses), rather than
-being cut early at a partial loss. That makes each loss more expensive
-than it would be with an SL, though it doesn't change how often a side
-wins.
+Exit: TP via a limit sell, or window resolution if TP isn't hit by
+close. There is no stop loss -- a losing trade always rides all the way
+to resolution ($0/share if it loses), rather than being cut early at a
+partial loss. That makes each loss more expensive than it would be with
+an SL, though it doesn't change how often a side wins.
 
 Bet sizing is a martingale ladder: a loss (resolution loss) multiplies
 the next TRADED window's bet by ENGINE_MARTINGALE_MULT; a win resets it
-to ENGINE_BASE_BET. Windows with no trade -- whether from the streak
-filter or because price never reached the entry price -- never move the
-ladder.
+to ENGINE_BASE_BET. A window with no trade -- because price never
+reached the entry price -- doesn't move the ladder.
 
 Capital: the engine tracks the app's one and only balance, starting at
 config.STARTING_CAPITAL. This is what the dashboard's "Demo Capital"
 figure shows. If a loss ever takes it below $0, the engine halts
 permanently (no further entries) -- a hard bankruptcy stop.
 
-This entry filter changes WHICH windows get traded; it does not change
-the market's underlying odds on any individual trade, and the engine's
-own win/loss outcome is a different thing from which side wins the
-market each window. If 5-minute BTC windows are close to independent,
-this filter may not meaningfully reduce real losing-streak risk -- the
-martingale ladder itself (made steeper here by the lack of an SL)
-remains the dominant source of tail risk. Validate in paper mode before
-this ever touches real money.
+This "bet the winner" rule changes WHICH side gets bet each window; it
+does not change the market's underlying odds on any individual trade.
+If 5-minute BTC windows are close to independent, following the
+previous winner has no real predictive edge -- the martingale ladder
+itself (made steeper here by the lack of an SL) remains the dominant
+source of tail risk. Validate in paper mode before this ever touches
+real money.
 """
 import time
 from dataclasses import dataclass, field
@@ -66,10 +61,9 @@ class EngineState:
     last_up_price: Optional[float] = None
     last_down_price: Optional[float] = None
 
-    # streak filter
-    streak_side: Optional[Side] = None     # side currently on a same-side win streak
-    streak_count: int = 0                  # how many windows in a row it's won
-    trade_side_this_window: Optional[Side] = None  # None = sit out this window
+    # which side to trade this window: the side that won the previous
+    # window. None = sit out (no prior result yet, or it was unconfirmed).
+    trade_side_this_window: Optional[Side] = None
     skip_reason: Optional[str] = None      # why trade_side_this_window is None, for logging
 
     # capital
@@ -116,7 +110,7 @@ class Engine:
                 self.name, window.slug, "WINDOW_OPEN",
                 side=side.value,
                 note=(f"resting buy on {side.value} only @ {config.ENGINE_ENTRY_PRICE} "
-                      f"(streak: {side.value} has won {self.s.streak_count} in a row), "
+                      f"({side.value} won the previous window), "
                       f"tp {config.ENGINE_TP}, no SL -- rides to resolution otherwise, "
                       f"next bet ${self.s.current_bet:.2f}"),
                 balance_after=self.s.balance,
@@ -138,7 +132,7 @@ class Engine:
     def _check_entry(self, up_price: float, down_price: float):
         side = self.s.trade_side_this_window
         if side is None:
-            return  # sitting out this window (streak filter or no prior result)
+            return  # sitting out this window (no prior result / unconfirmed)
         entry = config.ENGINE_ENTRY_PRICE
         price = up_price if side == Side.UP else down_price
         if price <= entry:
@@ -173,7 +167,7 @@ class Engine:
     def finalize_window(self, winning_side: Optional[Side]):
         if self.s.halted:
             self._record_equity_point()
-            self._update_streak_filter(winning_side)
+            self._update_next_side(winning_side)
             self.s.window = None
             return
 
@@ -186,7 +180,7 @@ class Engine:
                          note="held to resolution (no TP hit, no SL to cut it early)")
         elif not self.s.traded:
             self.s.no_trades += 1
-            reason = "streak filter" if self.s.trade_side_this_window is None and self.s.window is not None else "price never reached entry"
+            reason = "sitting out" if self.s.trade_side_this_window is None and self.s.window is not None else "price never reached entry"
             self.broker.log_event(
                 self.name, self.s.window.slug if self.s.window else "", "NO_TRADE",
                 balance_after=self.s.balance,
@@ -194,30 +188,22 @@ class Engine:
             )
 
         self._record_equity_point()
-        self._update_streak_filter(winning_side)
+        self._update_next_side(winning_side)
         self.s.window = None
 
-    def _update_streak_filter(self, winning_side: Optional[Side]):
+    def _update_next_side(self, winning_side: Optional[Side]):
+        """Next window's trade side is simply whichever side just won.
+        Up wins -> bet up next window. Down wins -> bet down next
+        window. No streak filter, no sitting out on a run -- every
+        window trades except when the outcome couldn't be determined."""
         if winning_side is None:
-            # Couldn't confirm the real outcome -- stay cautious, sit out
+            # Couldn't confirm the outcome -- stay cautious, sit out
             # next window rather than guess.
             self.s.trade_side_this_window = None
-            self.s.skip_reason = "previous window's outcome could not be confirmed"
+            self.s.skip_reason = "previous window's outcome could not be determined"
             return
-
-        if self.s.streak_side is None or winning_side != self.s.streak_side:
-            self.s.streak_side = winning_side
-            self.s.streak_count = 1
-        else:
-            self.s.streak_count += 1
-
-        if self.s.streak_count >= config.ENGINE_STREAK_FILTER_LENGTH:
-            self.s.trade_side_this_window = None
-            self.s.skip_reason = (f"{self.s.streak_side.value} has closed "
-                                   f"{self.s.streak_count} in a row; waiting for a reversal")
-        else:
-            self.s.trade_side_this_window = self.s.streak_side
-            self.s.skip_reason = None
+        self.s.trade_side_this_window = winning_side
+        self.s.skip_reason = None
 
     def _record_equity_point(self):
         self.s.equity_curve.append({
@@ -291,8 +277,7 @@ class Engine:
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.s.halted,
             "equity_curve": self.s.equity_curve[-150:],
-            "streak_side": self.s.streak_side.value if self.s.streak_side else None,
-            "streak_count": self.s.streak_count,
+            "trade_side": self.s.trade_side_this_window.value if self.s.trade_side_this_window else None,
             "sitting_out": self.s.trade_side_this_window is None,
             "skip_reason": self.s.skip_reason,
             "status": ("halted" if self.s.halted else
@@ -310,6 +295,5 @@ class Engine:
                 "entry": config.ENGINE_ENTRY_PRICE,
                 "tp": config.ENGINE_TP,
                 "mult": config.ENGINE_MARTINGALE_MULT,
-                "streak_filter_length": config.ENGINE_STREAK_FILTER_LENGTH,
             },
         }

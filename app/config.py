@@ -17,24 +17,20 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Engine (v9 -- streak-filtered single-side entry, martingale, no SL) -
+# ---- Engine (v10 -- bet the previous window's winner, martingale, no SL)
 # At window open, a resting limit buy is placed at ENGINE_ENTRY_PRICE on
-# ONLY the side that won the PREVIOUS window (real resolution, not a
-# guess). If the same side has won ENGINE_STREAK_FILTER_LENGTH windows in
-# a row, the engine places no order at all and sits out entirely until a
-# window resolves with the opposite side winning -- that flip becomes the
-# new streak (count 1) and trading resumes on it next window. The very
-# first window ever has no prior result, so it's sat out too.
+# whichever side won the PREVIOUS window -- no streak filter, no sitting
+# out on a run. Up wins -> bet up next window. Down wins -> bet down
+# next window. The very first window ever has no prior result, so it's
+# sat out, as is any window whose predecessor's outcome couldn't be
+# determined.
 #
-# Exit via TP or Polymarket's real resolution at window close -- there is
-# no stop loss, so a losing position always rides to $0/share rather than
-# being cut early. This raises per-loss severity versus a bot with an SL;
-# it does not change how often a side wins.
+# Exit via TP or window resolution at close -- there is no stop loss, so
+# a losing position always rides to $0/share rather than being cut early.
 ENGINE_ENTRY_PRICE = 0.30
 ENGINE_TP = 0.99
 ENGINE_BASE_BET = 30.0          # dollars
 ENGINE_MARTINGALE_MULT = 1.7    # next bet = prev bet * this, after a loss
-ENGINE_STREAK_FILTER_LENGTH = 3
 # A win (TP or resolution win) resets the next bet back to ENGINE_BASE_BET.
 # A window with no trade -- whether from the streak filter or because
 # price never reached the entry price -- does not affect the bet ladder;

@@ -6,11 +6,12 @@ dashboard.
 
 ## Strategy
 
-1. **Entry filter (streak-based):** at window open, place a resting
-   limit buy at **0.30** on ONLY the side that won the *previous*
-   window. If that side has won **3** windows in a row, sit out
-   entirely and wait for a reversal — that flip starts a new streak and
-   trading resumes the following window.
+1. **Entry:** at window open, place a resting limit buy at **0.30** on
+   whichever side won the *previous* window. Up wins → bet up next
+   window. Down wins → bet down next window. No streak filter, no
+   sitting out on a run — every window trades except the very first one
+   (no prior result yet) or one whose predecessor's outcome couldn't be
+   determined.
 2. **Exit:** take-profit at **0.99**, or hold to window close if TP
    isn't hit. **There is no stop loss** — a losing position always
    rides all the way to settlement ($0/share if it loses) rather than
@@ -19,8 +20,8 @@ dashboard.
    either side wins.
 3. **Bet sizing (martingale):** a loss multiplies the next traded
    window's bet by **1.7×**; a win resets it to the base bet of **$30**.
-   Windows with no trade (streak filter, or price never reached entry)
-   don't move the ladder.
+   Windows with no trade (price never reached entry) don't move the
+   ladder.
 4. **Capital / bankruptcy stop:** the engine tracks one running demo
    balance, starting at **$2,000** (`STARTING_CAPITAL`). If a loss ever
    takes it below $0, the engine halts permanently — no further trades.
@@ -49,7 +50,7 @@ app/
   models.py              shared dataclasses/enums
   polymarket_client.py   Gamma (market discovery) + CLOB (pricing) + resolution API client
   paper_broker.py         trade log + fee calculator (no balance of its own -- see below)
-  engine.py                the strategy: streak entry, martingale, no SL, capital tracking
+  engine.py                the strategy: bet the previous winner, martingale, no SL, capital tracking
   state.py                 background polling loop + orchestration
   main.py                  FastAPI app (serves API + dashboard)
 static/index.html          dashboard UI

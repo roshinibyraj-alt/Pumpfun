@@ -343,7 +343,7 @@ function drawEquityCurve(canvasId, points, startingCapital){
 
 function renderEngine(prefix, e){
   const defItems = [
-    {k:'Entry (streak side)', v: fmtP(e.def.entry)},
+    {k:'Entry (prev winner)', v: fmtP(e.def.entry)},
     {k:'Take Profit', v: fmtP(e.def.tp)},
     {k:'Stop Loss', v: 'none', cls:'no-sl'},
     {k:'Martingale ×', v: e.def.mult},
@@ -354,7 +354,7 @@ function renderEngine(prefix, e){
 
   $(prefix+'Streak').textContent = e.sitting_out
     ? `sitting out — ${e.skip_reason}`
-    : `trading ${e.streak_side || '—'} (${e.streak_count} win streak, flips after ${e.def.streak_filter_length})`;
+    : `trading ${e.trade_side || '—'} (won the previous window)`;
 
   $(prefix+'Bet').textContent = fmt$(e.current_bet);
   $(prefix+'BetNote').textContent = e.martingale_streak > 0
