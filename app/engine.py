@@ -1,38 +1,44 @@
 """
-Trading engine -- single-side entry on the previous window's winner,
-martingale, hard capital stop. No stop loss: every open position rides
-to take-profit or window resolution.
+Trading engine -- dual-order entry, sized off the previous window's
+winner, no filters, no martingale, no stop loss.
 
-Entry: at window open, a resting limit buy is placed at
-ENGINE_ENTRY_PRICE on whichever side won the PREVIOUS window -- no
-filter, no sitting out on a streak. Up won last window -> bet up this
-window. Down won -> bet down. Every window trades except the very first
-one ever (no prior result yet) and any window whose predecessor's
-outcome couldn't be determined.
+Entry: at window open, TWO resting limit buy orders are placed at once,
+both at ENGINE_ENTRY_PRICE:
+  - one on UP
+  - one on DOWN
+Sizes are asymmetric based on which side won the PREVIOUS window:
+  - previous winner UP   -> UP order = ENGINE_FAVORITE_SHARES,
+                             DOWN order = ENGINE_UNDERDOG_SHARES
+  - previous winner DOWN -> DOWN order = ENGINE_FAVORITE_SHARES,
+                             UP order = ENGINE_UNDERDOG_SHARES
+Whichever side's price reaches ENGINE_ENTRY_PRICE first fills; the
+other order is cancelled immediately. At most one open position per
+window. If neither side reaches ENGINE_ENTRY_PRICE by close, no trade
+happens that window.
+
+No filters -- every window with a known previous winner gets both
+orders placed; there's no streak logic or sitting out on a run. Only
+exception: the very first window ever (no prior winner yet) and any
+window whose predecessor's outcome couldn't be determined.
+
+No martingale -- size is always this fixed favorite/underdog split, win
+or lose. It never scales with results.
 
 Exit: TP via a limit sell, or window resolution if TP isn't hit by
 close. There is no stop loss -- a losing trade always rides all the way
 to resolution ($0/share if it loses), rather than being cut early at a
-partial loss. That makes each loss more expensive than it would be with
-an SL, though it doesn't change how often a side wins.
-
-Bet sizing is a martingale ladder: a loss (resolution loss) multiplies
-the next TRADED window's bet by ENGINE_MARTINGALE_MULT; a win resets it
-to ENGINE_BASE_BET. A window with no trade -- because price never
-reached the entry price -- doesn't move the ladder.
+partial loss.
 
 Capital: the engine tracks the app's one and only balance, starting at
 config.STARTING_CAPITAL. This is what the dashboard's "Demo Capital"
 figure shows. If a loss ever takes it below $0, the engine halts
 permanently (no further entries) -- a hard bankruptcy stop.
 
-This "bet the winner" rule changes WHICH side gets bet each window; it
-does not change the market's underlying odds on any individual trade.
-If 5-minute BTC windows are close to independent, following the
-previous winner has no real predictive edge -- the martingale ladder
-itself (made steeper here by the lack of an SL) remains the dominant
-source of tail risk. Validate in paper mode before this ever touches
-real money.
+Validate in paper mode before this ever touches real money -- betting
+2x size on the previous winner is a directional bet that up/down
+outcomes are streak-prone; if 5-minute BTC windows are close to
+independent, it has no real edge, and the 500-share side losing is a
+bigger notional hit than the 250-share side losing.
 """
 import time
 from dataclasses import dataclass, field
@@ -50,21 +56,20 @@ class EngineState:
     position: Optional[Position] = None
     exit_reason: Optional[str] = None
     entry_rebate: float = 0.0
-    current_bet: float = 0.0
     total_pnl: float = 0.0
     wins: int = 0
     losses: int = 0
     no_trades: int = 0
     last_window_pnl: float = 0.0
-    martingale_streak: int = 0       # consecutive losses feeding the current bet size
-    max_losing_streak: int = 0       # all-time high watermark of the above
     last_up_price: Optional[float] = None
     last_down_price: Optional[float] = None
 
-    # which side to trade this window: the side that won the previous
-    # window. None = sit out (no prior result yet, or it was unconfirmed).
-    trade_side_this_window: Optional[Side] = None
-    skip_reason: Optional[str] = None      # why trade_side_this_window is None, for logging
+    # this window's two resting orders, sized off the previous winner.
+    # None/None = sitting out (no prior winner known yet).
+    order_up_shares: Optional[float] = None
+    order_down_shares: Optional[float] = None
+    favorite_side: Optional[Side] = None   # the side that won the previous window
+    skip_reason: Optional[str] = None      # why there are no orders this window, for logging
 
     # capital
     balance: float = 0.0
@@ -77,9 +82,7 @@ class Engine:
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
-        self.s = EngineState(current_bet=config.ENGINE_BASE_BET,
-                              balance=config.STARTING_CAPITAL,
-                              trade_side_this_window=None,
+        self.s = EngineState(balance=config.STARTING_CAPITAL,
                               skip_reason="no prior window result yet")
 
     def reset_for_window(self, window: WindowMarket):
@@ -98,21 +101,26 @@ class Engine:
             )
             return
 
-        if self.s.trade_side_this_window is None:
+        if self.s.favorite_side is None:
+            self.s.order_up_shares = None
+            self.s.order_down_shares = None
             self.broker.log_event(
                 self.name, window.slug, "WINDOW_OPEN",
-                note=f"sitting out this window ({self.s.skip_reason}); next bet ${self.s.current_bet:.2f}",
+                note=f"sitting out this window ({self.s.skip_reason}); no orders placed",
                 balance_after=self.s.balance,
             )
         else:
-            side = self.s.trade_side_this_window
+            underdog = self.s.favorite_side.other()
+            self.s.order_up_shares = (config.ENGINE_FAVORITE_SHARES if self.s.favorite_side == Side.UP
+                                       else config.ENGINE_UNDERDOG_SHARES)
+            self.s.order_down_shares = (config.ENGINE_FAVORITE_SHARES if self.s.favorite_side == Side.DOWN
+                                         else config.ENGINE_UNDERDOG_SHARES)
             self.broker.log_event(
                 self.name, window.slug, "WINDOW_OPEN",
-                side=side.value,
-                note=(f"resting buy on {side.value} only @ {config.ENGINE_ENTRY_PRICE} "
-                      f"({side.value} won the previous window), "
-                      f"tp {config.ENGINE_TP}, no SL -- rides to resolution otherwise, "
-                      f"next bet ${self.s.current_bet:.2f}"),
+                note=(f"two limit buys @ {config.ENGINE_ENTRY_PRICE}: "
+                      f"{self.s.favorite_side.value} {config.ENGINE_FAVORITE_SHARES:.0f}sh (favorite, won previous window), "
+                      f"{underdog.value} {config.ENGINE_UNDERDOG_SHARES:.0f}sh (underdog); "
+                      f"first fill wins, other order cancelled"),
                 balance_after=self.s.balance,
             )
 
@@ -130,17 +138,27 @@ class Engine:
             self._check_exit(up_price, down_price)
 
     def _check_entry(self, up_price: float, down_price: float):
-        side = self.s.trade_side_this_window
-        if side is None:
-            return  # sitting out this window (no prior result / unconfirmed)
+        if self.s.order_up_shares is None and self.s.order_down_shares is None:
+            return  # sitting out this window
         entry = config.ENGINE_ENTRY_PRICE
-        price = up_price if side == Side.UP else down_price
-        if price <= entry:
-            self._fill_entry(side, entry)
+        up_hit = up_price <= entry
+        down_hit = down_price <= entry
+        if not up_hit and not down_hit:
+            return
+        if up_hit and down_hit:
+            # Both crossed within the same poll tick -- treat the side
+            # that dipped further below the entry price as the one that
+            # would have filled first.
+            winner = Side.UP if up_price <= down_price else Side.DOWN
+        else:
+            winner = Side.UP if up_hit else Side.DOWN
+        self._fill_entry(winner, entry)
 
     def _fill_entry(self, side: Side, fill_price: float):
-        bet = self.s.current_bet
-        shares = bet / fill_price
+        shares = self.s.order_up_shares if side == Side.UP else self.s.order_down_shares
+        cancelled_side = side.other()
+        cancelled_shares = self.s.order_up_shares if cancelled_side == Side.UP else self.s.order_down_shares
+
         rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(shares, fill_price)
         self.s.position = Position(side=side, shares=shares, entry_price=fill_price, fee=0.0)
         self.s.entry_rebate = rebate
@@ -148,7 +166,12 @@ class Engine:
         self.broker.log_event(
             self.name, self.s.window.slug, "BUY", side=side.value, price=fill_price,
             shares=shares, fee=-rebate, balance_after=self.s.balance,
-            note=f"single-side entry: {side.value} @ {fill_price}, bet ${bet:.2f} (rebate ${rebate:.4f})",
+            note=f"filled first: {side.value} {shares:.0f}sh @ {fill_price} (rebate ${rebate:.4f})",
+        )
+        self.broker.log_event(
+            self.name, self.s.window.slug, "CANCEL", side=cancelled_side.value,
+            shares=cancelled_shares, balance_after=self.s.balance,
+            note=f"cancelled unfilled {cancelled_side.value} order ({cancelled_shares:.0f}sh @ {fill_price})",
         )
 
     def _check_exit(self, up_price: float, down_price: float):
@@ -167,7 +190,7 @@ class Engine:
     def finalize_window(self, winning_side: Optional[Side]):
         if self.s.halted:
             self._record_equity_point()
-            self._update_next_side(winning_side)
+            self._update_next_favorite(winning_side)
             self.s.window = None
             return
 
@@ -180,29 +203,29 @@ class Engine:
                          note="held to resolution (no TP hit, no SL to cut it early)")
         elif not self.s.traded:
             self.s.no_trades += 1
-            reason = "sitting out" if self.s.trade_side_this_window is None and self.s.window is not None else "price never reached entry"
+            reason = "sitting out" if self.s.favorite_side is None and self.s.window is not None else "neither side reached entry price"
             self.broker.log_event(
                 self.name, self.s.window.slug if self.s.window else "", "NO_TRADE",
                 balance_after=self.s.balance,
-                note=f"no trade this window ({reason}); bet size unchanged",
+                note=f"no trade this window ({reason})",
             )
 
         self._record_equity_point()
-        self._update_next_side(winning_side)
+        self._update_next_favorite(winning_side)
         self.s.window = None
 
-    def _update_next_side(self, winning_side: Optional[Side]):
-        """Next window's trade side is simply whichever side just won.
-        Up wins -> bet up next window. Down wins -> bet down next
-        window. No streak filter, no sitting out on a run -- every
-        window trades except when the outcome couldn't be determined."""
+    def _update_next_favorite(self, winning_side: Optional[Side]):
+        """Next window's favorite (500-share) side is simply whichever
+        side just won. Up wins -> up is favorite next window. Down wins
+        -> down is favorite. No filters, no martingale -- purely this
+        binary rule each window."""
         if winning_side is None:
             # Couldn't confirm the outcome -- stay cautious, sit out
             # next window rather than guess.
-            self.s.trade_side_this_window = None
+            self.s.favorite_side = None
             self.s.skip_reason = "previous window's outcome could not be determined"
             return
-        self.s.trade_side_this_window = winning_side
+        self.s.favorite_side = winning_side
         self.s.skip_reason = None
 
     def _record_equity_point(self):
@@ -223,19 +246,14 @@ class Engine:
         won = pnl > 0
         if won:
             self.s.wins += 1
-            self.s.martingale_streak = 0
-            self.s.current_bet = config.ENGINE_BASE_BET
         else:
             self.s.losses += 1
-            self.s.martingale_streak += 1
-            self.s.max_losing_streak = max(self.s.max_losing_streak, self.s.martingale_streak)
-            self.s.current_bet = self.s.current_bet * config.ENGINE_MARTINGALE_MULT
         event = "TP_CLOSE" if reason == "tp" else ("RESOLVE_WIN" if won else "RESOLVE_LOSS")
         self.broker.log_event(
             self.name, self.s.window.slug if self.s.window else "", event,
             side=pos.side.value, price=exit_price, shares=pos.shares, fee=fee, pnl=pnl,
             balance_after=self.s.balance,
-            note=f"{note}; balance ${self.s.balance:.2f}; next bet ${self.s.current_bet:.2f}",
+            note=f"{note}; balance ${self.s.balance:.2f}",
         )
         self.s.position = None
 
@@ -263,10 +281,6 @@ class Engine:
         win_total = self.s.wins + self.s.losses
         win_rate = (self.s.wins / win_total * 100) if win_total else None
         return {
-            "current_bet": self.s.current_bet,
-            "base_bet": config.ENGINE_BASE_BET,
-            "martingale_streak": self.s.martingale_streak,
-            "max_losing_streak": self.s.max_losing_streak,
             "total_pnl": self.s.total_pnl,
             "wins": self.s.wins,
             "losses": self.s.losses,
@@ -277,13 +291,16 @@ class Engine:
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.s.halted,
             "equity_curve": self.s.equity_curve[-150:],
-            "trade_side": self.s.trade_side_this_window.value if self.s.trade_side_this_window else None,
-            "sitting_out": self.s.trade_side_this_window is None,
+            "favorite_side": self.s.favorite_side.value if self.s.favorite_side else None,
+            "underdog_side": self.s.favorite_side.other().value if self.s.favorite_side else None,
+            "order_up_shares": self.s.order_up_shares,
+            "order_down_shares": self.s.order_down_shares,
+            "sitting_out": self.s.favorite_side is None,
             "skip_reason": self.s.skip_reason,
             "status": ("halted" if self.s.halted else
                        ("open" if self.s.position is not None else
                         ("traded" if self.s.traded else
-                         ("sitting_out" if self.s.trade_side_this_window is None else "waiting")))),
+                         ("sitting_out" if self.s.favorite_side is None else "waiting")))),
             "position": None if self.s.position is None else {
                 "side": self.s.position.side.value,
                 "shares": self.s.position.shares,
@@ -294,6 +311,7 @@ class Engine:
             "def": {
                 "entry": config.ENGINE_ENTRY_PRICE,
                 "tp": config.ENGINE_TP,
-                "mult": config.ENGINE_MARTINGALE_MULT,
+                "favorite_shares": config.ENGINE_FAVORITE_SHARES,
+                "underdog_shares": config.ENGINE_UNDERDOG_SHARES,
             },
         }

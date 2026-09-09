@@ -6,22 +6,24 @@ dashboard.
 
 ## Strategy
 
-1. **Entry:** at window open, place a resting limit buy at **0.30** on
-   whichever side won the *previous* window. Up wins → bet up next
-   window. Down wins → bet down next window. No streak filter, no
-   sitting out on a run — every window trades except the very first one
-   (no prior result yet) or one whose predecessor's outcome couldn't be
-   determined.
+1. **Entry:** at window open, place TWO resting limit buy orders at
+   once, both at **0.30** — one on UP, one on DOWN. Sizes are
+   asymmetric: whichever side won the *previous* window gets **500
+   shares** (the favorite), the other side gets **250 shares** (the
+   underdog). Up wins → UP=500/DOWN=250 next window. Down wins →
+   DOWN=500/UP=250. Whichever order fills first, the other is
+   cancelled immediately — at most one open position per window. No
+   filters, no sitting out on a run — every window with a known
+   previous winner gets both orders. Only exception: the very first
+   window ever (no prior winner yet) or one whose predecessor's outcome
+   couldn't be determined.
 2. **Exit:** take-profit at **0.99**, or hold to window close if TP
    isn't hit. **There is no stop loss** — a losing position always
    rides all the way to settlement ($0/share if it loses) rather than
-   being cut early at a partial loss. This makes each loss more
-   expensive than it would be with an SL; it does not change how often
-   either side wins.
-3. **Bet sizing (martingale):** a loss multiplies the next traded
-   window's bet by **1.7×**; a win resets it to the base bet of **$30**.
-   Windows with no trade (price never reached entry) don't move the
-   ladder.
+   being cut early at a partial loss.
+3. **Bet sizing:** fixed — always 500 shares on the favorite / 250 on
+   the underdog, win or lose. **No martingale** — size never scales
+   with results.
 4. **Capital / bankruptcy stop:** the engine tracks one running demo
    balance, starting at **$2,000** (`STARTING_CAPITAL`). If a loss ever
    takes it below $0, the engine halts permanently — no further trades.
@@ -36,11 +38,12 @@ cost of occasionally disagreeing with the real outcome if the last price
 tick was noisy or a beat stale. `SETTLED_BY_PRICE` log entries record
 which prices decided each window.
 
-**Because there's no stop loss, the martingale ladder is the dominant
-source of tail risk here** — a multi-window losing streak on a fixed
-side gets expensive fast. Watch `max_losing_streak` on the dashboard
-and validate thoroughly in paper mode before ever pointing this at real
-money.
+**This is a directional bet that outcomes are streak-prone** — betting
+2x size on whichever side just won only pays off if wins cluster more
+than chance. If 5-minute BTC windows are close to independent, there's
+no real edge here, and a loss on the 500-share favorite costs twice as
+much as a loss on the 250-share underdog would. Validate thoroughly in
+paper mode before ever pointing this at real money.
 
 ## Project layout
 
@@ -50,7 +53,7 @@ app/
   models.py              shared dataclasses/enums
   polymarket_client.py   Gamma (market discovery) + CLOB (pricing) + resolution API client
   paper_broker.py         trade log + fee calculator (no balance of its own -- see below)
-  engine.py                the strategy: bet the previous winner, martingale, no SL, capital tracking
+  engine.py                the strategy: dual limit orders sized off previous winner, no martingale, no SL, capital tracking
   state.py                 background polling loop + orchestration
   main.py                  FastAPI app (serves API + dashboard)
 static/index.html          dashboard UI

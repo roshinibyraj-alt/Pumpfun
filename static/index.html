@@ -68,6 +68,7 @@
   .stat .label{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px;}
   .stat .val{font-family:var(--mono); font-size:21px; font-weight:700; margin-top:4px;}
   .val.pos{color:var(--up);} .val.neg{color:var(--down);}
+  #statBet{font-size:15px;}
   @media (max-width:700px){ .stats{grid-template-columns:repeat(2,1fr);} }
 
   .card{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px;}
@@ -136,6 +137,7 @@
   .log-row .t{color:var(--muted);}
   .log-row .ev{font-weight:700; font-size:9.5px; padding:2px 6px; border-radius:5px; text-align:center;}
   .ev.BUY{background:var(--blue-dim); color:#5eb3f0;}
+  .ev.CANCEL{background:#241a30; color:#b39ddb;}
   .ev.TP_CLOSE{background:var(--up-dim); color:var(--up);}
   .ev.RESOLVE_WIN{background:var(--up-dim); color:var(--up);}
   .ev.RESOLVE_LOSS{background:var(--down-dim); color:var(--down);}
@@ -177,7 +179,7 @@
     <div class="stat"><div class="label">Realized PnL</div><div class="val" id="statPnl">$0.00</div></div>
     <div class="stat"><div class="label">Floating PnL</div><div class="val" id="statFloating">$0.00</div></div>
     <div class="stat"><div class="label">Win Rate</div><div class="val" id="statWinRate">—</div></div>
-    <div class="stat"><div class="label">Next Bet</div><div class="val" id="statBet">$0.00</div></div>
+    <div class="stat"><div class="label">This Window's Orders</div><div class="val" id="statBet">—</div></div>
   </div>
 
   <div class="card">
@@ -213,10 +215,10 @@
 
       <div class="bet-row">
         <div>
-          <div class="label">Next Bet</div>
+          <div class="label">Order Sizes @ 0.30</div>
           <div class="streak" id="e1BetNote"></div>
         </div>
-        <div class="amt" id="e1Bet">$0.00</div>
+        <div class="amt" id="e1Bet" style="font-size:15px;">—</div>
       </div>
 
       <div class="engine-pos" id="e1Pos" style="display:none;"></div>
@@ -225,7 +227,7 @@
         <span class="es-win">Wins<b id="e1Wins">0</b></span>
         <span class="es-loss">Losses<b id="e1Losses">0</b></span>
         <span class="es-none">No-Trade<b id="e1NoTrade">0</b></span>
-        <span class="es-rate">Max Streak<b id="e1MaxStreak">0</b></span>
+        <span class="es-rate">Favorite<b id="e1MaxStreak">—</b></span>
       </div>
 
       <div class="engine-bottom">
@@ -343,10 +345,10 @@ function drawEquityCurve(canvasId, points, startingCapital){
 
 function renderEngine(prefix, e){
   const defItems = [
-    {k:'Entry (prev winner)', v: fmtP(e.def.entry)},
+    {k:'Entry (both sides)', v: fmtP(e.def.entry)},
     {k:'Take Profit', v: fmtP(e.def.tp)},
     {k:'Stop Loss', v: 'none', cls:'no-sl'},
-    {k:'Martingale ×', v: e.def.mult},
+    {k:'Favorite / Underdog', v: `${e.def.favorite_shares.toFixed(0)} / ${e.def.underdog_shares.toFixed(0)} sh`},
   ];
   $(prefix+'DefGrid').innerHTML = defItems.map(d=>`
     <div class="def-item ${d.cls||''}"><div class="k">${d.k}</div><div class="v">${d.v}</div></div>
@@ -354,12 +356,16 @@ function renderEngine(prefix, e){
 
   $(prefix+'Streak').textContent = e.sitting_out
     ? `sitting out — ${e.skip_reason}`
-    : `trading ${e.trade_side || '—'} (won the previous window)`;
+    : `${e.favorite_side} favorite (${e.def.favorite_shares.toFixed(0)}sh, won previous window) vs ${e.underdog_side} underdog (${e.def.underdog_shares.toFixed(0)}sh)`;
 
-  $(prefix+'Bet').textContent = fmt$(e.current_bet);
-  $(prefix+'BetNote').textContent = e.martingale_streak > 0
-    ? `${e.martingale_streak} loss streak (base ${fmt$(e.base_bet)})`
-    : 'at base bet';
+  if(e.sitting_out){
+    $(prefix+'Bet').textContent = 'no orders';
+    $(prefix+'BetNote').textContent = '';
+  } else {
+    const upSh = e.order_up_shares, downSh = e.order_down_shares;
+    $(prefix+'Bet').innerHTML = `<span style="color:var(--up)">UP ${upSh!==null&&upSh!==undefined?upSh.toFixed(0):'—'}</span> / <span style="color:var(--down)">DOWN ${downSh!==null&&downSh!==undefined?downSh.toFixed(0):'—'}</span>`;
+    $(prefix+'BetNote').textContent = 'both resting, first fill cancels the other';
+  }
 
   $(prefix+'Badge').textContent = e.status;
   $(prefix+'Badge').className = 'tag engine-badge ' + e.status;
@@ -372,7 +378,7 @@ function renderEngine(prefix, e){
     const upnlTxt = upnl===null||upnl===undefined ? '—' : `${upnl>=0?'+':''}${fmt$(upnl)}`;
     posEl.innerHTML = `
       <div style="display:flex; justify-content:space-between; align-items:center;">
-        <span><span style="color:${e.position.side==='UP'?'var(--up)':'var(--down)'}; font-weight:700;">${e.position.side}</span> ${e.position.shares.toFixed(2)} sh @ ${fmtP(e.position.entry_price)}</span>
+        <span><span style="color:${e.position.side==='UP'?'var(--up)':'var(--down)'}; font-weight:700;">${e.position.side}</span> ${e.position.shares.toFixed(0)} sh @ ${fmtP(e.position.entry_price)}</span>
         <span style="color:${upnlColor}; font-weight:700;">${upnlTxt}</span>
       </div>
       <div style="color:var(--muted); font-size:10px; margin-top:3px;">mark ${fmtP(e.position.mark_price)} · no SL, rides to TP or resolution</div>
@@ -384,8 +390,8 @@ function renderEngine(prefix, e){
   $(prefix+'Wins').textContent = e.wins;
   $(prefix+'Losses').textContent = e.losses;
   $(prefix+'NoTrade').textContent = e.no_trades;
-  const maxStreakEl = $(prefix+'MaxStreak');
-  if(maxStreakEl) maxStreakEl.textContent = e.max_losing_streak || 0;
+  const favEl = $(prefix+'MaxStreak');
+  if(favEl) favEl.textContent = e.favorite_side || '—';
 
   const pnlEl = $(prefix+'Pnl');
   pnlEl.textContent = (e.total_pnl>=0?'+':'') + fmt$(e.total_pnl);
@@ -472,7 +478,8 @@ async function poll(){
     drawChart();
 
     const e = s.engine || {};
-    $('statBet').textContent = fmt$(e.current_bet);
+    const upSh = e.order_up_shares, downSh = e.order_down_shares;
+    $('statBet').textContent = (upSh===null||upSh===undefined) ? 'sitting out' : `UP ${upSh.toFixed(0)} / DOWN ${downSh.toFixed(0)}`;
     $('statWinRate').textContent = (e.win_rate===null||e.win_rate===undefined) ? '—' : `${e.win_rate.toFixed(0)}%`;
 
     const floating = (e.position && e.position.unrealized_pnl!==null && e.position.unrealized_pnl!==undefined) ? e.position.unrealized_pnl : 0;
