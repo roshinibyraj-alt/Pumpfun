@@ -1,80 +1,111 @@
 """
-Trading engine -- dual-order entry, sized off the previous window's
-winner, no filters, no martingale, no stop loss.
+Trading engine -- dual-sided price-level ladder with merge-as-exit.
 
-Entry: at window open, TWO resting limit buy orders are placed at once,
-both at ENGINE_ENTRY_PRICE:
-  - one on UP
-  - one on DOWN
-Sizes are asymmetric based on which side won the PREVIOUS window:
-  - previous winner UP   -> UP order = ENGINE_FAVORITE_SHARES,
-                             DOWN order = ENGINE_UNDERDOG_SHARES
-  - previous winner DOWN -> DOWN order = ENGINE_FAVORITE_SHARES,
-                             UP order = ENGINE_UNDERDOG_SHARES
-Whichever side's price reaches ENGINE_ENTRY_PRICE first fills; the
-other order is cancelled immediately. At most one open position per
-window. If neither side reaches ENGINE_ENTRY_PRICE by close, no trade
-happens that window.
+Entry: each tick, for BOTH UP and DOWN independently, look at the
+current best ask and best bid:
+  - if the best ASK sits at a price level (config.ENGINE_LEVEL_STEP
+    increments, within [ENGINE_PRICE_MIN, ENGINE_PRICE_MAX]) not yet
+    used this window, buy ENGINE_ORDER_SHARES there. This crosses the
+    spread -- a taker fill, immediate, real taker fee applies.
+  - if the best BID sits at an unused level, place a resting buy for
+    ENGINE_ORDER_SHARES there instead. This is a maker order: it only
+    fills on a later tick, once the market's ask trades down to (or
+    through) that price. Maker fills earn the rebate, not the fee.
+Either way, once a level (ask or bid) has been targeted, it's marked
+used and never targeted again this window -- exactly one entry per
+level, per side. Resets every window since each 5-minute window is a
+brand-new market/token with a fresh book.
 
-No filters -- every window with a known previous winner gets both
-orders placed; there's no streak logic or sitting out on a run. Only
-exception: the very first window ever (no prior winner yet) and any
-window whose predecessor's outcome couldn't be determined.
+Exit: merging. Since exactly one of UP/DOWN pays $1 at resolution and
+the other pays $0, one UP share + one DOWN share is worth a guaranteed
+$1 combined at any time, via Polymarket's real merge/redeem mechanic.
+Whenever both UP and DOWN inventory are simultaneously > 0, the matched
+quantity is merged immediately. That's the ENTIRE exit mechanism --
+there is no take-profit price and no stop loss. A merge realizes
+proceeds - (UP cost basis for that qty) - (DOWN cost basis for that
+qty), where cost basis already reflects fees/rebates paid at fill time.
 
-No martingale -- size is always this fixed favorite/underdog split, win
-or lose. It never scales with results.
-
-Exit: TP via a limit sell, or window resolution if TP isn't hit by
-close. There is no stop loss -- a losing trade always rides all the way
-to resolution ($0/share if it loses), rather than being cut early at a
-partial loss.
+Anything left unmatched when the window closes (inventory on only one
+side, because fills on the two sides didn't land in equal size) rides
+to window resolution: $1/share if that side won, $0 if it lost -- same
+as every other engine in this app, no SL to cut it short.
 
 Capital: the engine tracks the app's one and only balance, starting at
-config.STARTING_CAPITAL. This is what the dashboard's "Demo Capital"
-figure shows. If a loss ever takes it below $0, the engine halts
-permanently (no further entries) -- a hard bankruptcy stop.
+config.STARTING_CAPITAL, debited on every fill and credited on every
+merge/resolution settlement. If it ever drops below $0, the engine
+halts permanently -- a hard bankruptcy stop.
 
-Validate in paper mode before this ever touches real money -- betting
-2x size on the previous winner is a directional bet that up/down
-outcomes are streak-prone; if 5-minute BTC windows are close to
-independent, it has no real edge, and the 500-share side losing is a
-bigger notional hit than the 250-share side losing.
+This is a market-making strategy: profit comes from buying UP and DOWN
+cheaply enough, across enough levels, that pairs merge for more than
+their combined cost (e.g. buying UP at 0.20 and DOWN at 0.75 nets
+$0.05/pair before fees). It does NOT depend on correctly predicting
+which side wins -- the risk is (a) never accumulating a matched pair at
+all if the book gaps past levels instead of trading through them, and
+(b) leftover one-sided inventory eating a full loss at resolution if
+the two sides don't fill evenly. Validate thoroughly in paper mode.
 """
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 
 from . import config
-from .models import Position, Side, WindowMarket
+from .models import Side, WindowMarket
 from .paper_broker import PaperBroker
+
+
+def _snap_to_level(price: float) -> float:
+    """Round a price to the nearest tradeable grid level."""
+    step = config.ENGINE_LEVEL_STEP
+    return round(round(price / step) * step, 4)
+
+
+def _in_range(price: Optional[float]) -> bool:
+    return price is not None and config.ENGINE_PRICE_MIN <= price <= config.ENGINE_PRICE_MAX
+
+
+@dataclass
+class PendingOrder:
+    side: Side
+    price: float
+    shares: float
 
 
 @dataclass
 class EngineState:
     window: Optional[WindowMarket] = None
-    traded: bool = False
-    position: Optional[Position] = None
-    exit_reason: Optional[str] = None
-    entry_rebate: float = 0.0
-    total_pnl: float = 0.0
-    wins: int = 0
-    losses: int = 0
-    no_trades: int = 0
+
+    # live book, last observed
+    up_bid: Optional[float] = None
+    up_ask: Optional[float] = None
+    down_bid: Optional[float] = None
+    down_ask: Optional[float] = None
+
+    # running inventory per side: total shares held and total cost basis
+    # (price*qty plus/minus fees/rebates already paid at fill time)
+    up_shares: float = 0.0
+    up_cost: float = 0.0
+    down_shares: float = 0.0
+    down_cost: float = 0.0
+
+    used_levels_up: Set[float] = field(default_factory=set)
+    used_levels_down: Set[float] = field(default_factory=set)
+    pending_orders: List[PendingOrder] = field(default_factory=list)
+
+    fills_this_window: int = 0
+    merges_this_window: int = 0
     last_window_pnl: float = 0.0
-    last_up_price: Optional[float] = None
-    last_down_price: Optional[float] = None
 
-    # this window's two resting orders, sized off the previous winner.
-    # None/None = sitting out (no prior winner known yet).
-    order_up_shares: Optional[float] = None
-    order_down_shares: Optional[float] = None
-    favorite_side: Optional[Side] = None   # the side that won the previous window
-    skip_reason: Optional[str] = None      # why there are no orders this window, for logging
+    total_fills: int = 0
+    total_merges: int = 0
+    total_merged_pairs: float = 0.0
+    no_trade_windows: int = 0
+    resolution_wins: int = 0
+    resolution_losses: int = 0
+    total_pnl: float = 0.0
 
-    # capital
     balance: float = 0.0
     halted: bool = False
-    equity_curve: List[dict] = field(default_factory=list)  # [{window, balance}, ...]
+    equity_curve: List[dict] = field(default_factory=list)
 
 
 class Engine:
@@ -82,15 +113,19 @@ class Engine:
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
-        self.s = EngineState(balance=config.STARTING_CAPITAL,
-                              skip_reason="no prior window result yet")
+        self.s = EngineState(balance=config.STARTING_CAPITAL)
 
     def reset_for_window(self, window: WindowMarket):
         self.s.window = window
-        self.s.traded = False
-        self.s.position = None
-        self.s.exit_reason = None
-        self.s.entry_rebate = 0.0
+        self.s.up_shares = 0.0
+        self.s.up_cost = 0.0
+        self.s.down_shares = 0.0
+        self.s.down_cost = 0.0
+        self.s.used_levels_up = set()
+        self.s.used_levels_down = set()
+        self.s.pending_orders = []
+        self.s.fills_this_window = 0
+        self.s.merges_this_window = 0
         self.s.last_window_pnl = 0.0
 
         if self.s.halted:
@@ -101,132 +136,203 @@ class Engine:
             )
             return
 
-        if self.s.favorite_side is None:
-            self.s.order_up_shares = None
-            self.s.order_down_shares = None
-            self.broker.log_event(
-                self.name, window.slug, "WINDOW_OPEN",
-                note=f"sitting out this window ({self.s.skip_reason}); no orders placed",
-                balance_after=self.s.balance,
-            )
-        else:
-            underdog = self.s.favorite_side.other()
-            self.s.order_up_shares = (config.ENGINE_FAVORITE_SHARES if self.s.favorite_side == Side.UP
-                                       else config.ENGINE_UNDERDOG_SHARES)
-            self.s.order_down_shares = (config.ENGINE_FAVORITE_SHARES if self.s.favorite_side == Side.DOWN
-                                         else config.ENGINE_UNDERDOG_SHARES)
-            self.broker.log_event(
-                self.name, window.slug, "WINDOW_OPEN",
-                note=(f"two limit buys @ {config.ENGINE_ENTRY_PRICE}: "
-                      f"{self.s.favorite_side.value} {config.ENGINE_FAVORITE_SHARES:.0f}sh (favorite, won previous window), "
-                      f"{underdog.value} {config.ENGINE_UNDERDOG_SHARES:.0f}sh (underdog); "
-                      f"first fill wins, other order cancelled"),
-                balance_after=self.s.balance,
-            )
+        self.broker.log_event(
+            self.name, window.slug, "WINDOW_OPEN",
+            note=(f"ladder active on both sides, {config.ENGINE_PRICE_MIN}-{config.ENGINE_PRICE_MAX} "
+                  f"@ {config.ENGINE_LEVEL_STEP} steps, {config.ENGINE_ORDER_SHARES:.0f}sh/fill, "
+                  f"one entry per level; merge = exit"),
+            balance_after=self.s.balance,
+        )
 
-    def on_tick(self, up_price: Optional[float], down_price: Optional[float],
+    def on_tick(self, up_bid: Optional[float], up_ask: Optional[float],
+                down_bid: Optional[float], down_ask: Optional[float],
                 seconds_to_close: float, now: Optional[float] = None):
-        if self.s.window is None or up_price is None or down_price is None:
+        if self.s.window is None:
             return
-        self.s.last_up_price = up_price
-        self.s.last_down_price = down_price
+        self.s.up_bid, self.s.up_ask = up_bid, up_ask
+        self.s.down_bid, self.s.down_ask = down_bid, down_ask
         if self.s.halted:
             return
-        if not self.s.traded:
-            self._check_entry(up_price, down_price)
-        elif self.s.position is not None:
-            self._check_exit(up_price, down_price)
 
-    def _check_entry(self, up_price: float, down_price: float):
-        if self.s.order_up_shares is None and self.s.order_down_shares is None:
-            return  # sitting out this window
-        entry = config.ENGINE_ENTRY_PRICE
-        up_hit = up_price <= entry
-        down_hit = down_price <= entry
-        if not up_hit and not down_hit:
+        self._check_pending_fills()
+        self._check_new_entries(Side.UP, up_bid, up_ask)
+        self._check_new_entries(Side.DOWN, down_bid, down_ask)
+        self._try_merge()
+
+    # ---- entries --------------------------------------------------------
+
+    def _check_new_entries(self, side: Side, bid: Optional[float], ask: Optional[float]):
+        used = self.s.used_levels_up if side == Side.UP else self.s.used_levels_down
+
+        if _in_range(ask):
+            lvl = _snap_to_level(ask)
+            if lvl not in used:
+                used.add(lvl)
+                self._fill_ask(side, lvl)
+
+        if _in_range(bid):
+            lvl = _snap_to_level(bid)
+            if lvl not in used:
+                used.add(lvl)
+                self._place_resting(side, lvl)
+
+    def _fill_ask(self, side: Side, price: float):
+        """Buying at the current ask crosses the spread -- an immediate
+        taker fill, real taker fee applies."""
+        shares = config.ENGINE_ORDER_SHARES
+        fee = self.broker.taker_fee_amount(shares, price)
+        cost = shares * price + fee
+        self._add_inventory(side, shares, cost)
+        self.s.balance -= cost
+        self.s.fills_this_window += 1
+        self.s.total_fills += 1
+        self.broker.log_event(
+            self.name, self.s.window.slug, "BUY", side=side.value, price=price,
+            shares=shares, fee=fee, balance_after=self.s.balance,
+            note=f"ask fill (taker): {side.value} {shares:.0f}sh @ {price} (fee ${fee:.4f})",
+        )
+        if self.s.balance < 0:
+            self._halt()
+
+    def _place_resting(self, side: Side, price: float):
+        self.s.pending_orders.append(PendingOrder(side=side, price=price, shares=config.ENGINE_ORDER_SHARES))
+        self.broker.log_event(
+            self.name, self.s.window.slug, "ORDER_PLACED", side=side.value, price=price,
+            shares=config.ENGINE_ORDER_SHARES, balance_after=self.s.balance,
+            note=f"resting bid order: {side.value} {config.ENGINE_ORDER_SHARES:.0f}sh @ {price} (maker, waiting for fill)",
+        )
+
+    def _check_pending_fills(self):
+        if not self.s.pending_orders:
             return
-        if up_hit and down_hit:
-            # Both crossed within the same poll tick -- treat the side
-            # that dipped further below the entry price as the one that
-            # would have filled first.
-            winner = Side.UP if up_price <= down_price else Side.DOWN
+        still_pending = []
+        for order in self.s.pending_orders:
+            current_ask = self.s.up_ask if order.side == Side.UP else self.s.down_ask
+            if current_ask is not None and current_ask <= order.price:
+                rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(order.shares, order.price)
+                cost = order.shares * order.price - rebate
+                self._add_inventory(order.side, order.shares, cost)
+                self.s.balance -= cost
+                self.s.fills_this_window += 1
+                self.s.total_fills += 1
+                self.broker.log_event(
+                    self.name, self.s.window.slug, "BUY", side=order.side.value, price=order.price,
+                    shares=order.shares, fee=-rebate, balance_after=self.s.balance,
+                    note=f"bid fill (maker): {order.side.value} {order.shares:.0f}sh @ {order.price} (rebate ${rebate:.4f})",
+                )
+                if self.s.balance < 0:
+                    self._halt()
+            else:
+                still_pending.append(order)
+        self.s.pending_orders = still_pending
+
+    def _add_inventory(self, side: Side, shares: float, cost: float):
+        if side == Side.UP:
+            self.s.up_shares += shares
+            self.s.up_cost += cost
         else:
-            winner = Side.UP if up_hit else Side.DOWN
-        self._fill_entry(winner, entry)
+            self.s.down_shares += shares
+            self.s.down_cost += cost
 
-    def _fill_entry(self, side: Side, fill_price: float):
-        shares = self.s.order_up_shares if side == Side.UP else self.s.order_down_shares
-        cancelled_side = side.other()
-        cancelled_shares = self.s.order_up_shares if cancelled_side == Side.UP else self.s.order_down_shares
+    # ---- merge (the exit) ------------------------------------------------
 
-        rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(shares, fill_price)
-        self.s.position = Position(side=side, shares=shares, entry_price=fill_price, fee=0.0)
-        self.s.entry_rebate = rebate
-        self.s.traded = True
+    def _try_merge(self):
+        qty = min(self.s.up_shares, self.s.down_shares)
+        if qty <= 1e-9:
+            return
+        avg_up = self.s.up_cost / self.s.up_shares
+        avg_down = self.s.down_cost / self.s.down_shares
+        cost_removed_up = avg_up * qty
+        cost_removed_down = avg_down * qty
+        proceeds = qty * 1.0
+        pnl = proceeds - cost_removed_up - cost_removed_down
+
+        self.s.up_shares -= qty
+        self.s.up_cost -= cost_removed_up
+        self.s.down_shares -= qty
+        self.s.down_cost -= cost_removed_down
+        self.s.balance += proceeds
+        self.s.total_pnl += pnl
+        self.s.last_window_pnl += pnl
+        self.s.merges_this_window += 1
+        self.s.total_merges += 1
+        self.s.total_merged_pairs += qty
+
         self.broker.log_event(
-            self.name, self.s.window.slug, "BUY", side=side.value, price=fill_price,
-            shares=shares, fee=-rebate, balance_after=self.s.balance,
-            note=f"filled first: {side.value} {shares:.0f}sh @ {fill_price} (rebate ${rebate:.4f})",
+            self.name, self.s.window.slug, "MERGE", shares=qty, pnl=pnl,
+            balance_after=self.s.balance,
+            note=(f"merged {qty:.0f} UP+DOWN pairs -> ${proceeds:.2f} redeemed, "
+                  f"cost ${cost_removed_up + cost_removed_down:.4f} "
+                  f"(avg UP {avg_up:.4f} + avg DOWN {avg_down:.4f})"),
         )
+        if self.s.balance < 0:
+            self._halt()
+
+    def _halt(self):
+        self.s.halted = True
         self.broker.log_event(
-            self.name, self.s.window.slug, "CANCEL", side=cancelled_side.value,
-            shares=cancelled_shares, balance_after=self.s.balance,
-            note=f"cancelled unfilled {cancelled_side.value} order ({cancelled_shares:.0f}sh @ {fill_price})",
+            self.name, self.s.window.slug if self.s.window else "", "HALTED",
+            balance_after=self.s.balance,
+            note=f"balance ${self.s.balance:.2f} < $0 -- bankrupt, engine stopped permanently",
         )
 
-    def _check_exit(self, up_price: float, down_price: float):
-        pos = self.s.position
-        price = up_price if pos.side == Side.UP else down_price
-        if price >= config.ENGINE_TP:
-            rebate = config.MAKER_REBATE_FRACTION * self.broker.taker_fee_amount(pos.shares, price)
-            self._close(price, "tp", fee=0.0, rebate=rebate)
-
-    def _close(self, price: float, reason: str, fee: float, rebate: float):
-        pos = self.s.position
-        proceeds = pos.shares * price
-        pnl = proceeds - pos.notional - fee + rebate + self.s.entry_rebate
-        self._settle(pos, pnl, reason, price, fee, rebate, note="take-profit")
+    # ---- window close: cancel resting orders, settle any leftover -------
 
     def finalize_window(self, winning_side: Optional[Side]):
-        if self.s.halted:
-            self._record_equity_point()
-            self._update_next_favorite(winning_side)
-            self.s.window = None
+        if self.s.window is None:
             return
 
-        if self.s.position is not None:
-            pos = self.s.position
-            won = winning_side is not None and pos.side == winning_side
-            proceeds = pos.shares * (1.0 if won else 0.0)
-            pnl = proceeds - pos.notional + self.s.entry_rebate
-            self._settle(pos, pnl, "resolution", 1.0 if won else 0.0, 0.0, 0.0,
-                         note="held to resolution (no TP hit, no SL to cut it early)")
-        elif not self.s.traded:
-            self.s.no_trades += 1
-            reason = "sitting out" if self.s.favorite_side is None and self.s.window is not None else "neither side reached entry price"
+        for order in self.s.pending_orders:
             self.broker.log_event(
-                self.name, self.s.window.slug if self.s.window else "", "NO_TRADE",
-                balance_after=self.s.balance,
-                note=f"no trade this window ({reason})",
+                self.name, self.s.window.slug, "CANCEL", side=order.side.value, price=order.price,
+                shares=order.shares, balance_after=self.s.balance,
+                note=f"unfilled resting order expired with the window: {order.side.value} {order.shares:.0f}sh @ {order.price}",
             )
+        self.s.pending_orders = []
+
+        if not self.s.halted:
+            self._settle_leftover(Side.UP, winning_side)
+            self._settle_leftover(Side.DOWN, winning_side)
+
+            if self.s.fills_this_window == 0:
+                self.s.no_trade_windows += 1
+                self.broker.log_event(
+                    self.name, self.s.window.slug, "NO_TRADE",
+                    balance_after=self.s.balance,
+                    note="no fills this window -- neither side's ask/bid ever reached the tradeable range",
+                )
 
         self._record_equity_point()
-        self._update_next_favorite(winning_side)
         self.s.window = None
 
-    def _update_next_favorite(self, winning_side: Optional[Side]):
-        """Next window's favorite (500-share) side is simply whichever
-        side just won. Up wins -> up is favorite next window. Down wins
-        -> down is favorite. No filters, no martingale -- purely this
-        binary rule each window."""
-        if winning_side is None:
-            # Couldn't confirm the outcome -- stay cautious, sit out
-            # next window rather than guess.
-            self.s.favorite_side = None
-            self.s.skip_reason = "previous window's outcome could not be determined"
+    def _settle_leftover(self, side: Side, winning_side: Optional[Side]):
+        shares = self.s.up_shares if side == Side.UP else self.s.down_shares
+        cost = self.s.up_cost if side == Side.UP else self.s.down_cost
+        if shares <= 1e-9:
             return
-        self.s.favorite_side = winning_side
-        self.s.skip_reason = None
+        won = winning_side is not None and side == winning_side
+        proceeds = shares * (1.0 if won else 0.0)
+        pnl = proceeds - cost
+        self.s.balance += proceeds
+        self.s.total_pnl += pnl
+        self.s.last_window_pnl += pnl
+        if won:
+            self.s.resolution_wins += 1
+        else:
+            self.s.resolution_losses += 1
+        event = "RESOLVE_WIN" if won else "RESOLVE_LOSS"
+        self.broker.log_event(
+            self.name, self.s.window.slug, event, side=side.value, shares=shares, pnl=pnl,
+            balance_after=self.s.balance,
+            note=(f"leftover {side.value} inventory ({shares:.0f}sh, unmatched -- no opposite-side fill "
+                  f"to merge against) settled at resolution: {'won $1/sh' if won else 'lost, $0/sh'}"),
+        )
+        if side == Side.UP:
+            self.s.up_shares, self.s.up_cost = 0.0, 0.0
+        else:
+            self.s.down_shares, self.s.down_cost = 0.0, 0.0
+        if self.s.balance < 0:
+            self._halt()
 
     def _record_equity_point(self):
         self.s.equity_curve.append({
@@ -237,81 +343,46 @@ class Engine:
         if len(self.s.equity_curve) > 500:
             self.s.equity_curve = self.s.equity_curve[-500:]
 
-    def _settle(self, pos: Position, pnl: float, reason: str, exit_price: float,
-                fee: float, rebate: float, note: str):
-        self.s.total_pnl += pnl
-        self.s.last_window_pnl = pnl
-        self.s.exit_reason = reason
-        self.s.balance += pnl
-        won = pnl > 0
-        if won:
-            self.s.wins += 1
-        else:
-            self.s.losses += 1
-        event = "TP_CLOSE" if reason == "tp" else ("RESOLVE_WIN" if won else "RESOLVE_LOSS")
-        self.broker.log_event(
-            self.name, self.s.window.slug if self.s.window else "", event,
-            side=pos.side.value, price=exit_price, shares=pos.shares, fee=fee, pnl=pnl,
-            balance_after=self.s.balance,
-            note=f"{note}; balance ${self.s.balance:.2f}",
-        )
-        self.s.position = None
-
-        if self.s.balance < 0:
-            self.s.halted = True
-            self.broker.log_event(
-                self.name, self.s.window.slug if self.s.window else "", "HALTED",
-                balance_after=self.s.balance,
-                note=f"balance ${self.s.balance:.2f} < $0 -- bankrupt, engine stopped permanently",
-            )
-
-    def _mark_price(self) -> Optional[float]:
-        if self.s.position is None:
-            return None
-        return self.s.last_up_price if self.s.position.side == Side.UP else self.s.last_down_price
-
-    def _unrealized_pnl(self) -> Optional[float]:
-        mark = self._mark_price()
-        if mark is None:
-            return None
-        pos = self.s.position
-        return pos.shares * (mark - pos.entry_price)
+    # ---- dashboard payload -------------------------------------------------
 
     def snapshot(self) -> dict:
-        win_total = self.s.wins + self.s.losses
-        win_rate = (self.s.wins / win_total * 100) if win_total else None
         return {
-            "total_pnl": self.s.total_pnl,
-            "wins": self.s.wins,
-            "losses": self.s.losses,
-            "win_rate": win_rate,
-            "no_trades": self.s.no_trades,
-            "last_window_pnl": self.s.last_window_pnl,
             "balance": round(self.s.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.s.halted,
             "equity_curve": self.s.equity_curve[-150:],
-            "favorite_side": self.s.favorite_side.value if self.s.favorite_side else None,
-            "underdog_side": self.s.favorite_side.other().value if self.s.favorite_side else None,
-            "order_up_shares": self.s.order_up_shares,
-            "order_down_shares": self.s.order_down_shares,
-            "sitting_out": self.s.favorite_side is None,
-            "skip_reason": self.s.skip_reason,
+            "total_pnl": self.s.total_pnl,
+            "last_window_pnl": self.s.last_window_pnl,
+
+            "up_shares": round(self.s.up_shares, 4),
+            "up_avg_price": (self.s.up_cost / self.s.up_shares) if self.s.up_shares > 1e-9 else None,
+            "down_shares": round(self.s.down_shares, 4),
+            "down_avg_price": (self.s.down_cost / self.s.down_shares) if self.s.down_shares > 1e-9 else None,
+
+            "pending_orders": [
+                {"side": o.side.value, "price": o.price, "shares": o.shares}
+                for o in self.s.pending_orders
+            ],
+            "used_levels_up": len(self.s.used_levels_up),
+            "used_levels_down": len(self.s.used_levels_down),
+
+            "fills_this_window": self.s.fills_this_window,
+            "merges_this_window": self.s.merges_this_window,
+            "total_fills": self.s.total_fills,
+            "total_merges": self.s.total_merges,
+            "total_merged_pairs": self.s.total_merged_pairs,
+            "no_trade_windows": self.s.no_trade_windows,
+            "resolution_wins": self.s.resolution_wins,
+            "resolution_losses": self.s.resolution_losses,
+
             "status": ("halted" if self.s.halted else
-                       ("open" if self.s.position is not None else
-                        ("traded" if self.s.traded else
-                         ("sitting_out" if self.s.favorite_side is None else "waiting")))),
-            "position": None if self.s.position is None else {
-                "side": self.s.position.side.value,
-                "shares": self.s.position.shares,
-                "entry_price": self.s.position.entry_price,
-                "mark_price": self._mark_price(),
-                "unrealized_pnl": self._unrealized_pnl(),
-            },
+                       ("open" if (self.s.up_shares > 1e-9 or self.s.down_shares > 1e-9 or self.s.pending_orders) else
+                        ("traded" if self.s.fills_this_window > 0 else "waiting"))),
+
             "def": {
-                "entry": config.ENGINE_ENTRY_PRICE,
-                "tp": config.ENGINE_TP,
-                "favorite_shares": config.ENGINE_FAVORITE_SHARES,
-                "underdog_shares": config.ENGINE_UNDERDOG_SHARES,
+                "price_min": config.ENGINE_PRICE_MIN,
+                "price_max": config.ENGINE_PRICE_MAX,
+                "level_step": config.ENGINE_LEVEL_STEP,
+                "order_shares": config.ENGINE_ORDER_SHARES,
             },
         }

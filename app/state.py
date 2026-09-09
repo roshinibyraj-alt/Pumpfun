@@ -18,8 +18,10 @@ class BotState:
         self.client = PolymarketClient()
         self.current_window: Optional[WindowMarket] = None
         self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
-        self.last_up_price: Optional[float] = None
-        self.last_down_price: Optional[float] = None
+        self.last_up_bid: Optional[float] = None
+        self.last_up_ask: Optional[float] = None
+        self.last_down_bid: Optional[float] = None
+        self.last_down_ask: Optional[float] = None
         self.status = "starting"
         self.error: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
@@ -52,42 +54,58 @@ class BotState:
         if self.current_window is None or window.slug != self.current_window.slug:
             await self._roll_window(window)
 
-        up_price = await self.client.get_price(self.current_window.token_up)
-        down_price = await self.client.get_price(self.current_window.token_down)
-        self.last_up_price, self.last_down_price = up_price, down_price
-        self.price_history.append(PricePoint(ts=now, up=up_price, down=down_price))
+        up_bid, up_ask = await self.client.get_book(self.current_window.token_up)
+        down_bid, down_ask = await self.client.get_book(self.current_window.token_down)
+        self.last_up_bid, self.last_up_ask = up_bid, up_ask
+        self.last_down_bid, self.last_down_ask = down_bid, down_ask
+
+        up_mid = self._midpoint(up_bid, up_ask)
+        down_mid = self._midpoint(down_bid, down_ask)
+        self.price_history.append(PricePoint(ts=now, up=up_mid, down=down_mid))
 
         seconds_to_close = self.current_window.close_ts - now
-        self.engine.on_tick(up_price, down_price, seconds_to_close, now=now)
+        self.engine.on_tick(up_bid, up_ask, down_bid, down_ask, seconds_to_close, now=now)
+
+    @staticmethod
+    def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        return ask if ask is not None else bid
 
     async def _roll_window(self, new_window: WindowMarket):
         # Finalize the previous window before starting the new one.
         if self.current_window is not None:
             winning_side = self._infer_winner()
+            up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
+            down_mid = self._midpoint(self.last_down_bid, self.last_down_ask)
             self.broker.log_event(
                 "SYS", self.current_window.slug, "SETTLED_BY_PRICE",
                 side=winning_side.value if winning_side else None,
-                note=(f"settled by last observed CLOB price: up={self.last_up_price}, "
-                      f"down={self.last_down_price} (no Polymarket resolution check)"),
+                note=(f"settled by last observed CLOB midpoint: up={up_mid}, "
+                      f"down={down_mid} (no Polymarket resolution check)"),
             )
             self.engine.finalize_window(winning_side)
 
         self.current_window = new_window
         self.price_history.clear()
+        self.last_up_bid = self.last_up_ask = None
+        self.last_down_bid = self.last_down_ask = None
         self.engine.reset_for_window(new_window)
 
     def _infer_winner(self) -> Optional[Side]:
         """The sole outcome source: whichever side's last observed CLOB
-        price (up to POLL_INTERVAL_SECONDS stale) was higher when the
+        midpoint (up to POLL_INTERVAL_SECONDS stale) was higher when the
         window rolled over. This is a live-market read, not Polymarket's
         settled resolution -- it can occasionally disagree with the real
         outcome if the last tick was noisy or a beat late. Traded off
         deliberately for simplicity/determinism over that small accuracy
         gap; see fetch_resolution() in polymarket_client.py if you want
         to reintroduce real-resolution settlement later."""
-        if self.last_up_price is None or self.last_down_price is None:
+        up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
+        down_mid = self._midpoint(self.last_down_bid, self.last_down_ask)
+        if up_mid is None or down_mid is None:
             return None
-        return Side.UP if self.last_up_price >= self.last_down_price else Side.DOWN
+        return Side.UP if up_mid >= down_mid else Side.DOWN
 
     # ---- dashboard payload -------------------------------------------------
 
@@ -102,9 +120,13 @@ class BotState:
                 "open_ts": self.current_window.open_ts,
                 "close_ts": self.current_window.close_ts,
             },
+            "book": {
+                "up_bid": self.last_up_bid, "up_ask": self.last_up_ask,
+                "down_bid": self.last_down_bid, "down_ask": self.last_down_ask,
+            },
             "prices": {
-                "up": self.last_up_price,
-                "down": self.last_down_price,
+                "up": self._midpoint(self.last_up_bid, self.last_up_ask),
+                "down": self._midpoint(self.last_down_bid, self.last_down_ask),
             },
             "price_history": [
                 {"ts": p.ts, "up": p.up, "down": p.down}

@@ -66,9 +66,8 @@
   .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:12px;}
   .stat{background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px;}
   .stat .label{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px;}
-  .stat .val{font-family:var(--mono); font-size:21px; font-weight:700; margin-top:4px;}
+  .stat .val{font-family:var(--mono); font-size:20px; font-weight:700; margin-top:4px;}
   .val.pos{color:var(--up);} .val.neg{color:var(--down);}
-  #statBet{font-size:15px;}
   @media (max-width:700px){ .stats{grid-template-columns:repeat(2,1fr);} }
 
   .card{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px;}
@@ -86,7 +85,12 @@
   .price-box.down{background:linear-gradient(135deg,var(--down-dim),transparent 70%);}
   .price-box .side-label{font-size:11.5px; font-weight:700; letter-spacing:1px;}
   .price-box.up .side-label{color:var(--up);} .price-box.down .side-label{color:var(--down);}
-  .price-box .p{font-family:var(--mono); font-size:28px; font-weight:700; margin-top:4px;}
+  .ba-row{display:flex; justify-content:space-between; align-items:baseline; margin-top:6px;}
+  .ba-row .ba{font-family:var(--mono);}
+  .ba-row .ba-bid{font-size:16px; font-weight:700; color:var(--text);}
+  .ba-row .ba-ask{font-size:16px; font-weight:700; color:var(--text);}
+  .ba-row .ba-lbl{font-size:9px; color:var(--muted); text-transform:uppercase; display:block; margin-bottom:1px;}
+  .spread{font-family:var(--mono); font-size:10px; color:var(--faint); margin-top:6px;}
   .bar-track{height:5px; background:#0006; border-radius:3px; margin-top:10px; overflow:hidden;}
   .bar-fill{height:100%; border-radius:3px;}
   .bar-fill.up{background:var(--up);} .bar-fill.down{background:var(--down);}
@@ -103,28 +107,37 @@
   .def-item .v{font-family:var(--mono); font-size:14px; font-weight:700; margin-top:2px;}
   .def-item.no-sl .v{color:var(--amber);}
 
-  .status-row{display:flex; align-items:center; gap:8px; margin-bottom:12px;}
-  .engine-badge{font-size:10px; font-weight:700; letter-spacing:.4px; padding:4px 9px; border-radius:6px; text-transform:uppercase;}
-  .engine-badge.waiting{background:#1a1f2b; color:#5a6579;}
-  .engine-badge.open{background:var(--blue-dim); color:#5eb3f0;}
-  .engine-badge.traded{background:#22262f; color:#9aa7ba;}
-  .engine-badge.sitting_out{background:var(--amber-dim); color:var(--amber);}
-  .engine-badge.halted{background:var(--down-dim); color:var(--down);}
-  .streak-note{font-size:12px; color:var(--muted); font-family:var(--mono);}
+  .inv-grid{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px;}
+  .inv-box{border-radius:10px; padding:12px; border:1px solid var(--border);}
+  .inv-box.up{background:linear-gradient(135deg,var(--up-dim),transparent 70%);}
+  .inv-box.down{background:linear-gradient(135deg,var(--down-dim),transparent 70%);}
+  .inv-box .lbl{font-size:10px; font-weight:700; letter-spacing:1px;}
+  .inv-box.up .lbl{color:var(--up);} .inv-box.down .lbl{color:var(--down);}
+  .inv-box .sh{font-family:var(--mono); font-size:22px; font-weight:700; margin-top:4px;}
+  .inv-box .avg{font-family:var(--mono); font-size:11px; color:var(--muted); margin-top:2px;}
 
-  .bet-row{display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-radius:8px; background:var(--panel-3); margin-bottom:12px;}
-  .bet-row .label{font-size:10.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.4px;}
-  .bet-row .amt{font-family:var(--mono); font-size:20px; font-weight:700; color:var(--amber);}
-  .bet-row .streak{font-family:var(--mono); font-size:11px; color:var(--muted); margin-top:2px;}
+  .levels-row{display:flex; gap:10px; margin-bottom:12px;}
+  .levels-row .lv{flex:1; background:var(--panel-3); border-radius:8px; padding:8px 10px; text-align:center;}
+  .levels-row .lv .k{font-size:9.5px; color:var(--muted); text-transform:uppercase;}
+  .levels-row .lv .v{font-family:var(--mono); font-size:15px; font-weight:700; margin-top:2px;}
 
-  .engine-pos{font-family:var(--mono); font-size:12px; padding:9px 11px; border-radius:8px; background:var(--panel-3); margin-bottom:12px;}
+  .pending-list{display:flex; flex-direction:column; gap:5px; margin-bottom:12px;}
+  .pending-item{display:flex; justify-content:space-between; align-items:center; font-family:var(--mono);
+    font-size:11.5px; background:var(--panel-3); border-radius:7px; padding:7px 10px;}
+  .pending-item .side{font-weight:700;}
+  .pending-item .side.UP{color:var(--up);} .pending-item .side.DOWN{color:var(--down);}
+  .pending-item .waiting{color:var(--faint); font-size:10px;}
 
   .engine-stats{display:flex; gap:10px; font-family:var(--mono); font-size:11px; margin-bottom:4px;}
   .engine-stats span{flex:1; background:var(--panel-3); border-radius:8px; padding:8px 10px; text-align:center;}
   .engine-stats span b{display:block; font-size:16px; margin-top:2px;}
-  .es-win b{color:var(--up);} .es-loss b{color:var(--down);} .es-none b{color:var(--muted);} .es-rate b{color:var(--text);}
+  .es-merge b{color:var(--amber);} .es-fill b{color:var(--blue);} .es-none b{color:var(--muted);} .es-loss b{color:var(--down);}
 
-  #e1Equity{height:80px !important; margin-top:12px;}
+  .engine-badge{font-size:10px; font-weight:700; letter-spacing:.4px; padding:4px 9px; border-radius:6px; text-transform:uppercase;}
+  .engine-badge.waiting{background:#1a1f2b; color:#5a6579;}
+  .engine-badge.open{background:var(--blue-dim); color:#5eb3f0;}
+  .engine-badge.traded{background:#22262f; color:#9aa7ba;}
+  .engine-badge.halted{background:var(--down-dim); color:var(--down);}
 
   .engine-bottom{display:flex; justify-content:space-between; align-items:baseline; margin-top:12px; padding-top:10px; border-top:1px solid var(--border);}
   .engine-pnl{font-family:var(--mono); font-weight:700; font-size:16px;}
@@ -132,17 +145,18 @@
   .last-pnl{font-family:var(--mono); font-size:11px; color:var(--muted);}
 
   .log-list{display:flex; flex-direction:column; gap:5px; max-height:440px; overflow-y:auto; padding-right:4px;}
-  .log-row{display:grid; grid-template-columns:56px 42px 1fr auto; gap:8px; align-items:center;
+  .log-row{display:grid; grid-template-columns:56px 66px 1fr auto; gap:8px; align-items:center;
     font-family:var(--mono); font-size:11.5px; padding:7px 9px; border-radius:7px; background:var(--panel-2);}
   .log-row .t{color:var(--muted);}
-  .log-row .ev{font-weight:700; font-size:9.5px; padding:2px 6px; border-radius:5px; text-align:center;}
+  .log-row .ev{font-weight:700; font-size:9px; padding:2px 6px; border-radius:5px; text-align:center;}
   .ev.BUY{background:var(--blue-dim); color:#5eb3f0;}
-  .ev.CANCEL{background:#241a30; color:#b39ddb;}
-  .ev.TP_CLOSE{background:var(--up-dim); color:var(--up);}
+  .ev.ORDER_PLACED{background:#241a30; color:#b39ddb;}
+  .ev.CANCEL{background:#241a30; color:#8a7a9e;}
+  .ev.MERGE{background:var(--amber-dim); color:var(--amber);}
   .ev.RESOLVE_WIN{background:var(--up-dim); color:var(--up);}
   .ev.RESOLVE_LOSS{background:var(--down-dim); color:var(--down);}
   .ev.WINDOW_OPEN{background:var(--purple-dim); color:var(--purple);}
-  .ev.NO_TRADE,.ev.SETTLED_BY_PRICE{background:var(--amber-dim); color:var(--amber);}
+  .ev.NO_TRADE,.ev.SETTLED_BY_PRICE{background:#20242e; color:var(--faint);}
   .ev.HALTED{background:var(--down-dim); color:var(--down);}
   .log-row .note{color:#aab8c9; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .log-row .pnl{font-weight:700;}
@@ -157,7 +171,7 @@
   <header>
     <div class="title">
       <h1>BTC 5m Up/Down</h1>
-      <span class="sub">paper trading · single engine · no stop loss</span>
+      <span class="sub">paper trading · dual-sided ladder · merge = exit</span>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting…</span></div>
   </header>
@@ -178,8 +192,8 @@
   <div class="stats">
     <div class="stat"><div class="label">Realized PnL</div><div class="val" id="statPnl">$0.00</div></div>
     <div class="stat"><div class="label">Floating PnL</div><div class="val" id="statFloating">$0.00</div></div>
-    <div class="stat"><div class="label">Win Rate</div><div class="val" id="statWinRate">—</div></div>
-    <div class="stat"><div class="label">This Window's Orders</div><div class="val" id="statBet">—</div></div>
+    <div class="stat"><div class="label">Merged Pairs</div><div class="val" id="statMerges">0</div></div>
+    <div class="stat"><div class="label">Fills This Window</div><div class="val" id="statFills">0</div></div>
   </div>
 
   <div class="card">
@@ -191,13 +205,21 @@
     <div class="prices">
       <div class="price-box up">
         <div class="side-label">UP</div>
-        <div class="p" id="priceUp">—</div>
+        <div class="ba-row">
+          <span class="ba"><span class="ba-lbl">Bid</span><span class="ba-bid" id="upBid">—</span></span>
+          <span class="ba"><span class="ba-lbl">Ask</span><span class="ba-ask" id="upAsk">—</span></span>
+        </div>
         <div class="bar-track"><div class="bar-fill up" id="barUp" style="width:0%"></div></div>
+        <div class="spread" id="upSpread">spread —</div>
       </div>
       <div class="price-box down">
         <div class="side-label">DOWN</div>
-        <div class="p" id="priceDown">—</div>
+        <div class="ba-row">
+          <span class="ba"><span class="ba-lbl">Bid</span><span class="ba-bid" id="downBid">—</span></span>
+          <span class="ba"><span class="ba-lbl">Ask</span><span class="ba-ask" id="downAsk">—</span></span>
+        </div>
         <div class="bar-track"><div class="bar-fill down" id="barDown" style="width:0%"></div></div>
+        <div class="spread" id="downSpread">spread —</div>
       </div>
     </div>
     <canvas id="chart"></canvas>
@@ -209,25 +231,31 @@
 
       <div class="def-grid" id="e1DefGrid"></div>
 
-      <div class="status-row">
-        <span class="streak-note" id="e1Streak">—</span>
-      </div>
-
-      <div class="bet-row">
-        <div>
-          <div class="label">Order Sizes @ 0.30</div>
-          <div class="streak" id="e1BetNote"></div>
+      <div class="inv-grid">
+        <div class="inv-box up">
+          <div class="lbl">UP INVENTORY</div>
+          <div class="sh" id="upShares">0</div>
+          <div class="avg" id="upAvg">no position</div>
         </div>
-        <div class="amt" id="e1Bet" style="font-size:15px;">—</div>
+        <div class="inv-box down">
+          <div class="lbl">DOWN INVENTORY</div>
+          <div class="sh" id="downShares">0</div>
+          <div class="avg" id="downAvg">no position</div>
+        </div>
       </div>
 
-      <div class="engine-pos" id="e1Pos" style="display:none;"></div>
+      <div class="levels-row">
+        <div class="lv"><div class="k">UP Levels Used</div><div class="v" id="upLevels">0</div></div>
+        <div class="lv"><div class="k">DOWN Levels Used</div><div class="v" id="downLevels">0</div></div>
+      </div>
+
+      <div class="pending-list" id="pendingList"></div>
 
       <div class="engine-stats">
-        <span class="es-win">Wins<b id="e1Wins">0</b></span>
-        <span class="es-loss">Losses<b id="e1Losses">0</b></span>
-        <span class="es-none">No-Trade<b id="e1NoTrade">0</b></span>
-        <span class="es-rate">Favorite<b id="e1MaxStreak">—</b></span>
+        <span class="es-merge">Merges (life)<b id="e1TotalMerges">0</b></span>
+        <span class="es-fill">Fills (life)<b id="e1TotalFills">0</b></span>
+        <span class="es-none">No-Fill Wins<b id="e1NoTrade">0</b></span>
+        <span class="es-loss">Leftover Losses<b id="e1ResLoss">0</b></span>
       </div>
 
       <div class="engine-bottom">
@@ -247,13 +275,14 @@
     <div class="log-list" id="logList"><div class="empty">Loading…</div></div>
   </div>
 
-  <footer>polling every second · Polymarket real resolution settles every window</footer>
+  <footer>polling every second · merge redeems matched UP+DOWN pairs for $1, no SL</footer>
 </div>
 
 <script>
 function $(id){ return document.getElementById(id); }
 function fmt$(n){ if(n===null||n===undefined||isNaN(n)) return '—'; return '$' + Number(n).toFixed(2); }
 function fmtP(n){ if(n===null||n===undefined) return '—'; return Number(n).toFixed(3); }
+function fmtSh(n){ if(n===null||n===undefined) return '0'; return Number(n).toFixed(0); }
 
 let history = [];
 
@@ -312,7 +341,6 @@ function drawEquityCurve(canvasId, points, startingCapital){
   const x = i => pad + (i/(points.length-1)) * (w-2*pad);
   const y = v => h - pad - ((v-min)/(max-min)) * (h-2*pad);
 
-  // starting-capital reference line
   ctx.strokeStyle = 'rgba(122,139,163,0.3)';
   ctx.setLineDash([3,3]);
   ctx.beginPath(); ctx.moveTo(pad, y(startingCapital)); ctx.lineTo(w-pad, y(startingCapital)); ctx.stroke();
@@ -321,7 +349,6 @@ function drawEquityCurve(canvasId, points, startingCapital){
   const last = vals[vals.length-1];
   const lineColor = last >= startingCapital ? '#22c55e' : '#ef4444';
 
-  // filled area under the curve for a bit more visual weight
   const grad = ctx.createLinearGradient(0,0,0,h);
   grad.addColorStop(0, last >= startingCapital ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.22)');
   grad.addColorStop(1, 'rgba(0,0,0,0)');
@@ -345,53 +372,42 @@ function drawEquityCurve(canvasId, points, startingCapital){
 
 function renderEngine(prefix, e){
   const defItems = [
-    {k:'Entry (both sides)', v: fmtP(e.def.entry)},
-    {k:'Take Profit', v: fmtP(e.def.tp)},
+    {k:'Range', v: `${e.def.price_min.toFixed(2)}–${e.def.price_max.toFixed(2)}`},
+    {k:'Level Step', v: e.def.level_step.toFixed(2)},
+    {k:'Order Size', v: `${e.def.order_shares.toFixed(0)} sh`},
     {k:'Stop Loss', v: 'none', cls:'no-sl'},
-    {k:'Favorite / Underdog', v: `${e.def.favorite_shares.toFixed(0)} / ${e.def.underdog_shares.toFixed(0)} sh`},
   ];
   $(prefix+'DefGrid').innerHTML = defItems.map(d=>`
     <div class="def-item ${d.cls||''}"><div class="k">${d.k}</div><div class="v">${d.v}</div></div>
   `).join('');
 
-  $(prefix+'Streak').textContent = e.sitting_out
-    ? `sitting out — ${e.skip_reason}`
-    : `${e.favorite_side} favorite (${e.def.favorite_shares.toFixed(0)}sh, won previous window) vs ${e.underdog_side} underdog (${e.def.underdog_shares.toFixed(0)}sh)`;
-
-  if(e.sitting_out){
-    $(prefix+'Bet').textContent = 'no orders';
-    $(prefix+'BetNote').textContent = '';
-  } else {
-    const upSh = e.order_up_shares, downSh = e.order_down_shares;
-    $(prefix+'Bet').innerHTML = `<span style="color:var(--up)">UP ${upSh!==null&&upSh!==undefined?upSh.toFixed(0):'—'}</span> / <span style="color:var(--down)">DOWN ${downSh!==null&&downSh!==undefined?downSh.toFixed(0):'—'}</span>`;
-    $(prefix+'BetNote').textContent = 'both resting, first fill cancels the other';
-  }
-
   $(prefix+'Badge').textContent = e.status;
   $(prefix+'Badge').className = 'tag engine-badge ' + e.status;
 
-  const posEl = $(prefix+'Pos');
-  if(e.position){
-    posEl.style.display = 'block';
-    const upnl = e.position.unrealized_pnl;
-    const upnlColor = upnl===null||upnl===undefined ? 'var(--muted)' : (upnl>=0 ? 'var(--up)' : 'var(--down)');
-    const upnlTxt = upnl===null||upnl===undefined ? '—' : `${upnl>=0?'+':''}${fmt$(upnl)}`;
-    posEl.innerHTML = `
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <span><span style="color:${e.position.side==='UP'?'var(--up)':'var(--down)'}; font-weight:700;">${e.position.side}</span> ${e.position.shares.toFixed(0)} sh @ ${fmtP(e.position.entry_price)}</span>
-        <span style="color:${upnlColor}; font-weight:700;">${upnlTxt}</span>
-      </div>
-      <div style="color:var(--muted); font-size:10px; margin-top:3px;">mark ${fmtP(e.position.mark_price)} · no SL, rides to TP or resolution</div>
-    `;
+  $('upShares').textContent = fmtSh(e.up_shares);
+  $('upAvg').textContent = e.up_avg_price!=null ? `avg ${fmtP(e.up_avg_price)}` : 'no position';
+  $('downShares').textContent = fmtSh(e.down_shares);
+  $('downAvg').textContent = e.down_avg_price!=null ? `avg ${fmtP(e.down_avg_price)}` : 'no position';
+
+  $('upLevels').textContent = e.used_levels_up;
+  $('downLevels').textContent = e.used_levels_down;
+
+  const pendEl = $('pendingList');
+  if(!e.pending_orders || !e.pending_orders.length){
+    pendEl.innerHTML = '<div class="empty" style="padding:8px 4px;">no resting orders</div>';
   } else {
-    posEl.style.display = 'none';
+    pendEl.innerHTML = e.pending_orders.map(o=>`
+      <div class="pending-item">
+        <span><span class="side ${o.side}">${o.side}</span> ${o.shares.toFixed(0)}sh @ ${fmtP(o.price)}</span>
+        <span class="waiting">waiting for fill</span>
+      </div>
+    `).join('');
   }
 
-  $(prefix+'Wins').textContent = e.wins;
-  $(prefix+'Losses').textContent = e.losses;
-  $(prefix+'NoTrade').textContent = e.no_trades;
-  const favEl = $(prefix+'MaxStreak');
-  if(favEl) favEl.textContent = e.favorite_side || '—';
+  $(prefix+'TotalMerges').textContent = e.total_merges;
+  $(prefix+'TotalFills').textContent = e.total_fills;
+  $(prefix+'NoTrade').textContent = e.no_trade_windows;
+  $(prefix+'ResLoss').textContent = e.resolution_losses;
 
   const pnlEl = $(prefix+'Pnl');
   pnlEl.textContent = (e.total_pnl>=0?'+':'') + fmt$(e.total_pnl);
@@ -417,7 +433,7 @@ function renderLog(entries){
     }
     row.innerHTML = `
       <span class="t">${t}</span>
-      <span class="ev ${e.event}">${e.engine||e.event}</span>
+      <span class="ev ${e.event}">${e.event}</span>
       <span class="note">${sideTag} ${e.note || ''} ${e.price!==null&&e.price!==undefined? '@ '+fmtP(e.price):''}</span>
       ${pnlHtml}
     `;
@@ -468,9 +484,15 @@ async function poll(){
       cd.className = 'countdown' + (remaining <= 20 ? ' hot' : '');
     }
 
+    const book = s.book || {};
+    $('upBid').textContent = fmtP(book.up_bid);
+    $('upAsk').textContent = fmtP(book.up_ask);
+    $('downBid').textContent = fmtP(book.down_bid);
+    $('downAsk').textContent = fmtP(book.down_ask);
+    $('upSpread').textContent = (book.up_bid!=null && book.up_ask!=null) ? `spread ${(book.up_ask-book.up_bid).toFixed(3)}` : 'spread —';
+    $('downSpread').textContent = (book.down_bid!=null && book.down_ask!=null) ? `spread ${(book.down_ask-book.down_bid).toFixed(3)}` : 'spread —';
+
     const up = s.prices.up, down = s.prices.down;
-    $('priceUp').textContent = fmtP(up);
-    $('priceDown').textContent = fmtP(down);
     $('barUp').style.width = (up!==null && up!==undefined ? up*100 : 0) + '%';
     $('barDown').style.width = (down!==null && down!==undefined ? down*100 : 0) + '%';
 
@@ -478,15 +500,17 @@ async function poll(){
     drawChart();
 
     const e = s.engine || {};
-    const upSh = e.order_up_shares, downSh = e.order_down_shares;
-    $('statBet').textContent = (upSh===null||upSh===undefined) ? 'sitting out' : `UP ${upSh.toFixed(0)} / DOWN ${downSh.toFixed(0)}`;
-    $('statWinRate').textContent = (e.win_rate===null||e.win_rate===undefined) ? '—' : `${e.win_rate.toFixed(0)}%`;
+    $('statMerges').textContent = (e.total_merged_pairs||0).toFixed(0);
+    $('statFills').textContent = e.fills_this_window || 0;
 
-    const floating = (e.position && e.position.unrealized_pnl!==null && e.position.unrealized_pnl!==undefined) ? e.position.unrealized_pnl : 0;
-    const hasOpen = !!e.position;
+    // Floating PnL: mark-to-market of any unmatched leftover inventory,
+    // using the current midpoint on each side.
+    let floating = 0, hasInv = false;
+    if(e.up_shares > 0 && up != null && e.up_avg_price != null){ floating += e.up_shares * (up - e.up_avg_price); hasInv = true; }
+    if(e.down_shares > 0 && down != null && e.down_avg_price != null){ floating += e.down_shares * (down - e.down_avg_price); hasInv = true; }
     const floatEl = $('statFloating');
-    floatEl.textContent = hasOpen ? (floating>=0?'+':'') + fmt$(floating) : '—';
-    floatEl.className = 'val ' + (hasOpen ? (floating>=0?'pos':'neg') : '');
+    floatEl.textContent = hasInv ? (floating>=0?'+':'') + fmt$(floating) : '—';
+    floatEl.className = 'val ' + (hasInv ? (floating>=0?'pos':'neg') : '');
 
     if(e.def) renderEngine('e1', e);
     if(e.equity_curve){
