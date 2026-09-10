@@ -21,9 +21,28 @@ class PricePoint:
 
 
 @dataclass
+class Position:
+    side: Side
+    shares: float
+    entry_price: float
+    fee: float = 0.0
+    opened_at: float = field(default_factory=time.time)
+
+    @property
+    def notional(self) -> float:
+        """Raw shares * price, before fees."""
+        return self.shares * self.entry_price
+
+    @property
+    def cost(self) -> float:
+        """Total cost basis including the entry taker fee."""
+        return self.notional + self.fee
+
+
+@dataclass
 class TradeLogEntry:
     ts: float
-    engine: str          # "BOT" or "SYS"
+    engine: str          # "A" or "B"
     window_slug: str
     event: str            # human readable event name
     side: Optional[str] = None
