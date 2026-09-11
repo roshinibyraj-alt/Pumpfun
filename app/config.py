@@ -29,10 +29,12 @@ Engine 2 -- breakout taker entry with stop loss:
      fee) to guarantee the exit.
   4. If the window closes with the position still open (no TP, no SL),
      force a taker close (market sell) right at window end.
-  5. Martingale: base size ENGINE2_BASE_USD ($30). A loss (SL hit, or a
-     forced close that lost money) doubles size for the *next window*
-     (2x/4x/8x, up to ENGINE2_MAX_MARTINGALE_LEVEL doublings). A win, or
-     completing the Nth (max) martingale level, resets size back to base.
+  5. Anti-martingale: base size ENGINE2_BASE_USD ($30). A win doubles the
+     size for the *next window* (2x/4x/8x, up to
+     ENGINE2_MAX_MARTINGALE_LEVEL doublings) -- pressing size only with
+     prior winnings. A loss (SL hit, or a forced close that lost money),
+     or completing the Nth (max) press level, resets size back to base.
+     This caps the worst case at one base-sized loss.
 
 Both engines pull from and pay into the SAME shared balance
 (config.STARTING_CAPITAL) -- there is one pot of capital, not two.
@@ -60,11 +62,13 @@ ENGINE1_BASE_USD = 10.0
 ENGINE1_MAX_MARTINGALE_LEVEL = 3  # 3 doublings allowed after base (2x/4x/8x)
 
 # ---- Engine 2: breakout taker entry @ 0.70, SL @ 0.29, TP @ 0.99 -------
+# Sizing is ANTI-martingale here: wins press size up, any loss resets to
+# base. (Engine 1 stays plain martingale.)
 ENGINE2_TRIGGER_PRICE = 0.70
 ENGINE2_TP_PRICE = 0.99
 ENGINE2_SL_PRICE = 0.29
 ENGINE2_BASE_USD = 30.0
-ENGINE2_MAX_MARTINGALE_LEVEL = 3  # 3 doublings allowed after base (2x/4x/8x)
+ENGINE2_MAX_MARTINGALE_LEVEL = 3  # 3 win-presses allowed after base (2x/4x/8x)
 
 MAKER_REBATE_FRACTION = 0.20  # rebate earned on every resting-order fill (maker side)
 

@@ -101,6 +101,7 @@
   .martingale-meta{font-family:var(--mono); font-size:10.5px; color:var(--muted); margin-top:8px;
     display:flex; justify-content:space-between;}
   .martingale-meta .max{color:var(--down);}
+  .martingale-meta .max.win{color:var(--up);}
 
   .position-box{border-radius:10px; padding:12px 14px; border:1px solid var(--border); margin-bottom:12px;}
   .position-box.up{background:linear-gradient(135deg,var(--up-dim),transparent 70%);}
@@ -369,7 +370,7 @@ function renderEngineCard(elId, eng, opts){
     <div class="engine-title">
       <div>
         <div class="name">${eng.label}</div>
-        <div class="desc">${elId==='e1Card' ? 'resting maker ladder, race + reset-on-fill' : 'taker breakout entry, taker stop loss'}</div>
+        <div class="desc">${elId==='e1Card' ? 'resting maker ladder, race + reset-on-fill' : 'taker breakout entry, taker stop loss, anti-martingale'}</div>
       </div>
       <span class="engine-badge ${eng.status}">${opts.statusLabels[eng.status] || eng.status}</span>
     </div>
@@ -378,13 +379,18 @@ function renderEngineCard(elId, eng, opts){
 
     <div class="martingale-box">
       <div class="martingale-top">
-        <span class="lbl">Martingale — level ${mg.level}/${mg.max_level}</span>
+        <span class="lbl">${mg.mode === 'anti_martingale' ? 'Anti-Martingale' : 'Martingale'} — level ${mg.level}/${mg.max_level}</span>
         <span class="size">${fmt$(mg.current_usd)}</span>
       </div>
       <div class="martingale-pips">${pips.join('')}</div>
       <div class="martingale-meta">
+        ${mg.mode === 'anti_martingale' ? `
+        <span>current win streak: ${mg.win_streak}</span>
+        <span class="max win">max win streak ever: ${mg.max_win_streak}</span>
+        ` : `
         <span>current loss streak: ${mg.loss_streak}</span>
         <span class="max">max loss streak ever: ${mg.max_loss_streak}</span>
+        `}
       </div>
     </div>
 

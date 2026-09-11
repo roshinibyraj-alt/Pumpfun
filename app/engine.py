@@ -10,7 +10,8 @@ resolution). Dollar-sized martingale (base $10, up to 3 doublings).
 Engine 2 (E2): watches for either side's mid-price to reach 0.70 first,
 taker-buys that side for $30, resting TP at 0.99, taker stop loss at
 0.29, forced taker close at window end if still open. Dollar-sized
-martingale (base $30, up to 3 doublings).
+anti-martingale (base $30, press up to 3 doublings on wins, any loss
+resets straight back to base).
 
 Both engines read the SAME book each tick and both draw from / pay into
 the SAME shared CapitalPool -- one balance, one halt condition, one
@@ -326,6 +327,7 @@ class Engine1:
                         ("traded" if self.s.fills_this_window > 0 else "waiting"))),
 
             "martingale": {
+                "mode": "martingale",
                 "level": self.s.martingale_level,
                 "max_level": config.ENGINE1_MAX_MARTINGALE_LEVEL,
                 "base_usd": config.ENGINE1_BASE_USD,
@@ -345,7 +347,7 @@ class Engine1:
 
 
 # ---------------------------------------------------------------------------
-# Engine 2 -- breakout taker entry @ 0.70, SL @ 0.29
+# Engine 2 -- breakout taker entry @ 0.70, SL @ 0.29, anti-martingale
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -368,8 +370,8 @@ class Engine2State:
     position: Optional[E2Position] = None
 
     martingale_level: int = 0
-    loss_streak: int = 0
-    max_loss_streak: int = 0
+    win_streak: int = 0
+    max_win_streak: int = 0
 
     fills_this_window: int = 0
     last_window_pnl: float = 0.0
@@ -412,7 +414,7 @@ class Engine2:
 
         self._log("WINDOW_OPEN", note=(
             f"armed: watching for either side to reach {config.ENGINE2_TRIGGER_PRICE} "
-            f"(size ${self._current_usd_size():.2f}, martingale level {self.s.martingale_level})"
+            f"(size ${self._current_usd_size():.2f}, anti-martingale press level {self.s.martingale_level})"
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask):
@@ -512,25 +514,29 @@ class Engine2:
         self._record_outcome(won=won)
         self.capital.check_halt()
 
-    # ---- martingale ------------------------------------------------------
+    # ---- anti-martingale ---------------------------------------------------
+    # Inverted vs Engine 1: a WIN presses size up (up to the level cap), and
+    # ANY loss (SL hit, or a forced close that lost money) resets straight
+    # back to base. This caps the worst case at one base-sized loss and only
+    # ever risks house money (prior wins) on the way up.
 
     def _record_outcome(self, won: bool):
         if won:
-            self.s.loss_streak = 0
-            if self.s.martingale_level != 0:
-                self._log("MARTINGALE_RESET", note=f"win -- martingale reset to base (was level {self.s.martingale_level})")
-            self.s.martingale_level = 0
-        else:
-            self.s.loss_streak += 1
-            self.s.max_loss_streak = max(self.s.max_loss_streak, self.s.loss_streak)
+            self.s.win_streak += 1
+            self.s.max_win_streak = max(self.s.max_win_streak, self.s.win_streak)
             if self.s.martingale_level >= config.ENGINE2_MAX_MARTINGALE_LEVEL:
-                self._log("MARTINGALE_RESET", note=(f"loss at max martingale level "
+                self._log("ANTI_MARTINGALE_RESET", note=(f"win completed max press level "
                            f"{config.ENGINE2_MAX_MARTINGALE_LEVEL} -- resetting to base"))
                 self.s.martingale_level = 0
             else:
                 self.s.martingale_level += 1
-                self._log("MARTINGALE_UP", note=(f"loss -- martingale level -> {self.s.martingale_level} "
+                self._log("ANTI_MARTINGALE_UP", note=(f"win -- pressing size, level -> {self.s.martingale_level} "
                            f"(next size ${self._current_usd_size():.2f})"))
+        else:
+            self.s.win_streak = 0
+            if self.s.martingale_level != 0:
+                self._log("ANTI_MARTINGALE_RESET", note=f"loss -- size reset to base (was level {self.s.martingale_level})")
+            self.s.martingale_level = 0
 
     # ---- window close -------------------------------------------------------
 
@@ -602,12 +608,13 @@ class Engine2:
                         ("triggered" if self.s.triggered else "waiting"))),
 
             "martingale": {
+                "mode": "anti_martingale",
                 "level": self.s.martingale_level,
                 "max_level": config.ENGINE2_MAX_MARTINGALE_LEVEL,
                 "base_usd": config.ENGINE2_BASE_USD,
                 "current_usd": self._current_usd_size(),
-                "loss_streak": self.s.loss_streak,
-                "max_loss_streak": self.s.max_loss_streak,
+                "win_streak": self.s.win_streak,
+                "max_win_streak": self.s.max_win_streak,
             },
 
             "def": {
