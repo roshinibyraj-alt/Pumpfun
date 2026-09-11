@@ -131,6 +131,7 @@
   .log-row .ev.BREAKOUT_BUY{color:var(--violet);}
   .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.SL_FILL{color:var(--coral);}
+  .log-row .ev.SL_STEP{color:var(--amber);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
   .log-row .ev.HALTED{color:var(--coral);}
   .log-row .ev.ANTI_MARTINGALE_UP{color:var(--amber);}
@@ -170,7 +171,7 @@
     </div>
     <div class="gauge-legend">
       <span><i style="background:var(--amber);"></i>0.70 trigger</span>
-      <span><i style="background:var(--coral);"></i>0.29 stop loss</span>
+      <span><i style="background:var(--coral);"></i>stop loss — tightens 0.29 \u2192 0.50 over the first 4 minutes after entry</span>
     </div>
   </div>
 
@@ -210,16 +211,18 @@ const fmtP = v => (v==null ? '—' : Number(v).toFixed(3));
 const fmtSh = v => (v==null ? '0' : Number(v).toFixed(2));
 const pnlClass = v => (v>0.005?'pos':(v<-0.005?'neg':''));
 
-function renderGauge(trackId, midId, bidAskId, side, bid, ask){
+function renderGauge(trackId, midId, bidAskId, side, bid, ask, slPrice){
   const mid = (bid!=null && ask!=null) ? (bid+ask)/2 : (ask!=null?ask:bid);
   $(midId).textContent = fmtP(mid);
   $(bidAskId).textContent = `bid ${fmtP(bid)} / ask ${fmtP(ask)}`;
   const track = $(trackId);
   const pct = mid!=null ? Math.max(0,Math.min(100, mid*100)) : 0;
+  const sl = slPrice!=null ? slPrice : 0.29;
+  const slLbl = slPrice!=null ? `${fmtP(sl)} sl \u2022 live` : '0.29 sl';
   track.innerHTML = `
     <div class="gauge-fill ${side}" style="width:${pct}%"></div>
-    <div class="gauge-mark trigger" style="left:70%"><span class="lbl">0.70</span></div>
-    <div class="gauge-mark sl" style="left:29%"><span class="lbl">0.29</span></div>
+    <div class="gauge-mark trigger" style="left:70%"><span class="lbl">0.70 trigger</span></div>
+    <div class="gauge-mark sl" style="left:${sl*100}%"><span class="lbl">${slLbl}</span></div>
   `;
 }
 
@@ -251,8 +254,11 @@ async function poll(){
     }
 
     const book = s.book || {};
-    renderGauge('upTrack','upMid','upBidAsk','UP', book.up_bid, book.up_ask);
-    renderGauge('downTrack','downMid','downBidAsk','DOWN', book.down_bid, book.down_ask);
+    const pos = e.open_position;
+    const upSl = (pos && pos.side==='UP') ? pos.sl_price : null;
+    const downSl = (pos && pos.side==='DOWN') ? pos.sl_price : null;
+    renderGauge('upTrack','upMid','upBidAsk','UP', book.up_bid, book.up_ask, upSl);
+    renderGauge('downTrack','downMid','downBidAsk','DOWN', book.down_bid, book.down_ask, downSl);
 
     renderEngineCard(e);
     renderStats(e);
@@ -272,10 +278,11 @@ function renderEngineCard(e){
   const pos = e.open_position;
   const statusLabels = {waiting:'watching for 0.70', triggered:'triggered', open:'position open', halted:'halted'};
 
+  const slSteps = (e.def.sl_schedule || []).map(s => fmtP(s.price)).join(' \u2192 ');
   const defRowsHtml = [
     ['Trigger (mid price)', fmtP(e.def.trigger_price)],
     ['Take profit', fmtP(e.def.tp_price)],
-    ['Stop loss', fmtP(e.def.sl_price)],
+    ['Stop loss (ladder)', slSteps || fmtP(e.def.sl_price)],
     ['Base size', fmt$(e.def.base_usd)],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
@@ -286,19 +293,32 @@ function renderEngineCard(e){
 
   let posHtml;
   if(pos){
+    const mins = Math.floor((pos.seconds_since_entry||0)/60), secs = Math.floor((pos.seconds_since_entry||0)%60);
+    const heldFor = `${mins}:${String(secs).padStart(2,'0')} held`;
+    const nextStep = pos.next_sl_change
+      ? `next tighten to ${fmtP(pos.next_sl_change.price)} in ${Math.max(0,Math.round(pos.next_sl_change.in_seconds))}s`
+      : 'at final stop level';
+    const slIdx = (e.def.sl_schedule || []).findIndex(s => s.price === pos.sl_price);
+    const slPips = (e.def.sl_schedule || []).map((s,i) =>
+      `<div class="pip ${i<=slIdx ? 'filled':''}"></div>`).join('');
     posHtml = `
       <div class="position-box ${pos.side}">
         <div class="position-top">
           <span class="side ${pos.side}">${pos.side} — floating</span>
-          <span class="shares">${fmtSh(pos.shares)}sh</span>
+          <span class="shares">${fmtSh(pos.shares)}sh \u00b7 ${heldFor}</span>
         </div>
         <div class="position-grid">
           <div><div class="k">Entry</div><div class="v">${fmtP(pos.entry_price)}</div></div>
           <div><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
           <div><div class="k">Cost basis</div><div class="v">${fmt$(pos.cost)}</div></div>
           <div><div class="k">TP</div><div class="v">${fmtP(pos.tp_price)}</div></div>
-          <div><div class="k">SL</div><div class="v">${fmtP(pos.sl_price)}</div></div>
+          <div><div class="k">SL now</div><div class="v" style="color:var(--coral)">${fmtP(pos.sl_price)}</div></div>
           <div><div class="k">Mkt value</div><div class="v">${fmt$(pos.mark_price!=null ? pos.shares*pos.mark_price : pos.cost)}</div></div>
+        </div>
+        <div class="press-box" style="margin:12px 0 0; padding:10px 12px;">
+          <div class="press-top"><span class="lbl">stop loss ladder</span><span class="size" style="color:var(--coral); font-size:13px;">${fmtP(pos.sl_price)}</span></div>
+          <div class="press-pips">${slPips}</div>
+          <div class="press-meta"><span>${nextStep}</span></div>
         </div>
         <div class="position-pnl-row">
           <span class="lbl">unrealized P&amp;L</span>

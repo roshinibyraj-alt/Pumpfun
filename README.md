@@ -11,8 +11,15 @@ breakout strategy with anti-martingale sizing.
    that side for $30 notional (crosses the spread, pays the taker fee).
    Fires at most once per window.
 2. **Take profit**: resting maker TP sell at 0.99.
-3. **Stop loss**: at 0.29 — the moment the bid drops to/through this
-   level, immediately taker-sell (market order, pays taker fee) to
+3. **Stop loss (time-tightened)**: starts at 0.29 and steps up the
+   longer the position stays open:
+   - 0:00–2:00 since entry → 0.29 (base)
+   - 2:00–3:00 since entry → 0.40
+   - 3:00–4:00 since entry → 0.45
+   - 4:00+ since entry → 0.50 (final minute of the window)
+
+   The moment the bid drops to/through whichever level is currently
+   active, immediately taker-sell (market order, pays taker fee) to
    guarantee the exit.
 4. **Forced close**: if the window closes with the position still open
    (no TP, no SL hit), force a taker close (market sell) right at window
@@ -37,7 +44,7 @@ Dashboard at http://localhost:8000
 
 ## Config knobs (`app/config.py`)
 
-- `ENGINE2_TRIGGER_PRICE`, `ENGINE2_TP_PRICE`, `ENGINE2_SL_PRICE`, `ENGINE2_BASE_USD`, `ENGINE2_MAX_MARTINGALE_LEVEL`
+- `ENGINE2_TRIGGER_PRICE`, `ENGINE2_TP_PRICE`, `ENGINE2_SL_SCHEDULE`, `ENGINE2_BASE_USD`, `ENGINE2_MAX_MARTINGALE_LEVEL`
 - `STARTING_CAPITAL`, fee/rebate constants
 
 ## Notes / assumptions

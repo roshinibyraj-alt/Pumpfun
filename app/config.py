@@ -7,9 +7,17 @@ Single engine -- breakout taker entry with stop loss:
      market BUY of that side for ENGINE2_BASE_USD ($30) notional (crosses
      the spread, pays the taker fee). Fires at most once per window.
   2. Resting TP sell at ENGINE2_TP_PRICE (0.99) (maker).
-  3. Stop loss at ENGINE2_SL_PRICE (0.29): the moment the bid drops to/
-     through this level, immediately taker-sell (market order, pays taker
-     fee) to guarantee the exit.
+  3. Time-tightened stop loss (ENGINE2_SL_SCHEDULE): starts at 0.29 and
+     steps up minute-by-minute the longer the position stays open:
+       - 0:00-2:00 since entry -> 0.29 (base)
+       - 2:00-3:00 since entry -> 0.40
+       - 3:00-4:00 since entry -> 0.45
+       - 4:00+ since entry     -> 0.50 (final minute of the window)
+     The moment the bid drops to/through whichever level is active,
+     immediately taker-sell (market order, pays taker fee) to guarantee
+     the exit. This trades a wider stop early (room for the breakout to
+     develop) for a tighter one late (give back less if it stalls near
+     window close).
   4. If the window closes with the position still open (no TP, no SL),
      force a taker close (market sell) right at window end.
   5. Anti-martingale: base size ENGINE2_BASE_USD ($30). A win doubles the
@@ -37,11 +45,20 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Breakout engine: taker entry @ 0.70, SL @ 0.29, TP @ 0.99 --------
+# ---- Breakout engine: taker entry @ 0.70, SL @ 0.29 (time-tightened), TP @ 0.99
 # Sizing is anti-martingale: wins press size up, any loss resets to base.
 ENGINE2_TRIGGER_PRICE = 0.70
 ENGINE2_TP_PRICE = 0.99
-ENGINE2_SL_PRICE = 0.29
+# Time-based stop loss ladder: (seconds_since_entry, stop_loss_price),
+# sorted ascending. The active stop is the price of the last threshold
+# reached -- i.e. it only ever tightens (moves toward the entry/TP side),
+# never loosens, as the position ages.
+ENGINE2_SL_SCHEDULE = [
+    (0, 0.29),      # 0:00-2:00 since entry -- base stop, room to develop
+    (120, 0.40),    # 2:00-3:00 since entry
+    (180, 0.45),    # 3:00-4:00 since entry
+    (240, 0.50),    # 4:00+ since entry -- final minute of the window
+]
 ENGINE2_BASE_USD = 30.0
 ENGINE2_MAX_MARTINGALE_LEVEL = 3  # 3 win-presses allowed after base (2x/4x/8x)
 

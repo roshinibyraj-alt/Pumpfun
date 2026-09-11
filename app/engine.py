@@ -24,6 +24,37 @@ def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
     return ask if ask is not None else bid
 
 
+def sl_price_for_elapsed(elapsed: Optional[float]) -> float:
+    """Time-based stop loss ladder, keyed off seconds since entry.
+    config.ENGINE2_SL_SCHEDULE is a list of (elapsed_seconds, price) pairs,
+    sorted ascending -- returns the price of the last step whose threshold
+    has been reached. Elapsed=None (no entry timestamp available, e.g. an
+    old snapshot) falls back to the base (first) step."""
+    schedule = config.ENGINE2_SL_SCHEDULE
+    if elapsed is None:
+        return schedule[0][1]
+    price = schedule[0][1]
+    for threshold, step_price in schedule:
+        if elapsed >= threshold:
+            price = step_price
+        else:
+            break
+    return price
+
+
+def sl_step_index_for_elapsed(elapsed: Optional[float]) -> int:
+    schedule = config.ENGINE2_SL_SCHEDULE
+    if elapsed is None:
+        return 0
+    idx = 0
+    for i, (threshold, _price) in enumerate(schedule):
+        if elapsed >= threshold:
+            idx = i
+        else:
+            break
+    return idx
+
+
 # ---------------------------------------------------------------------------
 # Shared capital -- single balance the engine debits/credits.
 # ---------------------------------------------------------------------------
@@ -57,6 +88,8 @@ class Position:
     entry_price: float
     shares: float
     cost: float
+    entry_ts: float = 0.0
+    sl_step_index: int = 0  # last logged index into config.ENGINE2_SL_SCHEDULE
 
 
 @dataclass
@@ -127,29 +160,30 @@ class Engine:
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None):
         if self.s.window is None or self.capital.halted:
             return
+        now = now if now is not None else time.time()
         self.s.up_bid, self.s.up_ask = up_bid, up_ask
         self.s.down_bid, self.s.down_ask = down_bid, down_ask
 
         if not self.s.triggered:
-            self._check_trigger()
+            self._check_trigger(now)
         elif self.s.position is not None:
-            self._check_sl()
+            self._check_sl(now)
             if self.s.position is not None:  # SL may have just closed it
                 self._check_tp()
 
     # ---- entry: breakout trigger, taker buy --------------------------------
 
-    def _check_trigger(self):
+    def _check_trigger(self, now: float):
         up_mid = _midpoint(self.s.up_bid, self.s.up_ask)
         down_mid = _midpoint(self.s.down_bid, self.s.down_ask)
         trigger = config.ENGINE2_TRIGGER_PRICE
         # deterministic tie-break: UP checked first if both cross the same tick
         if up_mid is not None and up_mid >= trigger:
-            self._enter(Side.UP, self.s.up_ask)
+            self._enter(Side.UP, self.s.up_ask, now)
         elif down_mid is not None and down_mid >= trigger:
-            self._enter(Side.DOWN, self.s.down_ask)
+            self._enter(Side.DOWN, self.s.down_ask, now)
 
-    def _enter(self, side: Side, ask: Optional[float]):
+    def _enter(self, side: Side, ask: Optional[float], now: float):
         if ask is None:
             return  # can't take a taker fill without a live ask
         self.s.triggered = True
@@ -164,21 +198,32 @@ class Engine:
         self._log("BREAKOUT_BUY", side=side.value, price=ask, shares=shares, fee=fee,
                    note=(f"{side.value} mid reached {config.ENGINE2_TRIGGER_PRICE} first -- taker buy "
                          f"{shares:.2f}sh @ {ask} (${usd:.2f}, fee ${fee:.4f}) -- "
-                         f"TP {config.ENGINE2_TP_PRICE}, SL {config.ENGINE2_SL_PRICE}"))
+                         f"TP {config.ENGINE2_TP_PRICE}, SL {config.ENGINE2_SL_SCHEDULE[0][1]} "
+                         f"(tightens over time, see SL schedule)"))
         if self.capital.check_halt():
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
 
-        self.s.position = Position(side=side, entry_price=ask, shares=shares, cost=cost)
+        self.s.position = Position(side=side, entry_price=ask, shares=shares, cost=cost, entry_ts=now)
 
-    # ---- exit: SL (taker) or TP (maker) -----------------------------------
+    # ---- exit: SL (taker, time-tightened) or TP (maker) --------------------
 
-    def _check_sl(self):
+    def _check_sl(self, now: float):
         pos = self.s.position
+        elapsed = max(0.0, now - pos.entry_ts)
+        step_idx = sl_step_index_for_elapsed(elapsed)
+        sl_price = sl_price_for_elapsed(elapsed)
+
+        if step_idx != pos.sl_step_index:
+            pos.sl_step_index = step_idx
+            self._log("SL_STEP", side=pos.side.value, price=sl_price,
+                       note=(f"stop loss tightened to {sl_price} "
+                             f"({int(elapsed)}s since entry)"))
+
         current_bid = self.s.up_bid if pos.side == Side.UP else self.s.down_bid
-        if current_bid is not None and current_bid <= config.ENGINE2_SL_PRICE:
+        if current_bid is not None and current_bid <= sl_price:
             self._close_taker(pos, price=current_bid, reason="SL_FILL",
-                               note_prefix="stop loss hit")
+                               note_prefix=f"stop loss hit (tightened to {sl_price} at {int(elapsed)}s)")
             self.s.total_sl_fills += 1
 
     def _check_tp(self):
@@ -286,10 +331,22 @@ class Engine:
             market_value = pos.shares * mark_for_calc
             unrealized_pnl = market_value - pos.cost
             open_market_value = market_value
+
+            elapsed = max(0.0, time.time() - pos.entry_ts)
+            current_sl = sl_price_for_elapsed(elapsed)
+            step_idx = sl_step_index_for_elapsed(elapsed)
+            schedule = config.ENGINE2_SL_SCHEDULE
+            next_sl_change = None
+            if step_idx + 1 < len(schedule):
+                next_threshold, next_price = schedule[step_idx + 1]
+                next_sl_change = {"in_seconds": round(next_threshold - elapsed, 1), "price": next_price}
+
             open_position = {
                 "side": pos.side.value, "entry_price": pos.entry_price, "shares": round(pos.shares, 4),
                 "cost": round(pos.cost, 4), "tp_price": config.ENGINE2_TP_PRICE,
-                "sl_price": config.ENGINE2_SL_PRICE,
+                "sl_price": current_sl,
+                "seconds_since_entry": round(elapsed, 1),
+                "next_sl_change": next_sl_change,
                 "mark_price": mark, "unrealized_pnl": round(unrealized_pnl, 4),
             }
 
@@ -339,7 +396,8 @@ class Engine:
             "def": {
                 "trigger_price": config.ENGINE2_TRIGGER_PRICE,
                 "tp_price": config.ENGINE2_TP_PRICE,
-                "sl_price": config.ENGINE2_SL_PRICE,
+                "sl_price": config.ENGINE2_SL_SCHEDULE[0][1],
+                "sl_schedule": [{"after_seconds": t, "price": p} for t, p in config.ENGINE2_SL_SCHEDULE],
                 "base_usd": config.ENGINE2_BASE_USD,
                 "max_martingale_level": config.ENGINE2_MAX_MARTINGALE_LEVEL,
             },
