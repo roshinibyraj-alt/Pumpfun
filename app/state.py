@@ -54,6 +54,7 @@ class BotState:
         if self.current_window is None or window.slug != self.current_window.slug:
             await self._roll_window(window)
 
+        # CLOB order book only -- no Gamma price fallback.
         up_bid, up_ask = await self.client.get_book(self.current_window.token_up)
         down_bid, down_ask = await self.client.get_book(self.current_window.token_down)
         self.last_up_bid, self.last_up_ask = up_bid, up_ask
@@ -93,14 +94,10 @@ class BotState:
         self.engine.reset_for_window(new_window)
 
     def _infer_winner(self) -> Optional[Side]:
-        """The sole outcome source: whichever side's last observed CLOB
-        midpoint (up to POLL_INTERVAL_SECONDS stale) was higher when the
-        window rolled over. This is a live-market read, not Polymarket's
-        settled resolution -- it can occasionally disagree with the real
-        outcome if the last tick was noisy or a beat late. Traded off
-        deliberately for simplicity/determinism over that small accuracy
-        gap; see fetch_resolution() in polymarket_client.py if you want
-        to reintroduce real-resolution settlement later."""
+        """Sole outcome source: whichever side's last observed CLOB midpoint
+        was higher when the window rolled over -- a live-market read, not
+        Polymarket's settled resolution. See fetch_resolution() in
+        polymarket_client.py if you want real-resolution settlement instead."""
         up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
         down_mid = self._midpoint(self.last_down_bid, self.last_down_ask)
         if up_mid is None or down_mid is None:
@@ -132,11 +129,7 @@ class BotState:
                 {"ts": p.ts, "up": p.up, "down": p.down}
                 for p in list(self.price_history)[-120:]
             ],
-            "pnl_total": round(eng["total_pnl"], 2),
-            # Demo capital: this is the single balance the whole app
-            # tracks -- see engine.py / config.STARTING_CAPITAL. Exposed
-            # at the top level too so the dashboard can feature it
-            # prominently without digging into the engine block.
+            "pnl_total": round(eng["realized_pnl"], 2),
             "demo_capital": {
                 "balance": eng["balance"],
                 "starting_capital": eng["starting_capital"],
