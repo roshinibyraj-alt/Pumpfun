@@ -3,7 +3,7 @@ Central configuration for the BTC 5-min up/down bot.
 
 Single engine -- two fully independent ladders (one per side, UP and
 DOWN never affect each other), each with two "zones" of resting limit
-buys and one dynamically-requoted limit sell:
+buys and universal TP at 0.99 (redeem $1.00/share):
 
 ZONE A (0.40 -> 0.10): placed all at once, immediately, the instant the
 window opens -- no trigger needed:
@@ -24,20 +24,12 @@ Both zones are always live at once -- nothing about one disables the
 other. All buy rungs are maker limit orders (fill at their own exact
 price, no fee) the moment that side's ask reaches them.
 
-Exit: the instant ANY rung fills (zone A or B), recompute the average
-entry price across every share held so far on that side, cancel the
-currently-resting sell order (if any), and place a fresh resting limit
-sell at (avg_entry + SELL_OFFSET) for the full held size. This can move
-the sell price either direction on a later fill -- a Zone B fill (higher
-price) pulls the average up, a Zone A fill (lower price) pulls it down.
-It's a full re-quote each time, not a one-way ratchet. There is no
-stop-loss anywhere in this design.
+Zone B activates 2 minutes (120s) after window opens.
 
-If the sell fills, that side is flat again but its still-resting
-(unfilled) buy rungs stay live -- a later fill can start a fresh
-accumulation / sell-requote cycle within the same window.
+Universal TP at 0.99: if mid >= 0.99, redeem all held shares at
+$1.00/share (fee-free). No stop-loss.
 
-Window close: cancel any still-resting buy/sell orders (no penalty) and
+Window close: cancel any still-resting buy orders (no penalty) and
 force a taker close (real fee, real depth-weighted price) on any shares
 still held.
 """
@@ -70,8 +62,6 @@ ZONE_B_RUNGS = [
 ]
 ZONE_B_DELAY_SECONDS = 120     # Zone B activates 2 minutes after window opens
 
-SELL_OFFSET = 0.10          # resting sell quoted at avg_entry + this, re-quoted after every fill
-SELL_PRICE_CAP = 0.99       # never quote a sell at/above this, regardless of avg entry
 
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 

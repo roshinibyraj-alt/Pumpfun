@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Two-zone ladder, dynamic sell — BTC 5m bot</title>
+<title>Two-zone ladder, TP 0.99 — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -58,7 +58,6 @@
   .gauge-mark.buy-resting{background:var(--amber);} .gauge-mark.buy-resting .lbl{color:var(--amber);}
   .gauge-mark.buy-filled{background:#3d5a52; opacity:.6;} .gauge-mark.buy-filled .lbl{color:#3d5a52; top:auto; bottom:-17px;}
   .gauge-mark.buy-cancelled{background:var(--faint); opacity:.35;} .gauge-mark.buy-cancelled .lbl{color:var(--faint); top:auto; bottom:-17px;}
-  .gauge-mark.sell-resting{background:var(--mint);} .gauge-mark.sell-resting .lbl{color:var(--mint);}
   .gauge-bidask{font-family:var(--mono); font-size:10.5px; color:var(--faint); display:flex; justify-content:space-between; margin-top:2px;}
   .gauge-legend{display:flex; gap:16px; flex-wrap:wrap; font-family:var(--mono); font-size:10px; color:var(--muted); padding-top:14px; border-top:1px solid var(--line);}
   .gauge-legend span{display:flex; align-items:center; gap:5px;}
@@ -134,9 +133,7 @@
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
   .log-row .ev.RUNG_PLACED{color:var(--amber);}
   .log-row .ev.RUNG_FILL{color:var(--mint);}
-  .log-row .ev.SELL_PLACED{color:var(--violet);}
-  .log-row .ev.SELL_CANCELLED{color:var(--faint);}
-  .log-row .ev.SELL_FILL{color:var(--mint);}
+
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
   .log-row .ev.NO_LIQUIDITY{color:var(--amber);}
   .log-row .ev.HALTED{color:var(--coral);}
@@ -150,8 +147,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Two-zone ladder, dynamic sell</h1>
-      <div class="sub">BTC 5m · Zone A 0.40→0.10 (immediate) · Zone B 0.60→0.80 (after 2min) · TP 0.99 · sell avg+0.10 · no SL</div>
+      <h1>Two-zone ladder, TP 0.99</h1>
+      <div class="sub">BTC 5m · Zone A 0.40→0.10 (immediate) · Zone B 0.60→0.80 (after 2min) · TP 0.99 · no SL</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -179,7 +176,7 @@
     <div class="gauge-legend">
       <span><i style="background:var(--amber);"></i>resting buy rung</span>
       <span><i style="background:#3d5a52;"></i>filled buy rung</span>
-      <span><i style="background:var(--mint);"></i>resting sell (avg entry + 0.10)</span>
+
     </div>
   </div>
 
@@ -233,9 +230,7 @@ function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, book, 
     const cls = o.status === 'filled' ? 'filled' : (o.status === 'cancelled' ? 'cancelled' : 'resting');
     marks += `<div class="gauge-mark buy-${cls}" style="left:${o.price*100}%"><span class="lbl">${fmtP(o.price)}</span></div>`;
   });
-  if(book && book.sell_order && book.sell_order.status === 'resting'){
-    marks += `<div class="gauge-mark sell-resting" style="left:${book.sell_order.price*100}%"><span class="lbl">${fmtP(book.sell_order.price)}</span></div>`;
-  }
+
   track.innerHTML = marks;
 }
 
@@ -291,14 +286,15 @@ function renderEngineCard(e){
     ['Zone A (immediate)', e.def.zone_a.map(([p,sh])=>`${p}@${sh}sh`).join(', ')],
     ['Zone B (after '+(e.def.zone_b_delay/60)+'min)', e.def.zone_b.map(([t,p,sh])=>`${p}@${sh}sh (at ${t})`).join(', ')],
     ['TP', `0.99 (redeem $1.00/share)`],
-    ['Sell re-quote', `avg entry + ${e.def.sell_offset}`],
+
+
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   function sideBox(book){
     if(!book) return `<div class="position-box empty">no data</div>`;
     const sideColor = book.side==='UP' ? 'var(--mint)' : 'var(--coral)';
     const heldText = book.shares_held > 0 ? `${fmtSh(book.shares_held)}sh @ avg ${fmtP(book.avg_entry)}` : 'no shares held';
-    const sellText = (book.sell_order && book.sell_order.status==='resting') ? `resting @ ${fmtP(book.sell_order.price)}` : '—';
+
     const ordersHtml = (book.orders||[]).map(o => `
       <div class="rung-row ${o.status}">
         <span class="zone ${o.zone}">Z${o.zone}</span>
@@ -315,7 +311,7 @@ function renderEngineCard(e){
         <div class="position-grid">
           <div><div class="k">Held</div><div class="v">${heldText}</div></div>
           <div><div class="k">Mark</div><div class="v">${fmtP(book.mark_price)}</div></div>
-          <div><div class="k">Sell quote</div><div class="v">${sellText}</div></div>
+
           <div><div class="k">Mkt value</div><div class="v">${book.market_value!=null?fmt$(book.market_value):'—'}</div></div>
         </div>
         <div class="position-pnl-row">
@@ -342,9 +338,9 @@ function renderEngineCard(e){
 
 function renderStats(e){
   const tiles = [
-    ['total_buy_fills','buy fills',''], ['total_sell_fills','sell fills','win'],
-    ['total_requotes','sell re-quotes',''], ['total_forced_closes','forced close',''],
+    ['total_buy_fills','buy fills',''], ['total_forced_closes','forced close',''],
     ['total_illiquid_skips','illiquid skips',''], ['no_trade_windows','no-trade',''],
+    ['wins','wins','win'], ['losses','losses',''],
     ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {

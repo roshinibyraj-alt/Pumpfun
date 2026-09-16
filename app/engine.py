@@ -2,8 +2,7 @@
 Trading engine -- two fully independent per-side ladders (UP and DOWN),
 each with a zone of buy rungs placed immediately at window open, a zone
 of buy rungs placed as price shows strength, and one dynamically
-re-quoted limit sell that recomputes to (avg_entry + 0.10) after every
-fill. See app/config.py for the full strategy write-up.
+universal TP at 0.99 (redeem $1.00/share, fee-free). See app/config.py for the full strategy write-up.
 """
 import time
 from dataclasses import dataclass, field
@@ -24,8 +23,8 @@ def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price:
     """Volume-weighted average price to actually trade `shares` against a
     real order book, instead of assuming the whole size fills at the
     single best quote. Used only for the TAKER forced-close at window
-    end -- every buy rung and the dynamic sell are resting maker orders
-    that fill at their own exact limit price, no walk needed.
+    end -- every buy rung is a resting maker order that fills at its
+    own exact limit price, no walk needed.
 
     - levels is None -> no depth data this tick; fall back to filling
       the whole size at `fallback_price`.
@@ -86,17 +85,11 @@ class GridOrder:
 
 
 @dataclass
-class SellOrder:
-    price: float
-    shares: float
-    status: str = "resting"   # resting | filled | cancelled
-
 
 @dataclass
 class SideBook:
     buy_orders: List[GridOrder] = field(default_factory=list)
     zone_b_placed: set = field(default_factory=set)   # trigger prices already fired (one-shot)
-    sell_order: Optional[SellOrder] = None
     shares_held: float = 0.0
     cost_basis: float = 0.0
 
@@ -118,8 +111,6 @@ class EngineState:
     down_book: SideBook = field(default_factory=SideBook)
 
     total_buy_fills: int = 0
-    total_sell_fills: int = 0
-    total_requotes: int = 0
     total_forced_closes: int = 0
     total_illiquid_skips: int = 0
     no_trade_windows: int = 0
@@ -130,7 +121,7 @@ class EngineState:
 
 
 class Engine:
-    """Two-zone ladder with a dynamically re-quoted sell, driven off a
+    """Two-zone ladder with universal TP at 0.99, driven off a
     single shared capital pool. Kept as the class name `Engine` /
     constructed the same way (Engine(broker)) so app/state.py doesn't
     need structural changes."""
@@ -164,7 +155,7 @@ class Engine:
         self._log("WINDOW_OPEN", note=(
             f"zone A (0.40/0.30/0.20/0.10) placed on both sides immediately, sizes 50/100/200/400. "
             f"Zone B (0.60/0.70/0.80) activates after 120s, placed as each trigger (0.70/0.80/0.90) is reached, sizes 100/200/400. "
-            f"No SL. Universal TP 0.99 (redeem $1.00/share). Sell re-quoted to avg_entry+{config.SELL_OFFSET} after every fill."
+            f"No SL. Universal TP 0.99 (redeem $1.00/share). Positions ride to TP or resolution."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -202,15 +193,9 @@ class Engine:
 
     def _process_side(self, side: Side, now: float):
         book = self._book_for(side)
-
         self._check_tp(side, book)
         self._maybe_place_zone_b(side, book, now)
-
-        any_fill = self._check_buy_fills(side, book, now)
-        if any_fill:
-            self._requote_sell(side, book, now)
-
-        self._check_sell_fill(side, book, now)
+        self._check_buy_fills(side, book, now)
 
     # ---- universal TP at 0.99 ---------------------------------------------
 
@@ -226,7 +211,6 @@ class Engine:
         self.capital.balance += proceeds
         self.s.total_pnl += pnl
         self.s.last_window_pnl += pnl
-        self.s.total_sell_fills += 1
         if pnl >= 0:
             self.s.wins += 1
         else:
@@ -237,7 +221,6 @@ class Engine:
             f"at $1.00/share, pnl ${pnl:.4f}"))
         book.shares_held = 0.0
         book.cost_basis = 0.0
-        book.sell_order = None
         self.capital.check_halt()
 
     # ---- zone B: one-shot trigger-based placement (active after 2min) ------
@@ -285,52 +268,7 @@ class Engine:
                     return any_fill
         return any_fill
 
-    # ---- dynamic sell re-quote ------------------------------------------------
 
-    def _requote_sell(self, side: Side, book: SideBook, now: float):
-        if book.shares_held <= 0:
-            return
-        if book.sell_order is not None and book.sell_order.status == "resting":
-            book.sell_order.status = "cancelled"
-            self._log("SELL_CANCELLED", side=side.value, price=book.sell_order.price,
-                       note=f"{side.value}: cancelling resting sell @ {book.sell_order.price} to re-quote after a new fill")
-
-        avg_entry = book.cost_basis / book.shares_held
-        target = min(round(avg_entry + config.SELL_OFFSET, 4), config.SELL_PRICE_CAP)
-        book.sell_order = SellOrder(price=target, shares=book.shares_held)
-        self.s.total_requotes += 1
-        self._log("SELL_PLACED", side=side.value, price=target, shares=book.shares_held,
-                   note=(f"{side.value}: resting sell re-quoted @ {target} for {book.shares_held:.0f}sh "
-                         f"(avg entry {avg_entry:.4f} + {config.SELL_OFFSET})"))
-
-    # ---- sell fill -------------------------------------------------------------
-
-    def _check_sell_fill(self, side: Side, book: SideBook, now: float):
-        order = book.sell_order
-        if order is None or order.status != "resting":
-            return
-        bid = self._bid_for(side)
-        if bid is None or bid < order.price:
-            return
-        order.status = "filled"
-        proceeds = order.shares * order.price
-        pnl = proceeds - book.cost_basis
-        self.capital.balance += proceeds
-        self.s.total_pnl += pnl
-        self.s.last_window_pnl += pnl
-        self.s.total_sell_fills += 1
-        if pnl >= 0:
-            self.s.wins += 1
-        else:
-            self.s.losses += 1
-        self._log("SELL_FILL", side=side.value, price=order.price, shares=order.shares, pnl=pnl, fee=0.0,
-                   note=(f"{side.value}: resting sell filled (maker, no fee): {order.shares:.0f}sh @ {order.price} "
-                         f"(cost basis ${book.cost_basis:.2f}, pnl ${pnl:.4f}) -- flat again, "
-                         f"remaining resting buy rungs stay live"))
-        book.shares_held = 0.0
-        book.cost_basis = 0.0
-        book.sell_order = None
-        self.capital.check_halt()
 
     # ---- window close -------------------------------------------------------
 
@@ -346,8 +284,6 @@ class Engine:
                 for order in book.buy_orders:
                     if order.status == "resting":
                         order.status = "cancelled"
-                if book.sell_order is not None and book.sell_order.status == "resting":
-                    book.sell_order.status = "cancelled"
 
                 if book.shares_held > 0:
                     any_activity = True
@@ -397,13 +333,9 @@ class Engine:
         orders = [{
             "price": o.price, "shares": o.shares, "zone": o.zone, "status": o.status,
         } for o in book.buy_orders]
-        sell_payload = None
-        if book.sell_order is not None:
-            sell_payload = {"price": book.sell_order.price, "shares": book.sell_order.shares, "status": book.sell_order.status}
         return {
             "side": side.value,
             "orders": orders,
-            "sell_order": sell_payload,
             "resting_count": sum(1 for o in book.buy_orders if o.status == "resting"),
             "filled_count": sum(1 for o in book.buy_orders if o.status == "filled"),
             "shares_held": book.shares_held,
@@ -429,7 +361,7 @@ class Engine:
             status = "watching"
 
         return {
-            "engine": "LADDER2", "label": "Two-zone ladder, dynamic re-quoted sell",
+            "engine": "LADDER2", "label": "Two-zone ladder, universal TP 0.99",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -446,9 +378,7 @@ class Engine:
             "down_book": down,
 
             "total_buy_fills": self.s.total_buy_fills,
-            "total_sell_fills": self.s.total_sell_fills,
-            "total_requotes": self.s.total_requotes,
-            "total_forced_closes": self.s.total_forced_closes,
+                        "total_forced_closes": self.s.total_forced_closes,
             "total_illiquid_skips": self.s.total_illiquid_skips,
             "no_trade_windows": self.s.no_trade_windows,
             "wins": self.s.wins,
@@ -462,6 +392,5 @@ class Engine:
                 "zone_b": config.ZONE_B_RUNGS,
                 "zone_b_delay": config.ZONE_B_DELAY_SECONDS,
                 "tp_price": 0.99,
-                "sell_offset": config.SELL_OFFSET,
             },
         }
