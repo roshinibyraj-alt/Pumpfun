@@ -68,6 +68,7 @@ ZONE_B_RUNGS = [
     (0.80, 0.70, 200.0),
     (0.90, 0.80, 400.0),
 ]
+ZONE_B_DELAY_SECONDS = 120     # Zone B activates 2 minutes after window opens
 
 SELL_OFFSET = 0.10          # resting sell quoted at avg_entry + this, re-quoted after every fill
 SELL_PRICE_CAP = 0.99       # never quote a sell at/above this, regardless of avg entry

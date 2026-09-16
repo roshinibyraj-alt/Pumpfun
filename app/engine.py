@@ -163,8 +163,8 @@ class Engine:
 
         self._log("WINDOW_OPEN", note=(
             f"zone A (0.40/0.30/0.20/0.10) placed on both sides immediately, sizes 50/100/200/400. "
-            f"Zone B (0.60/0.70/0.80) placed as each trigger (0.70/0.80/0.90) is reached, sizes 100/200/400. "
-            f"No SL. Sell re-quoted to avg_entry+{config.SELL_OFFSET} after every fill."
+            f"Zone B (0.60/0.70/0.80) activates after 120s, placed as each trigger (0.70/0.80/0.90) is reached, sizes 100/200/400. "
+            f"No SL. Universal TP 0.99 (redeem $1.00/share). Sell re-quoted to avg_entry+{config.SELL_OFFSET} after every fill."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -203,6 +203,7 @@ class Engine:
     def _process_side(self, side: Side, now: float):
         book = self._book_for(side)
 
+        self._check_tp(side, book)
         self._maybe_place_zone_b(side, book, now)
 
         any_fill = self._check_buy_fills(side, book, now)
@@ -211,9 +212,39 @@ class Engine:
 
         self._check_sell_fill(side, book, now)
 
-    # ---- zone B: one-shot trigger-based placement --------------------------
+    # ---- universal TP at 0.99 ---------------------------------------------
+
+    def _check_tp(self, side: Side, book: SideBook):
+        """If mid >= 0.99, redeem all held shares at $1.00/share (fee-free)."""
+        if book.shares_held <= 0:
+            return
+        mid = self._mid_for(side)
+        if mid is None or mid < 0.99:
+            return
+        proceeds = book.shares_held * 1.0   # $1.00/share, fee-free
+        pnl = proceeds - book.cost_basis
+        self.capital.balance += proceeds
+        self.s.total_pnl += pnl
+        self.s.last_window_pnl += pnl
+        self.s.total_sell_fills += 1
+        if pnl >= 0:
+            self.s.wins += 1
+        else:
+            self.s.losses += 1
+        self._log("TP_HIT", side=side.value, price=1.0, shares=book.shares_held,
+                  pnl=pnl, fee=0.0, note=(
+            f"{side.value}: universal TP at 0.99 -- redeemed {book.shares_held:.0f}sh "
+            f"at $1.00/share, pnl ${pnl:.4f}"))
+        book.shares_held = 0.0
+        book.cost_basis = 0.0
+        book.sell_order = None
+        self.capital.check_halt()
+
+    # ---- zone B: one-shot trigger-based placement (active after 2min) ------
 
     def _maybe_place_zone_b(self, side: Side, book: SideBook, now: float):
+        if now < self.s.window.open_ts + config.ZONE_B_DELAY_SECONDS:
+            return
         mid = self._mid_for(side)
         if mid is None:
             return
