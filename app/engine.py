@@ -460,6 +460,8 @@ class Engine:
             "def": {
                 "zone_a": config.ZONE_A_RUNGS,
                 "zone_b": config.ZONE_B_RUNGS,
+                "zone_b_delay": config.ZONE_B_DELAY_SECONDS,
+                "tp_price": 0.99,
                 "sell_offset": config.SELL_OFFSET,
             },
         }
