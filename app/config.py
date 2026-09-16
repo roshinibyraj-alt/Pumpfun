@@ -1,82 +1,89 @@
 """
-Central configuration, all overridable via environment variables
-(set these in Railway's Variables tab).
+Central configuration for the BTC 5-min up/down bot.
+
+Single engine -- two fully independent ladders (one per side, UP and
+DOWN never affect each other), each with two "zones" of resting limit
+buys and one dynamically-requoted limit sell:
+
+ZONE A (0.40 -> 0.10): placed all at once, immediately, the instant the
+window opens -- no trigger needed:
+    0.40 -> 50 shares
+    0.30 -> 100 shares
+    0.20 -> 200 shares
+    0.10 -> 400 shares
+
+ZONE B (0.60 -> 0.90): each rung is placed ONCE, only after its own
+trigger price is first reached (checked independently every tick, not
+sequentially -- reaching 0.90 doesn't require 0.70 or 0.80 to have
+triggered first):
+    price reaches 0.70 -> place resting buy @ 0.60, 100 shares
+    price reaches 0.80 -> place resting buy @ 0.70, 200 shares
+    price reaches 0.90 -> place resting buy @ 0.80, 400 shares
+
+Both zones are always live at once -- nothing about one disables the
+other. All buy rungs are maker limit orders (fill at their own exact
+price, no fee) the moment that side's ask reaches them.
+
+Exit: the instant ANY rung fills (zone A or B), recompute the average
+entry price across every share held so far on that side, cancel the
+currently-resting sell order (if any), and place a fresh resting limit
+sell at (avg_entry + SELL_OFFSET) for the full held size. This can move
+the sell price either direction on a later fill -- a Zone B fill (higher
+price) pulls the average up, a Zone A fill (lower price) pulls it down.
+It's a full re-quote each time, not a one-way ratchet. There is no
+stop-loss anywhere in this design.
+
+If the sell fills, that side is flat again but its still-resting
+(unfilled) buy rungs stay live -- a later fill can start a fresh
+accumulation / sell-requote cycle within the same window.
+
+Window close: cancel any still-resting buy/sell orders (no penalty) and
+force a taker close (real fee, real depth-weighted price) on any shares
+still held.
 """
 import os
-from dataclasses import dataclass
-from typing import Optional
-
-
-def _f(name: str, default: float) -> float:
-    return float(os.getenv(name, default))
-
-
-def _i(name: str, default: int) -> int:
-    return int(os.getenv(name, default))
-
 
 # ---- Mode -------------------------------------------------------------
-PAPER_MODE = True
+TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 
-# ---- Window -------------------------------------------------------------
-WINDOW_SECONDS = _i("WINDOW_SECONDS", 300)      # 5-minute windows
-WINDOW_LABEL = os.getenv("WINDOW_LABEL", "5m")
-ASSET = os.getenv("ASSET", "btc")                # BTC only
+# ---- Market discovery / pricing ---------------------------------------
+# CLOB only -- no Gamma price fallback anywhere in this app. Gamma is
+# used purely for one-time window metadata (slug -> token ids) in
+# polymarket_client.py; every live price/book read goes to CLOB.
+GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
+CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
+SLUG_PREFIX = "btc-updown-5m-"
+WINDOW_SECONDS = 300
 
-# ---- Capital -------------------------------------------------------------
-STARTING_CAPITAL_PER_ENGINE = _f("STARTING_CAPITAL_PER_ENGINE", 500.0)
-SHARES_PER_TRADE = _f("SHARES_PER_TRADE", 100.0)
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Take-profit (universal) --------------------------------------------------
-# Special rule from the spec: hitting TP is booked as a clean $1.00/share
-# payout with NO exit fee -- treated identically to a winning resolution,
-# not an actual market sale at 0.99. Applies to all 9 engines.
-TAKE_PROFIT_TRIGGER_PRICE = _f("TAKE_PROFIT_TRIGGER_PRICE", 0.99)
-TAKE_PROFIT_PAYOUT_PRICE = _f("TAKE_PROFIT_PAYOUT_PRICE", 1.00)
+# ---- Two-zone ladder + dynamic re-quoted sell ----------------------------
+# (price, shares) -- placed immediately at window open, both sides.
+ZONE_A_RUNGS = [(0.40, 50.0), (0.30, 100.0), (0.20, 200.0), (0.10, 400.0)]
 
-# ---- Fees -------------------------------------------------------------------
-FALLBACK_TAKER_FEE_RATE = _f("FALLBACK_TAKER_FEE_RATE", 0.07)
-
-# ---- Resolution (hold-to-close path) ------------------------------------------
-GAMMA_RESOLUTION_CONFIDENCE = _f("GAMMA_RESOLUTION_CONFIDENCE", 0.99)
-GAMMA_RESOLUTION_TIMEOUT_SECONDS = _f("GAMMA_RESOLUTION_TIMEOUT_SECONDS", 90.0)
-CLOB_FALLBACK_PRICE_THRESHOLD = _f("CLOB_FALLBACK_PRICE_THRESHOLD", 0.97)
-
-# ---- Polling ---------------------------------------------------------------
-POLL_INTERVAL_SECONDS = _f("POLL_INTERVAL_SECONDS", 1.0)
-RESOLUTION_POLL_SECONDS = _f("RESOLUTION_POLL_SECONDS", 1.5)
-RESOLUTION_POLL_TIMEOUT_SECONDS = _f("RESOLUTION_POLL_TIMEOUT_SECONDS", 180.0)
-
-# ---- Market discovery ---------------------------------------------------------
-GAMMA_BASE = os.getenv("GAMMA_BASE", "https://gamma-api.polymarket.com")
-CLOB_BASE = os.getenv("CLOB_BASE", "https://clob.polymarket.com")
-
-# ---- Storage ---------------------------------------------------------------
-DB_PATH = os.getenv("DB_PATH", "/data/nine_engine_bot_state.db" if os.path.isdir("/data") else "nine_engine_bot_state.db")
-
-# ---- Web server -------------------------------------------------------------
-PORT = _i("PORT", 8080)
-
-
-# ---- Engine definitions -------------------------------------------------------
-@dataclass(frozen=True)
-class EngineConfig:
-    label: str
-    kind: str                      # "limit_cancel_skip" (E1-E5) or "taker_momentum" (E6-E9)
-    price: float                   # entry limit price (1-5) or momentum trigger price (6-9)
-    skip_length: Optional[int]     # only for limit_cancel_skip
-    sl_price: Optional[float]      # only for taker_momentum
-    color: str                     # ANSI color name for logging
-
-
-ENGINES = [
-    EngineConfig(label="E1", kind="limit_cancel_skip", price=0.10, skip_length=5, sl_price=None, color="cyan"),
-    EngineConfig(label="E2", kind="limit_cancel_skip", price=0.20, skip_length=4, sl_price=None, color="magenta"),
-    EngineConfig(label="E3", kind="limit_cancel_skip", price=0.30, skip_length=3, sl_price=None, color="green"),
-    EngineConfig(label="E4", kind="limit_cancel_skip", price=0.40, skip_length=2, sl_price=None, color="yellow"),
-    EngineConfig(label="E5", kind="limit_cancel_skip", price=0.50, skip_length=1, sl_price=None, color="blue"),
-    EngineConfig(label="E6", kind="taker_momentum", price=0.60, skip_length=None, sl_price=0.20, color="red"),
-    EngineConfig(label="E7", kind="taker_momentum", price=0.70, skip_length=None, sl_price=0.30, color="bright_magenta"),
-    EngineConfig(label="E8", kind="taker_momentum", price=0.80, skip_length=None, sl_price=0.40, color="bright_cyan"),
-    EngineConfig(label="E9", kind="taker_momentum", price=0.90, skip_length=None, sl_price=0.50, color="white"),
+# (trigger_price, order_price, shares) -- order_price rung is placed
+# once trigger_price is first reached, each trigger independent.
+ZONE_B_RUNGS = [
+    (0.70, 0.60, 100.0),
+    (0.80, 0.70, 200.0),
+    (0.90, 0.80, 400.0),
 ]
+
+SELL_OFFSET = 0.10          # resting sell quoted at avg_entry + this, re-quoted after every fill
+SELL_PRICE_CAP = 0.99       # never quote a sell at/above this, regardless of avg entry
+
+STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
+
+# ---- Trading fees -----------------------------------------------------
+# Every buy rung and the dynamic sell are resting MAKER limit orders --
+# they fill at their own limit price with no fee. Only a forced
+# window-end close is a TAKER market order and pays the fee for real,
+# priced by walking real book depth. Verify against
+# GET https://clob.polymarket.com/fee-rate?token_id=... before trading
+# real money.
+APPLY_TAKER_FEES = True
+TAKER_FEE_RATE = 0.07
+TAKER_FEE_EXPONENT = 1
+
+# ---- Misc -----------------------------------------------------------------
+LOG_MAX_ENTRIES = 500
