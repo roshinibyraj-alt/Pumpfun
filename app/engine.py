@@ -1,8 +1,9 @@
 """
-Trading engine -- two fully independent per-side ladders (UP and DOWN),
-each with a zone of buy rungs placed immediately at window open, a zone
-of buy rungs placed as price shows strength, and one dynamically
-universal TP at 0.99 (redeem $1.00/share, fee-free). See app/config.py for the full strategy write-up.
+Trading engine -- two fully independent per-side momentum ladders (UP and
+DOWN), each with a zone of buy-strength entries placed immediately at
+window open, a confirmation zone added as price shows strength, and a
+universal TP at 0.99 (redeem $1.00/share, fee-free). See app/config.py
+for the full strategy write-up.
 """
 import time
 from dataclasses import dataclass, field
@@ -153,9 +154,11 @@ class Engine:
                              + ", ".join(f"{p}@{sh:.0f}sh" for p, sh in config.ZONE_A_RUNGS)))
 
         self._log("WINDOW_OPEN", note=(
-            f"zone A (0.40/0.30/0.20/0.10) placed on both sides immediately, sizes 50/100/200/400. "
-            f"Zone B (0.60/0.70/0.80) activates after 120s, placed as each trigger (0.70/0.80/0.90) is reached, sizes 100/200/400. "
-            f"No SL. Universal TP 0.99 (redeem $1.00/share). Positions ride to TP or resolution."
+            f"momentum zone A (0.60/0.70/0.80/0.90) placed on both sides immediately, "
+            f"sizes 50/100/200/400. Confirmation zone B activates after 120s and adds "
+            f"entries at 0.70/0.80/0.90 after strength triggers 0.60/0.70/0.80. "
+            f"Entries fill on rising ask strength. No SL. Universal TP 0.99 "
+            f"(redeem $1.00/share). Positions ride to TP or resolution."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -223,7 +226,7 @@ class Engine:
         book.cost_basis = 0.0
         self.capital.check_halt()
 
-    # ---- zone B: one-shot trigger-based placement (active after 2min) ------
+    # ---- zone B: one-shot strength-triggered placement (active after 2min)
 
     def _maybe_place_zone_b(self, side: Side, book: SideBook, now: float):
         if now < self.s.window.open_ts + config.ZONE_B_DELAY_SECONDS:
@@ -238,10 +241,10 @@ class Engine:
                 book.zone_b_placed.add(trigger)
                 book.buy_orders.append(GridOrder(price=order_price, shares=shares, zone="B"))
                 self._log("RUNG_PLACED", side=side.value, price=order_price, shares=shares,
-                           note=(f"{side.value}: {trigger} reached -- placing zone B resting buy "
-                                 f"@ {order_price}, {shares:.0f}sh"))
+                           note=(f"{side.value}: strength trigger {trigger} reached -- placing "
+                                 f"zone B momentum entry @ {order_price}, {shares:.0f}sh"))
 
-    # ---- buy fills -----------------------------------------------------------
+    # ---- momentum entry fills -----------------------------------------------
 
     def _check_buy_fills(self, side: Side, book: SideBook, now: float) -> bool:
         ask = self._ask_for(side)
@@ -251,7 +254,9 @@ class Engine:
         for order in book.buy_orders:
             if order.status != "resting":
                 continue
-            if ask <= order.price:
+            # Reversed behavior: entries activate as the ask rises through
+            # the rung, rather than filling when price falls to it.
+            if ask >= order.price:
                 order.status = "filled"
                 cost = order.shares * order.price
                 self.capital.balance -= cost
@@ -260,9 +265,10 @@ class Engine:
                 self.s.total_buy_fills += 1
                 any_fill = True
                 self._log("RUNG_FILL", side=side.value, price=order.price, shares=order.shares, fee=0.0,
-                           note=(f"{side.value}: zone {order.zone} buy filled (maker, no fee): "
-                                 f"{order.shares:.0f}sh @ {order.price} -- now holds {book.shares_held:.0f}sh, "
-                                 f"cost basis ${book.cost_basis:.2f}"))
+                           note=(f"{side.value}: zone {order.zone} momentum entry filled "
+                                 f"(rising ask): {order.shares:.0f}sh @ {order.price} -- "
+                                 f"now holds {book.shares_held:.0f}sh, cost basis "
+                                 f"${book.cost_basis:.2f}"))
                 if self.capital.check_halt():
                     self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
                     return any_fill
@@ -361,7 +367,7 @@ class Engine:
             status = "watching"
 
         return {
-            "engine": "LADDER2", "label": "Two-zone ladder, universal TP 0.99",
+            "engine": "LADDER2", "label": "Two-zone momentum ladder, universal TP 0.99",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,

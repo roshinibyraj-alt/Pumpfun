@@ -1,28 +1,28 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single engine -- two fully independent ladders (one per side, UP and
-DOWN never affect each other), each with two "zones" of resting limit
-buys and universal TP at 0.99 (redeem $1.00/share):
+Single engine -- two fully independent momentum ladders (one per side,
+UP and DOWN never affect each other), each with two zones of buy-strength
+entries and universal TP at 0.99 (redeem $1.00/share):
 
-ZONE A (0.40 -> 0.10): placed all at once, immediately, the instant the
-window opens -- no trigger needed:
-    0.40 -> 50 shares
-    0.30 -> 100 shares
-    0.20 -> 200 shares
-    0.10 -> 400 shares
+ZONE A (0.60 -> 0.90): placed all at once, immediately, the instant the
+window opens. These are momentum entry rungs: they fill when the ask
+rises through each rung:
+    0.60 -> 50 shares
+    0.70 -> 100 shares
+    0.80 -> 200 shares
+    0.90 -> 400 shares
 
-ZONE B (0.60 -> 0.90): each rung is placed ONCE, only after its own
-trigger price is first reached (checked independently every tick, not
-sequentially -- reaching 0.90 doesn't require 0.70 or 0.80 to have
-triggered first):
-    price reaches 0.70 -> place resting buy @ 0.60, 100 shares
-    price reaches 0.80 -> place resting buy @ 0.70, 200 shares
-    price reaches 0.90 -> place resting buy @ 0.80, 400 shares
+ZONE B (confirmation entries): each rung is placed ONCE, only after its
+own strength trigger is first reached (checked independently every tick):
+    price reaches 0.60 -> place momentum buy @ 0.70, 100 shares
+    price reaches 0.70 -> place momentum buy @ 0.80, 200 shares
+    price reaches 0.80 -> place momentum buy @ 0.90, 400 shares
 
 Both zones are always live at once -- nothing about one disables the
-other. All buy rungs are maker limit orders (fill at their own exact
-price, no fee) the moment that side's ask reaches them.
+other. This is intentionally the reverse of the old dip-buy ladder:
+entries are activated by rising strength (`ask >= entry price`), not by
+falling price (`ask <= entry price`).
 
 Zone B activates 2 minutes (120s) after window opens.
 
@@ -49,16 +49,17 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Two-zone ladder + dynamic re-quoted sell ----------------------------
-# (price, shares) -- placed immediately at window open, both sides.
-ZONE_A_RUNGS = [(0.40, 50.0), (0.30, 100.0), (0.20, 200.0), (0.10, 400.0)]
+# ---- Two-zone momentum ladder ----------------------------------------------
+# (entry_price, shares) -- placed immediately at window open, both sides.
+# Entries fill when the ask rises through the rung.
+ZONE_A_RUNGS = [(0.60, 50.0), (0.70, 100.0), (0.80, 200.0), (0.90, 400.0)]
 
-# (trigger_price, order_price, shares) -- order_price rung is placed
-# once trigger_price is first reached, each trigger independent.
+# (strength_trigger, entry_price, shares) -- entry rung is placed once
+# the strength trigger is first reached; each trigger is independent.
 ZONE_B_RUNGS = [
-    (0.70, 0.60, 100.0),
-    (0.80, 0.70, 200.0),
-    (0.90, 0.80, 400.0),
+    (0.60, 0.70, 100.0),
+    (0.70, 0.80, 200.0),
+    (0.80, 0.90, 400.0),
 ]
 ZONE_B_DELAY_SECONDS = 120     # Zone B activates 2 minutes after window opens
 

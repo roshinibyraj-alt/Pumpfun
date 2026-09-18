@@ -147,8 +147,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Two-zone ladder, TP 0.99</h1>
-      <div class="sub">BTC 5m · Zone A 0.40→0.10 (immediate) · Zone B 0.60→0.80 (after 2min) · TP 0.99 · no SL</div>
+      <h1>Two-zone momentum ladder, TP 0.99</h1>
+      <div class="sub">BTC 5m · buy strength at 0.60→0.90 · confirmation entries after 2min · TP 0.99 · no SL</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -283,8 +283,8 @@ function renderEngineCard(e){
   const statusLabels = { watching:'watching', open:'position(s) open', halted:'halted' };
 
   const defRowsHtml = [
-    ['Zone A (immediate)', e.def.zone_a.map(([p,sh])=>`${p}@${sh}sh`).join(', ')],
-    ['Zone B (after '+(e.def.zone_b_delay/60)+'min)', e.def.zone_b.map(([t,p,sh])=>`${p}@${sh}sh (at ${t})`).join(', ')],
+    ['Zone A momentum entries (immediate)', e.def.zone_a.map(([p,sh])=>`${p}@${sh}sh`).join(', ')],
+    ['Zone B confirmation entries (after '+(e.def.zone_b_delay/60)+'min)', e.def.zone_b.map(([t,p,sh])=>`${p}@${sh}sh (at ${t})`).join(', ')],
     ['TP', `0.99 (redeem $1.00/share)`],
 
 

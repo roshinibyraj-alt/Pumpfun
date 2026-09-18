@@ -1,35 +1,31 @@
-# Two-zone ladder, dynamic re-quoted sell — BTC 5m bot
+# Two-zone momentum ladder — BTC 5m bot
 
 Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. UP and
-DOWN each run their own fully independent ladder of resting limit buys
-across two zones, with a single limit sell that re-quotes to
-`avg_entry + 0.10` after every fill.
+DOWN each run their own fully independent momentum ladder across two
+zones. This version buys strength instead of buying dips.
 
 ## Strategy
 
-**Zone A (0.40 → 0.10)** — placed all at once, immediately, the
-instant the window opens:
-- 0.40 → 50 shares
-- 0.30 → 100 shares
-- 0.20 → 200 shares
-- 0.10 → 400 shares
+**Zone A (0.60 → 0.90)** — placed all at once, immediately, the
+instant the window opens. Each entry fills when that side's ask rises
+through the rung:
+- 0.60 → 50 shares
+- 0.70 → 100 shares
+- 0.80 → 200 shares
+- 0.90 → 400 shares
 
-**Zone B (0.60 → 0.90)** — each rung placed once, only after its own
-trigger is first reached (checked independently every tick):
-- price reaches 0.70 → place resting buy @ 0.60, 100 shares
-- price reaches 0.80 → place resting buy @ 0.70, 200 shares
-- price reaches 0.90 → place resting buy @ 0.80, 400 shares
+**Zone B (confirmation entries)** — activated 2 minutes after window
+open. Each entry is placed once after its independent strength trigger:
+- price reaches 0.60 → place momentum entry @ 0.70, 100 shares
+- price reaches 0.70 → place momentum entry @ 0.80, 200 shares
+- price reaches 0.80 → place momentum entry @ 0.90, 400 shares
 
 Both zones are always live together — nothing about one disables the
-other.
+other. The entry condition is deliberately reversed from the former
+dip-buy ladder: `ask >= entry_price`, not `ask <= entry_price`.
 
-**Exit** — the instant ANY rung fills (zone A or B), recompute the
-average entry price across every share held on that side, cancel the
-currently-resting sell (if any), and place a fresh resting limit sell
-at `avg_entry + 0.10` for the full held size. A later fill can move
-this either direction: a Zone A fill (lower price) pulls the average
-(and the sell quote) down; a Zone B fill (higher price) pulls it up.
-**There is no stop-loss anywhere in this design.**
+**Exit** — when the side reaches 0.99, redeem all held shares at
+$1.00/share. **There is no stop-loss anywhere in this design.**
 
 If the sell fills, that side goes flat, but any still-resting
 (unfilled) buy rungs stay live — a later fill can start a fresh
@@ -51,26 +47,23 @@ Dashboard at http://localhost:8000
 
 ## Config knobs (`app/config.py`)
 
-- `ZONE_A_RUNGS`, `ZONE_B_RUNGS`, `SELL_OFFSET`, `SELL_PRICE_CAP`
+- `ZONE_A_RUNGS`, `ZONE_B_RUNGS`, `ZONE_B_DELAY_SECONDS`
 - `STARTING_CAPITAL` ($2000, single shared pool for both sides)
-- Taker fee constants (buy rungs and the sell are fee-free maker fills; only a forced window-end close pays the real taker fee)
+- Taker fee constants (momentum entries are simulated at their entry
+  price; only a forced window-end close pays the real taker fee)
 
 ## Notes / assumptions
 
-- All buy rungs and the dynamic sell are simulated as filling fully, at
-  their exact limit price, no fee, no slippage — the depth-aware
-  realistic-fill-price logic only applies to the forced taker close at
-  window end.
+- All momentum entries are simulated as filling fully at their exact
+  entry price, with no fee or slippage. The depth-aware realistic
+  fill-price logic only applies to the forced taker close at window end.
 - Zone B triggers are checked against that side's own **mid** price,
-  independently each tick — reaching 0.90 does not require 0.70 or
-  0.80 to have triggered first; all three can fire in the same tick if
+  independently each tick — reaching 0.80 does not require 0.60 or
+  0.70 to have triggered first; all three can fire in the same tick if
   price jumps far enough.
-- The sell price is capped at `SELL_PRICE_CAP` (0.99) regardless of
-  avg entry, so it's never quoted at an untradeable price ≥ 1.00.
-- After a full sell-out, a side's still-resting (never-filled) buy
-  rungs remain live for the rest of the window — a later dip or rally
-  can refill them and start a new accumulation/sell cycle.
-- Every buy-rung fill debits the capital balance immediately (verified
+- A side's still-resting (never-filled) momentum entries remain live for
+  the rest of the window — a later rally can fill them.
+- Every entry fill debits the capital balance immediately (verified
   explicitly in testing — this is the exact bug class that showed up
   in an earlier version of this bot, where fills updated share/cost
   tracking without moving real balance).
