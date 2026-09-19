@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Two-zone ladder, TP 0.99 — BTC 5m bot</title>
+<title>Previous-window momentum — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -20,7 +20,7 @@
   *{box-sizing:border-box;}
   body{margin:0; background:var(--ink); color:var(--text); font-family:var(--head);
     min-height:100vh; padding:14px; padding-bottom:56px; font-size:14px;}
-  .wrap{max-width:1180px; margin:0 auto; display:flex; flex-direction:column; gap:12px;}
+  .wrap{max-width:1080px; margin:0 auto; display:flex; flex-direction:column; gap:12px;}
 
   header{display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:2px 2px 4px;}
   header h1{font-size:17px; margin:0; font-weight:600;}
@@ -41,70 +41,72 @@
   .clock-row .countdown{font-family:var(--mono); font-size:30px; font-weight:600; letter-spacing:.5px;}
   .clock-row .countdown.hot{color:var(--amber);}
 
-  .gauge-panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; display:flex; flex-direction:column; gap:16px;}
+  .binance-card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px;}
+  .binance-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:14px;}
+  .binance-head h2{margin:0; font-size:12.5px; color:var(--muted); font-weight:600;}
+  .binance-conn{font-family:var(--mono); font-size:10.5px; display:flex; align-items:center; gap:6px;}
+  .binance-conn .dot{width:6px; height:6px;}
+  .signal-banner{padding:12px 14px; border-radius:10px; font-family:var(--mono); font-size:12.5px; font-weight:600; text-align:center;}
+  .signal-banner.green{background:var(--mint-dim); color:var(--mint);}
+  .signal-banner.red{background:var(--coral-dim); color:var(--coral);}
+  .signal-banner.flat{background:var(--panel-3); color:var(--faint);}
+  .signal-banner.pending{background:var(--panel-3); color:var(--muted);}
+
+  .ai-status{display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px 14px; margin-top:10px;
+    font-family:var(--mono); font-size:10.5px; color:var(--muted);}
+  .ai-status b{color:var(--text);}
+  .ai-status .ready{color:var(--mint);} .ai-status .cold{color:var(--amber);}
+
+  .gauge-panel{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px;
+    display:grid; grid-template-columns:1fr 1fr; gap:16px;}
+  @media (max-width:640px){ .gauge-panel{grid-template-columns:1fr;} }
   .gauge{display:flex; flex-direction:column; gap:6px;}
   .gauge-head{display:flex; justify-content:space-between; align-items:baseline;}
   .gauge-head .side{font-size:13px; font-weight:600;}
   .gauge-head .side.UP{color:var(--mint);} .gauge-head .side.DOWN{color:var(--coral);}
-  .gauge-head .side .held-tag{font-size:9.5px; font-family:var(--mono); font-weight:600; color:var(--amber);
-    background:var(--amber-dim); padding:2px 6px; border-radius:5px; margin-left:7px; vertical-align:1px;}
   .gauge-head .mid{font-family:var(--mono); font-size:17px; font-weight:600;}
-  .gauge-track{position:relative; height:30px; background:var(--panel-3); border-radius:7px; overflow:visible; border:1px solid var(--line);}
+  .gauge-track{position:relative; height:22px; background:var(--panel-3); border-radius:7px; overflow:visible; border:1px solid var(--line);}
   .gauge-fill{position:absolute; left:0; top:0; bottom:0; border-radius:6px 0 0 6px; transition:width .3s ease;}
   .gauge-fill.UP{background:linear-gradient(90deg,var(--mint-dim),var(--mint));}
   .gauge-fill.DOWN{background:linear-gradient(90deg,var(--coral-dim),var(--coral));}
-  .gauge-mark{position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--faint);}
-  .gauge-mark .lbl{position:absolute; top:-17px; left:50%; transform:translateX(-50%); font-family:var(--mono); font-size:9px; color:var(--faint); white-space:nowrap;}
-  .gauge-mark.buy-resting{background:var(--amber);} .gauge-mark.buy-resting .lbl{color:var(--amber);}
-  .gauge-mark.buy-filled{background:#3d5a52; opacity:.6;} .gauge-mark.buy-filled .lbl{color:#3d5a52; top:auto; bottom:-17px;}
-  .gauge-mark.buy-cancelled{background:var(--faint); opacity:.35;} .gauge-mark.buy-cancelled .lbl{color:var(--faint); top:auto; bottom:-17px;}
+  .gauge-mark{position:absolute; top:-4px; bottom:-4px; width:2px; background:var(--amber);}
+  .gauge-mark .lbl{position:absolute; top:-17px; left:50%; transform:translateX(-50%); font-family:var(--mono); font-size:9px; color:var(--amber); white-space:nowrap;}
   .gauge-bidask{font-family:var(--mono); font-size:10.5px; color:var(--faint); display:flex; justify-content:space-between; margin-top:2px;}
-  .gauge-legend{display:flex; gap:16px; flex-wrap:wrap; font-family:var(--mono); font-size:10px; color:var(--muted); padding-top:14px; border-top:1px solid var(--line);}
-  .gauge-legend span{display:flex; align-items:center; gap:5px;}
-  .gauge-legend i{width:8px; height:8px; border-radius:2px; display:inline-block;}
-
-  .two-col{display:grid; grid-template-columns:1.2fr 1fr; gap:12px; align-items:start;}
-  @media (max-width:880px){ .two-col{grid-template-columns:1fr;} }
 
   .card{background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px;}
   .card h2{margin:0 0 13px; font-size:12.5px; color:var(--muted); font-weight:600; display:flex; align-items:center; justify-content:space-between; gap:8px;}
   .card h2 .tag{font-size:10px; padding:2px 8px; border-radius:6px; background:var(--panel-3); color:var(--faint); font-family:var(--mono); font-weight:500;}
 
   .status-badge{font-size:10.5px; font-weight:600; padding:4px 10px; border-radius:6px;}
-  .status-badge.watching{background:#1a2029; color:#6a7688;}
+  .status-badge.awaiting_signal{background:#1a2029; color:#6a7688;}
+  .status-badge.order_resting{background:var(--amber-dim); color:var(--amber);}
+  .status-badge.taker_watching{background:var(--amber-dim); color:var(--amber);}
   .status-badge.open{background:var(--mint-dim); color:var(--mint);}
+  .status-badge.done{background:var(--violet-dim); color:var(--violet);}
   .status-badge.halted{background:var(--coral-dim); color:var(--coral);}
 
-  .def-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:8px; margin-bottom:14px;}
+  .def-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-bottom:14px;}
   .def-item{background:var(--panel-3); border-radius:9px; padding:10px 12px;}
   .def-item .k{font-size:10px; color:var(--muted);}
   .def-item .v{font-family:var(--mono); font-size:12.5px; font-weight:600; margin-top:3px;}
 
-  .subhead{font-size:11px; color:var(--muted); font-weight:600; margin:16px 0 8px;}
-  .subhead:first-child{margin-top:0;}
+  .order-box{border-radius:11px; padding:12px 14px; border:1px dashed var(--amber); background:var(--amber-dim); margin-bottom:10px;
+    font-family:var(--mono); font-size:12px; display:flex; justify-content:space-between; align-items:center;}
+  .order-box .lbl{color:var(--amber); font-weight:600;}
 
-  .rung-row{display:grid; grid-template-columns:auto auto 1fr auto; gap:10px; align-items:center;
-    background:var(--panel-3); border-radius:9px; padding:9px 12px; margin-bottom:6px; font-family:var(--mono); font-size:12px;}
-  .rung-row .zone{color:var(--amber); font-weight:600; font-size:10px; background:var(--amber-dim); padding:2px 6px; border-radius:5px;}
-  .rung-row .zone.B{color:var(--violet); background:var(--violet-dim);}
-  .rung-row .price{color:var(--text); font-weight:600;}
-  .rung-row .shares{color:var(--muted); font-size:11px; text-align:right;}
-  .rung-row.filled{opacity:.5;}
-  .rung-row.cancelled{opacity:.3; text-decoration:line-through;}
-
-  .position-box{border-radius:11px; padding:12px 14px; border:1px solid var(--line); margin-bottom:8px;
+  .position-box{border-radius:11px; padding:14px 16px; border:1px solid var(--line);
     background:linear-gradient(135deg,var(--mint-glow),transparent 65%);}
   .position-box.loss{background:linear-gradient(135deg,var(--coral-glow),transparent 65%);}
-  .position-box.empty{background:var(--panel-3); border-style:dashed; color:var(--faint); font-size:12px; text-align:center; padding:20px;}
+  .position-box.empty{background:var(--panel-3); border-style:dashed; color:var(--faint); font-size:12px; text-align:center; padding:22px;}
   .position-top{display:flex; justify-content:space-between; align-items:baseline;}
-  .position-top .rung-tag{font-size:11.5px; font-weight:600; color:var(--amber);}
+  .position-top .side-tag{font-size:13px; font-weight:600;}
   .position-top .shares{font-family:var(--mono); font-size:11.5px; color:var(--muted);}
-  .position-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:9px;}
+  .position-grid{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:11px;}
   .position-grid .k{font-size:9.5px; color:var(--muted);}
-  .position-grid .v{font-family:var(--mono); font-size:12px; font-weight:600; margin-top:2px;}
-  .position-pnl-row{display:flex; justify-content:space-between; margin-top:9px; padding-top:8px; border-top:1px solid var(--line);}
+  .position-grid .v{font-family:var(--mono); font-size:12.5px; font-weight:600; margin-top:2px;}
+  .position-pnl-row{display:flex; justify-content:space-between; margin-top:11px; padding-top:10px; border-top:1px solid var(--line);}
   .position-pnl-row .lbl{font-size:10.5px; color:var(--muted);}
-  .position-pnl-row .v{font-family:var(--mono); font-weight:600; font-size:13px;}
+  .position-pnl-row .v{font-family:var(--mono); font-weight:600; font-size:14px;}
   .position-pnl-row .v.pos{color:var(--mint);} .position-pnl-row .v.neg{color:var(--coral);}
 
   .stats-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:8px;}
@@ -115,13 +117,13 @@
 
   .equity-hero{display:grid; grid-template-columns:repeat(3,1fr); gap:12px;}
   .equity-hero .item .k{font-size:11px; color:var(--muted); font-weight:600;}
-  .equity-hero .item .v{font-family:var(--mono); font-size:26px; font-weight:600; margin-top:6px;}
+  .equity-hero .item .v{font-family:var(--mono); font-size:24px; font-weight:600; margin-top:6px;}
   .equity-hero .item .v.pos{color:var(--mint);} .equity-hero .item .v.neg{color:var(--coral);}
   .equity-hero .item .sub{font-family:var(--mono); font-size:11px; color:var(--muted); margin-top:4px;}
   @media (max-width:640px){ .equity-hero{grid-template-columns:1fr;} }
 
   .equity-wrap{margin-top:16px; position:relative;}
-  .equity-svg{width:100%; height:200px; display:block;}
+  .equity-svg{width:100%; height:180px; display:block;}
   .equity-summary{display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-top:10px;
     font-family:var(--mono); font-size:11px; color:var(--muted);}
   .equity-summary b{color:var(--text);}
@@ -131,11 +133,20 @@
     font-family:var(--mono); font-size:11px; padding:7px 9px; border-radius:7px; background:var(--panel-3);}
   .log-row .t{color:var(--faint);}
   .log-row .ev{font-weight:600; font-size:9.5px; padding:2px 7px; border-radius:5px; background:#1a222f; text-align:center; white-space:nowrap;}
+  .log-row .ev.CANDLE_READ{color:var(--amber);}
+  .log-row .ev.AI_SIGNAL{color:var(--amber);}
+  .log-row .ev.AI_LEARN{color:var(--faint);}
   .log-row .ev.RUNG_PLACED{color:var(--amber);}
   .log-row .ev.RUNG_FILL{color:var(--mint);}
-
+  .log-row .ev.RUNG_CANCELLED{color:var(--violet);}
+  .log-row .ev.RUNG_TIMEOUT{color:var(--violet);}
+  .log-row .ev.TAKER_WAIT{color:var(--amber);}
+  .log-row .ev.TAKER_ENTRY{color:var(--mint);}
+  .log-row .ev.TAKER_SKIPPED{color:var(--faint);}
+  .log-row .ev.TP_FILL{color:var(--mint);}
   .log-row .ev.FORCED_CLOSE{color:var(--violet);}
   .log-row .ev.NO_LIQUIDITY{color:var(--amber);}
+  .log-row .ev.RSI_FLAG{color:var(--violet);}
   .log-row .ev.HALTED{color:var(--coral);}
   .log-row .ev.NO_TRADE{color:var(--faint);}
   .log-row .note{color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
@@ -147,8 +158,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>Two-zone momentum ladder, TP 0.99</h1>
-      <div class="sub">BTC 5m · buy strength at 0.60→0.90 · confirmation entries after 2min · TP 0.99 · no SL</div>
+      <h1>AI signal — fade</h1>
+      <div class="sub">BTC 5m up/down — an AI signal engine (self-training logistic regression, pretrained on historical Binance data at startup, no external API calls) predicts the next window from RSI/momentum/volatility/streak features. NO-SKIP MODE: the AI always picks a side and the bot always places an order — RSI is logged but no longer blocks. The bot FADES the AI's signal — always trades the opposite side: resting limit buy @ 0.45. If unfilled after 30s it is cancelled, then the bot buys at market (taker) the moment that side's ask is below 0.60, watching until the window closes (no trade if it never is). 200sh, no SL, TP 0.99</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -162,43 +173,44 @@
     <div class="countdown" id="countdown">--:--</div>
   </div>
 
+  <div class="binance-card">
+    <div class="binance-head">
+      <h2>AI signal engine — online logistic regression (self-trained, no external API)</h2>
+      <div class="binance-conn" id="binanceConn"><span class="dot"></span><span>—</span></div>
+    </div>
+    <div class="signal-banner pending" id="signalBanner">waiting</div>
+    <div class="ai-status" id="aiStatus"></div>
+  </div>
+
   <div class="gauge-panel">
     <div class="gauge" data-side="UP" id="upGauge">
-      <div class="gauge-head"><span class="side UP" id="upSideLbl">UP</span><span class="mid" id="upMid">—</span></div>
-      <div class="gauge-track" id="upTrack"></div>
+      <div class="gauge-head"><span class="side UP">UP</span><span class="mid" id="upMid">—</span></div>
+      <div class="gauge-track" id="upTrack"><div class="gauge-fill UP" id="upFill" style="width:0%"></div></div>
       <div class="gauge-bidask"><span id="upBidAsk">bid — / ask —</span></div>
     </div>
     <div class="gauge" data-side="DOWN" id="downGauge">
-      <div class="gauge-head"><span class="side DOWN" id="downSideLbl">DOWN</span><span class="mid" id="downMid">—</span></div>
-      <div class="gauge-track" id="downTrack"></div>
+      <div class="gauge-head"><span class="side DOWN">DOWN</span><span class="mid" id="downMid">—</span></div>
+      <div class="gauge-track" id="downTrack"><div class="gauge-fill DOWN" id="downFill" style="width:0%"></div></div>
       <div class="gauge-bidask"><span id="downBidAsk">bid — / ask —</span></div>
-    </div>
-    <div class="gauge-legend">
-      <span><i style="background:var(--amber);"></i>resting buy rung</span>
-      <span><i style="background:#3d5a52;"></i>filled buy rung</span>
-
     </div>
   </div>
 
-  <div class="two-col">
-    <div class="card" id="engineCard"></div>
+  <div class="card" id="engineCard"></div>
 
-    <div style="display:flex; flex-direction:column; gap:12px;">
-      <div class="card">
-        <h2>Trade stats</h2>
-        <div class="stats-grid" id="statsGrid"></div>
-      </div>
-      <div class="card">
-        <h2>Balance</h2>
-        <div class="equity-hero" id="equityHero"></div>
-      </div>
-    </div>
+  <div class="card">
+    <h2>Trade stats</h2>
+    <div class="stats-grid" id="statsGrid"></div>
+  </div>
+
+  <div class="card">
+    <h2>Balance</h2>
+    <div class="equity-hero" id="equityHero"></div>
   </div>
 
   <div class="card">
     <h2>Equity curve <span class="tag" id="equityTag"></span></h2>
     <div class="equity-wrap">
-      <svg class="equity-svg" id="equityChart" viewBox="0 0 1000 200" preserveAspectRatio="none"></svg>
+      <svg class="equity-svg" id="equityChart" viewBox="0 0 1000 180" preserveAspectRatio="none"></svg>
     </div>
     <div class="equity-summary" id="equitySummary"></div>
   </div>
@@ -215,23 +227,66 @@ const fmt$ = v => (v==null ? '—' : (v<0?'-$':'$') + Math.abs(Number(v)).toFixe
 const fmtP = v => (v==null ? '—' : Number(v).toFixed(3));
 const fmtSh = v => (v==null ? '0' : Number(v).toFixed(0));
 const pnlClass = v => (v>0.005?'pos':(v<-0.005?'neg':''));
+const ORDER_PRICE = 0.45;
+const ORDER_TIMEOUT = 30;
+const TAKER_MAX = 0.60;
 
-function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, book, gaugeElId){
+function renderGauge(trackId, fillId, midId, bidAskId, bid, ask, order, side){
   const mid = (bid!=null && ask!=null) ? (bid+ask)/2 : (ask!=null?ask:bid);
   $(midId).textContent = fmtP(mid);
   $(bidAskId).textContent = `bid ${fmtP(bid)} / ask ${fmtP(ask)}`;
-  const held = book && book.shares_held > 0;
-  $(sideLblId).innerHTML = side + (held ? `<span class="held-tag">${fmtSh(book.shares_held)}sh @ avg ${fmtP(book.avg_entry)}</span>` : '');
-
-  const track = document.getElementById(trackId);
   const pct = mid!=null ? Math.max(0,Math.min(100, mid*100)) : 0;
-  let marks = `<div class="gauge-fill ${side}" style="width:${pct}%"></div>`;
-  (book && book.orders ? book.orders : []).forEach(o => {
-    const cls = o.status === 'filled' ? 'filled' : (o.status === 'cancelled' ? 'cancelled' : 'resting');
-    marks += `<div class="gauge-mark buy-${cls}" style="left:${o.price*100}%"><span class="lbl">${fmtP(o.price)}</span></div>`;
-  });
+  $(fillId).style.width = pct + '%';
+  const track = $(trackId);
+  let marks = '';
+  if(order && order.side === side && order.status === 'resting'){
+    marks = `<div class="gauge-mark" style="left:${order.price*100}%"><span class="lbl">${fmtP(order.price)}</span></div>`;
+  }
+  const existing = track.querySelector('.gauge-mark');
+  if(existing) existing.remove();
+  if(marks) track.insertAdjacentHTML('beforeend', marks);
+}
 
-  track.innerHTML = marks;
+function renderBinancePanel(e){
+  const bin = e.binance || {};
+  const connEl = $('binanceConn');
+  connEl.innerHTML = bin.connected
+    ? `<span class="dot live" style="background:var(--mint); box-shadow:0 0 5px var(--mint);"></span><span>connected${bin.last_message_age_s!=null? ' · '+bin.last_message_age_s.toFixed(1)+'s ago':''}</span>`
+    : `<span class="dot" style="background:var(--coral);"></span><span>disconnected${bin.last_error? ' — '+bin.last_error : ''}</span>`;
+
+  const banner = $('signalBanner');
+  const side = e.ai_predicted_side;
+  const fade = !(e.def && e.def.fade_signal === false);
+  if(side === 'UP'){
+    banner.className = 'signal-banner green';
+    banner.textContent = `AI predicts UP (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}), ${fade?'FADED — buy DOWN':'buy UP'}: resting @ ${ORDER_PRICE}, taker fallback < ${TAKER_MAX} after ${ORDER_TIMEOUT}s`;
+  } else if(side === 'DOWN'){
+    banner.className = 'signal-banner red';
+    banner.textContent = `AI predicts DOWN (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}), ${fade?'FADED — buy UP':'buy DOWN'}: resting @ ${ORDER_PRICE}, taker fallback < ${TAKER_MAX} after ${ORDER_TIMEOUT}s`;
+  } else if(e.decision_made){
+    banner.className = 'signal-banner flat';
+    banner.textContent = 'NO TRADE — Binance feed missing candle history this window (only case that can skip in no-skip mode)';
+  } else {
+    banner.className = 'signal-banner pending';
+    banner.textContent = 'waiting for previous-window candle data from Binance...';
+  }
+
+  renderAiStatus(e.ai || {}, e.pretrain || {});
+}
+
+function renderAiStatus(ai, pretrain){
+  const el = $('aiStatus');
+  const acc = ai.accuracy!=null ? ai.accuracy.toFixed(1)+'%' : '—';
+  const pretrainTag = !pretrain.done
+    ? `<span class="cold">pretraining…</span>`
+    : (pretrain.error
+        ? `<span class="cold">pretrain failed — starting cold, fills in live (~15min)</span>`
+        : `<span class="ready">pretrained on ${pretrain.windows_trained} windows, seeded ${pretrain.candles_seeded} live candles</span>`);
+  el.innerHTML = `
+    <span>${pretrainTag}</span>
+    <span>trained on <b>${ai.n_trained ?? 0}</b> windows (${ai.pretrained_windows ?? 0} pretrain + ${ai.live_trained_windows ?? 0} live)</span>
+    <span>directional accuracy <b>${acc}</b> (${ai.correct_predictions ?? 0}/${ai.total_predictions ?? 0})</span>
+  `;
 }
 
 async function poll(){
@@ -263,9 +318,10 @@ async function poll(){
     }
 
     const book = s.book || {};
-    renderGauge('upTrack','upMid','upBidAsk','upSideLbl','UP', book.up_bid, book.up_ask, e.up_book, 'upGauge');
-    renderGauge('downTrack','downMid','downBidAsk','downSideLbl','DOWN', book.down_bid, book.down_ask, e.down_book, 'downGauge');
+    renderGauge('upTrack','upFill','upMid','upBidAsk', book.up_bid, book.up_ask, e.order, 'UP');
+    renderGauge('downTrack','downFill','downMid','downBidAsk', book.down_bid, book.down_ask, e.order, 'DOWN');
 
+    renderBinancePanel(e);
     renderEngineCard(e);
     renderStats(e);
     renderEquityHero(e);
@@ -280,47 +336,52 @@ async function poll(){
 function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
-  const statusLabels = { watching:'watching', open:'position(s) open', halted:'halted' };
+  const statusLabels = {
+    awaiting_signal:'awaiting previous-candle signal', order_resting:'order resting, unfilled', taker_watching:'timed out — watching for ask < 0.60',
+    open:'position open', done:'done for this window', halted:'halted',
+  };
 
   const defRowsHtml = [
-    ['Zone A momentum entries (immediate)', e.def.zone_a.map(([p,sh])=>`${p}@${sh}sh`).join(', ')],
-    ['Zone B confirmation entries (after '+(e.def.zone_b_delay/60)+'min)', e.def.zone_b.map(([t,p,sh])=>`${p}@${sh}sh (at ${t})`).join(', ')],
-    ['TP', `0.99 (redeem $1.00/share)`],
-
-
+    ['Shares', fmtSh(e.def.shares)],
+    ['Order price', fmtP(e.def.order_price)],
+    ['Timeout', fmtSh(e.def.order_timeout_s)+'s'],
+    ['Taker if ask <', fmtP(e.def.taker_max_price)],
+    ['TP price', fmtP(e.def.tp_price)],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
-  function sideBox(book){
-    if(!book) return `<div class="position-box empty">no data</div>`;
-    const sideColor = book.side==='UP' ? 'var(--mint)' : 'var(--coral)';
-    const heldText = book.shares_held > 0 ? `${fmtSh(book.shares_held)}sh @ avg ${fmtP(book.avg_entry)}` : 'no shares held';
+  let orderHtml = '';
+  if(e.order && e.order.status === 'resting'){
+    const tag = e.order.signal_side ? ` <span class="lbl" style="color:var(--violet)">[${e.def.fade_signal===false?'with':'FADED, real'} signal ${e.order.signal_side}]</span>` : '';
+    const left = e.order.seconds_resting!=null ? Math.max(0, e.def.order_timeout_s - e.order.seconds_resting).toFixed(0) : '—';
+    orderHtml = `<div class="order-box"><span class="lbl">resting: ${e.order.side} ${fmtSh(e.order.shares)}sh @ ${fmtP(e.order.price)}</span>${tag}<span>waiting for fill · ${left}s to timeout</span></div>`;
+  } else if(e.status === 'taker_watching' && e.order){
+    orderHtml = `<div class="order-box"><span class="lbl">timed out — watching ${e.order.side} ask</span><span>taker buy when ask &lt; ${fmtP(e.def.taker_max_price)}</span></div>`;
+  }
 
-    const ordersHtml = (book.orders||[]).map(o => `
-      <div class="rung-row ${o.status}">
-        <span class="zone ${o.zone}">Z${o.zone}</span>
-        <span class="price">${fmtP(o.price)}</span>
-        <span></span>
-        <span class="shares">${fmtSh(o.shares)}sh · ${o.status}</span>
-      </div>`).join('');
-    return `
-      <div class="position-box ${(book.unrealized_pnl||0)<0?'loss':''}">
+  const pos = e.position;
+  let posHtml;
+  if(pos){
+    const mins = Math.floor((pos.seconds_since_entry||0)/60), secs = Math.floor((pos.seconds_since_entry||0)%60);
+    const sideColor = pos.side==='UP' ? 'var(--mint)' : 'var(--coral)';
+    posHtml = `
+      <div class="position-box ${pos.unrealized_pnl<0?'loss':''}">
         <div class="position-top">
-          <span class="rung-tag"><span style="color:${sideColor}">${book.side}</span></span>
-          <span class="shares">${book.resting_count} resting · ${book.filled_count} filled</span>
+          <span class="side-tag" style="color:${sideColor}">${pos.side}</span>
+          <span class="shares">${fmtSh(pos.shares)}sh · ${mins}:${String(secs).padStart(2,'0')} held</span>
         </div>
         <div class="position-grid">
-          <div><div class="k">Held</div><div class="v">${heldText}</div></div>
-          <div><div class="k">Mark</div><div class="v">${fmtP(book.mark_price)}</div></div>
-
-          <div><div class="k">Mkt value</div><div class="v">${book.market_value!=null?fmt$(book.market_value):'—'}</div></div>
+          <div><div class="k">Entry</div><div class="v">${fmtP(pos.entry_price)}</div></div>
+          <div><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
+          <div><div class="k">TP target</div><div class="v">${fmtP(e.def.tp_price)}</div></div>
+          <div><div class="k">Mkt value</div><div class="v">${fmt$(pos.shares*pos.mark_price)}</div></div>
         </div>
         <div class="position-pnl-row">
           <span class="lbl">unrealized P&amp;L</span>
-          <span class="v ${pnlClass(book.unrealized_pnl)}">${book.unrealized_pnl!=null ? (book.unrealized_pnl>=0?'+':'')+fmt$(book.unrealized_pnl) : '—'}</span>
+          <span class="v ${pnlClass(pos.unrealized_pnl)}">${pos.unrealized_pnl>=0?'+':''}${fmt$(pos.unrealized_pnl)}</span>
         </div>
-        <div class="subhead" style="margin-top:12px;">Rungs</div>
-        ${ordersHtml || '<div class="empty">none</div>'}
       </div>`;
+  } else {
+    posHtml = `<div class="position-box empty">${e.decision_made ? 'no open position' : 'no open position — waiting on signal'}</div>`;
   }
 
   el.innerHTML = `
@@ -329,18 +390,17 @@ function renderEngineCard(e){
       <span class="status-badge ${e.status}">${statusLabels[e.status] || e.status}</span>
     </h2>
     <div class="def-grid">${defRowsHtml}</div>
-    <div class="subhead">UP</div>
-    ${sideBox(e.up_book)}
-    <div class="subhead">DOWN</div>
-    ${sideBox(e.down_book)}
+    ${orderHtml}
+    ${posHtml}
   `;
 }
 
 function renderStats(e){
   const tiles = [
-    ['total_buy_fills','buy fills',''], ['total_forced_closes','forced close',''],
-    ['total_illiquid_skips','illiquid skips',''], ['no_trade_windows','no-trade',''],
-    ['wins','wins','win'], ['losses','losses',''],
+    ['total_orders_placed','orders placed',''], ['total_order_fills','maker fills',''], ['total_timeout_cancels','30s timeouts',''], ['total_taker_entries','taker entries',''], ['total_taker_skips','taker skips (ask ≥ 0.60)',''],
+    ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
+    ['total_unfilled_cancels','unfilled cancels',''], ['total_no_signal_windows','no-signal (feed gap)',''],
+    ['total_illiquid_skips','illiquid skips',''], ['total_rsi_flags','RSI flags',''],
     ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {
@@ -368,7 +428,7 @@ function renderEquityHero(e){
     <div class="item">
       <div class="k">Unrealized P&amp;L</div>
       <div class="v ${pnlClass(e.unrealized_pnl)}">${e.unrealized_pnl>=0?'+':''}${fmt$(e.unrealized_pnl)}</div>
-      <div class="sub">floating, open positions</div>
+      <div class="sub">floating, open position</div>
     </div>
   `;
 }
@@ -378,11 +438,11 @@ function renderEquityCurve(curve){
   const summary = $('equitySummary');
   $('equityTag').textContent = `${curve.length} points`;
   if(!curve || curve.length < 2){
-    svg.innerHTML = '<text x="500" y="100" text-anchor="middle" fill="var(--faint)" font-size="13" font-family="monospace">not enough data yet — waiting on the first window to close</text>';
+    svg.innerHTML = '<text x="500" y="90" text-anchor="middle" fill="var(--faint)" font-size="13" font-family="monospace">not enough data yet — waiting on the first window to close</text>';
     summary.innerHTML = '';
     return;
   }
-  const w = 1000, h = 200, padL = 58, padR = 12, padT = 14, padB = 22;
+  const w = 1000, h = 180, padL = 58, padR = 12, padT = 14, padB = 22;
   const balances = curve.map(p => p.balance);
   const minB = Math.min(...balances), maxB = Math.max(...balances);
   const range = (maxB - minB) || 1;

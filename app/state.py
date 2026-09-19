@@ -5,6 +5,8 @@ from collections import deque
 from typing import Optional
 
 from . import config
+from .backtest import pretrain_ai
+from .binance_client import BinanceKlineFeed
 from .engine import Engine
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
@@ -14,7 +16,8 @@ from .polymarket_client import PolymarketClient
 class BotState:
     def __init__(self):
         self.broker = PaperBroker()
-        self.engine = Engine(self.broker)
+        self.binance_feed = BinanceKlineFeed()
+        self.engine = Engine(self.broker, self.binance_feed)
         self.client = PolymarketClient()
         self.current_window: Optional[WindowMarket] = None
         self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
@@ -24,14 +27,34 @@ class BotState:
         self.last_down_ask: Optional[float] = None
         self.status = "starting"
         self.error: Optional[str] = None
+        self.pretrain_status = {"done": False, "windows_trained": 0, "candles_seeded": 0, "error": None}
         self._task: Optional[asyncio.Task] = None
 
     async def start(self):
+        # Fetch+train+seed happens BEFORE the live websocket starts, so
+        # the REST-sourced seed data can never race with / get
+        # clobbered by real-time updates landing mid-seed.
+        result = await pretrain_ai(self.engine.ai, live_feed=self.binance_feed)
+        self.pretrain_status = {"done": True, **result}
+        if result["error"]:
+            self.broker.log_event(
+                "SYS", "", "AI_PRETRAIN",
+                note=f"pretraining skipped/failed ({result['error']}) -- starting fully cold, learns/fills online instead",
+            )
+        else:
+            self.broker.log_event(
+                "SYS", "", "AI_PRETRAIN",
+                note=(f"pretrained AI on {result['windows_trained']} historical windows AND seeded the live "
+                      f"feed with {result['candles_seeded']} historical candles -- full feature lookback "
+                      f"available from the first live tick, no ~15min live warm-up needed"),
+            )
+        self.binance_feed.start()
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self):
         if self._task:
             self._task.cancel()
+        await self.binance_feed.stop()
         await self.client.close()
 
     async def _run_loop(self):
@@ -125,6 +148,7 @@ class BotState:
             "status": self.status,
             "error": self.error,
             "server_time": time.time(),
+            "pretrain": self.pretrain_status,
             "window": None if not self.current_window else {
                 "slug": self.current_window.slug,
                 "open_ts": self.current_window.open_ts,

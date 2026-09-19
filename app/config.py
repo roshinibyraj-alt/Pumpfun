@@ -1,37 +1,43 @@
 """
 Central configuration for the BTC 5-min up/down bot.
 
-Single engine -- two fully independent momentum ladders (one per side,
-UP and DOWN never affect each other), each with two zones of buy-strength
-entries and universal TP at 0.99 (redeem $1.00/share):
+Single engine -- one entry attempt EVERY window (no-skip mode).
+Direction is decided by an AI signal engine (app/ai_signal.py)
+predicting the next window's outcome -- pretrained on historical
+Binance data at startup (app/backtest.py) so it isn't starting cold --
+and the bot FADES that signal -- it buys the OPPOSITE side of the AI's
+prediction (toggle: FADE_SIGNAL, default on):
 
-ZONE A (0.60 -> 0.90): placed all at once, immediately, the instant the
-window opens. These are momentum entry rungs: they fill when the ask
-rises through each rung:
-    0.60 -> 50 shares
-    0.70 -> 100 shares
-    0.80 -> 200 shares
-    0.90 -> 400 shares
+  1. The instant a new window opens, compute AI features off the
+     Binance feed and get a prediction -- the model always returns UP
+     or DOWN (no "not confident enough" skip), so the signal is
+     decided every window that has candle history.
+  2. RSI(14) is computed and logged against the signal side for
+     visibility, but does NOT block the trade.
+  3. The bot places a resting MAKER limit buy on the FADE side (the
+     opposite of the AI's predicted side) @ ORDER_PRICE (0.45). It fills at its own exact price, no
+     slippage, no fee, the moment that side's ask drops to/through it.
+  4. If the resting order hasn't filled ORDER_TIMEOUT_SECONDS (30s)
+     after being placed, it is cancelled and the bot switches to
+     TAKER fallback: from then until the window closes, the moment the
+     traded (fade) side's best ask is BELOW TAKER_FALLBACK_MAX_PRICE
+     (0.60), the bot buys at market (taker) -- priced by walking real
+     ask depth, paying the taker fee. If the ask never gets below
+     0.60 before the window closes, no trade that window.
+  5. No stop-loss. Take profit is fixed at TP_PRICE (0.99) -- a real
+     taker sell, priced by walking actual book depth, the moment the
+     bid reaches it.
+  6. Only one entry, one trade max per window -- no re-arming. If the
+     position is open but TP never hits, it is force-closed at window
+     end (taker, real depth-weighted price).
+  7. Every window's true outcome (once known) is fed back into the AI
+     signal engine as one online training step -- it keeps learning
+     for as long as the bot runs, whether or not a trade was actually
+     placed that window.
 
-ZONE B (confirmation entries): each rung is placed ONCE, only after its
-own strength trigger is first reached (checked independently every tick):
-    price reaches 0.60 -> place momentum buy @ 0.70, 100 shares
-    price reaches 0.70 -> place momentum buy @ 0.80, 200 shares
-    price reaches 0.80 -> place momentum buy @ 0.90, 400 shares
-
-Both zones are always live at once -- nothing about one disables the
-other. This is intentionally the reverse of the old dip-buy ladder:
-entries are activated by rising strength (`ask >= entry price`), not by
-falling price (`ask <= entry price`).
-
-Zone B activates 2 minutes (120s) after window opens.
-
-Universal TP at 0.99: if mid >= 0.99, redeem all held shares at
-$1.00/share (fee-free). No stop-loss.
-
-Window close: cancel any still-resting buy orders (no penalty) and
-force a taker close (real fee, real depth-weighted price) on any shares
-still held.
+The only thing that can skip a window for data reasons is missing
+candle history from the live Binance feed (disconnected, or too early
+after process startup for the RSI/momentum lookback to be full).
 """
 import os
 
@@ -49,28 +55,68 @@ WINDOW_SECONDS = 300
 
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- Two-zone momentum ladder ----------------------------------------------
-# (entry_price, shares) -- placed immediately at window open, both sides.
-# Entries fill when the ask rises through the rung.
-ZONE_A_RUNGS = [(0.60, 50.0), (0.70, 100.0), (0.80, 200.0), (0.90, 400.0)]
+# ---- Order sizing / pricing (AI signal engine, faded by default) ------------
+ORDER_SHARES = 200.0
+FADE_SIGNAL = os.getenv("FADE_SIGNAL", "1").strip().lower() not in ("0", "false", "no", "off")
+                             # True = buy the OPPOSITE of the AI's predicted side (fade); False = buy the predicted side
+ORDER_PRICE = 0.45           # fixed absolute resting-limit price on the traded side
+ORDER_TIMEOUT_SECONDS = 30.0        # cancel the resting order if unfilled this long after placement
+TAKER_FALLBACK_MAX_PRICE = 0.60     # after the cancel, taker-buy only while the traded side's best ask is strictly BELOW this
+SIGNAL_CANDLE_OFFSET = 240   # the decision candle is the previous window's [240s, 300s) minute
+TP_PRICE = 0.99
 
-# (strength_trigger, entry_price, shares) -- entry rung is placed once
-# the strength trigger is first reached; each trigger is independent.
-ZONE_B_RUNGS = [
-    (0.60, 0.70, 100.0),
-    (0.70, 0.80, 200.0),
-    (0.80, 0.90, 400.0),
-]
-ZONE_B_DELAY_SECONDS = 120     # Zone B activates 2 minutes after window opens
-
+# ---- RSI flag (informational, no-skip mode) --------------------------------
+# Computed on the 1-minute BTC feed, as of the same signal candle used for
+# the AI's features. Checked against the signal side and logged for
+# visibility -- it does NOT block the trade:
+#   AI signal UP,   RSI already overbought -> flagged, trade still placed
+#   AI signal DOWN, RSI already oversold   -> flagged, trade still placed
+# If there isn't enough closed-candle history yet (startup/reconnect), the
+# flag is just skipped (nothing to compute it from).
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70.0
+RSI_OVERSOLD = 30.0
 
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 
+# ---- AI signal engine -----------------------------------------------------
+# Replaces "candle color = real signal" with an online (self-training)
+# logistic regression predicting P(next window resolves UP), fit
+# incrementally after every window's true outcome becomes known -- no
+# external API calls, no historical dataset REQUIRED to run, but see
+# AI_BACKTEST_DAYS below for pretraining. See app/ai_signal.py for the
+# model itself and feature list.
+#
+# NO-SKIP MODE: the model always returns a side (never "not confident
+# enough" or "not trained enough") and RSI is logged but no longer
+# blocks a trade -- every window that has candle history places a
+# resting limit order. The only thing that can still skip a window is
+# missing live feed data (Binance disconnected / not enough candle
+# history yet at process startup), which is a data-availability issue,
+# not a strategy choice, and can't be worked around without inventing
+# prices.
+AI_LEARNING_RATE = 0.05
+AI_L2_REG = 0.001
+AI_STREAK_LOOKBACK = 10          # max consecutive same-color candles counted for the streak feature
+
+# ---- AI historical pretraining ---------------------------------------------
+# At startup, fetch this many days of 1-minute BTC/USDT candles from
+# Binance's public REST klines endpoint (no API key needed) and replay
+# them through the exact same feature computation and 5-minute window
+# grid the live bot uses, training the model on all of it before the
+# first live tick -- so it isn't starting from all-zero weights. See
+# app/backtest.py. Label used: whether BTC's own spot price finished
+# each historical window higher than it opened (Polymarket's own
+# historical order book isn't available, but these are BTC up/down
+# markets, so BTC's own move is the real determinant behind them).
+AI_BACKTEST_DAYS = float(os.getenv("AI_BACKTEST_DAYS", "3"))
+AI_BACKTEST_BASE_URL = "https://api.binance.com/api/v3/klines"
+
 # ---- Trading fees -----------------------------------------------------
-# Every buy rung and the dynamic sell are resting MAKER limit orders --
-# they fill at their own limit price with no fee. Only a forced
-# window-end close is a TAKER market order and pays the fee for real,
-# priced by walking real book depth. Verify against
+# The resting entry is a MAKER limit order -- it fills at its own exact
+# price with no fee. The taker-fallback entry (after the 30s timeout),
+# the TP exit and any forced window-end close are TAKER market orders
+# and pay the real fee, priced by walking real order-book depth. Verify against
 # GET https://clob.polymarket.com/fee-rate?token_id=... before trading
 # real money.
 APPLY_TAKER_FEES = True
