@@ -26,9 +26,7 @@ class PaperBroker:
             self.log.pop(0)
 
     def taker_fee_amount(self, shares: float, price: float) -> float:
-        """The taker fee that would apply to a market-order fill of this
-        size/price. Used to compute the maker rebate on entry/TP fills
-        (which are resting limit orders and don't pay it themselves)."""
+        """The taker fee that applies to a market-order fill."""
         return self._taker_fee(shares, price)
 
     def _taker_fee(self, shares: float, price: float) -> float:

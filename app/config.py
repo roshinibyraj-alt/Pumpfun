@@ -18,9 +18,7 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
 # ---- Order sizing / pricing ------------------------------------------------
 ORDER_SHARES = float(os.getenv("ORDER_SHARES", "200"))
-ORDER_PRICE = float(os.getenv("ORDER_PRICE", "0.45"))
-ORDER_TIMEOUT_SECONDS = float(os.getenv("ORDER_TIMEOUT_SECONDS", "30"))
-TAKER_FALLBACK_MAX_PRICE = float(os.getenv("TAKER_FALLBACK_MAX_PRICE", "0.60"))
+ENTRY_DELAY_SECONDS = float(os.getenv("ENTRY_DELAY_SECONDS", "2"))
 TP_PRICE = float(os.getenv("TP_PRICE", "0.99"))
 SIGNAL_CANDLE_OFFSET = 240
 

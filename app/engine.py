@@ -3,8 +3,9 @@
 At each 5-minute window the signal engine predicts UP or DOWN from completed
 1D/4H/1H/15M indicators and the walk-forward learner. The engine buys that
 same side; it never fades the prediction. Weak or conflicting signals are
-recorded and skipped. The existing maker-then-taker execution and window-end
-settlement logic remains intact.
+recorded and skipped. A qualifying signal waits two seconds after window open
+and then executes one depth-priced taker buy; window-end settlement remains
+unchanged.
 """
 import time
 from dataclasses import dataclass, field
@@ -20,13 +21,11 @@ from .paper_broker import PaperBroker
 def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
     """Volume-weighted average price to actually trade `shares` against a
     real order book, instead of assuming the whole size fills at the
-    single best quote. Used only for the TAKER TP exit / forced close --
-    the entry itself is a resting maker order that fills at its own
-    exact limit price, no walk needed.
+    single best quote. Used for the taker entry, TP exit and forced close.
 
     - levels is None -> no depth data this tick; fall back to filling
       the whole size at `fallback_price`.
-    - levels is [] -> book fetched fine, genuinely nothing resting on
+    - levels is [] -> book fetched fine, genuinely no ask/bid depth on
       this side; return None, caller must not invent a fill.
     - levels is non-empty -> walk best-price-first; any shortfall in
       visible depth is priced at the worst level seen.
@@ -71,16 +70,6 @@ class CapitalPool:
 
 
 @dataclass
-class RestingOrder:
-    side: Side
-    price: float
-    shares: float
-    status: str = "resting"   # resting | filled | cancelled
-    signal_side: Optional[Side] = None   # directional prediction that selected this side
-    placed_ts: float = 0.0    # when the resting order was placed, for the 30s timeout
-
-
-@dataclass
 class Position:
     side: Side
     entry_price: float
@@ -88,7 +77,7 @@ class Position:
     cost: float
     entry_ts: float
     signal_side: Optional[Side] = None
-    entry_type: str = "maker"   # "maker" (resting fill) | "taker" (post-timeout fallback)
+    entry_type: str = "taker"
 
 
 @dataclass
@@ -107,14 +96,13 @@ class EngineState:
     down_bid_levels: Optional[list] = None
     down_ask_levels: Optional[list] = None
 
-    order: Optional[RestingOrder] = None
     position: Optional[Position] = None
     decision_made: bool = False     # True once the AI signal has been decided (whichever way it went)
     decided_color: Optional[str] = None
     ai_features: Optional[object] = None    # multi-timeframe feature bundle for online learning
     ai_predicted_side: Optional[Side] = None
-    taker_watching: bool = False    # True once the resting order timed out and was cancelled, until entry or window close
-    taker_wait_logged: bool = False # so the "ask still >= 0.60" note is logged once, not every tick
+    entry_attempted: bool = False
+    entry_wait_logged: bool = False
     ai_confidence: Optional[float] = None
     ai_reason: Optional[str] = None
     ai_tradeable: bool = False
@@ -142,10 +130,7 @@ class Engine:
         self.total_order_fills = 0
         self.total_tp_fills = 0
         self.total_forced_closes = 0
-        self.total_unfilled_cancels = 0
-        self.total_timeout_cancels = 0
         self.total_taker_entries = 0
-        self.total_taker_skips = 0
         self.total_no_signal_windows = 0
         self.total_illiquid_skips = 0
         self.total_rsi_flags = 0
@@ -174,9 +159,8 @@ class Engine:
             f"uses 1d + 4h + 1h + 15m indicators, then buys the predicted side. "
             f"Signal threshold: confidence >= {config.AI_MIN_CONFIDENCE:.2f}, "
             f"alignment >= {config.AI_MIN_ALIGNMENT:.2f}. "
-            f"Resting buy @ {config.ORDER_PRICE}, {config.ORDER_SHARES:.0f}sh; "
-            f"unfilled after {config.ORDER_TIMEOUT_SECONDS:.0f}s -> taker fallback < "
-            f"{config.TAKER_FALLBACK_MAX_PRICE}."
+            f"wait {config.ENTRY_DELAY_SECONDS:.0f}s after window open, then immediate "
+            f"taker buy of the predicted side for {config.ORDER_SHARES:.0f}sh."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -196,11 +180,7 @@ class Engine:
 
         if not self.s.decision_made:
             self._check_signal(now)
-            return
-
-        if self.s.order is not None and self.s.order.status == "resting":
-            self._check_fill(now)
-        elif self.s.taker_watching:
+        if self.s.position is None and self.s.ai_tradeable and not self.s.entry_attempted:
             self._check_taker_entry(now)
 
     # ---- price/level lookups ----------------------------------------------
@@ -252,83 +232,44 @@ class Engine:
             ))
             return
 
-        trade_side = side
-        self.s.order = RestingOrder(side=trade_side, price=config.ORDER_PRICE, shares=config.ORDER_SHARES,
-                                     signal_side=side, placed_ts=now)
-        self.total_orders_placed += 1
-        self._log("RUNG_PLACED", side=trade_side.value, price=config.ORDER_PRICE, shares=config.ORDER_SHARES,
-                   note=(f"directional signal {side.value} (confidence {confidence:.2f}) -> "
-                         f"buying the SAME side; {feats.reason}; resting limit buy "
-                         f"{trade_side.value}: {config.ORDER_SHARES:.0f}sh @ {config.ORDER_PRICE} "
-                         f"(cancel + taker fallback if unfilled after {config.ORDER_TIMEOUT_SECONDS:.0f}s)"))
-
-    def _check_fill(self, now: float):
-        order = self.s.order
-        ask = self._ask_for(order.side)
-        if ask is None or ask > order.price:
-            # Not fillable this tick -- check the 30s timeout.
-            if now - order.placed_ts >= config.ORDER_TIMEOUT_SECONDS:
-                order.status = "cancelled"
-                self.total_timeout_cancels += 1
-                self.s.taker_watching = True
-                self._log("RUNG_TIMEOUT", side=order.side.value, price=order.price,
-                           note=(f"resting buy unfilled after {now - order.placed_ts:.0f}s -- cancelled; "
-                                 f"taker fallback armed: buy {order.side.value} at market whenever ask < "
-                                 f"{config.TAKER_FALLBACK_MAX_PRICE} until window close"))
-                self._check_taker_entry(now)
-            return
-        order.status = "filled"
-        cost = order.shares * order.price
-        self.capital.balance -= cost
-        self.total_order_fills += 1
-        self._log("RUNG_FILL", side=order.side.value, price=order.price, shares=order.shares, fee=0.0,
-                   note=f"resting buy filled (maker, no fee): {order.shares:.0f}sh @ {order.price}")
-        if self.capital.check_halt():
-            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
-            return
-        self.s.position = Position(side=order.side, entry_price=order.price, shares=order.shares, cost=cost,
-                                    entry_ts=now, signal_side=order.signal_side, entry_type="maker")
-
-    # ---- taker fallback entry (after the resting order timed out) ----------------
-
     def _check_taker_entry(self, now: float):
-        """Runs every tick after the 30s timeout until the window closes.
-        Buys at market (taker) the first tick the traded (fade) side's best
-        ask is strictly below TAKER_FALLBACK_MAX_PRICE. The gate is the
-        best ask; the actual fill is priced by walking real ask depth
-        for the full size, and pays the taker fee."""
-        order = self.s.order
-        if order is None or self.s.position is not None:
+        """Buy the predicted side once, two seconds after window open."""
+        if self.s.ai_predicted_side is None or self.s.position is not None:
             return
-        ask = self._ask_for(order.side)
-        if ask is None or ask >= config.TAKER_FALLBACK_MAX_PRICE:
-            if not self.s.taker_wait_logged:
-                self.s.taker_wait_logged = True
-                self._log("TAKER_WAIT", side=order.side.value, price=ask,
-                           note=(f"ask {ask} not below {config.TAKER_FALLBACK_MAX_PRICE} -- "
-                                 f"watching every tick until window close"))
+        ready_ts = self.s.window.open_ts + config.ENTRY_DELAY_SECONDS
+        if now < ready_ts:
+            if not self.s.entry_wait_logged:
+                self.s.entry_wait_logged = True
+                self._log("ENTRY_WAIT", side=self.s.ai_predicted_side.value,
+                           note=(f"signal accepted; waiting {ready_ts - now:.1f}s until "
+                                 f"the {config.ENTRY_DELAY_SECONDS:.0f}s post-open taker entry"))
             return
-        levels = self._ask_levels_for(order.side)
-        fill_price = _realistic_fill_price(levels, order.shares, ask)
+        self.s.entry_attempted = True
+        side = self.s.ai_predicted_side
+        ask = self._ask_for(side)
+        levels = self._ask_levels_for(side)
+        fill_price = _realistic_fill_price(levels, config.ORDER_SHARES, ask)
         if fill_price is None:
-            # Book fetched fine but nothing resting on the ask side -- can't buy, keep watching.
             self.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=order.side.value, price=ask,
-                       note=f"taker entry triggered @ ask {ask} but zero ask depth -- waiting")
+            self._log("NO_TRADE", side=side.value, price=ask,
+                       note="taker entry reached 2s after open, but the predicted side had no ask depth")
             return
-        fee = self.broker.taker_fee_amount(order.shares, fill_price)
-        cost = order.shares * fill_price + fee
+        fee = self.broker.taker_fee_amount(config.ORDER_SHARES, fill_price)
+        cost = config.ORDER_SHARES * fill_price + fee
         self.capital.balance -= cost
         self.total_taker_entries += 1
-        self.s.taker_watching = False
-        self._log("TAKER_ENTRY", side=order.side.value, price=fill_price, shares=order.shares, fee=fee,
-                   note=(f"taker buy filled @ {fill_price:.4f} (best ask {ask} < {config.TAKER_FALLBACK_MAX_PRICE}), "
-                         f"{order.shares:.0f}sh, fee ${fee:.4f}, total cost ${cost:.4f}"))
+        self.total_orders_placed += 1
+        self.total_order_fills += 1
+        self._log("TAKER_ENTRY", side=side.value, price=fill_price, shares=config.ORDER_SHARES, fee=fee,
+                   note=(f"immediate taker buy {side.value} at {config.ENTRY_DELAY_SECONDS:.0f}s "
+                         f"after window open; fill {fill_price:.4f} from ask depth "
+                         f"(best ask {ask}), fee ${fee:.4f}, total cost ${cost:.4f}; "
+                         f"{self.s.ai_reason}"))
         if self.capital.check_halt():
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
-        self.s.position = Position(side=order.side, entry_price=fill_price, shares=order.shares, cost=cost,
-                                    entry_ts=now, signal_side=order.signal_side, entry_type="taker")
+        self.s.position = Position(side=side, entry_price=fill_price, shares=config.ORDER_SHARES, cost=cost,
+                                   entry_ts=now, signal_side=side, entry_type="taker")
 
     # ---- exit: TP only, no SL ------------------------------------------------
 
@@ -398,21 +339,13 @@ class Engine:
                                  f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
                 self.capital.check_halt()
                 self.s.position = None
-            elif self.s.order is not None and self.s.order.status == "resting":
-                # Window closed before the 30s timeout could fire (only possible on a very
-                # short/late window) -- plain cancel, no taker fallback possible.
-                self.s.order.status = "cancelled"
-                self.total_unfilled_cancels += 1
-                self._log("RUNG_CANCELLED", side=self.s.order.side.value, price=self.s.order.price,
-                           note="window closed, resting order never filled -- cancelled, no penalty")
-            elif self.s.order is not None and self.s.taker_watching:
-                self.total_taker_skips += 1
-                self._log("TAKER_SKIPPED", side=self.s.order.side.value,
-                           note=(f"window closed, ask never went below {config.TAKER_FALLBACK_MAX_PRICE} "
-                                 f"after the 30s timeout -- no trade this window"))
+            elif self.s.ai_tradeable and not self.s.entry_attempted:
+                self._log("NO_TRADE", side=(
+                    self.s.ai_predicted_side.value if self.s.ai_predicted_side else None
+                ), note="window closed before the 2-second taker entry could be attempted")
             elif not self.s.decision_made:
                 self.total_no_signal_windows += 1
-                self._log("NO_TRADE", note="previous window's last-minute candle never arrived/closed in time")
+                self._log("NO_TRADE", note="multi-timeframe signal was not available before window close")
 
         self.s.window = None
         self.capital.record_equity_point(window_slug)
@@ -437,23 +370,12 @@ class Engine:
                 "entry_type": pos.entry_type,
             }
 
-        order_payload = None
-        if self.s.order is not None:
-            order_payload = {
-                "side": self.s.order.side.value, "price": self.s.order.price,
-                "shares": self.s.order.shares, "status": self.s.order.status,
-                "signal_side": self.s.order.signal_side.value if self.s.order.signal_side else None,
-                "seconds_resting": round(time.time() - self.s.order.placed_ts, 1) if self.s.order.status == "resting" else None,
-            }
-
         if self.capital.halted:
             status = "halted"
         elif pos is not None:
             status = "open"
-        elif order_payload is not None and order_payload["status"] == "resting":
-            status = "order_resting"
-        elif self.s.taker_watching:
-            status = "taker_watching"
+        elif self.s.ai_tradeable and not self.s.entry_attempted:
+            status = "waiting_entry"
         elif self.s.decision_made:
             status = "done"
         else:
@@ -476,7 +398,7 @@ class Engine:
             "last_window_pnl": round(self.s.last_window_pnl, 4),
 
             "position": pos_payload,
-            "order": order_payload,
+            "order": None,
             "decision_made": self.s.decision_made,
             "decided_color": self.s.decided_color,
             "ai_predicted_side": self.s.ai_predicted_side.value if self.s.ai_predicted_side else None,
@@ -494,10 +416,7 @@ class Engine:
             "total_order_fills": self.total_order_fills,
             "total_tp_fills": self.total_tp_fills,
             "total_forced_closes": self.total_forced_closes,
-            "total_unfilled_cancels": self.total_unfilled_cancels,
-            "total_timeout_cancels": self.total_timeout_cancels,
             "total_taker_entries": self.total_taker_entries,
-            "total_taker_skips": self.total_taker_skips,
             "total_no_signal_windows": self.total_no_signal_windows,
             "total_illiquid_skips": self.total_illiquid_skips,
             "total_rsi_flags": self.total_rsi_flags,
@@ -513,9 +432,7 @@ class Engine:
                 "shares": config.ORDER_SHARES,
                 "fade_signal": False,
                 "direction": "same_as_signal",
-                "order_price": config.ORDER_PRICE,
-                "order_timeout_s": config.ORDER_TIMEOUT_SECONDS,
-                "taker_max_price": config.TAKER_FALLBACK_MAX_PRICE,
+                "entry_delay_s": config.ENTRY_DELAY_SECONDS,
                 "tp_price": config.TP_PRICE,
                 "min_confidence": config.AI_MIN_CONFIDENCE,
                 "min_alignment": config.AI_MIN_ALIGNMENT,

@@ -49,12 +49,13 @@ reliable from only seven daily candles.
 The execution layer remains paper trading by default:
 
 - one signal-driven entry per 5-minute window;
-- resting maker buy at `ORDER_PRICE`;
-- after `ORDER_TIMEOUT_SECONDS`, taker fallback when the predicted side's
-  ask is below `TAKER_FALLBACK_MAX_PRICE`;
+- wait `ENTRY_DELAY_SECONDS` after the window opens (default 2 seconds);
+- immediately buy the predicted side with a taker order using the available
+  ask depth;
 - TP at `TP_PRICE`;
 - force-close at the end of the window if TP is not reached;
-- realistic order-book depth and taker fees are used for taker fills.
+- realistic order-book depth and taker fees are used for entry, TP and
+  forced-close fills.
 
 ## Run locally
 
@@ -75,8 +76,7 @@ Dashboard: `http://localhost:8000`
 - `AI_MIN_ALIGNMENT` — minimum agreement across timeframes, default `0.35`.
 - `AI_MODEL_WEIGHT` — learned-model share of the final probability, default
   `0.70`.
-- `ORDER_SHARES`, `ORDER_PRICE`, `ORDER_TIMEOUT_SECONDS`,
-  `TAKER_FALLBACK_MAX_PRICE`, `TP_PRICE`.
+- `ORDER_SHARES`, `ENTRY_DELAY_SECONDS`, `TP_PRICE`.
 
 The bot is still configured for paper trading. Review the strategy, fees and
 backtest results before using any live funds.
