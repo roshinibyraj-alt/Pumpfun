@@ -1,9 +1,9 @@
 # Multi-timeframe BTC 5m prediction bot
 
 Paper-trading bot for Polymarket `btc-updown-5m-*` markets. The bot predicts
-the direction of the next 5-minute BTC window and buys the **same** side:
-an UP prediction buys UP; a DOWN prediction buys DOWN. It never fades the
-signal.
+the direction of the next 5-minute BTC window and, by default, buys the
+**opposite** side: an UP prediction buys DOWN; a DOWN prediction buys UP.
+This is a deliberate fade of the model signal.
 
 ## Strategy
 
@@ -20,9 +20,9 @@ At every new 5-minute window:
 4. A pure-Python logistic model is blended with that transparent indicator
    score. It is trained walk-forward: it predicts first, observes the next
    5-minute result, then takes one learning step.
-5. The engine buys the predicted side only when confidence and cross-timeframe
-   alignment pass the configured thresholds. Weak or conflicting signals are
-   skipped instead of forcing a trade.
+5. The engine buys the opposite side of a qualifying prediction when
+   confidence and cross-timeframe alignment pass the configured thresholds.
+   Weak or conflicting signals are skipped instead of forcing a trade.
 
 ## One-week walk-forward backtest
 
@@ -50,8 +50,8 @@ The execution layer remains paper trading by default:
 
 - one signal-driven entry per 5-minute window;
 - wait `ENTRY_DELAY_SECONDS` after the window opens (default 2 seconds);
-- immediately buy the predicted side with a taker order using the available
-  ask depth;
+- immediately buy the opposite side from the prediction with a taker order
+  using the available ask depth;
 - TP at `TP_PRICE`;
 - force-close at the end of the window if TP is not reached;
 - realistic order-book depth and taker fees are used for entry, TP and
@@ -76,6 +76,8 @@ Dashboard: `http://localhost:8000`
 - `AI_MIN_ALIGNMENT` — minimum agreement across timeframes, default `0.35`.
 - `AI_MODEL_WEIGHT` — learned-model share of the final probability, default
   `0.70`.
+- `FADE_SIGNAL` — buy the opposite side of the signal by default; set to
+  `false` to buy the predicted side instead.
 - `ORDER_SHARES`, `ENTRY_DELAY_SECONDS`, `TP_PRICE`.
 
 The bot is still configured for paper trading. Review the strategy, fees and

@@ -1,8 +1,8 @@
 """Trading engine for the directional multi-timeframe strategy.
 
 At each 5-minute window the signal engine predicts UP or DOWN from completed
-1D/4H/1H/15M indicators and the walk-forward learner. The engine buys that
-same side; it never fades the prediction. Weak or conflicting signals are
+1D/4H/1H/15M indicators and the walk-forward learner. The engine buys the
+opposite side of that prediction by default. Weak or conflicting signals are
 recorded and skipped. A qualifying signal waits two seconds after window open
 and then executes one depth-priced taker buy; window-end settlement remains
 unchanged.
@@ -16,6 +16,11 @@ from .ai_signal import AISignalEngine
 from .binance_client import BinanceKlineFeed
 from .models import Side, WindowMarket
 from .paper_broker import PaperBroker
+
+
+def entry_side_for_signal(signal_side: Side) -> Side:
+    """Return the outcome token the execution layer should buy."""
+    return signal_side.other() if config.FADE_SIGNAL else signal_side
 
 
 def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
@@ -156,11 +161,13 @@ class Engine:
             return
         self._log("WINDOW_OPEN", note=(
             f"multi-timeframe predictor ready ({self.ai.n_trained} walk-forward/live training windows); "
-            f"uses 1d + 4h + 1h + 15m indicators, then buys the predicted side. "
+            f"uses 1d + 4h + 1h + 15m indicators, then buys the "
+            f"{'opposite' if config.FADE_SIGNAL else 'predicted'} side. "
             f"Signal threshold: confidence >= {config.AI_MIN_CONFIDENCE:.2f}, "
             f"alignment >= {config.AI_MIN_ALIGNMENT:.2f}. "
             f"wait {config.ENTRY_DELAY_SECONDS:.0f}s after window open, then immediate "
-            f"taker buy of the predicted side for {config.ORDER_SHARES:.0f}sh."
+            f"taker buy of the {'opposite' if config.FADE_SIGNAL else 'predicted'} side "
+            f"for {config.ORDER_SHARES:.0f}sh."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -233,26 +240,29 @@ class Engine:
             return
 
     def _check_taker_entry(self, now: float):
-        """Buy the predicted side once, two seconds after window open."""
+        """Buy the configured entry side once, two seconds after window open."""
         if self.s.ai_predicted_side is None or self.s.position is not None:
             return
+        signal_side = self.s.ai_predicted_side
+        side = entry_side_for_signal(signal_side)
         ready_ts = self.s.window.open_ts + config.ENTRY_DELAY_SECONDS
         if now < ready_ts:
             if not self.s.entry_wait_logged:
                 self.s.entry_wait_logged = True
-                self._log("ENTRY_WAIT", side=self.s.ai_predicted_side.value,
-                           note=(f"signal accepted; waiting {ready_ts - now:.1f}s until "
+                self._log("ENTRY_WAIT", side=side.value,
+                           note=(f"{signal_side.value} signal accepted; buying {side.value}; "
+                                 f"waiting {ready_ts - now:.1f}s until "
                                  f"the {config.ENTRY_DELAY_SECONDS:.0f}s post-open taker entry"))
             return
         self.s.entry_attempted = True
-        side = self.s.ai_predicted_side
         ask = self._ask_for(side)
         levels = self._ask_levels_for(side)
         fill_price = _realistic_fill_price(levels, config.ORDER_SHARES, ask)
         if fill_price is None:
             self.total_illiquid_skips += 1
             self._log("NO_TRADE", side=side.value, price=ask,
-                       note="taker entry reached 2s after open, but the predicted side had no ask depth")
+                       note=(f"taker entry reached 2s after open, but the {side.value} "
+                             f"buy side for {signal_side.value} signal had no ask depth"))
             return
         fee = self.broker.taker_fee_amount(config.ORDER_SHARES, fill_price)
         cost = config.ORDER_SHARES * fill_price + fee
@@ -261,7 +271,8 @@ class Engine:
         self.total_orders_placed += 1
         self.total_order_fills += 1
         self._log("TAKER_ENTRY", side=side.value, price=fill_price, shares=config.ORDER_SHARES, fee=fee,
-                   note=(f"immediate taker buy {side.value} at {config.ENTRY_DELAY_SECONDS:.0f}s "
+                   note=(f"signal {signal_side.value}; immediate taker buy {side.value} at "
+                         f"{config.ENTRY_DELAY_SECONDS:.0f}s "
                          f"after window open; fill {fill_price:.4f} from ask depth "
                          f"(best ask {ask}), fee ${fee:.4f}, total cost ${cost:.4f}; "
                          f"{self.s.ai_reason}"))
@@ -269,7 +280,7 @@ class Engine:
             self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
             return
         self.s.position = Position(side=side, entry_price=fill_price, shares=config.ORDER_SHARES, cost=cost,
-                                   entry_ts=now, signal_side=side, entry_type="taker")
+                                   entry_ts=now, signal_side=signal_side, entry_type="taker")
 
     # ---- exit: TP only, no SL ------------------------------------------------
 
@@ -340,8 +351,12 @@ class Engine:
                 self.capital.check_halt()
                 self.s.position = None
             elif self.s.ai_tradeable and not self.s.entry_attempted:
+                entry_side = (
+                    entry_side_for_signal(self.s.ai_predicted_side)
+                    if self.s.ai_predicted_side else None
+                )
                 self._log("NO_TRADE", side=(
-                    self.s.ai_predicted_side.value if self.s.ai_predicted_side else None
+                    entry_side.value if entry_side else None
                 ), note="window closed before the 2-second taker entry could be attempted")
             elif not self.s.decision_made:
                 self.total_no_signal_windows += 1
@@ -430,8 +445,8 @@ class Engine:
 
             "def": {
                 "shares": config.ORDER_SHARES,
-                "fade_signal": False,
-                "direction": "same_as_signal",
+                "fade_signal": config.FADE_SIGNAL,
+                "direction": "opposite_signal" if config.FADE_SIGNAL else "same_as_signal",
                 "entry_delay_s": config.ENTRY_DELAY_SECONDS,
                 "tp_price": config.TP_PRICE,
                 "min_confidence": config.AI_MIN_CONFIDENCE,

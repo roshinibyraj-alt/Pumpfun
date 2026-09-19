@@ -151,7 +151,7 @@
   <header>
     <div>
       <h1>AI signal — fade</h1>
-      <div class="sub">BTC 5m up/down — a walk-forward prediction engine reads completed 1D, 4H, 1H and 15M Binance indicators, backtests the latest week, and buys the predicted side only when confidence and timeframe alignment clear the thresholds. Every decision includes its regime, historical setup accuracy and reason. 200sh, no SL, TP 0.99</div>
+      <div class="sub">BTC 5m up/down — a walk-forward prediction engine reads completed 1D, 4H, 1H and 15M Binance indicators, backtests the latest week, and buys the opposite side of qualifying signals. Every decision includes its regime, historical setup accuracy and reason. 200sh, no SL, TP 0.99</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -246,10 +246,12 @@ function renderBinancePanel(e){
   const side = e.ai_predicted_side;
   if(side === 'UP'){
     banner.className = 'signal-banner green';
-    banner.textContent = `SIGNAL UP (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}) → buy UP ${e.ai_tradeable?'· order active':'· skipped by threshold'}`;
+    const buySide = e.def && e.def.fade_signal ? 'DOWN' : 'UP';
+    banner.textContent = `SIGNAL UP (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}) → buy ${buySide} ${e.ai_tradeable?'· order active':'· skipped by threshold'}`;
   } else if(side === 'DOWN'){
     banner.className = 'signal-banner red';
-    banner.textContent = `SIGNAL DOWN (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}) → buy DOWN ${e.ai_tradeable?'· order active':'· skipped by threshold'}`;
+    const buySide = e.def && e.def.fade_signal ? 'UP' : 'DOWN';
+    banner.textContent = `SIGNAL DOWN (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}) → buy ${buySide} ${e.ai_tradeable?'· order active':'· skipped by threshold'}`;
   } else if(e.decision_made){
     banner.className = 'signal-banner flat';
     banner.textContent = 'NO TRADE — multi-timeframe history is incomplete';
@@ -350,7 +352,7 @@ function renderEngineCard(e){
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
   const orderHtml = e.ai_tradeable && !e.position && e.status === 'waiting_entry'
-    ? `<div class="order-box"><span class="lbl">signal accepted: buy ${e.ai_predicted_side}</span><span>waiting ${fmtSh(e.def.entry_delay_s)}s after window open, then taker entry</span></div>`
+    ? `<div class="order-box"><span class="lbl">signal ${e.ai_predicted_side}: buy ${e.def.fade_signal ? (e.ai_predicted_side === 'UP' ? 'DOWN' : 'UP') : e.ai_predicted_side}</span><span>waiting ${fmtSh(e.def.entry_delay_s)}s after window open, then taker entry</span></div>`
     : '';
 
   const pos = e.position;

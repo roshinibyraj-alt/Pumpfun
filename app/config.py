@@ -1,8 +1,8 @@
 """Configuration for the directional BTC 5-minute prediction bot.
 
-The bot buys the side predicted by the multi-timeframe engine. It never
-fades the signal. A signal is tradable only when the learned probability and
-cross-timeframe alignment clear their configured thresholds.
+The bot buys the side opposite to the multi-timeframe signal by default.
+A signal is tradable only when the learned probability and cross-timeframe
+alignment clear their configured thresholds.
 """
 import os
 
@@ -22,9 +22,11 @@ ENTRY_DELAY_SECONDS = float(os.getenv("ENTRY_DELAY_SECONDS", "2"))
 TP_PRICE = float(os.getenv("TP_PRICE", "0.99"))
 SIGNAL_CANDLE_OFFSET = 240
 
-# The legacy name remains available to old dashboard code, but the engine
-# always trades with the prediction and ignores fading.
-FADE_SIGNAL = False
+# Buy the opposite outcome from the model signal by default. Set this to
+# false when testing the non-faded strategy.
+FADE_SIGNAL = os.getenv("FADE_SIGNAL", "true").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 
 # ---- Multi-timeframe prediction -------------------------------------------
 TIMEFRAME_LABELS = ("1d", "4h", "1h", "15m")
