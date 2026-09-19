@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Previous-window momentum — BTC 5m bot</title>
+<title>Multi-timeframe prediction — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -159,7 +159,7 @@
   <header>
     <div>
       <h1>AI signal — fade</h1>
-      <div class="sub">BTC 5m up/down — an AI signal engine (self-training logistic regression, pretrained on historical Binance data at startup, no external API calls) predicts the next window from RSI/momentum/volatility/streak features. NO-SKIP MODE: the AI always picks a side and the bot always places an order — RSI is logged but no longer blocks. The bot FADES the AI's signal — always trades the opposite side: resting limit buy @ 0.45. If unfilled after 30s it is cancelled, then the bot buys at market (taker) the moment that side's ask is below 0.60, watching until the window closes (no trade if it never is). 200sh, no SL, TP 0.99</div>
+      <div class="sub">BTC 5m up/down — a walk-forward prediction engine reads completed 1D, 4H, 1H and 15M Binance indicators, backtests the latest week, and buys the predicted side only when confidence and timeframe alignment clear the thresholds. Every decision includes its regime, historical setup accuracy and reason. 200sh, no SL, TP 0.99</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -175,7 +175,7 @@
 
   <div class="binance-card">
     <div class="binance-head">
-      <h2>AI signal engine — online logistic regression (self-trained, no external API)</h2>
+      <h2>Directional prediction engine — 1D / 4H / 1H / 15M</h2>
       <div class="binance-conn" id="binanceConn"><span class="dot"></span><span>—</span></div>
     </div>
     <div class="signal-banner pending" id="signalBanner">waiting</div>
@@ -256,19 +256,18 @@ function renderBinancePanel(e){
 
   const banner = $('signalBanner');
   const side = e.ai_predicted_side;
-  const fade = !(e.def && e.def.fade_signal === false);
   if(side === 'UP'){
     banner.className = 'signal-banner green';
-    banner.textContent = `AI predicts UP (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}), ${fade?'FADED — buy DOWN':'buy UP'}: resting @ ${ORDER_PRICE}, taker fallback < ${TAKER_MAX} after ${ORDER_TIMEOUT}s`;
+    banner.textContent = `SIGNAL UP (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}) → buy UP ${e.ai_tradeable?'· order active':'· skipped by threshold'}`;
   } else if(side === 'DOWN'){
     banner.className = 'signal-banner red';
-    banner.textContent = `AI predicts DOWN (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}), ${fade?'FADED — buy UP':'buy DOWN'}: resting @ ${ORDER_PRICE}, taker fallback < ${TAKER_MAX} after ${ORDER_TIMEOUT}s`;
+    banner.textContent = `SIGNAL DOWN (conf ${e.ai_confidence!=null?(e.ai_confidence*100).toFixed(0)+'%':'—'}) → buy DOWN ${e.ai_tradeable?'· order active':'· skipped by threshold'}`;
   } else if(e.decision_made){
     banner.className = 'signal-banner flat';
-    banner.textContent = 'NO TRADE — Binance feed missing candle history this window (only case that can skip in no-skip mode)';
+    banner.textContent = 'NO TRADE — multi-timeframe history is incomplete';
   } else {
     banner.className = 'signal-banner pending';
-    banner.textContent = 'waiting for previous-window candle data from Binance...';
+    banner.textContent = 'waiting for completed multi-timeframe candles from Binance...';
   }
 
   renderAiStatus(e.ai || {}, e.pretrain || {});
@@ -277,16 +276,30 @@ function renderBinancePanel(e){
 function renderAiStatus(ai, pretrain){
   const el = $('aiStatus');
   const acc = ai.accuracy!=null ? ai.accuracy.toFixed(1)+'%' : '—';
+  const bt = ai.backtest || {};
+  const regimes = Object.entries(bt.by_regime || {}).sort((a,b)=>(b[1].accuracy||0)-(a[1].accuracy||0));
+  const setups = Object.entries(bt.by_setup || {}).sort((a,b)=>(b[1].accuracy||0)-(a[1].accuracy||0));
+  const evidence = bt.windows
+    ? `week backtest <b>${bt.accuracy ?? '—'}%</b> overall · ${bt.tradeable_accuracy ?? '—'}% qualifying · best ${regimes[0] ? regimes[0][0]+' '+regimes[0][1].accuracy+'%' : '—'}${setups[0] ? ' · setup '+setups[0][0]+' '+setups[0][1].accuracy+'%' : ''}`
+    : 'week backtest pending';
   const pretrainTag = !pretrain.done
     ? `<span class="cold">pretraining…</span>`
     : (pretrain.error
-        ? `<span class="cold">pretrain failed — starting cold, fills in live (~15min)</span>`
-        : `<span class="ready">pretrained on ${pretrain.windows_trained} windows, seeded ${pretrain.candles_seeded} live candles</span>`);
+        ? `<span class="cold">one-week walk-forward backtest failed — starting cold</span>`
+        : `<span class="ready">walk-forward tested ${pretrain.windows_trained} windows, seeded ${pretrain.candles_seeded} OHLCV candles</span>`);
   el.innerHTML = `
     <span>${pretrainTag}</span>
-    <span>trained on <b>${ai.n_trained ?? 0}</b> windows (${ai.pretrained_windows ?? 0} pretrain + ${ai.live_trained_windows ?? 0} live)</span>
-    <span>directional accuracy <b>${acc}</b> (${ai.correct_predictions ?? 0}/${ai.total_predictions ?? 0})</span>
+    <span>trained on <b>${ai.n_trained ?? 0}</b> windows (${ai.pretrained_windows ?? 0} backtest + ${ai.live_trained_windows ?? 0} live)</span>
+    <span>directional accuracy <b>${acc}</b> (${ai.correct_predictions ?? 0}/${ai.total_predictions ?? 0}) · min conf <b>${ai.min_confidence ?? '—'}</b></span>
+    <span style="width:100%; color:var(--text)">${evidence}</span>
   `;
+  const last = ai.last_prediction;
+  if(last && last.reason){
+    const reason = document.createElement('div');
+    reason.style.cssText = 'width:100%; color:var(--text); margin-top:4px;';
+    reason.textContent = last.reason;
+    el.appendChild(reason);
+  }
 }
 
 async function poll(){
@@ -337,7 +350,7 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    awaiting_signal:'awaiting previous-candle signal', order_resting:'order resting, unfilled', taker_watching:'timed out — watching for ask < 0.60',
+    awaiting_signal:'awaiting multi-timeframe signal', order_resting:'order resting, unfilled', taker_watching:'timed out — watching for ask < 0.60',
     open:'position open', done:'done for this window', halted:'halted',
   };
 
@@ -351,7 +364,7 @@ function renderEngineCard(e){
 
   let orderHtml = '';
   if(e.order && e.order.status === 'resting'){
-    const tag = e.order.signal_side ? ` <span class="lbl" style="color:var(--violet)">[${e.def.fade_signal===false?'with':'FADED, real'} signal ${e.order.signal_side}]</span>` : '';
+    const tag = e.order.signal_side ? ` <span class="lbl" style="color:var(--violet)">[buying signal side ${e.order.signal_side}]</span>` : '';
     const left = e.order.seconds_resting!=null ? Math.max(0, e.def.order_timeout_s - e.order.seconds_resting).toFixed(0) : '—';
     orderHtml = `<div class="order-box"><span class="lbl">resting: ${e.order.side} ${fmtSh(e.order.shares)}sh @ ${fmtP(e.order.price)}</span>${tag}<span>waiting for fill · ${left}s to timeout</span></div>`;
   } else if(e.status === 'taker_watching' && e.order){
@@ -400,7 +413,7 @@ function renderStats(e){
     ['total_orders_placed','orders placed',''], ['total_order_fills','maker fills',''], ['total_timeout_cancels','30s timeouts',''], ['total_taker_entries','taker entries',''], ['total_taker_skips','taker skips (ask ≥ 0.60)',''],
     ['total_tp_fills','tp fills','win'], ['total_forced_closes','forced close',''],
     ['total_unfilled_cancels','unfilled cancels',''], ['total_no_signal_windows','no-signal (feed gap)',''],
-    ['total_illiquid_skips','illiquid skips',''], ['total_rsi_flags','RSI flags',''],
+    ['total_illiquid_skips','illiquid skips',''], ['total_signal_skips','weak/conflicting signals',''],
     ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {

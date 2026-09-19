@@ -1,19 +1,10 @@
-"""
-Trading engine -- one entry attempt per window. Direction is decided by
-an online AI signal engine (app/ai_signal.py) predicting the next
-window's outcome, and the bot FADES that signal (buys the opposite side;
-config.FADE_SIGNAL toggles this).
+"""Trading engine for the directional multi-timeframe strategy.
 
-See app/config.py for the full strategy write-up. Summary: the instant
-a new window opens, compute AI features off the Binance feed and get a
-prediction (UP/DOWN, always). Place a resting maker limit buy on the
-fade side (opposite of the prediction) @ 0.45. If it hasn't filled
-after 30s, cancel it and watch that side's best ask until the window closes: the first
-tick it is below 0.60, buy at market (taker, depth-walked, with fee).
-If it never gets below 0.60, no trade. No SL. TP 0.99, real taker exit.
-One entry/trade max per window; no re-arm. Every window's true outcome
-is fed back into the AI engine as one online training step, whether or
-not a trade happened.
+At each 5-minute window the signal engine predicts UP or DOWN from completed
+1D/4H/1H/15M indicators and the walk-forward learner. The engine buys that
+same side; it never fades the prediction. Weak or conflicting signals are
+recorded and skipped. The existing maker-then-taker execution and window-end
+settlement logic remains intact.
 """
 import time
 from dataclasses import dataclass, field
@@ -85,7 +76,7 @@ class RestingOrder:
     price: float
     shares: float
     status: str = "resting"   # resting | filled | cancelled
-    signal_side: Optional[Side] = None   # the real AI signal side (opposite of `side` when fading), for logging
+    signal_side: Optional[Side] = None   # directional prediction that selected this side
     placed_ts: float = 0.0    # when the resting order was placed, for the 30s timeout
 
 
@@ -119,18 +110,20 @@ class EngineState:
     order: Optional[RestingOrder] = None
     position: Optional[Position] = None
     decision_made: bool = False     # True once the AI signal has been decided (whichever way it went)
-    decided_color: Optional[str] = None   # "green" | "red" | "flat", the signal candle's own color (one AI feature, for display)
-    ai_features: Optional[list] = None    # feature vector computed at signal time, kept for the learn() step at window close
-    ai_predicted_side: Optional[Side] = None   # the AI prediction = the side traded
+    decided_color: Optional[str] = None
+    ai_features: Optional[object] = None    # multi-timeframe feature bundle for online learning
+    ai_predicted_side: Optional[Side] = None
     taker_watching: bool = False    # True once the resting order timed out and was cancelled, until entry or window close
     taker_wait_logged: bool = False # so the "ask still >= 0.60" note is logged once, not every tick
     ai_confidence: Optional[float] = None
+    ai_reason: Optional[str] = None
+    ai_tradeable: bool = False
 
     last_window_pnl: float = 0.0
 
 
 class Engine:
-    """AI-signal engine (faded by default), driven off a single shared
+    """Directional signal engine driven off a single shared
     capital pool. Constructed as Engine(broker, binance_feed) --
     app/state.py owns the BinanceKlineFeed instance and passes it in."""
 
@@ -156,6 +149,7 @@ class Engine:
         self.total_no_signal_windows = 0
         self.total_illiquid_skips = 0
         self.total_rsi_flags = 0
+        self.total_signal_skips = 0
         self.total_pnl = 0.0
         self.wins = 0
         self.losses = 0
@@ -176,12 +170,13 @@ class Engine:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
         self._log("WINDOW_OPEN", note=(
-            f"AI signal engine predicts next window (trained on {self.ai.n_trained} windows: "
-            f"{self.ai.pretrained_windows} pretrained + {self.ai.n_trained - self.ai.pretrained_windows} live) "
-            f"-- RSI({config.RSI_PERIOD}) logged but does not block the trade (no-skip mode). {'FADES the signal (buys the opposite side)' if config.FADE_SIGNAL else 'Trades WITH the signal'}: "
-            f"resting limit buy on the traded side @ {config.ORDER_PRICE}, {config.ORDER_SHARES:.0f}sh; "
-            f"unfilled after {config.ORDER_TIMEOUT_SECONDS:.0f}s -> cancel, then taker buy whenever ask < "
-            f"{config.TAKER_FALLBACK_MAX_PRICE} until window close. No SL, TP {config.TP_PRICE}"
+            f"multi-timeframe predictor ready ({self.ai.n_trained} walk-forward/live training windows); "
+            f"uses 1d + 4h + 1h + 15m indicators, then buys the predicted side. "
+            f"Signal threshold: confidence >= {config.AI_MIN_CONFIDENCE:.2f}, "
+            f"alignment >= {config.AI_MIN_ALIGNMENT:.2f}. "
+            f"Resting buy @ {config.ORDER_PRICE}, {config.ORDER_SHARES:.0f}sh; "
+            f"unfilled after {config.ORDER_TIMEOUT_SECONDS:.0f}s -> taker fallback < "
+            f"{config.TAKER_FALLBACK_MAX_PRICE}."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -222,71 +217,48 @@ class Engine:
     def _ask_levels_for(self, side: Side) -> Optional[list]:
         return self.s.up_ask_levels if side == Side.UP else self.s.down_ask_levels
 
-    # ---- signal: AI prediction off the Binance feed --------------------------
+    # ---- signal: multi-timeframe prediction off the Binance feed -------------
 
     def _check_signal(self, now: float):
-        # The previous window's last minute is exactly the 60 seconds
-        # right before this window opened -- i.e. [this_open-60, this_open).
-        # Still needed: it's the candle the AI feature set is computed
-        # relative to, and its own color is one of those features.
         signal_open_ts = self.s.window.open_ts - 60
         candle = self.binance_feed.get_candle(signal_open_ts)
-
-        if candle is None or not candle.closed:
-            # Binance data for this candle isn't in yet -- keep waiting,
-            # retried every tick. It should normally already be closed
-            # (it ended exactly when this window opened), but feed lag
-            # or a reconnect can delay it briefly.
-            return
-
-        color = "green" if candle.close > candle.open else ("red" if candle.close < candle.open else "flat")
-        self.s.decided_color = color
-        self._log("CANDLE_READ", price=candle.close,
-                   note=(f"previous window's last-minute candle: open {candle.open}, close {candle.close} -> "
-                         f"{color} (open_time {candle.open_time}) -- one input feature for the AI signal"))
-
         feats = self.ai.compute_features(self.binance_feed, signal_open_ts)
         self.s.ai_features = feats
         self.s.decision_made = True
-
         if feats is None:
             self.total_no_signal_windows += 1
             self._log("NO_TRADE", note=(
-                "AI signal engine missing feature history (startup/reconnect, not enough candle "
-                "history yet) -- only case that can skip a window in no-skip mode"))
+                "multi-timeframe engine missing a complete 1d/4h/1h/15m history set "
+                "(startup/reconnect/data gap)"))
             return
-
-        # No-skip mode: predict() always returns a real side here.
         side, confidence = self.ai.predict(feats)
         self.s.ai_predicted_side = side
         self.s.ai_confidence = confidence
-        self._log("AI_SIGNAL", side=side.value, price=candle.close,
-                   note=f"AI predicts {side.value} (confidence {confidence:.2f}), trained on {self.ai.n_trained} windows")
+        self.s.ai_reason = feats.reason
+        self.s.ai_tradeable = self.ai.is_tradeable(confidence, feats)
+        prediction = self.ai.last_prediction or {}
+        self._log("AI_SIGNAL", side=side.value, price=candle.close if candle else None,
+                   note=(
+                       f"predicts {side.value} with confidence {confidence:.2f}; "
+                       f"{feats.reason}; model p(UP)={prediction.get('p_up')}; "
+                       f"historical setup accuracy is tracked by regime/hour/setup"
+                   ))
+        if not self.s.ai_tradeable:
+            self.total_signal_skips += 1
+            self._log("NO_TRADE", side=side.value, note=(
+                f"signal skipped: confidence {confidence:.2f} / alignment "
+                f"{feats.alignment:.2f} did not clear thresholds "
+                f"({config.AI_MIN_CONFIDENCE:.2f} / {config.AI_MIN_ALIGNMENT:.2f})"
+            ))
+            return
 
-        # RSI is logged for visibility but does NOT block the trade --
-        # every window with candle history places an order.
-        rsi = self.binance_feed.get_rsi(signal_open_ts, config.RSI_PERIOD)
-        if rsi is not None:
-            if side == Side.UP and rsi > config.RSI_OVERBOUGHT:
-                self.total_rsi_flags += 1
-                self._log("RSI_FLAG", side=side.value, note=(
-                    f"AI signal UP but RSI({config.RSI_PERIOD}) {rsi:.1f} > {config.RSI_OVERBOUGHT} "
-                    f"(overbought) -- flagged only, trade still placed (no-skip mode)"))
-            elif side == Side.DOWN and rsi < config.RSI_OVERSOLD:
-                self.total_rsi_flags += 1
-                self._log("RSI_FLAG", side=side.value, note=(
-                    f"AI signal DOWN but RSI({config.RSI_PERIOD}) {rsi:.1f} < {config.RSI_OVERSOLD} "
-                    f"(oversold) -- flagged only, trade still placed (no-skip mode)"))
-
-        # FADE: buy the opposite of the AI's predicted side (config.FADE_SIGNAL=False trades with it).
-        trade_side = side.other() if config.FADE_SIGNAL else side
-
+        trade_side = side
         self.s.order = RestingOrder(side=trade_side, price=config.ORDER_PRICE, shares=config.ORDER_SHARES,
                                      signal_side=side, placed_ts=now)
         self.total_orders_placed += 1
-        rsi_note = f", RSI({config.RSI_PERIOD}) {rsi:.1f}" if rsi is not None else ", RSI n/a (insufficient history)"
         self._log("RUNG_PLACED", side=trade_side.value, price=config.ORDER_PRICE, shares=config.ORDER_SHARES,
-                   note=(f"AI signal {side.value} (conf {confidence:.2f}){rsi_note} -> {'FADED' if config.FADE_SIGNAL else 'with signal'} -> resting limit buy "
+                   note=(f"directional signal {side.value} (confidence {confidence:.2f}) -> "
+                         f"buying the SAME side; {feats.reason}; resting limit buy "
                          f"{trade_side.value}: {config.ORDER_SHARES:.0f}sh @ {config.ORDER_PRICE} "
                          f"(cancel + taker fallback if unfilled after {config.ORDER_TIMEOUT_SECONDS:.0f}s)"))
 
@@ -392,18 +364,15 @@ class Engine:
             return
         window_slug = self.s.window.slug
 
-        # AI online learning: one gradient step per window, as long as we
-        # both computed features for it and know the true outcome -- this
-        # runs whether or not a trade was actually placed (RSI veto /
-        # illiquidity can still block a trade the AI called correctly),
-        # and even if the engine is halted, so the model keeps improving.
+        # One walk-forward learning step per completed window, whether or not
+        # the signal cleared the live trading threshold.
         if self.s.ai_features is not None and winning_side is not None:
             actual_up = (winning_side == Side.UP)
             self.ai.learn(self.s.ai_features, actual_up)
             self.ai.record_prediction_result(self.s.ai_predicted_side, actual_up)
             self._log("AI_LEARN", note=(
-                f"window resolved {winning_side.value} -- AI trained on this window "
-                f"(n_trained now {self.ai.n_trained})"))
+                f"window resolved {winning_side.value} -- directional engine trained "
+                f"on this setup (n_trained now {self.ai.n_trained})"))
 
         if not self.capital.halted:
             if self.s.position is not None:
@@ -493,7 +462,7 @@ class Engine:
         win_rate = round(100 * self.wins / (self.wins + self.losses), 1) if (self.wins + self.losses) else None
 
         return {
-            "engine": "PREVCANDLE", "label": "AI signal (faded)" if config.FADE_SIGNAL else "AI signal (with signal)",
+            "engine": "PREVCANDLE", "label": "Multi-timeframe directional signal",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -512,6 +481,12 @@ class Engine:
             "decided_color": self.s.decided_color,
             "ai_predicted_side": self.s.ai_predicted_side.value if self.s.ai_predicted_side else None,
             "ai_confidence": round(self.s.ai_confidence, 3) if self.s.ai_confidence is not None else None,
+            "ai_reason": self.s.ai_reason,
+            "ai_tradeable": self.s.ai_tradeable,
+            "ai_timeframes": (
+                (self.ai.last_prediction or {}).get("timeframes")
+                if self.ai.last_prediction else None
+            ),
             "ai": self.ai.status(),
             "binance": self.binance_feed.status(),
 
@@ -526,6 +501,7 @@ class Engine:
             "total_no_signal_windows": self.total_no_signal_windows,
             "total_illiquid_skips": self.total_illiquid_skips,
             "total_rsi_flags": self.total_rsi_flags,
+            "total_signal_skips": self.total_signal_skips,
 
             "wins": self.wins,
             "losses": self.losses,
@@ -535,10 +511,13 @@ class Engine:
 
             "def": {
                 "shares": config.ORDER_SHARES,
-                "fade_signal": config.FADE_SIGNAL,
+                "fade_signal": False,
+                "direction": "same_as_signal",
                 "order_price": config.ORDER_PRICE,
                 "order_timeout_s": config.ORDER_TIMEOUT_SECONDS,
                 "taker_max_price": config.TAKER_FALLBACK_MAX_PRICE,
                 "tp_price": config.TP_PRICE,
+                "min_confidence": config.AI_MIN_CONFIDENCE,
+                "min_alignment": config.AI_MIN_ALIGNMENT,
             },
         }

@@ -39,14 +39,34 @@ class BotState:
         if result["error"]:
             self.broker.log_event(
                 "SYS", "", "AI_PRETRAIN",
-                note=f"pretraining skipped/failed ({result['error']}) -- starting fully cold, learns/fills online instead",
+                note=f"multi-timeframe backtest skipped/failed ({result['error']}) -- starting cold",
             )
         else:
+            backtest = result.get("backtest") or {}
+            by_regime = backtest.get("by_regime") or {}
+            best_regime = max(
+                by_regime.items(),
+                key=lambda item: item[1].get("accuracy", -1),
+                default=None,
+            )
+            best_setup = max(
+                (backtest.get("by_setup") or {}).items(),
+                key=lambda item: item[1].get("accuracy", -1),
+                default=None,
+            )
+            evidence = (
+                f"backtest accuracy {backtest.get('accuracy', 'n/a')}%; "
+                f"best regime {best_regime[0]} {best_regime[1].get('accuracy')}%"
+                if best_regime else "backtest breakdown unavailable"
+            )
+            if best_setup:
+                evidence += f"; best setup {best_setup[0]} {best_setup[1].get('accuracy')}%"
             self.broker.log_event(
                 "SYS", "", "AI_PRETRAIN",
-                note=(f"pretrained AI on {result['windows_trained']} historical windows AND seeded the live "
-                      f"feed with {result['candles_seeded']} historical candles -- full feature lookback "
-                      f"available from the first live tick, no ~15min live warm-up needed"),
+                note=(f"walk-forward tested and trained directional engine on "
+                      f"{result['windows_trained']} latest-week windows; seeded live feed with "
+                      f"{result['candles_seeded']} OHLCV candles for 1d/4h/1h/15m features; "
+                      f"{evidence}"),
             )
         self.binance_feed.start()
         self._task = asyncio.create_task(self._run_loop())

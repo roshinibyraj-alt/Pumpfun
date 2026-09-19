@@ -1,17 +1,12 @@
-"""
-Binance 1-minute kline websocket feed for BTC/USDT spot.
+"""Binance BTC/USDT candles used by the multi-timeframe signal engine.
 
-Used ONLY to determine candle color (red/green) for the entry decision
-in app/engine.py -- it never prices or executes anything. All actual
-order pricing and fills are against Polymarket's own CLOB order book,
-handled entirely in polymarket_client.py / engine.py.
-
-Runs as a long-lived background task (started alongside the main poll
-loop in state.py) that keeps a reconnecting websocket open to Binance's
-public kline stream and stores a small rolling window of recent
-candles, keyed by each candle's open time (minute-aligned, in seconds).
+The websocket supplies closed 1-minute candles while startup REST data
+provides enough history to calculate completed 15m, 1h, 4h and 1d bars.
+The feed deliberately exposes only completed higher-timeframe bars so a
+signal can never read future candles or a partially formed bar.
 """
 import asyncio
+import bisect
 import json
 import time
 from dataclasses import dataclass
@@ -20,7 +15,7 @@ from typing import Optional
 import websockets
 
 STREAM_URL = "wss://stream.binance.com:9443/ws/btcusdt@kline_1m"
-MAX_CANDLES = 30            # ~30 minutes of history is plenty
+MAX_CANDLES = 70_000        # about 48 days of 1-minute history
 RECONNECT_BACKOFF_SECONDS = 3
 
 
@@ -30,6 +25,9 @@ class Candle:
     open: float
     close: float
     closed: bool        # True once Binance has sent the final update for this candle
+    high: Optional[float] = None
+    low: Optional[float] = None
+    volume: float = 0.0
 
 
 class BinanceKlineFeed:
@@ -40,6 +38,8 @@ class BinanceKlineFeed:
         self.last_message_ts: Optional[float] = None
         self._stop = False
         self._task: Optional[asyncio.Task] = None
+        self._candle_revision = 0
+        self._timeframe_cache = {}
 
     def start(self):
         self._task = asyncio.create_task(self._run())
@@ -71,14 +71,27 @@ class BinanceKlineFeed:
             k = data.get("k") or {}
             open_time_ms = k.get("t")
             open_price = k.get("o")
+            high_price = k.get("h")
+            low_price = k.get("l")
             close_price = k.get("c")
+            volume = k.get("v")
             is_closed = bool(k.get("x", False))
-            if open_time_ms is None or open_price is None or close_price is None:
+            if (open_time_ms is None or open_price is None or high_price is None
+                    or low_price is None or close_price is None or volume is None):
                 return
             open_time_s = open_time_ms / 1000.0
             self.candles[open_time_s] = Candle(
-                open_time=open_time_s, open=float(open_price), close=float(close_price), closed=is_closed,
+                open_time=open_time_s,
+                open=float(open_price),
+                close=float(close_price),
+                closed=is_closed,
+                high=float(high_price),
+                low=float(low_price),
+                volume=float(volume),
             )
+            if is_closed:
+                self._candle_revision += 1
+                self._timeframe_cache.clear()
             self.last_message_ts = time.time()
             self._trim()
         except Exception:
@@ -130,6 +143,55 @@ class BinanceKlineFeed:
         rs = avg_gain / avg_loss
         return 100.0 - (100.0 / (1.0 + rs))
 
+    def get_timeframe_bars(self, timeframe_seconds: int, as_of_ts: float,
+                           min_bars: int = 1) -> Optional[list]:
+        """Aggregate complete 1-minute candles into completed timeframe bars.
+
+        `as_of_ts` is the decision boundary. A timeframe bucket is included
+        only when its final minute has closed by that boundary and every
+        minute in the bucket exists. Missing minutes are treated as a data
+        gap rather than silently producing misleading indicators.
+        """
+        if timeframe_seconds % 60:
+            raise ValueError("timeframe_seconds must be a multiple of 60")
+        minute_count = timeframe_seconds // 60
+        cache_key = (timeframe_seconds, self._candle_revision)
+        out = self._timeframe_cache.get(cache_key)
+        if out is None:
+            buckets = {}
+            for key, candle in self.candles.items():
+                if not candle.closed:
+                    continue
+                bucket_start = int(key // timeframe_seconds) * timeframe_seconds
+                buckets.setdefault(bucket_start, {})[int(key)] = candle
+
+            out = []
+            for bucket_start in sorted(buckets):
+                bucket = buckets[bucket_start]
+                expected = [bucket_start + i * 60 for i in range(minute_count)]
+                if any(ts not in bucket or not bucket[ts].closed for ts in expected):
+                    continue
+                minutes = [bucket[ts] for ts in expected]
+                highs = [c.high if c.high is not None else max(c.open, c.close) for c in minutes]
+                lows = [c.low if c.low is not None else min(c.open, c.close) for c in minutes]
+                out.append(Candle(
+                    open_time=float(bucket_start),
+                    open=minutes[0].open,
+                    close=minutes[-1].close,
+                    closed=True,
+                    high=max(highs),
+                    low=min(lows),
+                    volume=sum(c.volume for c in minutes),
+                ))
+            self._timeframe_cache[cache_key] = out
+
+        # The cache contains only complete buckets. Slice by the decision
+        # boundary without rebuilding all aggregations for every 5m window.
+        cutoff = as_of_ts - timeframe_seconds
+        index = bisect.bisect_right([bar.open_time for bar in out], cutoff)
+        selected = out[:index]
+        return selected if len(selected) >= min_bars else None
+
     def status(self) -> dict:
         return {
             "connected": self.connected,
@@ -137,4 +199,5 @@ class BinanceKlineFeed:
             "last_message_age_s": (round(time.time() - self.last_message_ts, 1)
                                     if self.last_message_ts else None),
             "candles_cached": len(self.candles),
+            "history_hours": round(len(self.candles) / 60, 1),
         }
