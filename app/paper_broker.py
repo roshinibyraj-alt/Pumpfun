@@ -26,7 +26,11 @@ class PaperBroker:
             self.log.pop(0)
 
     def taker_fee_amount(self, shares: float, price: float) -> float:
-        """The taker fee that applies to a market-order fill."""
+        """The taker fee for a fill of this size/price. Every leg of the
+        strategy calls this -- the entry buy and every exit path
+        (TP/stop/forced-close) are all taker fills, not resting maker
+        orders, so all of them pay this fee for real (TP is the sole
+        exception -- it's a CTF resolution redemption, not a trade)."""
         return self._taker_fee(shares, price)
 
     def _taker_fee(self, shares: float, price: float) -> float:

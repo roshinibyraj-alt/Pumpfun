@@ -1,59 +1,66 @@
-"""Trading engine for the directional multi-timeframe strategy.
+"""
+Trading engine -- BTC-spot-trend entry (buys the direction BTC itself
+has been trending in, not the previous window's winner or the token's
+own cheapness), continuous trailing stop that arms 3 minutes after
+window open and tightens above 0.85, a hard stop-loss override once
+deep ITM, single trade per window, TP redemption.
 
-At each 5-minute window the signal engine predicts UP or DOWN from completed
-1D/4H/1H/15M indicators and the walk-forward learner. The engine buys the
-opposite side of that prediction by default. Weak or conflicting signals are
-recorded and skipped. A qualifying signal waits two seconds after window open
-and then executes one depth-priced taker buy; window-end settlement remains
-unchanged.
+See app/config.py for the full strategy write-up, and app/btc_trend.py
+for how the trend signal itself is computed. Summary: a short delay
+after window open (ENTRY_SETTLE_SECONDS, just long enough for book
+data to exist), the engine looks at whatever BTC trend it was last
+told about (see on_tick's btc_trend argument, fed by app/state.py from
+a BtcTrendTracker that runs continuously off real BTC spot price,
+independent of the window clock). If there's no clear trend, the
+window is skipped outright. If there is, the target side is UP for an
+uptrend or DOWN for a downtrend; if that side's price is below
+ENTRY_PRICE_THRESHOLD (0.40), it's bought immediately, flat
+BASE_ORDER_SHARES; otherwise no trade is taken this window -- this is
+a single check, not a rearmed watch. From then on, TP is live
+immediately, but the trailing stop doesn't arm until
+TRAIL_START_DELAY_SECONDS (180s / 3min) after the WINDOW OPENED (not
+after entry) -- before that, only TP can close the position. The
+high-water mark keeps tracking the whole time regardless, so once the
+stop arms it starts from wherever price has already gotten to, not
+from scratch. Once armed, the stop sits behind the position's
+high-water MID -- 0.20 back normally, narrowing to 0.10 back once the
+high-water mark has gone above 0.85 -- and only ever tightens.
+Independent of that arming delay, the moment the high-water mark
+reaches HARD_STOP_TRIGGER_PRICE (0.90), the trailing stop is
+permanently deactivated for that position and replaced with a fixed
+HARD_STOP_PRICE (0.60) stop-loss -- much wider than the tightened
+trail would be, deliberately giving a deep-ITM position room to wobble
+without getting stopped out; this never reverts even if price falls
+back under 0.90. Mid price is what triggers every decision (entry
+threshold, TP, stop), but every actual fill is a real taker execution
+priced off real ask/bid order-book depth (see
+Engine._realistic_fill_price), so mid and fill price can differ by the
+spread. If mid reaches 0.99, redeem at a flat $1.00/share, fee-free,
+done for the window. If the trailing stop or hard stop is hit instead,
+the position is closed and the window is done -- no flip, no re-entry
+on the other side, at most one trade per window. No martingale
+anywhere; every entry is BASE_ORDER_SHARES. Every fill except TP is a
+taker order and pays the taker fee; TP is the sole fee-free exception
+since it's a CTF resolution redemption, not an orderbook trade.
 """
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 from . import config
-from .ai_signal import AISignalEngine
-from .binance_client import BinanceKlineFeed
 from .models import Side, WindowMarket
 from .paper_broker import PaperBroker
 
 
-def entry_side_for_signal(signal_side: Side) -> Side:
-    """Return the outcome token the execution layer should buy."""
-    return signal_side.other() if config.FADE_SIGNAL else signal_side
+def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2
+    return ask if ask is not None else bid
 
 
-def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
-    """Volume-weighted average price to actually trade `shares` against a
-    real order book, instead of assuming the whole size fills at the
-    single best quote. Used for the taker entry, TP exit and forced close.
-
-    - levels is None -> no depth data this tick; fall back to filling
-      the whole size at `fallback_price`.
-    - levels is [] -> book fetched fine, genuinely no ask/bid depth on
-      this side; return None, caller must not invent a fill.
-    - levels is non-empty -> walk best-price-first; any shortfall in
-      visible depth is priced at the worst level seen.
-    """
-    if levels is None:
-        return fallback_price
-    if not levels:
-        return None
-    remaining = shares
-    cost = 0.0
-    worst_price = levels[-1][0]
-    for price, size in levels:
-        if remaining <= 1e-9:
-            break
-        take = min(remaining, size) if size and size > 0 else 0.0
-        if take <= 0:
-            continue
-        cost += take * price
-        remaining -= take
-    if remaining > 1e-9:
-        cost += remaining * worst_price
-    return cost / shares
-
+# ---------------------------------------------------------------------------
+# Shared capital -- single balance the engine debits/credits.
+# ---------------------------------------------------------------------------
 
 @dataclass
 class CapitalPool:
@@ -74,81 +81,80 @@ class CapitalPool:
         return self.halted
 
 
+# ---------------------------------------------------------------------------
+# The single open position for a window, if any.
+# ---------------------------------------------------------------------------
+
 @dataclass
 class Position:
     side: Side
-    entry_price: float
     shares: float
-    cost: float
+    entry_price: float
+    entry_fee: float
     entry_ts: float
-    signal_side: Optional[Side] = None
-    entry_type: str = "taker"
+    high_water_mark: float = 0.0   # best bid seen since entry -- drives the continuous trailing stop
+    hard_stop_active: bool = False # once high-water mark >= HARD_STOP_TRIGGER_PRICE, trailing is permanently
+                                    # replaced by the fixed HARD_STOP_PRICE stop -- never reverts
+
+    @property
+    def cost(self) -> float:
+        return self.shares * self.entry_price + self.entry_fee
 
 
 @dataclass
 class EngineState:
-    """Per-window transient state -- fully replaced by reset_for_window()
-    at the start of every window. Cumulative stats live on the Engine
-    itself, below, so they survive across windows instead of getting
-    wiped every 5 minutes."""
     window: Optional[WindowMarket] = None
     up_bid: Optional[float] = None
     up_ask: Optional[float] = None
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
+
+    # Full order-book depth for the current tick, when available. None
+    # means "no depth data this tick" (fall back to the scalar price for
+    # the whole size); an empty list means "book fetched fine, there is
+    # genuinely nothing resting on this side" -- a real no-liquidity
+    # signal, not a data gap. See Engine._realistic_fill_price.
     up_bid_levels: Optional[list] = None
     up_ask_levels: Optional[list] = None
     down_bid_levels: Optional[list] = None
     down_ask_levels: Optional[list] = None
 
     position: Optional[Position] = None
-    decision_made: bool = False     # True once the AI signal has been decided (whichever way it went)
-    decided_color: Optional[str] = None
-    ai_features: Optional[object] = None    # multi-timeframe feature bundle for online learning
-    ai_predicted_side: Optional[Side] = None
-    entry_attempted: bool = False
-    entry_wait_logged: bool = False
-    ai_confidence: Optional[float] = None
-    ai_reason: Optional[str] = None
-    ai_tradeable: bool = False
+    entry_checked: bool = False     # the single entry check (t=ENTRY_SETTLE_SECONDS) has happened
+    btc_trend: Optional[Side] = None   # latest BTC trend read, refreshed every tick via on_tick's
+                                        # btc_trend argument -- Side.UP/Side.DOWN/None, captured at
+                                        # whatever value it holds at the moment of the entry check
+    done_for_window: bool = False   # TP or stop hit, or window closed with nothing open -- nothing left to watch
 
+    total_entries_attempted: int = 0   # entry checks where the trend side was below threshold and bought
+    total_price_too_high: int = 0      # entry checks where the trend side was at/above ENTRY_PRICE_THRESHOLD
+    total_tp_hits: int = 0
+    total_stop_hits: int = 0           # trailing-stop closes only
+    total_hard_stop_hits: int = 0      # fixed hard-stop closes only (position ran to 0.90+ first)
+    total_forced_closes: int = 0       # window closed before TP/stop was reached
+    no_trade_windows: int = 0          # no clear trend, or trend side was too expensive -- nothing opened
+    wins: int = 0
+    losses: int = 0
+    total_pnl: float = 0.0
     last_window_pnl: float = 0.0
 
 
 class Engine:
-    """Directional signal engine driven off a single shared
-    capital pool. Constructed as Engine(broker, binance_feed) --
-    app/state.py owns the BinanceKlineFeed instance and passes it in."""
+    """BTC-spot-trend entry (buys the direction BTC itself has been
+    trending in) / trailing stop that arms 3 minutes after window open,
+    tightens above 0.85, and gets permanently overridden by a fixed
+    hard stop above 0.90 / single trade per window, driven off its own
+    capital pool. Kept as the class name `Engine` / constructed the
+    same way (Engine(broker)) so app/state.py doesn't need structural
+    changes."""
 
-    name = "PREVCANDLE"
+    name = "FLIP"
 
-    def __init__(self, broker: PaperBroker, binance_feed: BinanceKlineFeed):
+    def __init__(self, broker: PaperBroker):
         self.broker = broker
-        self.binance_feed = binance_feed
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
         self.s = EngineState()
         self.capital.record_equity_point(None)
-        self.ai = AISignalEngine()
-
-        # ---- cumulative stats, survive across windows ----------------------
-        self.total_orders_placed = 0
-        self.total_order_fills = 0
-        self.total_tp_fills = 0
-        self.total_forced_closes = 0
-        self.total_taker_entries = 0
-        self.total_no_signal_windows = 0
-        self.total_illiquid_skips = 0
-        self.total_rsi_flags = 0
-        self.total_signal_skips = 0
-        self.total_pnl = 0.0
-        self.wins = 0
-        self.losses = 0
-
-    def _record_trade_result(self, pnl: float):
-        if pnl >= 0:
-            self.wins += 1
-        else:
-            self.losses += 1
 
     def _log(self, event, **kw):
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
@@ -156,23 +162,27 @@ class Engine:
 
     def reset_for_window(self, window: WindowMarket):
         self.s = EngineState(window=window)
+
         if self.capital.halted:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
-        self._log("WINDOW_OPEN", note=(
-            f"multi-timeframe predictor ready ({self.ai.n_trained} walk-forward/live training windows); "
-            f"uses 1d + 4h + 1h + 15m indicators, then buys the "
-            f"{'opposite' if config.FADE_SIGNAL else 'predicted'} side. "
-            f"Signal threshold: confidence >= {config.AI_MIN_CONFIDENCE:.2f}, "
-            f"alignment >= {config.AI_MIN_ALIGNMENT:.2f}. "
-            f"wait {config.ENTRY_DELAY_SECONDS:.0f}s after window open, then immediate "
-            f"taker buy of the {'opposite' if config.FADE_SIGNAL else 'predicted'} side "
-            f"for {config.ORDER_SHARES:.0f}sh."
+
+        self._log("WINDOW_OPEN", shares=config.BASE_ORDER_SHARES, note=(
+            f"waiting {config.ENTRY_SETTLE_SECONDS:.0f}s, then checking the BTC trend -- if it's clearly "
+            f"up, buy UP; if clearly down, buy DOWN; if no clear trend, skip this window entirely. The "
+            f"trend side is only bought if its price is below {config.ENTRY_PRICE_THRESHOLD} at that "
+            f"single check (no rearmed watch) -- flat {config.BASE_ORDER_SHARES:.0f}sh, no martingale. "
+            f"TP {config.TP_PRICE} (redeem $1) live immediately / trailing stop arms "
+            f"{config.TRAIL_START_DELAY_SECONDS:.0f}s after window open, {config.TRAIL_DISTANCE} trail "
+            f"(tightens to {config.TRAIL_DISTANCE_TIGHT} above {config.TRAIL_TIGHTEN_PRICE}, permanently "
+            f"replaced by a fixed {config.HARD_STOP_PRICE} hard stop above {config.HARD_STOP_TRIGGER_PRICE}), "
+            f"one trade per window -- no flip on stop-out."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
                 up_bid_levels: Optional[list] = None, up_ask_levels: Optional[list] = None,
-                down_bid_levels: Optional[list] = None, down_ask_levels: Optional[list] = None):
+                down_bid_levels: Optional[list] = None, down_ask_levels: Optional[list] = None,
+                btc_trend: Optional[Side] = None):
         if self.s.window is None or self.capital.halted:
             return
         now = now if now is not None else time.time()
@@ -180,15 +190,15 @@ class Engine:
         self.s.down_bid, self.s.down_ask = down_bid, down_ask
         self.s.up_bid_levels, self.s.up_ask_levels = up_bid_levels, up_ask_levels
         self.s.down_bid_levels, self.s.down_ask_levels = down_bid_levels, down_ask_levels
+        self.s.btc_trend = btc_trend
 
-        if self.s.position is not None:
-            self._check_exit(now)
+        if self.s.done_for_window:
             return
 
-        if not self.s.decision_made:
-            self._check_signal(now)
-        if self.s.position is None and self.s.ai_tradeable and not self.s.entry_attempted:
-            self._check_taker_entry(now)
+        if self.s.position is None:
+            self._check_entry(now)
+        else:
+            self._check_exit(now)
 
     # ---- price/level lookups ----------------------------------------------
 
@@ -198,258 +208,361 @@ class Engine:
     def _bid_for(self, side: Side) -> Optional[float]:
         return self.s.up_bid if side == Side.UP else self.s.down_bid
 
-    def _bid_levels_for(self, side: Side) -> Optional[list]:
-        return self.s.up_bid_levels if side == Side.UP else self.s.down_bid_levels
+    def _mid_for(self, side: Side) -> Optional[float]:
+        return _midpoint(self._bid_for(side), self._ask_for(side))
 
     def _ask_levels_for(self, side: Side) -> Optional[list]:
         return self.s.up_ask_levels if side == Side.UP else self.s.down_ask_levels
 
-    # ---- signal: multi-timeframe prediction off the Binance feed -------------
+    def _bid_levels_for(self, side: Side) -> Optional[list]:
+        return self.s.up_bid_levels if side == Side.UP else self.s.down_bid_levels
 
-    def _check_signal(self, now: float):
-        signal_open_ts = self.s.window.open_ts - 60
-        candle = self.binance_feed.get_candle(signal_open_ts)
-        feats = self.ai.compute_features(self.binance_feed, signal_open_ts)
-        self.s.ai_features = feats
-        self.s.decision_made = True
-        if feats is None:
-            self.total_no_signal_windows += 1
+    @staticmethod
+    def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
+        """Volume-weighted average price to actually trade `shares`
+        against a real order book, instead of assuming the whole size
+        fills at the single best quote.
+
+        - levels is None -> no depth data this tick; fall back to
+          filling the whole size at `fallback_price`.
+        - levels is [] -> book fetched fine, genuinely nothing resting
+          on this side; return None, caller must not invent a fill.
+        - levels is non-empty -> walk best-price-first; any shortfall
+          in visible depth is priced at the worst level seen.
+        """
+        if levels is None:
+            return fallback_price
+        if not levels:
+            return None
+        remaining = shares
+        cost = 0.0
+        worst_price = levels[-1][0]
+        for price, size in levels:
+            if remaining <= 1e-9:
+                break
+            take = min(remaining, size) if size and size > 0 else 0.0
+            if take <= 0:
+                continue
+            cost += take * price
+            remaining -= take
+        if remaining > 1e-9:
+            cost += remaining * worst_price
+        return cost / shares
+
+    # ---- entry: single check at ENTRY_SETTLE_SECONDS -- BTC trend picks --
+    # ---- the side, ENTRY_PRICE_THRESHOLD decides whether to fire ---------
+
+    def _check_entry(self, now: float):
+        elapsed = now - self.s.window.open_ts
+        if elapsed < config.ENTRY_SETTLE_SECONDS:
+            return   # not yet -- keep waiting, don't mark checked
+
+        self.s.entry_checked = True
+
+        trend = self.s.btc_trend
+        if trend is None:
+            self.s.no_trade_windows += 1
+            self.s.done_for_window = True
             self._log("NO_TRADE", note=(
-                "multi-timeframe engine missing a complete 1d/4h/1h/15m history set "
-                "(startup/reconnect/data gap)"))
-            return
-        side, confidence = self.ai.predict(feats)
-        self.s.ai_predicted_side = side
-        self.s.ai_confidence = confidence
-        self.s.ai_reason = feats.reason
-        self.s.ai_tradeable = self.ai.is_tradeable(confidence, feats)
-        prediction = self.ai.last_prediction or {}
-        self._log("AI_SIGNAL", side=side.value, price=candle.close if candle else None,
-                   note=(
-                       f"predicts {side.value} with confidence {confidence:.2f}; "
-                       f"{feats.reason}; model p(UP)={prediction.get('p_up')}; "
-                       f"historical setup accuracy is tracked by regime/hour/setup"
-                   ))
-        if not self.s.ai_tradeable:
-            self.total_signal_skips += 1
-            self._log("NO_TRADE", side=side.value, note=(
-                f"signal skipped: confidence {confidence:.2f} / alignment "
-                f"{feats.alignment:.2f} did not clear thresholds "
-                f"({config.AI_MIN_CONFIDENCE:.2f} / {config.AI_MIN_ALIGNMENT:.2f})"
+                f"no clear BTC trend at the {config.ENTRY_SETTLE_SECONDS:.0f}s check "
+                f"(last {config.BTC_TREND_LOOKBACK_BLOCKS} blocks weren't cleanly monotonic) -- "
+                f"skipping window"
             ))
             return
 
-    def _check_taker_entry(self, now: float):
-        """Buy the configured entry side once, two seconds after window open."""
-        if self.s.ai_predicted_side is None or self.s.position is not None:
+        price = self._mid_for(trend)
+        if price is None:
+            self.s.no_trade_windows += 1
+            self.s.done_for_window = True
+            self._log("NO_TRADE", side=trend.value,
+                       note="no price data at the entry check -- skipping window")
             return
-        signal_side = self.s.ai_predicted_side
-        side = entry_side_for_signal(signal_side)
-        ready_ts = self.s.window.open_ts + config.ENTRY_DELAY_SECONDS
-        if now < ready_ts:
-            if not self.s.entry_wait_logged:
-                self.s.entry_wait_logged = True
-                self._log("ENTRY_WAIT", side=side.value,
-                           note=(f"{signal_side.value} signal accepted; buying {side.value}; "
-                                 f"waiting {ready_ts - now:.1f}s until "
-                                 f"the {config.ENTRY_DELAY_SECONDS:.0f}s post-open taker entry"))
+
+        if price >= config.ENTRY_PRICE_THRESHOLD:
+            self.s.total_price_too_high += 1
+            self.s.no_trade_windows += 1
+            self.s.done_for_window = True
+            self._log("NO_TRADE", side=trend.value, price=round(price, 4), note=(
+                f"BTC trend side {trend.value} mid @ {price:.4f} is at/above the "
+                f"{config.ENTRY_PRICE_THRESHOLD} entry threshold at the "
+                f"{config.ENTRY_SETTLE_SECONDS:.0f}s check -- no trade this window"
+            ))
             return
-        self.s.entry_attempted = True
+
+        self.s.total_entries_attempted += 1
+        self._open_position(trend, now, zone_note=(
+            f"BTC trend is {trend.value} (last {config.BTC_TREND_LOOKBACK_BLOCKS} 30s blocks monotonic), "
+            f"{trend.value} mid @ {price:.4f} < {config.ENTRY_PRICE_THRESHOLD}"
+        ))
+
+    # ---- position open (single entry per window) ---------------------------
+
+    def _open_position(self, side: Side, now: float, zone_note: str):
+        shares = config.BASE_ORDER_SHARES
         ask = self._ask_for(side)
         levels = self._ask_levels_for(side)
-        fill_price = _realistic_fill_price(levels, config.ORDER_SHARES, ask)
-        if fill_price is None:
-            self.total_illiquid_skips += 1
-            self._log("NO_TRADE", side=side.value, price=ask,
-                       note=(f"taker entry reached 2s after open, but the {side.value} "
-                             f"buy side for {signal_side.value} signal had no ask depth"))
-            return
-        fee = self.broker.taker_fee_amount(config.ORDER_SHARES, fill_price)
-        cost = config.ORDER_SHARES * fill_price + fee
-        self.capital.balance -= cost
-        self.total_taker_entries += 1
-        self.total_orders_placed += 1
-        self.total_order_fills += 1
-        self._log("TAKER_ENTRY", side=side.value, price=fill_price, shares=config.ORDER_SHARES, fee=fee,
-                   note=(f"signal {signal_side.value}; immediate taker buy {side.value} at "
-                         f"{config.ENTRY_DELAY_SECONDS:.0f}s "
-                         f"after window open; fill {fill_price:.4f} from ask depth "
-                         f"(best ask {ask}), fee ${fee:.4f}, total cost ${cost:.4f}; "
-                         f"{self.s.ai_reason}"))
-        if self.capital.check_halt():
-            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
-            return
-        self.s.position = Position(side=side, entry_price=fill_price, shares=config.ORDER_SHARES, cost=cost,
-                                   entry_ts=now, signal_side=signal_side, entry_type="taker")
+        fill_price = self._realistic_fill_price(levels, shares, ask)
 
-    # ---- exit: TP only, no SL ------------------------------------------------
+        if fill_price is None:
+            self._log("NO_LIQUIDITY", side=side.value,
+                       note=f"no ask liquidity on {side.value} -- entry skipped")
+            self.s.done_for_window = True
+            self.s.no_trade_windows += 1
+            return
+
+        fee = self.broker.taker_fee_amount(shares, fill_price)
+        cost = shares * fill_price + fee
+        self.capital.balance -= cost
+        mid_now = self._mid_for(side)
+        hwm_start = mid_now if mid_now is not None else fill_price
+        self.s.position = Position(side=side, shares=shares, entry_price=fill_price, entry_fee=fee,
+                                    entry_ts=now, high_water_mark=hwm_start)
+        self._log("ENTRY_FILL", side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
+                   note=(f"entry buy filled (taker, real ask depth): {shares:.0f}sh @ {fill_price:.4f} "
+                         f"({zone_note}, fee ${fee:.4f}) -- TP {config.TP_PRICE} (redeem $1) / "
+                         f"trailing stop arms {config.TRAIL_START_DELAY_SECONDS:.0f}s after window open"))
+        self.capital.check_halt()
+
+    # ---- exit: TP redemption or continuous trailing-stop hit ---------------
+
+    @staticmethod
+    def _effective_stop(high_water_mark: float) -> float:
+        """Continuous trail: TRAIL_DISTANCE behind the high-water mark,
+        narrowing to TRAIL_DISTANCE_TIGHT once the high-water mark has
+        gone above TRAIL_TIGHTEN_PRICE, rounded to the price tick.
+        Monotonically non-decreasing since the caller always feeds in
+        the cumulative HWM, never the raw current price -- so it only
+        ever tightens (both from the HWM rising and from crossing the
+        tighten threshold)."""
+        trail = config.TRAIL_DISTANCE_TIGHT if high_water_mark > config.TRAIL_TIGHTEN_PRICE else config.TRAIL_DISTANCE
+        stop = high_water_mark - trail
+        return round(stop / config.PRICE_TICK) * config.PRICE_TICK
 
     def _check_exit(self, now: float):
         pos = self.s.position
-        bid = self._bid_for(pos.side)
-        if bid is None or bid < config.TP_PRICE:
+        mid = self._mid_for(pos.side)
+        if mid is None:
             return
-        levels = self._bid_levels_for(pos.side)
-        fill_price = _realistic_fill_price(levels, pos.shares, bid)
-        if fill_price is None:
-            self.total_illiquid_skips += 1
-            self._log("NO_LIQUIDITY", side=pos.side.value, price=bid, note=f"TP triggered @ {bid} but zero bid depth -- waiting")
+        if mid > pos.high_water_mark:
+            pos.high_water_mark = mid
+
+        if mid >= config.TP_PRICE:
+            self.s.total_tp_hits += 1
+            self._close_position(now, reason="TP_HIT",
+                                  note_prefix=f"take-profit hit ({config.TP_PRICE} mid)",
+                                  fill_price_override=1.0, fee_override=0.0)
             return
-        fee = self.broker.taker_fee_amount(pos.shares, fill_price)
+
+        # Hard stop: the instant the position has run deep enough ITM,
+        # permanently swap the trailing stop for a fixed, much wider
+        # stop-loss -- independent of the trail-arm delay below, and it
+        # never reverts even if price pulls back under the trigger
+        # afterwards.
+        if not pos.hard_stop_active and pos.high_water_mark >= config.HARD_STOP_TRIGGER_PRICE:
+            pos.hard_stop_active = True
+            self._log("HARD_STOP_ARMED", price=round(pos.high_water_mark, 4), note=(
+                f"high-water mid reached {config.HARD_STOP_TRIGGER_PRICE} -- trailing stop deactivated, "
+                f"hard stop-loss now fixed at {config.HARD_STOP_PRICE} for the rest of this position"
+            ))
+
+        if pos.hard_stop_active:
+            if mid <= config.HARD_STOP_PRICE:
+                self.s.total_hard_stop_hits += 1
+                self._close_position(now, reason="HARD_STOP_HIT", note_prefix=(
+                    f"hard stop-loss hit at {config.HARD_STOP_PRICE:.4f} (fixed -- trailing stop was "
+                    f"deactivated once high-water mid passed {config.HARD_STOP_TRIGGER_PRICE})"
+                ))
+            return   # hard-stop mode: trailing logic below no longer applies to this position
+
+        if now - self.s.window.open_ts < config.TRAIL_START_DELAY_SECONDS:
+            return   # stop isn't armed yet -- only TP can close in this window
+
+        stop = self._effective_stop(pos.high_water_mark)
+        if mid <= stop:
+            self.s.total_stop_hits += 1
+            trail = (config.TRAIL_DISTANCE_TIGHT if pos.high_water_mark > config.TRAIL_TIGHTEN_PRICE
+                     else config.TRAIL_DISTANCE)
+            self._close_position(now, reason="STOP_HIT",
+                                  note_prefix=(f"continuous trailing stop hit at mid {stop:.4f} "
+                                               f"(high-water mid {pos.high_water_mark:.4f}, {trail} trail)"))
+
+    def _close_position(self, now: float, reason: str, note_prefix: str,
+                         fill_price_override: Optional[float] = None, fee_override: Optional[float] = None):
+        pos = self.s.position
+        if fill_price_override is not None:
+            # TP: booked as a CTF resolution redemption, not an orderbook
+            # trade -- flat $1.00/share, no fee, no book-depth lookup.
+            fill_price = fill_price_override
+            fee = fee_override if fee_override is not None else 0.0
+        else:
+            # Real taker sell against actual bid depth -- mid only decides
+            # WHEN to exit, never what price it fills at.
+            bid = self._bid_for(pos.side)
+            levels = self._bid_levels_for(pos.side)
+            fill_price = self._realistic_fill_price(levels, pos.shares, bid)
+            if fill_price is None:
+                # confirmed empty book -- nobody bidding at all right now
+                fill_price = 0.0
+                self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
+                           note=f"{reason} but book has zero bid depth on {pos.side.value} -- assuming worst case $0")
+            fee = self.broker.taker_fee_amount(pos.shares, fill_price)
+
         proceeds = pos.shares * fill_price - fee
         pnl = proceeds - pos.cost
         self.capital.balance += proceeds
-        self.total_pnl += pnl
+        self.s.total_pnl += pnl
         self.s.last_window_pnl += pnl
-        self._record_trade_result(pnl)
-        self.total_tp_fills += 1
-        self._log("TP_FILL", side=pos.side.value, price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee,
-                   note=(f"TP hit, real fill @ {fill_price:.4f} (triggered @ {bid}) "
-                         f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
+        win = pnl >= 0
+        if win:
+            self.s.wins += 1
+        else:
+            self.s.losses += 1
+
+        self._log(reason, side=pos.side.value, price=round(fill_price, 4), shares=pos.shares,
+                   fee=round(fee, 4), pnl=round(pnl, 4),
+                   note=(f"{note_prefix} ({'redemption, fee-free' if fill_price_override is not None else 'taker'}, "
+                         f"@ {fill_price:.4f}): {pos.shares:.0f}sh (entry {pos.entry_price:.4f}, "
+                         f"fee ${fee:.4f}, pnl ${pnl:.4f})"))
         self.capital.check_halt()
         self.s.position = None
 
+        # TP, stop, or a forced window-end close -- every close is terminal
+        # now: one trade per window, no flip/re-entry on stop-out.
+        self.s.done_for_window = True
+
     # ---- window close -------------------------------------------------------
 
-    def finalize_window(self, winning_side: Optional[Side]):
+    def finalize_window(self):
         if self.s.window is None:
             return
         window_slug = self.s.window.slug
 
-        # One walk-forward learning step per completed window, whether or not
-        # the signal cleared the live trading threshold.
-        if self.s.ai_features is not None and winning_side is not None:
-            actual_up = (winning_side == Side.UP)
-            self.ai.learn(self.s.ai_features, actual_up)
-            self.ai.record_prediction_result(self.s.ai_predicted_side, actual_up)
-            self._log("AI_LEARN", note=(
-                f"window resolved {winning_side.value} -- directional engine trained "
-                f"on this setup (n_trained now {self.ai.n_trained})"))
-
         if not self.capital.halted:
             if self.s.position is not None:
-                pos = self.s.position
-                bid = self._bid_for(pos.side)
-                levels = self._bid_levels_for(pos.side)
-                fill_price = _realistic_fill_price(levels, pos.shares, bid)
-                if fill_price is None:
-                    fill_price = 0.0
-                    self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
-                               note="window closed with zero bid depth -- assuming worst case $0")
-                fee = self.broker.taker_fee_amount(pos.shares, fill_price)
-                proceeds = pos.shares * fill_price - fee
-                pnl = proceeds - pos.cost
-                self.capital.balance += proceeds
-                self.total_pnl += pnl
-                self.s.last_window_pnl += pnl
-                self.total_forced_closes += 1
-                self._record_trade_result(pnl)
-                self._log("FORCED_CLOSE", side=pos.side.value, price=pos.entry_price, shares=pos.shares,
-                           pnl=pnl, fee=fee,
-                           note=(f"window closed, forced taker close @ {fill_price:.4f} "
-                                 f"(entry {pos.entry_price}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
-                self.capital.check_halt()
-                self.s.position = None
-            elif self.s.ai_tradeable and not self.s.entry_attempted:
-                entry_side = (
-                    entry_side_for_signal(self.s.ai_predicted_side)
-                    if self.s.ai_predicted_side else None
-                )
-                self._log("NO_TRADE", side=(
-                    entry_side.value if entry_side else None
-                ), note="window closed before the 2-second taker entry could be attempted")
-            elif not self.s.decision_made:
-                self.total_no_signal_windows += 1
-                self._log("NO_TRADE", note="multi-timeframe signal was not available before window close")
+                self.s.total_forced_closes += 1
+                self._close_position(time.time(), reason="FORCED_CLOSE",
+                                      note_prefix="window closed before TP/stop, forced taker close")
+            elif not self.s.entry_checked:
+                self.s.no_trade_windows += 1
+                self._log("NO_TRADE", note="window closed before the entry check ever ran")
 
         self.s.window = None
         self.capital.record_equity_point(window_slug)
 
     # ---- dashboard payload -------------------------------------------------
 
-    def snapshot(self) -> dict:
+    def _position_payload(self) -> Optional[dict]:
         pos = self.s.position
-        pos_payload = None
-        open_market_value = 0.0
-        unrealized = 0.0
-        if pos is not None:
-            bid = self._bid_for(pos.side)
-            mark = bid if bid is not None else pos.entry_price
-            open_market_value = pos.shares * mark
-            unrealized = open_market_value - pos.cost
-            pos_payload = {
-                "side": pos.side.value, "entry_price": pos.entry_price, "shares": pos.shares,
-                "cost": round(pos.cost, 4), "mark_price": mark, "unrealized_pnl": round(unrealized, 4),
-                "seconds_since_entry": round(time.time() - pos.entry_ts, 1),
-                "signal_side": pos.signal_side.value if pos.signal_side else None,
-                "entry_type": pos.entry_type,
-            }
+        if pos is None:
+            return None
+        mid = self._mid_for(pos.side)
+        mark = mid if mid is not None else pos.entry_price
+        hwm = max(pos.high_water_mark, mark)
+        hard_stop_active = pos.hard_stop_active or hwm >= config.HARD_STOP_TRIGGER_PRICE
+        market_value = pos.shares * mark
+        unrealized = market_value - pos.cost
+        to_tp = round(config.TP_PRICE - mark, 4)
+
+        window_open_ts = self.s.window.open_ts if self.s.window is not None else pos.entry_ts
+        elapsed_since_open = time.time() - window_open_ts
+        stop_armed = elapsed_since_open >= config.TRAIL_START_DELAY_SECONDS
+        stop_arms_in = round(max(0.0, config.TRAIL_START_DELAY_SECONDS - elapsed_since_open), 1)
+
+        if hard_stop_active:
+            stop = config.HARD_STOP_PRICE
+        else:
+            stop = self._effective_stop(hwm)
+        to_stop = round(mark - stop, 4)
+
+        return {
+            "side": pos.side.value,
+            "shares": pos.shares,
+            "entry_price": round(pos.entry_price, 4),
+            "entry_fee": round(pos.entry_fee, 4),
+            "entry_ts": pos.entry_ts,
+            "mark_price": mark,
+            "high_water_mark": round(hwm, 4),
+            "market_value": round(market_value, 4),
+            "unrealized_pnl": round(unrealized, 4),
+            "tp_price": config.TP_PRICE,
+            "stop_price": round(stop, 4),
+            "stop_armed": stop_armed,
+            "stop_arms_in": stop_arms_in,
+            "hard_stop_active": hard_stop_active,
+            "hard_stop_trigger_price": config.HARD_STOP_TRIGGER_PRICE,
+            "hard_stop_price": config.HARD_STOP_PRICE,
+            "trail_distance": config.TRAIL_DISTANCE,
+            "distance_to_tp": to_tp,
+            "distance_to_stop": to_stop,
+        }
+
+    def snapshot(self) -> dict:
+        position = self._position_payload()
+        market_value = position["market_value"] if position else 0.0
+        unrealized = position["unrealized_pnl"] if position else 0.0
+        realized_pnl = round(self.s.total_pnl, 4)
 
         if self.capital.halted:
             status = "halted"
-        elif pos is not None:
-            status = "open"
-        elif self.s.ai_tradeable and not self.s.entry_attempted:
+        elif position is not None:
+            status = "in_position"
+        elif not self.s.entry_checked:
             status = "waiting_entry"
-        elif self.s.decision_made:
-            status = "done"
         else:
-            status = "awaiting_signal"
+            status = "done"
 
-        win_rate = round(100 * self.wins / (self.wins + self.losses), 1) if (self.wins + self.losses) else None
+        up_mid = self._mid_for(Side.UP)
+        down_mid = self._mid_for(Side.DOWN)
 
         return {
-            "engine": "PREVCANDLE", "label": "Multi-timeframe directional signal",
+            "engine": "FLIP", "label": "BTC-trend entry (buys the direction BTC itself is trending), continuous trail (tightens above 0.85), single trade",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.capital.halted,
             "equity_curve": self.capital.equity_curve,
-            "equity": round(self.capital.balance + open_market_value, 4),
+            "equity": round(self.capital.balance + market_value, 4),
 
-            "realized_pnl": round(self.total_pnl, 4),
+            "realized_pnl": realized_pnl,
             "unrealized_pnl": round(unrealized, 4),
-            "open_market_value": round(open_market_value, 4),
+            "open_market_value": round(market_value, 4),
             "last_window_pnl": round(self.s.last_window_pnl, 4),
 
-            "position": pos_payload,
-            "order": None,
-            "decision_made": self.s.decision_made,
-            "decided_color": self.s.decided_color,
-            "ai_predicted_side": self.s.ai_predicted_side.value if self.s.ai_predicted_side else None,
-            "ai_confidence": round(self.s.ai_confidence, 3) if self.s.ai_confidence is not None else None,
-            "ai_reason": self.s.ai_reason,
-            "ai_tradeable": self.s.ai_tradeable,
-            "ai_timeframes": (
-                (self.ai.last_prediction or {}).get("timeframes")
-                if self.ai.last_prediction else None
-            ),
-            "ai": self.ai.status(),
-            "binance": self.binance_feed.status(),
+            "up_mid": up_mid,
+            "down_mid": down_mid,
+            "btc_trend": self.s.btc_trend.value if self.s.btc_trend else None,
+            "entry_checked": self.s.entry_checked,
+            "position": position,
+            "done_for_window": self.s.done_for_window,
 
-            "total_orders_placed": self.total_orders_placed,
-            "total_order_fills": self.total_order_fills,
-            "total_tp_fills": self.total_tp_fills,
-            "total_forced_closes": self.total_forced_closes,
-            "total_taker_entries": self.total_taker_entries,
-            "total_no_signal_windows": self.total_no_signal_windows,
-            "total_illiquid_skips": self.total_illiquid_skips,
-            "total_rsi_flags": self.total_rsi_flags,
-            "total_signal_skips": self.total_signal_skips,
+            "base_order_shares": config.BASE_ORDER_SHARES,
 
-            "wins": self.wins,
-            "losses": self.losses,
-            "win_rate": win_rate,
+            "total_entries_attempted": self.s.total_entries_attempted,
+            "total_price_too_high": self.s.total_price_too_high,
+            "total_tp_hits": self.s.total_tp_hits,
+            "total_stop_hits": self.s.total_stop_hits,
+            "total_hard_stop_hits": self.s.total_hard_stop_hits,
+            "total_forced_closes": self.s.total_forced_closes,
+            "no_trade_windows": self.s.no_trade_windows,
+            "wins": self.s.wins,
+            "losses": self.s.losses,
+            "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
 
             "status": status,
 
             "def": {
-                "shares": config.ORDER_SHARES,
-                "fade_signal": config.FADE_SIGNAL,
-                "direction": "opposite_signal" if config.FADE_SIGNAL else "same_as_signal",
-                "entry_delay_s": config.ENTRY_DELAY_SECONDS,
+                "entry_settle_seconds": config.ENTRY_SETTLE_SECONDS,
+                "entry_price_threshold": config.ENTRY_PRICE_THRESHOLD,
+                "btc_block_seconds": config.BTC_BLOCK_SECONDS,
+                "btc_trend_history_blocks": config.BTC_TREND_HISTORY_BLOCKS,
+                "btc_trend_lookback_blocks": config.BTC_TREND_LOOKBACK_BLOCKS,
                 "tp_price": config.TP_PRICE,
-                "min_confidence": config.AI_MIN_CONFIDENCE,
-                "min_alignment": config.AI_MIN_ALIGNMENT,
+                "trail_distance": config.TRAIL_DISTANCE,
+                "trail_distance_tight": config.TRAIL_DISTANCE_TIGHT,
+                "trail_tighten_price": config.TRAIL_TIGHTEN_PRICE,
+                "trail_start_delay_seconds": config.TRAIL_START_DELAY_SECONDS,
+                "hard_stop_trigger_price": config.HARD_STOP_TRIGGER_PRICE,
+                "hard_stop_price": config.HARD_STOP_PRICE,
+                "base_order_shares": config.BASE_ORDER_SHARES,
             },
         }

@@ -1,11 +1,18 @@
 """
-Thin client around Polymarket's public read APIs.
+Thin client around Polymarket's public read APIs, plus one unrelated
+public price feed used only for trend detection.
 
-Three APIs are involved:
+Three Polymarket APIs are involved:
   - Gamma API (metadata): market question, slug, close time, and the two
     CLOB token ids (one per outcome: Up / Down).
   - CLOB API (live pricing): midpoint/last-trade price per token id, and
     the real order book (best bid / best ask) via get_book().
+
+Plus one independent feed:
+  - BTC spot price (fetch_btc_spot_price()): a public, no-auth BTC/USD
+    price used purely to detect a short-term trend (see
+    app/btc_trend.py) -- has nothing to do with Polymarket's own APIs
+    or token pricing.
 
 NOTE: Polymarket's public API surface has shifted field names between
 versions in the past. This module is the single place to patch if a
@@ -205,6 +212,32 @@ class PolymarketClient:
         if up_p is None or down_p is None:
             return None
         return Side.UP if up_p > down_p else Side.DOWN
+
+    # ---- BTC spot price (independent of Polymarket) -----------------------
+
+    async def fetch_btc_spot_price(self) -> Optional[float]:
+        """BTC/USD spot price from a public, no-auth price feed (see
+        config.BTC_SPOT_API_URL), used purely for the trend-detection
+        entry signal -- completely separate from the Polymarket
+        UP/DOWN token pricing above. Returns None on any failure
+        (network error, unexpected shape, bad status); the caller
+        should treat that as "no sample this poll" and just try again
+        next time, same convention as get_price()/get_book_full()."""
+        try:
+            resp = await self._client.get(config.BTC_SPOT_API_URL)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        try:
+            # Coinbase spot-price shape: {"data": {"base": "BTC", "currency": "USD", "amount": "79000.12"}}
+            amount = data.get("data", {}).get("amount")
+            return float(amount) if amount is not None else None
+        except Exception:
+            return None
 
     # ---- live pricing -------------------------------------------------------
 
