@@ -15,9 +15,19 @@ Mechanics:
     blocks is kept (the in-progress block is never part of this deque
     until it closes).
   - trend() looks at the most recent BTC_TREND_LOOKBACK_BLOCKS
-    completed blocks: strictly increasing block-over-block -> "up";
-    strictly decreasing -> "down"; anything else (flat, mixed, a
-    reversal partway through, or not enough history yet) -> None.
+    completed blocks. BTC realistically only moves in ~$1 increments
+    over a 30s block, so a sub-$1 wobble between two blocks isn't a
+    real move -- it's noise/rounding. Each block-over-block step must
+    be at least MIN_STEP (in dollars) in the same direction: strictly
+    increasing by >= MIN_STEP every step -> "up"; strictly decreasing
+    by >= MIN_STEP every step -> "down"; anything else (flat, mixed, a
+    reversal, a sub-$1 step, or not enough history yet) -> None.
+  - effective_trend() is trend() plus carryover: if the fresh read is
+    None, it returns whatever the last clear "up"/"down" read was, so
+    a momentary flat/mixed patch doesn't erase a trend that was just
+    established -- it only updates once a new clear trend (same or
+    opposite direction) is read. Returns None if no clear trend has
+    ever been read yet (e.g. still warming up on startup).
 
 A gap in polling (e.g. the feed was down for a few minutes) just means
 some blocks in between are silently skipped rather than fabricated --
@@ -28,11 +38,17 @@ import math
 from collections import deque
 from typing import Optional
 
+DEFAULT_MIN_STEP = 1.0   # dollars -- fallback if the caller doesn't pass one; see
+                          # config.BTC_TREND_MIN_STEP_USD for the value actually used
+
 
 class BtcTrendTracker:
-    def __init__(self, block_seconds: float, history_len: int, lookback: int):
+    def __init__(self, block_seconds: float, history_len: int, lookback: int,
+                 min_step: float = DEFAULT_MIN_STEP):
         self.block_seconds = block_seconds
         self.lookback = lookback
+        self.min_step = min_step   # minimum $ move between consecutive blocks to count as a
+                                    # real step, not sub-$1 noise/rounding
         self.blocks: deque = deque(maxlen=history_len)
 
         self._cur_block_start: Optional[float] = None
@@ -41,6 +57,10 @@ class BtcTrendTracker:
 
         self.last_price: Optional[float] = None
         self.last_sample_ts: Optional[float] = None
+
+        # Last clear ("up"/"down") trend() read, carried forward whenever
+        # a fresh read comes back None -- see effective_trend().
+        self._last_clear_trend: Optional[str] = None
 
     def _block_start_for(self, ts: float) -> float:
         return math.floor(ts / self.block_seconds) * self.block_seconds
@@ -73,16 +93,32 @@ class BtcTrendTracker:
 
     def trend(self) -> Optional[str]:
         """"up" if the last `lookback` completed blocks are strictly
-        increasing block-over-block, "down" if strictly decreasing,
-        else None (flat, mixed, a reversal, or not enough history)."""
+        increasing block-over-block by at least self.min_step each
+        step, "down" if strictly decreasing by at least self.min_step
+        each step, else None (flat, mixed, a reversal, a sub-min_step
+        step, or not enough history). Updates the carryover value used
+        by effective_trend() as a side effect."""
         if len(self.blocks) < self.lookback:
             return None
         recent = list(self.blocks)[-self.lookback:]
-        if all(recent[i] < recent[i + 1] for i in range(len(recent) - 1)):
-            return "up"
-        if all(recent[i] > recent[i + 1] for i in range(len(recent) - 1)):
-            return "down"
-        return None
+        result: Optional[str] = None
+        if all(recent[i + 1] - recent[i] >= self.min_step for i in range(len(recent) - 1)):
+            result = "up"
+        elif all(recent[i] - recent[i + 1] >= self.min_step for i in range(len(recent) - 1)):
+            result = "down"
+        if result is not None:
+            self._last_clear_trend = result
+        return result
+
+    def effective_trend(self) -> Optional[str]:
+        """trend() with carryover: if the fresh read is None, fall back
+        to the last clear "up"/"down" read (from any previous call to
+        trend()) instead of losing the signal to a momentary flat/mixed
+        patch. None only if no clear trend has ever been read."""
+        fresh = self.trend()
+        if fresh is not None:
+            return fresh
+        return self._last_clear_trend
 
     def snapshot(self) -> dict:
         """Dashboard payload -- completed block history, the in-progress
@@ -98,5 +134,7 @@ class BtcTrendTracker:
             "lookback": self.lookback,
             "history_len": self.blocks.maxlen,
             "block_seconds": self.block_seconds,
+            "min_step": self.min_step,
             "trend": self.trend(),
+            "effective_trend": self.effective_trend(),
         }

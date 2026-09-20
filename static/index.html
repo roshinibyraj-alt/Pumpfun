@@ -238,7 +238,7 @@ function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, e, gau
   let marks = `<div class="gauge-fill ${side}" style="width:${pct}%"></div>`;
   const threshold = e.def.entry_price_threshold;
   if(threshold!=null){
-    marks += `<div class="gauge-mark trigger" style="left:${threshold*100}%"><span class="lbl">${fmtP(threshold)}</span></div>`;
+    marks += `<div class="gauge-mark trigger" style="left:${threshold*100}%"><span class="lbl">${fmtP(threshold)} (info only)</span></div>`;
   }
   if(held){
     marks += `<div class="gauge-mark tp" style="left:${e.def.tp_price*100}%"><span class="lbl">TP ${fmtP(e.def.tp_price)}</span></div>`;
@@ -297,8 +297,12 @@ function renderBtcTrend(bt){
   const el = $('btcTrendCard');
   if(!el) return;
   const trend = bt.trend;
-  const trendLabel = trend === 'up' ? '▲ UP' : (trend === 'down' ? '▼ DOWN' : '— no clear trend');
+  const eff = bt.effective_trend;
+  const trendLabel = trend === 'up' ? '▲ UP' : (trend === 'down' ? '▼ DOWN' : '— flat/mixed right now');
   const trendCls = trend === 'up' ? 'pos' : (trend === 'down' ? 'neg' : '');
+  const effLabel = eff === 'up' ? '▲ UP' : (eff === 'down' ? '▼ DOWN' : '— none read yet');
+  const effCls = eff === 'up' ? 'pos' : (eff === 'down' ? 'neg' : '');
+  const carried = trend == null && eff != null;
   const blocks = bt.blocks || [];
   const lookback = bt.lookback || 5;
   const recent = blocks.slice(-lookback);
@@ -317,8 +321,12 @@ function renderBtcTrend(bt){
       <div class="v">${bt.last_price!=null ? '$'+Number(bt.last_price).toFixed(2) : '—'}</div>
     </div>
     <div class="def-item" style="margin-bottom:8px;">
-      <div class="k">Trend (last ${lookback} × ${fmtSh(bt.block_seconds||30)}s blocks)</div>
+      <div class="k">Fresh trend (last ${lookback} × ${fmtSh(bt.block_seconds||30)}s blocks, min $${fmtSh(bt.min_step||1)}/block)</div>
       <div class="v ${trendCls}">${trendLabel}</div>
+    </div>
+    <div class="def-item" style="margin-bottom:8px;">
+      <div class="k">Effective trend (used for entry — carries the last clear read forward)</div>
+      <div class="v ${effCls}">${effLabel}${carried ? ' <span style="opacity:.7">(carried)</span>' : ''}</div>
     </div>
     <div class="def-item" style="margin-bottom:8px;">
       <div class="k">Recent blocks</div>
@@ -340,13 +348,13 @@ function renderEngineCard(e){
   };
 
   const defRowsHtml = [
-    ['Entry signal', `BTC spot trend — last ${fmtSh(e.def.btc_trend_lookback_blocks)} of ${fmtSh(e.def.btc_trend_history_blocks)} rolling ${fmtSh(e.def.btc_block_seconds)}s blocks must be strictly monotonic`],
+    ['Entry signal', `BTC spot trend — last ${fmtSh(e.def.btc_trend_lookback_blocks)} of ${fmtSh(e.def.btc_trend_history_blocks)} rolling ${fmtSh(e.def.btc_block_seconds)}s blocks must move ≥$1/block in the same direction; a momentary flat/mixed read carries the last clear trend forward`],
     ['Entry wait', `${fmtSh(e.def.entry_settle_seconds)}s after window open (just for book data to exist), single check`],
-    ['Entry rule', `uptrend → buy UP, downtrend → buy DOWN, no clear trend → skip window`],
-    ['Entry price condition', `trend side must be below ${fmtP(e.def.entry_price_threshold)} at that single check — no rearmed watch`],
+    ['Entry rule', `uptrend → buy UP, downtrend → buy DOWN — guaranteed every window once any trend has ever been read`],
+    ['Entry price condition', `none — always buys the trend side; ${fmtP(e.def.entry_price_threshold)} is tracked for stats only`],
     ['Take-profit', `${fmtP(e.def.tp_price)} \u2192 redeemed @ $1.00, fee-free`],
     ['Stop-loss', 'none — the position rides out every other price move; TP or the forced window-end close are the only two exits'],
-    ['Trades per window', 'one — no flip/re-entry'],
+    ['Trades per window', 'one — guaranteed, no flip/re-entry'],
     ['Order size', `${fmtSh(e.def.base_order_shares)}sh flat, no martingale`],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
@@ -362,12 +370,10 @@ function renderEngineCard(e){
     phaseCls = 'done';
     phaseBanner = e.total_entries_attempted > 0
       ? 'Trade closed — done for the rest of this window.'
-      : (e.btc_trend
-          ? `No trade this window (${e.btc_trend} trend, but price was at/above ${fmtP(e.def.entry_price_threshold)}).`
-          : 'No clear BTC trend at the entry check — no trade this window.');
+      : 'No trade this window — no BTC trend has ever been read yet (still building history) or no price data.';
   } else {
-    phaseBanner = `Waiting ${fmtSh(e.def.entry_settle_seconds)}s after window open, then checking the BTC trend` +
-                  (e.btc_trend ? ` (currently ${e.btc_trend}).` : ' (no clear trend right now).');
+    phaseBanner = `Waiting ${fmtSh(e.def.entry_settle_seconds)}s after window open, then buying the BTC trend side` +
+                  (e.btc_trend ? ` (currently ${e.btc_trend} — guaranteed trade).` : ' (no trend read yet — will skip if none by the check).');
   }
 
   function positionBox(){
@@ -406,7 +412,7 @@ function renderEngineCard(e){
 
 function renderStats(e){
   const tiles = [
-    ['total_entries_attempted','entries',''], ['total_price_too_high','price too high',''],
+    ['total_entries_attempted','entries',''], ['total_price_too_high','bought above threshold',''],
     ['total_tp_hits','TP hits','win'], ['total_forced_closes','forced close',''],
     ['no_trade_windows','no-trade',''],
     ['win_rate','win rate %',''],

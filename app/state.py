@@ -34,6 +34,7 @@ class BotState:
             block_seconds=config.BTC_BLOCK_SECONDS,
             history_len=config.BTC_TREND_HISTORY_BLOCKS,
             lookback=config.BTC_TREND_LOOKBACK_BLOCKS,
+            min_step=config.BTC_TREND_MIN_STEP_USD,
         )
         self._last_btc_fetch_ts: float = 0.0
 
@@ -115,7 +116,11 @@ class BotState:
         down_mid = self._midpoint(down_bid, down_ask)
         self.price_history.append(PricePoint(ts=now, up=up_mid, down=down_mid))
 
-        trend = self.btc_tracker.trend()
+        # effective_trend() carries the last clear up/down read forward
+        # through momentary flat/mixed patches, so the engine always has
+        # a side to act on once any clear trend has ever been seen --
+        # needed to guarantee a trade every window.
+        trend = self.btc_tracker.effective_trend()
         btc_trend_side = Side.UP if trend == "up" else (Side.DOWN if trend == "down" else None)
 
         seconds_to_close = self.current_window.close_ts - now

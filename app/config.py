@@ -3,8 +3,8 @@ Central configuration for the BTC 5-min up/down bot.
 
 Single engine -- BTC-spot-trend entry (buys the direction BTC itself
 has been trending in, not anything about the previous window or the
-token's own cheapness), single trade per window, TP redemption, no
-stop-loss of any kind:
+token's own cheapness), one guaranteed trade per window, TP
+redemption, no stop-loss of any kind:
 
   1. BTC trend signal (independent of the Polymarket window clock):
      BTC spot price is polled roughly every BTC_FETCH_INTERVAL_SECONDS
@@ -13,22 +13,32 @@ stop-loss of any kind:
      blocks, each block's value being the average of its samples. The
      last BTC_TREND_HISTORY_BLOCKS (20) completed blocks are kept.
      Every time a block completes, the trend is recomputed by looking
-     at the most recent BTC_TREND_LOOKBACK_BLOCKS (5) of them: if
-     they're strictly increasing block-over-block, the trend is UP; if
-     strictly decreasing, the trend is DOWN; anything else (flat,
-     mixed, a reversal partway through) is NO TREND. This runs
-     continuously across window boundaries -- it doesn't reset when a
-     new Polymarket window opens.
+     at the most recent BTC_TREND_LOOKBACK_BLOCKS (5) of them. BTC
+     realistically only moves in ~$1 increments over a 30s block, so a
+     sub-$1 wobble between two blocks is noise, not a real step: each
+     block-over-block move must be at least BTC_TREND_MIN_STEP_USD
+     ($1) in the same direction for the run to count. Strictly
+     increasing by >= $1 each step -> UP; strictly decreasing by >= $1
+     each step -> DOWN; anything else (flat, mixed, a reversal, a
+     sub-$1 step) is NO FRESH TREND. This runs continuously across
+     window boundaries -- it doesn't reset when a new Polymarket
+     window opens. See app/btc_trend.py's effective_trend(): whenever
+     a fresh read comes back with no trend, the last clear UP/DOWN
+     read is carried forward instead of being discarded, so a
+     momentary flat/mixed patch doesn't erase an established trend --
+     this carryover is what guarantees a trade every window (item 2).
   2. Entry: from window open, wait ENTRY_SETTLE_SECONDS (a couple of
      seconds -- just long enough for the first tick's order-book data
      to exist, not a strategic delay). At that single check:
-       - if there's no clear BTC trend right now, the window is
-         skipped outright -- nothing to follow.
-       - if the trend is UP, the target side is UP; if DOWN, the
-         target side is DOWN.
-       - if that side's price is BELOW ENTRY_PRICE_THRESHOLD (0.40),
-         buy it immediately, flat BASE_ORDER_SHARES.
-       - if it's at or above 0.40, no trade is taken this window --
+       - the target side is whatever the effective BTC trend is (UP or
+         DOWN, including a carried-forward read) -- it's bought
+         immediately, flat BASE_ORDER_SHARES, regardless of price.
+         ENTRY_PRICE_THRESHOLD (0.40) is tracked for stats/logging
+         only; it no longer blocks the trade, since the bot must fire
+         at least once per window.
+       - the only case with no trade at all is if no clear trend has
+         EVER been read yet (e.g. right at startup, before enough BTC
+         block history exists) or there's no price/liquidity data --
          this is a single check, not a rearmed watch.
   3. Exit: TP_PRICE (0.99) hit -> REDEEMED, not sold -- credited at a
      flat $1.00/share, zero fee (CTF resolution redemption). There is
@@ -47,8 +57,8 @@ stop-loss of any kind:
      will pay (real taker sell) -- this is the only other way out of a
      position besides TP.
 
-At most one position open at a time, one trade per window, no order-book
-ladder, no merge.
+At most one position open at a time, exactly one trade per window (once
+any trend has ever been read), no order-book ladder, no merge.
 """
 import os
 
@@ -78,14 +88,18 @@ BTC_BLOCK_SECONDS = 30.0           # length of one BTC trend block (average of s
 BTC_TREND_HISTORY_BLOCKS = 20      # rolling window of completed blocks kept (20 * 30s = 10 minutes)
 BTC_TREND_LOOKBACK_BLOCKS = 5      # how many of the most recent completed blocks must be strictly
                                     # monotonic (all up, or all down) for a trend signal to fire
+BTC_TREND_MIN_STEP_USD = 1.0       # minimum $ move required between consecutive blocks for that step to
+                                    # count towards a trend (see app/btc_trend.py MIN_STEP) -- filters out
+                                    # sub-$1 noise/rounding that isn't a real BTC move over a 30s block
 
 # ---- BTC-trend entry / continuous trailing stop engine -----------------
 ENTRY_SETTLE_SECONDS = 2.0        # brief technical delay after window open before the single entry
                                    # check -- just long enough for the first tick's book data to exist,
                                    # not a strategic wait
-ENTRY_PRICE_THRESHOLD = 0.40      # the BTC-trend side must be strictly below this to buy; a single
-                                   # check, not a rearmed watch -- if it's not below 0.40 at that
-                                   # moment, no trade is taken this window
+ENTRY_PRICE_THRESHOLD = 0.40      # informational only -- no longer gates entry. The trend side is
+                                   # always bought to guarantee a trade every window; this value is just
+                                   # logged/counted (total_price_too_high) when the fill price is at or
+                                   # above it
 TP_PRICE = 0.99                   # take-profit level -- hit = redeemed at $1.00, fee-free
                                    # -- no stop-loss config: this bot no longer has one, TP and the
                                    # forced window-end close are the only two ways out of a position

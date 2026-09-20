@@ -1,35 +1,39 @@
 """
 Trading engine -- BTC-spot-trend entry (buys the direction BTC itself
 has been trending in, not the previous window's winner or the token's
-own cheapness), single trade per window, TP redemption, no stop-loss
-of any kind.
+own cheapness), guaranteed one trade per window, TP redemption, no
+stop-loss of any kind.
 
 See app/config.py for the full strategy write-up, and app/btc_trend.py
 for how the trend signal itself is computed. Summary: a short delay
 after window open (ENTRY_SETTLE_SECONDS, just long enough for book
 data to exist), the engine looks at whatever BTC trend it was last
 told about (see on_tick's btc_trend argument, fed by app/state.py from
-a BtcTrendTracker that runs continuously off real BTC spot price,
-independent of the window clock). If there's no clear trend, the
-window is skipped outright. If there is, the target side is UP for an
-uptrend or DOWN for a downtrend; if that side's price is below
-ENTRY_PRICE_THRESHOLD (0.40), it's bought immediately, flat
-BASE_ORDER_SHARES; otherwise no trade is taken this window -- this is
-a single check, not a rearmed watch. Once filled, the position has
-exactly two ways out: TP_PRICE (0.99) hit -> redeemed at a flat
-$1.00/share, fee-free (a CTF resolution redemption, not an orderbook
-trade); or the window closes first, in which case it's force-closed at
-whatever the market will pay (a real taker sell, priced off real bid
-depth). There is no stop-loss of any kind -- a position that's deep
-underwater just keeps riding it out until one of those two things
-happens; mid price is what triggers the TP check, but every actual
-fill (entry, or the forced close) is a real taker execution priced off
-real ask/bid order-book depth (see Engine._realistic_fill_price), so
-mid and fill price can differ by the spread. No flip, no re-entry on
-the other side -- at most one trade per window. No martingale
-anywhere; every entry is BASE_ORDER_SHARES. Every fill except TP is a
-taker order and pays the taker fee; TP is the sole fee-free exception
-since it's a CTF resolution redemption, not an orderbook trade.
+BtcTrendTracker.effective_trend(), which runs continuously off real
+BTC spot price, independent of the window clock, and carries the last
+clear up/down read forward through any momentary flat/mixed patch).
+The target side is UP for an uptrend or DOWN for a downtrend, and it
+is bought immediately, flat BASE_ORDER_SHARES -- this is a single
+check, not a rearmed watch, and it fires regardless of that side's
+price (ENTRY_PRICE_THRESHOLD, 0.40, is tracked for stats/logging only,
+it no longer blocks entry). The only case with no trade at all is if
+no clear trend has EVER been read yet (e.g. right at startup, before
+enough BTC block history exists) or there's no price/liquidity data.
+Once filled, the position has exactly two ways out: TP_PRICE (0.99)
+hit -> redeemed at a flat $1.00/share, fee-free (a CTF resolution
+redemption, not an orderbook trade); or the window closes first, in
+which case it's force-closed at whatever the market will pay (a real
+taker sell, priced off real bid depth). There is no stop-loss of any
+kind -- a position that's deep underwater just keeps riding it out
+until one of those two things happens; mid price is what triggers the
+TP check, but every actual fill (entry, or the forced close) is a real
+taker execution priced off real ask/bid order-book depth (see
+Engine._realistic_fill_price), so mid and fill price can differ by the
+spread. No flip, no re-entry on the other side -- at most one trade
+per window. No martingale anywhere; every entry is BASE_ORDER_SHARES.
+Every fill except TP is a taker order and pays the taker fee; TP is
+the sole fee-free exception since it's a CTF resolution redemption,
+not an orderbook trade.
 """
 import time
 from dataclasses import dataclass, field
@@ -111,11 +115,11 @@ class EngineState:
                                         # whatever value it holds at the moment of the entry check
     done_for_window: bool = False   # TP or stop hit, or window closed with nothing open -- nothing left to watch
 
-    total_entries_attempted: int = 0   # entry checks where the trend side was below threshold and bought
-    total_price_too_high: int = 0      # entry checks where the trend side was at/above ENTRY_PRICE_THRESHOLD
+    total_entries_attempted: int = 0   # entry checks that resulted in a trade (guaranteed whenever a trend side is known)
+    total_price_too_high: int = 0      # of those, how many were bought anyway despite being at/above ENTRY_PRICE_THRESHOLD
     total_tp_hits: int = 0
     total_forced_closes: int = 0       # window closed before TP was reached
-    no_trade_windows: int = 0          # no clear trend, or trend side was too expensive -- nothing opened
+    no_trade_windows: int = 0          # no clear trend has EVER been read yet, or no price data -- nothing opened
     wins: int = 0
     losses: int = 0
     total_pnl: float = 0.0
@@ -124,11 +128,11 @@ class EngineState:
 
 class Engine:
     """BTC-spot-trend entry (buys the direction BTC itself has been
-    trending in) / single trade per window / no stop-loss of any kind
-    -- TP or the forced window-end close are the only two ways out --
-    driven off its own capital pool. Kept as the class name `Engine` /
-    constructed the same way (Engine(broker)) so app/state.py doesn't
-    need structural changes."""
+    trending in) / guaranteed one trade per window / no stop-loss of
+    any kind -- TP or the forced window-end close are the only two
+    ways out -- driven off its own capital pool. Kept as the class
+    name `Engine` / constructed the same way (Engine(broker)) so
+    app/state.py doesn't need structural changes."""
 
     name = "FLIP"
 
@@ -150,10 +154,11 @@ class Engine:
             return
 
         self._log("WINDOW_OPEN", shares=config.BASE_ORDER_SHARES, note=(
-            f"waiting {config.ENTRY_SETTLE_SECONDS:.0f}s, then checking the BTC trend -- if it's clearly "
-            f"up, buy UP; if clearly down, buy DOWN; if no clear trend, skip this window entirely. The "
-            f"trend side is only bought if its price is below {config.ENTRY_PRICE_THRESHOLD} at that "
-            f"single check (no rearmed watch) -- flat {config.BASE_ORDER_SHARES:.0f}sh, no martingale. "
+            f"waiting {config.ENTRY_SETTLE_SECONDS:.0f}s, then buying the BTC trend side -- if it's "
+            f"clearly up, buy UP; if clearly down, buy DOWN; if momentarily flat/mixed, carry the last "
+            f"clear trend forward and buy that. A trade is guaranteed every window once any trend has "
+            f"ever been read -- the {config.ENTRY_PRICE_THRESHOLD} price threshold no longer blocks "
+            f"entry, it's just noted in the log. Flat {config.BASE_ORDER_SHARES:.0f}sh, no martingale. "
             f"TP {config.TP_PRICE} (redeem $1) is the only take-profit; no stop-loss of any kind -- "
             f"the position rides everything else out until TP or the window closes and it's forced out. "
             f"One trade per window -- no flip, no re-entry."
@@ -239,14 +244,21 @@ class Engine:
 
         self.s.entry_checked = True
 
+        # Guaranteed one trade per window: trend is the *effective*
+        # trend (see BtcTrendTracker.effective_trend / app/state.py),
+        # which carries the last clear up/down read forward through any
+        # momentary flat/mixed patch. The only case left where there's
+        # genuinely nothing to trade is if no clear trend has EVER been
+        # read yet (e.g. right after startup, before BTC_TREND_LOOKBACK_
+        # BLOCKS blocks of history exist) -- that's the sole remaining
+        # no-trade path.
         trend = self.s.btc_trend
         if trend is None:
             self.s.no_trade_windows += 1
             self.s.done_for_window = True
             self._log("NO_TRADE", note=(
-                f"no clear BTC trend at the {config.ENTRY_SETTLE_SECONDS:.0f}s check "
-                f"(last {config.BTC_TREND_LOOKBACK_BLOCKS} blocks weren't cleanly monotonic) -- "
-                f"skipping window"
+                "no BTC trend has ever been read yet (still building history) -- "
+                "skipping window"
             ))
             return
 
@@ -258,22 +270,23 @@ class Engine:
                        note="no price data at the entry check -- skipping window")
             return
 
+        # ENTRY_PRICE_THRESHOLD is no longer a skip condition -- it's
+        # tracked purely for stats/logging. The trend side is bought
+        # every window regardless of price, to guarantee a trade.
         if price >= config.ENTRY_PRICE_THRESHOLD:
             self.s.total_price_too_high += 1
-            self.s.no_trade_windows += 1
-            self.s.done_for_window = True
-            self._log("NO_TRADE", side=trend.value, price=round(price, 4), note=(
-                f"BTC trend side {trend.value} mid @ {price:.4f} is at/above the "
-                f"{config.ENTRY_PRICE_THRESHOLD} entry threshold at the "
-                f"{config.ENTRY_SETTLE_SECONDS:.0f}s check -- no trade this window"
-            ))
-            return
+            zone_note = (
+                f"BTC trend is {trend.value} (carried/fresh), {trend.value} mid @ {price:.4f} >= "
+                f"{config.ENTRY_PRICE_THRESHOLD} threshold -- buying anyway to guarantee a trade this window"
+            )
+        else:
+            zone_note = (
+                f"BTC trend is {trend.value} (carried/fresh), {trend.value} mid @ {price:.4f} < "
+                f"{config.ENTRY_PRICE_THRESHOLD}"
+            )
 
         self.s.total_entries_attempted += 1
-        self._open_position(trend, now, zone_note=(
-            f"BTC trend is {trend.value} (last {config.BTC_TREND_LOOKBACK_BLOCKS} 30s blocks monotonic), "
-            f"{trend.value} mid @ {price:.4f} < {config.ENTRY_PRICE_THRESHOLD}"
-        ))
+        self._open_position(trend, now, zone_note=zone_note)
 
     # ---- position open (single entry per window) ---------------------------
 
@@ -423,7 +436,7 @@ class Engine:
         down_mid = self._mid_for(Side.DOWN)
 
         return {
-            "engine": "FLIP", "label": "BTC-trend entry (buys the direction BTC itself is trending), single trade, TP only — no stop-loss",
+            "engine": "FLIP", "label": "BTC-trend entry (buys the direction BTC itself is trending, guaranteed 1 trade/window), TP only — no stop-loss",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
