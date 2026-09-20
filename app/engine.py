@@ -1,58 +1,62 @@
 """
-Trading engine -- BTC-spot-trend entry (buys the direction BTC itself
-has been trending in, not the previous window's winner or the token's
-own cheapness), guaranteed one trade per window, TP redemption, no
-stop-loss of any kind.
+ALPHASTRIKE trading engine -- "the current window decides the next window".
 
-See app/config.py for the full strategy write-up, and app/btc_trend.py
-for how the trend signal itself is computed. Summary: a short delay
-after window open (ENTRY_SETTLE_SECONDS, just long enough for book
-data to exist), the engine looks at whatever BTC trend it was last
-told about (see on_tick's btc_trend argument, fed by app/state.py from
-BtcTrendTracker.effective_trend(), which runs continuously off real
-BTC spot price, independent of the window clock, and carries the last
-clear up/down read forward through any momentary flat/mixed patch).
-The target side is UP for an uptrend or DOWN for a downtrend, and it
-is bought immediately, flat BASE_ORDER_SHARES -- this is a single
-check, not a rearmed watch, and it fires regardless of that side's
-price (ENTRY_PRICE_THRESHOLD, 0.40, is tracked for stats/logging only,
-it no longer blocks entry). The only case with no trade at all is if
-no clear trend has EVER been read yet (e.g. right at startup, before
-enough BTC block history exists) or there's no price/liquidity data.
-Once filled, the position has exactly two ways out: TP_PRICE (0.99)
-hit -> redeemed at a flat $1.00/share, fee-free (a CTF resolution
-redemption, not an orderbook trade); or the window closes first, in
-which case it's force-closed at whatever the market will pay (a real
-taker sell, priced off real bid depth). There is no stop-loss of any
-kind -- a position that's deep underwater just keeps riding it out
-until one of those two things happens; mid price is what triggers the
-TP check, but every actual fill (entry, or the forced close) is a real
-taker execution priced off real ask/bid order-book depth (see
-Engine._realistic_fill_price), so mid and fill price can differ by the
-spread. No flip, no re-entry on the other side -- at most one trade
-per window. No martingale anywhere; every entry is BASE_ORDER_SHARES.
-Every fill except TP is a taker order and pays the taker fee; TP is
-the sole fee-free exception since it's a CTF resolution redemption,
-not an orderbook trade.
+Signal (app/strategy.py): from the five 1-minute closes of the window that
+just closed. UP = minute 2 below minute 1 AND avg(min3-5) above avg(min1-2);
+DOWN = the exact opposite; otherwise no trade.
+
+Trade, in the NEXT window, on the signalled side -- ONE order type, a taker
+market buy:
+  1. ENTRY_DELAY_SECONDS (2s) after the window opens, buy TAKER_SHARES (300)
+     at market, whatever the price (depth-walked fill, taker fee). If the
+     signal is only known after that point, buy the moment it is known. If
+     there is no ask / no depth, retry every tick until the window closes.
+  2. No SL. TP 0.99 (taker sell), else forced taker close at window end.
+  3. One entry per window.
 """
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Optional
 
 from . import config
 from .models import Side, WindowMarket
 from .paper_broker import PaperBroker
+from .strategy import SignalResult
 
 
-def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
-    if bid is not None and ask is not None:
-        return (bid + ask) / 2
-    return ask if ask is not None else bid
+def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
+    """Volume-weighted average price to actually trade `shares` against a
+    real order book, instead of assuming the whole size fills at the
+    single best quote. Used for the entry, the TP exit and the forced
+    window-end close.
 
+    - levels is None -> no depth data this tick; fall back to filling
+      the whole size at `fallback_price`.
+    - levels is [] -> book fetched fine, genuinely nothing resting on
+      this side; return None, caller must not invent a fill.
+    - levels is non-empty -> walk best-price-first; any shortfall in
+      visible depth is priced at the worst level seen.
+    """
+    if levels is None:
+        return fallback_price
+    if not levels:
+        return None
+    remaining = shares
+    cost = 0.0
+    worst_price = levels[-1][0]
+    for price, size in levels:
+        if remaining <= 1e-9:
+            break
+        take = min(remaining, size) if size and size > 0 else 0.0
+        if take <= 0:
+            continue
+        cost += take * price
+        remaining -= take
+    if remaining > 1e-9:
+        cost += remaining * worst_price
+    return cost / shares
 
-# ---------------------------------------------------------------------------
-# Shared capital -- single balance the engine debits/credits.
-# ---------------------------------------------------------------------------
 
 @dataclass
 class CapitalPool:
@@ -73,101 +77,122 @@ class CapitalPool:
         return self.halted
 
 
-# ---------------------------------------------------------------------------
-# The single open position for a window, if any.
-# ---------------------------------------------------------------------------
-
 @dataclass
 class Position:
     side: Side
-    shares: float
     entry_price: float
-    entry_fee: float
+    shares: float
+    cost: float
     entry_ts: float
-
-    @property
-    def cost(self) -> float:
-        return self.shares * self.entry_price + self.entry_fee
 
 
 @dataclass
 class EngineState:
+    """Per-window transient state -- fully replaced by reset_for_window()
+    at the start of every window. Cumulative stats live on the Engine
+    itself so they survive across windows."""
     window: Optional[WindowMarket] = None
     up_bid: Optional[float] = None
     up_ask: Optional[float] = None
     down_bid: Optional[float] = None
     down_ask: Optional[float] = None
-
-    # Full order-book depth for the current tick, when available. None
-    # means "no depth data this tick" (fall back to the scalar price for
-    # the whole size); an empty list means "book fetched fine, there is
-    # genuinely nothing resting on this side" -- a real no-liquidity
-    # signal, not a data gap. See Engine._realistic_fill_price.
     up_bid_levels: Optional[list] = None
     up_ask_levels: Optional[list] = None
     down_bid_levels: Optional[list] = None
     down_ask_levels: Optional[list] = None
 
+    # signal_status: pending (waiting for the previous window's candles) | armed (side chosen, entry due
+    # ENTRY_DELAY_SECONDS after open) | no_pattern | no_data (candles never arrived) | late_join (bot
+    # started mid-window)
+    signal_status: str = "pending"
+    signal: Optional[SignalResult] = None
+    entered: bool = False            # the window's single entry has happened (stays True after TP)
     position: Optional[Position] = None
-    entry_checked: bool = False     # the single entry check (t=ENTRY_SETTLE_SECONDS) has happened
-    btc_trend: Optional[Side] = None   # latest BTC trend read, refreshed every tick via on_tick's
-                                        # btc_trend argument -- Side.UP/Side.DOWN/None, captured at
-                                        # whatever value it holds at the moment of the entry check
-    done_for_window: bool = False   # TP or stop hit, or window closed with nothing open -- nothing left to watch
-
-    total_entries_attempted: int = 0   # entry checks that resulted in a trade (guaranteed whenever a trend side is known)
-    total_price_too_high: int = 0      # of those, how many were bought anyway despite being at/above ENTRY_PRICE_THRESHOLD
-    total_tp_hits: int = 0
-    total_forced_closes: int = 0       # window closed before TP was reached
-    no_trade_windows: int = 0          # no clear trend has EVER been read yet, or no price data -- nothing opened
-    wins: int = 0
-    losses: int = 0
-    total_pnl: float = 0.0
+    entry_wait_logged: bool = False  # so the "no ask / no depth" note is logged once, not every tick
     last_window_pnl: float = 0.0
 
 
 class Engine:
-    """BTC-spot-trend entry (buys the direction BTC itself has been
-    trending in) / guaranteed one trade per window / no stop-loss of
-    any kind -- TP or the forced window-end close are the only two
-    ways out -- driven off its own capital pool. Kept as the class
-    name `Engine` / constructed the same way (Engine(broker)) so
-    app/state.py doesn't need structural changes."""
-
-    name = "FLIP"
+    name = "BOT"
 
     def __init__(self, broker: PaperBroker):
         self.broker = broker
         self.capital = CapitalPool(balance=config.STARTING_CAPITAL)
         self.s = EngineState()
         self.capital.record_equity_point(None)
+        self.history = deque(maxlen=30)      # one row per finished window, for the dashboard
+
+        # ---- cumulative stats, survive across windows ----------------------
+        self.total_signals_up = 0
+        self.total_signals_down = 0
+        self.total_no_pattern = 0
+        self.total_no_data = 0
+        self.signal_right = 0
+        self.signal_wrong = 0
+        self.total_taker_entries = 0
+        self.total_no_fills = 0              # armed, but the book never had an ask/depth to buy into
+        self.total_tp_fills = 0
+        self.total_forced_closes = 0
+        self.total_illiquid_skips = 0
+        self.total_pnl = 0.0
+        self.wins = 0
+        self.losses = 0
+
+    def _record_trade_result(self, pnl: float):
+        if pnl >= 0:
+            self.wins += 1
+        else:
+            self.losses += 1
 
     def _log(self, event, **kw):
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event,
                                balance_after=self.capital.balance, **kw)
 
-    def reset_for_window(self, window: WindowMarket):
-        self.s = EngineState(window=window)
+    # ---- window lifecycle --------------------------------------------------------
 
+    def reset_for_window(self, window: WindowMarket, late_join: bool = False):
+        self.s = EngineState(window=window)
         if self.capital.halted:
             self._log("HALTED", note=f"engine halted (balance ${self.capital.balance:.2f} < $0) -- no trading")
             return
+        if late_join:
+            self.s.signal_status = "late_join"
+            self._log("NO_TRADE", note="bot started mid-window -- skipping this window, trading from the next one")
+            return
+        self._log("WINDOW_OPEN", note=(
+            f"ALPHASTRIKE: reading the previous window's 1-minute closes. Taker buy {config.TAKER_SHARES:.0f}sh "
+            f"at market, {config.ENTRY_DELAY_SECONDS:g}s after open, on the signalled side, any price. "
+            f"No SL, TP {config.TP_PRICE}"))
 
-        self._log("WINDOW_OPEN", shares=config.BASE_ORDER_SHARES, note=(
-            f"waiting {config.ENTRY_SETTLE_SECONDS:.0f}s, then buying the BTC trend side -- if it's "
-            f"clearly up, buy UP; if clearly down, buy DOWN; if momentarily flat/mixed, carry the last "
-            f"clear trend forward and buy that. A trade is guaranteed every window once any trend has "
-            f"ever been read -- the {config.ENTRY_PRICE_THRESHOLD} price threshold no longer blocks "
-            f"entry, it's just noted in the log. Flat {config.BASE_ORDER_SHARES:.0f}sh, no martingale. "
-            f"TP {config.TP_PRICE} (redeem $1) is the only take-profit; no stop-loss of any kind -- "
-            f"the position rides everything else out until TP or the window closes and it's forced out. "
-            f"One trade per window -- no flip, no re-entry."
-        ))
+    def needs_signal(self) -> bool:
+        return (self.s.window is not None and not self.capital.halted and self.s.signal_status == "pending")
+
+    def set_signal(self, result: SignalResult, now: Optional[float] = None):
+        """Called by state.py once the previous window's five minute-closes are in."""
+        self.s.signal = result
+        closes = " / ".join(f"{c:.2f}" for c in result.closes)
+        if result.side is None:
+            self.s.signal_status = "no_pattern"
+            self.total_no_pattern += 1
+            self._log("NO_SIGNAL", note=f"closes {closes} -- {result.reason}")
+            return
+        self.s.signal_status = "armed"
+        if result.side == Side.UP:
+            self.total_signals_up += 1
+        else:
+            self.total_signals_down += 1
+        self._log("SIGNAL", side=result.side.value,
+                   note=(f"closes {closes} -- {result.reason}. Taker buy {config.TAKER_SHARES:.0f}sh "
+                         f"{result.side.value} at market from {config.ENTRY_DELAY_SECONDS:g}s after open"))
+
+    def set_signal_unavailable(self, reason: str):
+        self.s.signal_status = "no_data"
+        self.total_no_data += 1
+        self._log("NO_TRADE", note=f"previous window's candles unavailable ({reason}) -- skipping this window")
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
                 up_bid_levels: Optional[list] = None, up_ask_levels: Optional[list] = None,
-                down_bid_levels: Optional[list] = None, down_ask_levels: Optional[list] = None,
-                btc_trend: Optional[Side] = None):
+                down_bid_levels: Optional[list] = None, down_ask_levels: Optional[list] = None):
         if self.s.window is None or self.capital.halted:
             return
         now = now if now is not None else time.time()
@@ -175,15 +200,12 @@ class Engine:
         self.s.down_bid, self.s.down_ask = down_bid, down_ask
         self.s.up_bid_levels, self.s.up_ask_levels = up_bid_levels, up_ask_levels
         self.s.down_bid_levels, self.s.down_ask_levels = down_bid_levels, down_ask_levels
-        self.s.btc_trend = btc_trend
 
-        if self.s.done_for_window:
-            return
-
-        if self.s.position is None:
-            self._check_entry(now)
-        else:
+        if self.s.position is not None:
             self._check_exit(now)
+            return
+        if self._entry_due(now):
+            self._try_entry(now)
 
     # ---- price/level lookups ----------------------------------------------
 
@@ -193,289 +215,239 @@ class Engine:
     def _bid_for(self, side: Side) -> Optional[float]:
         return self.s.up_bid if side == Side.UP else self.s.down_bid
 
-    def _mid_for(self, side: Side) -> Optional[float]:
-        return _midpoint(self._bid_for(side), self._ask_for(side))
+    def _bid_levels_for(self, side: Side) -> Optional[list]:
+        return self.s.up_bid_levels if side == Side.UP else self.s.down_bid_levels
 
     def _ask_levels_for(self, side: Side) -> Optional[list]:
         return self.s.up_ask_levels if side == Side.UP else self.s.down_ask_levels
 
-    def _bid_levels_for(self, side: Side) -> Optional[list]:
-        return self.s.up_bid_levels if side == Side.UP else self.s.down_bid_levels
+    # ---- entry: one taker market buy, ENTRY_DELAY_SECONDS after open ---------
 
-    @staticmethod
-    def _realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
-        """Volume-weighted average price to actually trade `shares`
-        against a real order book, instead of assuming the whole size
-        fills at the single best quote.
+    def _entry_due(self, now: float) -> bool:
+        s = self.s
+        if s.signal_status != "armed" or s.entered or s.signal is None or s.signal.side is None:
+            return False
+        w = s.window
+        return w.open_ts + config.ENTRY_DELAY_SECONDS <= now < w.close_ts
 
-        - levels is None -> no depth data this tick; fall back to
-          filling the whole size at `fallback_price`.
-        - levels is [] -> book fetched fine, genuinely nothing resting
-          on this side; return None, caller must not invent a fill.
-        - levels is non-empty -> walk best-price-first; any shortfall
-          in visible depth is priced at the worst level seen.
-        """
-        if levels is None:
-            return fallback_price
-        if not levels:
-            return None
-        remaining = shares
-        cost = 0.0
-        worst_price = levels[-1][0]
-        for price, size in levels:
-            if remaining <= 1e-9:
-                break
-            take = min(remaining, size) if size and size > 0 else 0.0
-            if take <= 0:
-                continue
-            cost += take * price
-            remaining -= take
-        if remaining > 1e-9:
-            cost += remaining * worst_price
-        return cost / shares
-
-    # ---- entry: single check at ENTRY_SETTLE_SECONDS -- BTC trend picks --
-    # ---- the side, ENTRY_PRICE_THRESHOLD decides whether to fire ---------
-
-    def _check_entry(self, now: float):
-        elapsed = now - self.s.window.open_ts
-        if elapsed < config.ENTRY_SETTLE_SECONDS:
-            return   # not yet -- keep waiting, don't mark checked
-
-        self.s.entry_checked = True
-
-        # Guaranteed one trade per window: trend is the *effective*
-        # trend (see BtcTrendTracker.effective_trend / app/state.py),
-        # which carries the last clear up/down read forward through any
-        # momentary flat/mixed patch. The only case left where there's
-        # genuinely nothing to trade is if no clear trend has EVER been
-        # read yet (e.g. right after startup, before BTC_TREND_LOOKBACK_
-        # BLOCKS blocks of history exist) -- that's the sole remaining
-        # no-trade path.
-        trend = self.s.btc_trend
-        if trend is None:
-            self.s.no_trade_windows += 1
-            self.s.done_for_window = True
-            self._log("NO_TRADE", note=(
-                "no BTC trend has ever been read yet (still building history) -- "
-                "skipping window"
-            ))
-            return
-
-        price = self._mid_for(trend)
-        if price is None:
-            self.s.no_trade_windows += 1
-            self.s.done_for_window = True
-            self._log("NO_TRADE", side=trend.value,
-                       note="no price data at the entry check -- skipping window")
-            return
-
-        # ENTRY_PRICE_THRESHOLD is no longer a skip condition -- it's
-        # tracked purely for stats/logging. The trend side is bought
-        # every window regardless of price, to guarantee a trade.
-        if price >= config.ENTRY_PRICE_THRESHOLD:
-            self.s.total_price_too_high += 1
-            zone_note = (
-                f"BTC trend is {trend.value} (carried/fresh), {trend.value} mid @ {price:.4f} >= "
-                f"{config.ENTRY_PRICE_THRESHOLD} threshold -- buying anyway to guarantee a trade this window"
-            )
-        else:
-            zone_note = (
-                f"BTC trend is {trend.value} (carried/fresh), {trend.value} mid @ {price:.4f} < "
-                f"{config.ENTRY_PRICE_THRESHOLD}"
-            )
-
-        self.s.total_entries_attempted += 1
-        self._open_position(trend, now, zone_note=zone_note)
-
-    # ---- position open (single entry per window) ---------------------------
-
-    def _open_position(self, side: Side, now: float, zone_note: str):
-        shares = config.BASE_ORDER_SHARES
+    def _try_entry(self, now: float):
+        """Buy TAKER_SHARES at market on the signalled side -- no price cap. The fill is
+        priced by walking real ask depth for the full size and pays the taker fee. With no ask or
+        an empty book nothing is invented: it retries on the next tick until the window closes."""
+        side = self.s.signal.side
         ask = self._ask_for(side)
-        levels = self._ask_levels_for(side)
-        fill_price = self._realistic_fill_price(levels, shares, ask)
-
+        shares = config.TAKER_SHARES
+        fill_price = _realistic_fill_price(self._ask_levels_for(side), shares, ask)
         if fill_price is None:
-            self._log("NO_LIQUIDITY", side=side.value,
-                       note=f"no ask liquidity on {side.value} -- entry skipped")
-            self.s.done_for_window = True
-            self.s.no_trade_windows += 1
+            if not self.s.entry_wait_logged:
+                self.s.entry_wait_logged = True
+                self.total_illiquid_skips += 1
+                self._log("NO_LIQUIDITY", side=side.value, price=ask,
+                           note=f"entry due but {side.value} has no ask / zero ask depth -- retrying every tick until window close")
             return
-
         fee = self.broker.taker_fee_amount(shares, fill_price)
         cost = shares * fill_price + fee
         self.capital.balance -= cost
-        self.s.position = Position(side=side, shares=shares, entry_price=fill_price, entry_fee=fee,
-                                    entry_ts=now)
-        self._log("ENTRY_FILL", side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
-                   note=(f"entry buy filled (taker, real ask depth): {shares:.0f}sh @ {fill_price:.4f} "
-                         f"({zone_note}, fee ${fee:.4f}) -- TP {config.TP_PRICE} (redeem $1) is the only "
-                         f"exit besides a forced window-end close; no stop-loss"))
-        self.capital.check_halt()
+        self.total_taker_entries += 1
+        self.s.entered = True
+        self._log("TAKER_ENTRY", side=side.value, price=fill_price, shares=shares, fee=fee,
+                   note=(f"taker buy filled @ {fill_price:.4f} (best ask {ask}), {shares:.0f}sh, "
+                         f"fee ${fee:.4f}, total cost ${cost:.4f}, {now - self.s.window.open_ts:.1f}s after window open"))
+        if self.capital.check_halt():
+            self._log("HALTED", note=f"balance ${self.capital.balance:.2f} < $0 -- bankrupt")
+            return
+        self.s.position = Position(side=side, entry_price=fill_price, shares=shares, cost=cost, entry_ts=now)
 
-    # ---- exit: TP redemption only -- no stop-loss of any kind --------------
+    # ---- exit: TP only, no SL ------------------------------------------------
 
     def _check_exit(self, now: float):
         pos = self.s.position
-        mid = self._mid_for(pos.side)
-        if mid is None:
+        bid = self._bid_for(pos.side)
+        if bid is None or bid < config.TP_PRICE:
             return
-
-        if mid >= config.TP_PRICE:
-            self.s.total_tp_hits += 1
-            self._close_position(now, reason="TP_HIT",
-                                  note_prefix=f"take-profit hit ({config.TP_PRICE} mid)",
-                                  fill_price_override=1.0, fee_override=0.0)
-
-    def _close_position(self, now: float, reason: str, note_prefix: str,
-                         fill_price_override: Optional[float] = None, fee_override: Optional[float] = None):
-        pos = self.s.position
-        if fill_price_override is not None:
-            # TP: booked as a CTF resolution redemption, not an orderbook
-            # trade -- flat $1.00/share, no fee, no book-depth lookup.
-            fill_price = fill_price_override
-            fee = fee_override if fee_override is not None else 0.0
-        else:
-            # Real taker sell against actual bid depth -- mid only decides
-            # WHEN to exit, never what price it fills at.
-            bid = self._bid_for(pos.side)
-            levels = self._bid_levels_for(pos.side)
-            fill_price = self._realistic_fill_price(levels, pos.shares, bid)
-            if fill_price is None:
-                # confirmed empty book -- nobody bidding at all right now
-                fill_price = 0.0
-                self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
-                           note=f"{reason} but book has zero bid depth on {pos.side.value} -- assuming worst case $0")
-            fee = self.broker.taker_fee_amount(pos.shares, fill_price)
-
+        levels = self._bid_levels_for(pos.side)
+        fill_price = _realistic_fill_price(levels, pos.shares, bid)
+        if fill_price is None:
+            self.total_illiquid_skips += 1
+            self._log("NO_LIQUIDITY", side=pos.side.value, price=bid, note=f"TP triggered @ {bid} but zero bid depth -- waiting")
+            return
+        fee = self.broker.taker_fee_amount(pos.shares, fill_price)
         proceeds = pos.shares * fill_price - fee
         pnl = proceeds - pos.cost
         self.capital.balance += proceeds
-        self.s.total_pnl += pnl
+        self.total_pnl += pnl
         self.s.last_window_pnl += pnl
-        win = pnl >= 0
-        if win:
-            self.s.wins += 1
-        else:
-            self.s.losses += 1
-
-        self._log(reason, side=pos.side.value, price=round(fill_price, 4), shares=pos.shares,
-                   fee=round(fee, 4), pnl=round(pnl, 4),
-                   note=(f"{note_prefix} ({'redemption, fee-free' if fill_price_override is not None else 'taker'}, "
-                         f"@ {fill_price:.4f}): {pos.shares:.0f}sh (entry {pos.entry_price:.4f}, "
-                         f"fee ${fee:.4f}, pnl ${pnl:.4f})"))
+        self._record_trade_result(pnl)
+        self.total_tp_fills += 1
+        self._log("TP_FILL", side=pos.side.value, price=pos.entry_price, shares=pos.shares, pnl=pnl, fee=fee,
+                   note=(f"TP hit, real fill @ {fill_price:.4f} (triggered @ {bid}) "
+                         f"(entry {pos.entry_price:.4f}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
         self.capital.check_halt()
         self.s.position = None
 
-        # TP or a forced window-end close -- every close is terminal now:
-        # one trade per window, no flip/re-entry, no stop-loss to trigger
-        # in between.
-        self.s.done_for_window = True
-
     # ---- window close -------------------------------------------------------
 
-    def finalize_window(self):
+    def finalize_window(self, winning_side: Optional[Side]):
         if self.s.window is None:
             return
-        window_slug = self.s.window.slug
+        window = self.s.window
+        window_slug = window.slug
+        sig = self.s.signal
+        result_txt = None
+
+        # Was the signal right? (signal side == the side that won the window it traded)
+        if sig is not None and sig.side is not None and winning_side is not None:
+            if sig.side == winning_side:
+                self.signal_right += 1
+            else:
+                self.signal_wrong += 1
+            self._log("SIGNAL_RESULT", side=sig.side.value,
+                       note=f"window resolved {winning_side.value}: signal {sig.side.value} was "
+                            f"{'RIGHT' if sig.side == winning_side else 'WRONG'}")
 
         if not self.capital.halted:
             if self.s.position is not None:
-                self.s.total_forced_closes += 1
-                self._close_position(time.time(), reason="FORCED_CLOSE",
-                                      note_prefix="window closed before TP, forced taker close")
-            elif not self.s.entry_checked:
-                self.s.no_trade_windows += 1
-                self._log("NO_TRADE", note="window closed before the entry check ever ran")
+                pos = self.s.position
+                bid = self._bid_for(pos.side)
+                levels = self._bid_levels_for(pos.side)
+                fill_price = _realistic_fill_price(levels, pos.shares, bid)
+                if fill_price is None:
+                    fill_price = 0.0
+                    self._log("NO_LIQUIDITY", side=pos.side.value, price=bid,
+                               note="window closed with zero bid depth -- assuming worst case $0")
+                fee = self.broker.taker_fee_amount(pos.shares, fill_price)
+                proceeds = pos.shares * fill_price - fee
+                pnl = proceeds - pos.cost
+                self.capital.balance += proceeds
+                self.total_pnl += pnl
+                self.s.last_window_pnl += pnl
+                self.total_forced_closes += 1
+                self._record_trade_result(pnl)
+                self._log("FORCED_CLOSE", side=pos.side.value, price=pos.entry_price, shares=pos.shares,
+                           pnl=pnl, fee=fee,
+                           note=(f"window closed, forced taker close @ {fill_price:.4f} "
+                                 f"(entry {pos.entry_price:.4f}, fee ${fee:.4f}, pnl ${pnl:.4f})"))
+                self.capital.check_halt()
+                self.s.position = None
+                result_txt = "taker entry, forced close"
+            elif self.s.signal_status == "armed" and not self.s.entered:
+                self.total_no_fills += 1
+                self._log("ENTRY_MISSED", side=sig.side.value if (sig and sig.side) else "",
+                           note="window closed and the entry never filled (no ask / no depth) -- no trade this window")
+                result_txt = "no fill (empty book)"
+            elif self.s.signal_status == "pending":
+                self.total_no_data += 1
+                self.s.signal_status = "no_data"
+                self._log("NO_TRADE", note="previous window's candles never arrived for this window")
 
+        if self.s.signal_status == "no_pattern":
+            result_txt = "no pattern"
+        elif self.s.signal_status == "no_data":
+            result_txt = "no candle data"
+        elif self.s.signal_status == "late_join":
+            result_txt = "joined mid-window"
+        if result_txt is None and self.s.entered:
+            result_txt = "taker entry, TP hit"
+
+        self.history.appendleft({
+            "slug": window_slug, "open_ts": window.open_ts,
+            "signal": sig.side.value if (sig and sig.side) else None,
+            "closes": [round(c, 2) for c in sig.closes] if sig else None,
+            "winner": winning_side.value if winning_side else None,
+            "entry": "taker" if self.s.entered else None, "result": result_txt,
+            "pnl": round(self.s.last_window_pnl, 2) if self.s.entered else None,
+        })
         self.s.window = None
         self.capital.record_equity_point(window_slug)
 
     # ---- dashboard payload -------------------------------------------------
 
-    def _position_payload(self) -> Optional[dict]:
-        pos = self.s.position
-        if pos is None:
-            return None
-        mid = self._mid_for(pos.side)
-        mark = mid if mid is not None else pos.entry_price
-        market_value = pos.shares * mark
-        unrealized = market_value - pos.cost
-        to_tp = round(config.TP_PRICE - mark, 4)
-
-        return {
-            "side": pos.side.value,
-            "shares": pos.shares,
-            "entry_price": round(pos.entry_price, 4),
-            "entry_fee": round(pos.entry_fee, 4),
-            "entry_ts": pos.entry_ts,
-            "mark_price": mark,
-            "market_value": round(market_value, 4),
-            "unrealized_pnl": round(unrealized, 4),
-            "tp_price": config.TP_PRICE,
-            "distance_to_tp": to_tp,
-        }
-
     def snapshot(self) -> dict:
-        position = self._position_payload()
-        market_value = position["market_value"] if position else 0.0
-        unrealized = position["unrealized_pnl"] if position else 0.0
-        realized_pnl = round(self.s.total_pnl, 4)
+        now = time.time()
+        pos = self.s.position
+        pos_payload = None
+        open_market_value = 0.0
+        unrealized = 0.0
+        if pos is not None:
+            bid = self._bid_for(pos.side)
+            mark = bid if bid is not None else pos.entry_price
+            open_market_value = pos.shares * mark
+            unrealized = open_market_value - pos.cost
+            pos_payload = {
+                "side": pos.side.value, "entry_price": pos.entry_price, "shares": pos.shares,
+                "cost": round(pos.cost, 4), "mark_price": mark, "unrealized_pnl": round(unrealized, 4),
+                "seconds_since_entry": round(now - pos.entry_ts, 1),
+            }
+
+        # Armed and waiting to fire (the 2s delay, or an empty book): what the bot is about to buy.
+        entry_payload = None
+        sig = self.s.signal
+        w = self.s.window
+        if (w is not None and not self.capital.halted and self.s.signal_status == "armed"
+                and not self.s.entered and sig is not None and sig.side is not None):
+            entry_payload = {
+                "side": sig.side.value, "shares": config.TAKER_SHARES,
+                "fires_in": round(max(0.0, w.open_ts + config.ENTRY_DELAY_SECONDS - now), 1),
+                "ask": self._ask_for(sig.side),
+            }
 
         if self.capital.halted:
             status = "halted"
-        elif position is not None:
-            status = "in_position"
-        elif not self.s.entry_checked:
-            status = "waiting_entry"
+        elif pos is not None:
+            status = "open"
+        elif entry_payload is not None:
+            status = "entry_pending"
+        elif self.s.signal_status == "pending":
+            status = "awaiting_signal"
         else:
             status = "done"
 
-        up_mid = self._mid_for(Side.UP)
-        down_mid = self._mid_for(Side.DOWN)
+        win_rate = round(100 * self.wins / (self.wins + self.losses), 1) if (self.wins + self.losses) else None
+        judged = self.signal_right + self.signal_wrong
+        signal_acc = round(100 * self.signal_right / judged, 1) if judged else None
 
         return {
-            "engine": "FLIP", "label": "BTC-trend entry (buys the direction BTC itself is trending, guaranteed 1 trade/window), TP only — no stop-loss",
+            "engine": "BOT", "label": "ALPHASTRIKE",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.capital.halted,
             "equity_curve": self.capital.equity_curve,
-            "equity": round(self.capital.balance + market_value, 4),
+            "equity": round(self.capital.balance + open_market_value, 4),
 
-            "realized_pnl": realized_pnl,
+            "realized_pnl": round(self.total_pnl, 4),
             "unrealized_pnl": round(unrealized, 4),
-            "open_market_value": round(market_value, 4),
+            "open_market_value": round(open_market_value, 4),
             "last_window_pnl": round(self.s.last_window_pnl, 4),
 
-            "up_mid": up_mid,
-            "down_mid": down_mid,
-            "btc_trend": self.s.btc_trend.value if self.s.btc_trend else None,
-            "entry_checked": self.s.entry_checked,
-            "position": position,
-            "done_for_window": self.s.done_for_window,
+            "position": pos_payload,
+            "entry": entry_payload,
+            "signal_status": self.s.signal_status,
+            "signal": self.s.signal.to_dict() if self.s.signal else None,
+            "history": list(self.history),
 
-            "base_order_shares": config.BASE_ORDER_SHARES,
+            "total_signals_up": self.total_signals_up,
+            "total_signals_down": self.total_signals_down,
+            "total_no_pattern": self.total_no_pattern,
+            "total_no_data": self.total_no_data,
+            "signal_right": self.signal_right,
+            "signal_wrong": self.signal_wrong,
+            "signal_accuracy": signal_acc,
+            "total_taker_entries": self.total_taker_entries,
+            "total_no_fills": self.total_no_fills,
+            "total_tp_fills": self.total_tp_fills,
+            "total_forced_closes": self.total_forced_closes,
+            "total_illiquid_skips": self.total_illiquid_skips,
 
-            "total_entries_attempted": self.s.total_entries_attempted,
-            "total_price_too_high": self.s.total_price_too_high,
-            "total_tp_hits": self.s.total_tp_hits,
-            "total_forced_closes": self.s.total_forced_closes,
-            "no_trade_windows": self.s.no_trade_windows,
-            "wins": self.s.wins,
-            "losses": self.s.losses,
-            "win_rate": round(100 * self.s.wins / (self.s.wins + self.s.losses), 1) if (self.s.wins + self.s.losses) else None,
+            "wins": self.wins,
+            "losses": self.losses,
+            "win_rate": win_rate,
 
             "status": status,
 
             "def": {
-                "entry_settle_seconds": config.ENTRY_SETTLE_SECONDS,
-                "entry_price_threshold": config.ENTRY_PRICE_THRESHOLD,
-                "btc_block_seconds": config.BTC_BLOCK_SECONDS,
-                "btc_trend_history_blocks": config.BTC_TREND_HISTORY_BLOCKS,
-                "btc_trend_lookback_blocks": config.BTC_TREND_LOOKBACK_BLOCKS,
+                "taker_shares": config.TAKER_SHARES,
+                "entry_delay_s": config.ENTRY_DELAY_SECONDS,
                 "tp_price": config.TP_PRICE,
-                "base_order_shares": config.BASE_ORDER_SHARES,
             },
         }

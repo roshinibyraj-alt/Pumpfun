@@ -4,12 +4,17 @@ import time
 from collections import deque
 from typing import Optional
 
+import httpx
+
 from . import config
-from .btc_trend import BtcTrendTracker
+from .binance import fetch_window_minutes
 from .engine import Engine
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
 from .polymarket_client import PolymarketClient
+from .strategy import closes_for_window, evaluate, live_minutes
+
+SIGNAL_RETRY_SECONDS = 1.0        # how often to retry fetching the previous window's candles
 
 
 class BotState:
@@ -17,94 +22,92 @@ class BotState:
         self.broker = PaperBroker()
         self.engine = Engine(self.broker)
         self.client = PolymarketClient()
+        self.http = httpx.AsyncClient(timeout=8)       # Binance 1m candles (signal data only)
         self.current_window: Optional[WindowMarket] = None
-        self.price_history: deque = deque(maxlen=300)  # ~5 min at 1s ticks
+        self.price_history: deque = deque(maxlen=config.WINDOW_SECONDS)  # ~one window at 1s ticks
         self.last_up_bid: Optional[float] = None
         self.last_up_ask: Optional[float] = None
         self.last_down_bid: Optional[float] = None
         self.last_down_ask: Optional[float] = None
         self.status = "starting"
         self.error: Optional[str] = None
+        self.signal_error: Optional[str] = None
+        self._signal_last_attempt = 0.0
         self._task: Optional[asyncio.Task] = None
-
-        # BTC spot-price trend tracker -- runs continuously, independent
-        # of window boundaries. Polled on its own slower cadence (see
-        # _tick) rather than every 0.5s Polymarket tick.
-        self.btc_tracker = BtcTrendTracker(
-            block_seconds=config.BTC_BLOCK_SECONDS,
-            history_len=config.BTC_TREND_HISTORY_BLOCKS,
-            lookback=config.BTC_TREND_LOOKBACK_BLOCKS,
-            min_step=config.BTC_TREND_MIN_STEP_USD,
-        )
-        self._last_btc_fetch_ts: float = 0.0
+        # Live min1-min5 BTC prices of the CURRENT window (dashboard only, refreshed by its own
+        # task so a slow Binance call can never delay the trading tick).
+        self.live: Optional[dict] = None            # live_minutes() result
+        self.live_slug: Optional[str] = None        # the window `live` belongs to
+        self.live_ts: Optional[float] = None
+        self.live_error: Optional[str] = None
+        self._live_task: Optional[asyncio.Task] = None
 
     async def start(self):
         self._task = asyncio.create_task(self._run_loop())
+        self._live_task = asyncio.create_task(self._live_loop())
 
     async def stop(self):
         if self._task:
             self._task.cancel()
+        if self._live_task:
+            self._live_task.cancel()
+        await self.http.aclose()
         await self.client.close()
 
     async def _run_loop(self):
         self.status = "running"
+        loop = asyncio.get_running_loop()
         while True:
+            started = loop.time()
             try:
                 await self._tick()
             except Exception as e:  # keep the loop alive no matter what
                 self.error = str(e)
-            await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
+            # sleep only what is left of the interval, so slow ticks don't stretch the cadence
+            await asyncio.sleep(max(0.0, config.POLL_INTERVAL_SECONDS - (loop.time() - started)))
+
+    async def _live_loop(self):
+        while True:
+            try:
+                await self._refresh_live_minutes(time.time())
+            except Exception as e:
+                self.live_error = f"{type(e).__name__}: {e}"
+            await asyncio.sleep(config.LIVE_MINUTES_POLL_SECONDS)
+
+    async def _refresh_live_minutes(self, now: float):
+        """Fetch the current window's 1-minute candles (closed + the one still forming) from Binance."""
+        window = self.current_window
+        if window is None:
+            return
+        try:
+            candles = await fetch_window_minutes(self.http, window.open_ts)
+        except Exception as e:
+            self.live_error = f"{type(e).__name__}: {e}"
+            return
+        self.live = live_minutes(candles, window.open_ts, now)
+        self.live_slug = window.slug          # captured before the await: a late reply is tagged with ITS window
+        self.live_ts = now
+        self.live_error = None
 
     async def _tick(self):
         now = time.time()
+        window, error_reason = await self.client.get_active_window(now)
+        if window is None:
+            self.error = error_reason or "No market found for current window slug"
+            return
+        self.error = None
 
-        # The window's metadata (slug/token ids) doesn't change intra-
-        # window, so once we have a current window that hasn't reached
-        # its close time yet, skip the Gamma metadata round-trip entirely
-        # and go straight to prices -- that was a full extra network hop
-        # blocking every single tick for no reason. Only re-resolve when
-        # we have no window yet, or we're at/past the known close time
-        # (window roll).
-        if self.current_window is not None and now < self.current_window.close_ts:
-            window = self.current_window
-        else:
-            window, error_reason = await self.client.get_active_window(now)
-            if window is None:
-                self.error = error_reason or "No market found for current window slug"
-                return
-            self.error = None
-            if self.current_window is None or window.slug != self.current_window.slug:
-                await self._roll_window(window)
+        if self.current_window is None or window.slug != self.current_window.slug:
+            await self._roll_window(window)
 
         # CLOB order book only -- no Gamma price fallback. Full depth (not
         # just top-of-book) so the engine can price fills realistically
         # against actual available size instead of assuming unlimited
-        # depth at the best quote. Fetched concurrently (not one-after-
-        # the-other) so a stop-check isn't waiting on two sequential
-        # round-trips -- cuts tick latency roughly in half. Both sides are
-        # still fetched every tick for dashboard display, even though
-        # exits only ever watch the one held side. BTC spot price is
-        # polled on its own, much slower cadence (BTC_FETCH_INTERVAL_SECONDS)
-        # bundled into the same gather when it's due, rather than firing a
-        # request to the price feed on every single 0.5s tick.
-        fetch_btc = (now - self._last_btc_fetch_ts) >= config.BTC_FETCH_INTERVAL_SECONDS
-        if fetch_btc:
-            up_book, down_book, btc_price = await asyncio.gather(
-                self.client.get_book_full(self.current_window.token_up),
-                self.client.get_book_full(self.current_window.token_down),
-                self.client.fetch_btc_spot_price(),
-            )
-            self._last_btc_fetch_ts = now
-        else:
-            up_book, down_book = await asyncio.gather(
-                self.client.get_book_full(self.current_window.token_up),
-                self.client.get_book_full(self.current_window.token_down),
-            )
-            btc_price = None
-
-        if btc_price is not None:
-            self.btc_tracker.update(btc_price, now)
-
+        # depth at the best quote.
+        up_book, down_book = await asyncio.gather(
+            self.client.get_book_full(self.current_window.token_up),
+            self.client.get_book_full(self.current_window.token_down),
+        )
         up_bid = up_book["best_bid"] if up_book else None
         up_ask = up_book["best_ask"] if up_book else None
         down_bid = down_book["best_bid"] if down_book else None
@@ -116,12 +119,7 @@ class BotState:
         down_mid = self._midpoint(down_bid, down_ask)
         self.price_history.append(PricePoint(ts=now, up=up_mid, down=down_mid))
 
-        # effective_trend() carries the last clear up/down read forward
-        # through momentary flat/mixed patches, so the engine always has
-        # a side to act on once any clear trend has ever been seen --
-        # needed to guarantee a trade every window.
-        trend = self.btc_tracker.effective_trend()
-        btc_trend_side = Side.UP if trend == "up" else (Side.DOWN if trend == "down" else None)
+        await self._ensure_signal(now)
 
         seconds_to_close = self.current_window.close_ts - now
         self.engine.on_tick(
@@ -130,8 +128,30 @@ class BotState:
             up_ask_levels=up_book["asks"] if up_book else None,
             down_bid_levels=down_book["bids"] if down_book else None,
             down_ask_levels=down_book["asks"] if down_book else None,
-            btc_trend=btc_trend_side,
         )
+
+    async def _ensure_signal(self, now: float):
+        """Read the PREVIOUS window's five 1-minute closes from Binance and hand
+        the resulting signal to the engine. Retries every second until the
+        candles are in (the last minute only finishes closing at the window
+        boundary) and gives up after SIGNAL_MAX_WAIT_SECONDS."""
+        if not self.engine.needs_signal() or now - self._signal_last_attempt < SIGNAL_RETRY_SECONDS:
+            return
+        self._signal_last_attempt = now
+        window = self.current_window
+        prev_open = window.open_ts - config.WINDOW_SECONDS
+        try:
+            candles = await fetch_window_minutes(self.http, prev_open)
+            closes = closes_for_window(candles, prev_open, now)
+            if closes is not None:
+                self.signal_error = None
+                self.engine.set_signal(evaluate(closes), now=now)
+                return
+            self.signal_error = f"waiting for the previous window's minute candles ({len(candles)}/5 closed)"
+        except Exception as e:
+            self.signal_error = f"{type(e).__name__}: {e}"
+        if now - window.open_ts > config.SIGNAL_MAX_WAIT_SECONDS:
+            self.engine.set_signal_unavailable(self.signal_error or "no data")
 
     @staticmethod
     def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
@@ -140,10 +160,7 @@ class BotState:
         return ask if ask is not None else bid
 
     async def _roll_window(self, new_window: WindowMarket):
-        # Finalize the previous window before starting the new one. The
-        # engine's own entry logic no longer depends on this window's
-        # outcome (it's BTC-trend-driven now), so this is purely a
-        # settlement log line for the dashboard/audit trail.
+        # Finalize the previous window before starting the new one.
         if self.current_window is not None:
             winning_side = self._infer_winner()
             up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
@@ -154,13 +171,18 @@ class BotState:
                 note=(f"settled by last observed CLOB midpoint: up={up_mid}, "
                       f"down={down_mid} (no Polymarket resolution check)"),
             )
-            self.engine.finalize_window()
+            self.engine.finalize_window(winning_side)
 
+        first_window = self.current_window is None
         self.current_window = new_window
         self.price_history.clear()
         self.last_up_bid = self.last_up_ask = None
         self.last_down_bid = self.last_down_ask = None
-        self.engine.reset_for_window(new_window)
+        self.signal_error = None
+        # A window we only see well after it opened (bot just started) isn't traded: the
+        # entry is timed off the window open, so we have to be there at the open.
+        late = first_window and (time.time() - new_window.open_ts) > config.LATE_JOIN_GRACE_SECONDS
+        self.engine.reset_for_window(new_window, late_join=late)
 
     def _infer_winner(self) -> Optional[Side]:
         """Sole outcome source: whichever side's last observed CLOB midpoint
@@ -175,17 +197,30 @@ class BotState:
 
     # ---- dashboard payload -------------------------------------------------
 
+    def _btc_minutes_payload(self) -> dict:
+        """Min1-min5 BTC prices of the current window. Data fetched for an older window is never
+        shown against the new one -- the strip resets to 'pending' at every window open."""
+        fresh = self.live is not None and self.current_window is not None and self.live_slug == self.current_window.slug
+        live = self.live if fresh else {
+            "open_price": None,
+            "minutes": [{"minute": i + 1, "state": "pending", "price": None, "change": None} for i in range(5)],
+        }
+        return {"open_price": live["open_price"], "minutes": live["minutes"],
+                "updated_ts": self.live_ts if fresh else None, "error": self.live_error}
+
     def snapshot(self) -> dict:
         eng = self.engine.snapshot()
         return {
             "status": self.status,
             "error": self.error,
             "server_time": time.time(),
+            "signal_error": self.signal_error,
             "window": None if not self.current_window else {
                 "slug": self.current_window.slug,
                 "open_ts": self.current_window.open_ts,
                 "close_ts": self.current_window.close_ts,
             },
+            "btc_minutes": self._btc_minutes_payload(),
             "book": {
                 "up_bid": self.last_up_bid, "up_ask": self.last_up_ask,
                 "down_bid": self.last_down_bid, "down_ask": self.last_down_ask,
@@ -198,7 +233,6 @@ class BotState:
                 {"ts": p.ts, "up": p.up, "down": p.down}
                 for p in list(self.price_history)[-120:]
             ],
-            "btc_trend": self.btc_tracker.snapshot(),
             "pnl_total": round(eng["realized_pnl"] + eng["unrealized_pnl"], 2),
             "demo_capital": {
                 "balance": eng["balance"],

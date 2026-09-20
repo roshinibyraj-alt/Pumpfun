@@ -1,18 +1,11 @@
 """
-Thin client around Polymarket's public read APIs, plus one unrelated
-public price feed used only for trend detection.
+Thin client around Polymarket's public read APIs.
 
-Three Polymarket APIs are involved:
+Three APIs are involved:
   - Gamma API (metadata): market question, slug, close time, and the two
     CLOB token ids (one per outcome: Up / Down).
   - CLOB API (live pricing): midpoint/last-trade price per token id, and
     the real order book (best bid / best ask) via get_book().
-
-Plus one independent feed:
-  - BTC spot price (fetch_btc_spot_price()): a public, no-auth BTC/USD
-    price used purely to detect a short-term trend (see
-    app/btc_trend.py) -- has nothing to do with Polymarket's own APIs
-    or token pricing.
 
 NOTE: Polymarket's public API surface has shifted field names between
 versions in the past. This module is the single place to patch if a
@@ -42,7 +35,7 @@ class PolymarketClient:
 
     # ---- market discovery -------------------------------------------------
     #
-    # Polymarket's btc-updown-5m-<ts> slug keys off the window's OPEN time,
+    # Polymarket's btc-updown-15m-<ts> slug keys off the window's OPEN time,
     # not its close time (confirmed against a live window). Using ceil()
     # here -- i.e. treating <ts> as a close time -- silently resolves to
     # the *next* window's open timestamp instead, which is exactly the bug
@@ -51,12 +44,13 @@ class PolymarketClient:
     # case Polymarket changes convention or a market is momentarily
     # missing from Gamma right at the boundary.
     #
-    # IMPORTANT: for the 5-minute crypto series, Gamma's `/markets?slug=...`
+    # IMPORTANT: for the short-window crypto series, Gamma's `/markets?slug=...`
     # returns an empty list -- these markets are only addressable by slug
     # through the `/events?slug=...` endpoint (each event wraps exactly one
     # market for this series, in event["markets"][0]). Confirmed against a
-    # live event: `/markets?slug=btc-updown-5m-<ts>` -> [], while
-    # `/events?slug=btc-updown-5m-<ts>` -> [{ ..., "markets": [{...}] }].
+    # live event (5m series): `/markets?slug=btc-updown-5m-<ts>` -> [], while
+    # `/events?slug=btc-updown-5m-<ts>` -> [{ ..., "markets": [{...}] }]. The
+    # 15m series uses the same event slug pattern (btc-updown-15m-<open ts>).
 
     def _slug_for_ts(self, ts: int) -> str:
         return f"{config.SLUG_PREFIX}{ts}"
@@ -212,32 +206,6 @@ class PolymarketClient:
         if up_p is None or down_p is None:
             return None
         return Side.UP if up_p > down_p else Side.DOWN
-
-    # ---- BTC spot price (independent of Polymarket) -----------------------
-
-    async def fetch_btc_spot_price(self) -> Optional[float]:
-        """BTC/USD spot price from a public, no-auth price feed (see
-        config.BTC_SPOT_API_URL), used purely for the trend-detection
-        entry signal -- completely separate from the Polymarket
-        UP/DOWN token pricing above. Returns None on any failure
-        (network error, unexpected shape, bad status); the caller
-        should treat that as "no sample this poll" and just try again
-        next time, same convention as get_price()/get_book_full()."""
-        try:
-            resp = await self._client.get(config.BTC_SPOT_API_URL)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-        except Exception:
-            return None
-        if not isinstance(data, dict):
-            return None
-        try:
-            # Coinbase spot-price shape: {"data": {"base": "BTC", "currency": "USD", "amount": "79000.12"}}
-            amount = data.get("data", {}).get("amount")
-            return float(amount) if amount is not None else None
-        except Exception:
-            return None
 
     # ---- live pricing -------------------------------------------------------
 

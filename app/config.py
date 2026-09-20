@@ -1,64 +1,28 @@
 """
-Central configuration for the BTC 5-min up/down bot.
+Central configuration for ALPHASTRIKE -- BTC 5-min up/down bot.
 
-Single engine -- BTC-spot-trend entry (buys the direction BTC itself
-has been trending in, not anything about the previous window or the
-token's own cheapness), one guaranteed trade per window, TP
-redemption, no stop-loss of any kind:
+Strategy: "the current window decides the next window".
 
-  1. BTC trend signal (independent of the Polymarket window clock):
-     BTC spot price is polled roughly every BTC_FETCH_INTERVAL_SECONDS
-     (~3s) from an external price feed (see fetch_btc_spot_price() in
-     polymarket_client.py) and bucketed into BTC_BLOCK_SECONDS (30s)
-     blocks, each block's value being the average of its samples. The
-     last BTC_TREND_HISTORY_BLOCKS (20) completed blocks are kept.
-     Every time a block completes, the trend is recomputed by looking
-     at the most recent BTC_TREND_LOOKBACK_BLOCKS (5) of them. BTC
-     realistically only moves in ~$1 increments over a 30s block, so a
-     sub-$1 wobble between two blocks is noise, not a real step: each
-     block-over-block move must be at least BTC_TREND_MIN_STEP_USD
-     ($1) in the same direction for the run to count. Strictly
-     increasing by >= $1 each step -> UP; strictly decreasing by >= $1
-     each step -> DOWN; anything else (flat, mixed, a reversal, a
-     sub-$1 step) is NO FRESH TREND. This runs continuously across
-     window boundaries -- it doesn't reset when a new Polymarket
-     window opens. See app/btc_trend.py's effective_trend(): whenever
-     a fresh read comes back with no trend, the last clear UP/DOWN
-     read is carried forward instead of being discarded, so a
-     momentary flat/mixed patch doesn't erase an established trend --
-     this carryover is what guarantees a trade every window (item 2).
-  2. Entry: from window open, wait ENTRY_SETTLE_SECONDS (a couple of
-     seconds -- just long enough for the first tick's order-book data
-     to exist, not a strategic delay). At that single check:
-       - the target side is whatever the effective BTC trend is (UP or
-         DOWN, including a carried-forward read) -- it's bought
-         immediately, flat BASE_ORDER_SHARES, regardless of price.
-         ENTRY_PRICE_THRESHOLD (0.40) is tracked for stats/logging
-         only; it no longer blocks the trade, since the bot must fire
-         at least once per window.
-       - the only case with no trade at all is if no clear trend has
-         EVER been read yet (e.g. right at startup, before enough BTC
-         block history exists) or there's no price/liquidity data --
-         this is a single check, not a rearmed watch.
-  3. Exit: TP_PRICE (0.99) hit -> REDEEMED, not sold -- credited at a
-     flat $1.00/share, zero fee (CTF resolution redemption). There is
-     no stop-loss, trailing or otherwise: once filled, a position only
-     ever exits via TP or via the forced close below. It rides out
-     every other price move for the rest of the window, including all
-     the way to zero.
-  4. No flips: once a position closes (TP or forced), the window is
-     done -- at most one trade per window, no re-entry on the opposite
-     side.
-  5. Sizing: flat, no martingale of any kind. Every entry is exactly
-     BASE_ORDER_SHARES. No cross-window sizing memory either; every
-     window starts fresh.
-  6. Window close: if a position is still open when the window closes
-     without having hit TP, it's force-closed at whatever the market
-     will pay (real taker sell) -- this is the only other way out of a
-     position besides TP.
+  SIGNAL (from the window that just closed, using its five 1-minute
+  BTC closes c1..c5):
+    UP   : minute 2 closed BELOW minute 1  (early dip)
+           AND avg(c3, c4, c5) > avg(c1, c2)  (then recovered)
+    DOWN : exactly the opposite -- minute 2 closed ABOVE minute 1
+           AND avg(c3, c4, c5) < avg(c1, c2)
+    else : no pattern -> no trade in the next window.
 
-At most one position open at a time, exactly one trade per window (once
-any trend has ever been read), no order-book ladder, no merge.
+  TRADE (in the NEXT window, on the signalled side) -- ONE order type,
+  a TAKER market buy:
+    1. ENTRY_DELAY_SECONDS (2s) after the window opens, buy TAKER_SHARES
+       (300) at market on the signalled side, whatever the price. Priced
+       by walking real ask depth, taker fee paid. No price cap, no resting
+       limit order, no timeout.
+    2. No stop-loss. Take profit at TP_PRICE (0.99) -- a real taker sell,
+       depth-walked. If TP never hits, force-closed (taker) at window end.
+    3. One entry per window.
+
+Minute prices come from Binance BTCUSDT 1-minute candles (public REST);
+every order is priced/filled against Polymarket's own CLOB book.
 """
 import os
 
@@ -72,54 +36,34 @@ TRADING_MODE = os.getenv("TRADING_MODE", "paper")
 GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
 CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
 SLUG_PREFIX = "btc-updown-5m-"
-WINDOW_SECONDS = 300
+WINDOW_SECONDS = 300             # 5-minute windows: five 1-minute candles per window
 
-POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "0.5"))
+POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
-# ---- BTC spot price feed / trend tracking -----------------------------
-# Public, no-auth spot price endpoint. Independent of Polymarket's own
-# CLOB/Gamma APIs above -- this is the actual BTC/USD spot price, used
-# purely to detect a short-term trend, not for anything Polymarket-
-# specific.
-BTC_SPOT_API_URL = os.getenv("BTC_SPOT_API_URL", "https://api.coinbase.com/v2/prices/BTC-USD/spot")
-BTC_FETCH_INTERVAL_SECONDS = 3.0   # how often to poll BTC spot price -- deliberately much slower than
-                                    # the 0.5s Polymarket book-polling tick so we don't hammer a public API
-BTC_BLOCK_SECONDS = 30.0           # length of one BTC trend block (average of samples within it)
-BTC_TREND_HISTORY_BLOCKS = 20      # rolling window of completed blocks kept (20 * 30s = 10 minutes)
-BTC_TREND_LOOKBACK_BLOCKS = 5      # how many of the most recent completed blocks must be strictly
-                                    # monotonic (all up, or all down) for a trend signal to fire
-BTC_TREND_MIN_STEP_USD = 1.0       # minimum $ move required between consecutive blocks for that step to
-                                    # count towards a trend (see app/btc_trend.py MIN_STEP) -- filters out
-                                    # sub-$1 noise/rounding that isn't a real BTC move over a 30s block
+# ---- Entry: one taker buy, fired shortly after the window opens ---------
+ENTRY_DELAY_SECONDS = float(os.getenv("ENTRY_DELAY_SECONDS", "2"))   # fire this long after the window opens
+TAKER_SHARES = float(os.getenv("TAKER_SHARES", "300"))
+TP_PRICE = 0.99
 
-# ---- BTC-trend entry / continuous trailing stop engine -----------------
-ENTRY_SETTLE_SECONDS = 2.0        # brief technical delay after window open before the single entry
-                                   # check -- just long enough for the first tick's book data to exist,
-                                   # not a strategic wait
-ENTRY_PRICE_THRESHOLD = 0.40      # informational only -- no longer gates entry. The trend side is
-                                   # always bought to guarantee a trade every window; this value is just
-                                   # logged/counted (total_price_too_high) when the fill price is at or
-                                   # above it
-TP_PRICE = 0.99                   # take-profit level -- hit = redeemed at $1.00, fee-free
-                                   # -- no stop-loss config: this bot no longer has one, TP and the
-                                   # forced window-end close are the only two ways out of a position
-
-BASE_ORDER_SHARES = 100.0         # flat size for every entry -- initial and every flip, no martingale
-
-# Demo capital: single source of truth for the paper balance -- debited
-# on every buy fill, credited on every sell settlement. Halts
-# permanently if it ever drops below $0.
 STARTING_CAPITAL = float(os.getenv("STARTING_CAPITAL", "2000"))
 
+# ---- Signal data (Binance public REST, no API key) ------------------------
+# Used to read the previous window's 1-minute closes (the signal) and to show
+# the current window's live minute prices on the dashboard. If your host is
+# geo-blocked from api.binance.com, point this at a mirror (e.g.
+# https://api.binance.us/api/v3/klines) -- same response format.
+BINANCE_KLINES_URL = os.getenv("BINANCE_KLINES_URL", "https://api.binance.com/api/v3/klines")
+BINANCE_SYMBOL = os.getenv("BINANCE_SYMBOL", "BTCUSDT")
+SIGNAL_MAX_WAIT_SECONDS = 60.0     # give up on a window's signal if the candles haven't arrived this long after open
+LATE_JOIN_GRACE_SECONDS = 10.0     # a window first seen more than this many seconds after its open is not traded
+LIVE_MINUTES_POLL_SECONDS = float(os.getenv("LIVE_MINUTES_POLL_SECONDS", "1.0"))  # dashboard's live min1-min5 refresh
+
 # ---- Trading fees -----------------------------------------------------
-# Entry and a forced window-end close are reactive/triggered fills
-# (not resting orders placed ahead of time), so both are modeled
-# as TAKER fills and pay the fee for real, priced by walking real book
-# depth. TP is the one exception: it's booked as a resolution
-# redemption (see TP_PRICE above), not an orderbook trade, so it pays
-# no fee at all. Verify the taker rate against
-# GET https://clob.polymarket.com/fee-rate?token_id=... before trading
-# real money.
+# The entry, the TP exit and any forced window-end close are all TAKER
+# market orders and pay the real fee, priced by walking real order-book
+# depth.
+# Verify against GET https://clob.polymarket.com/fee-rate?token_id=...
+# before trading real money.
 APPLY_TAKER_FEES = True
 TAKER_FEE_RATE = 0.07
 TAKER_FEE_EXPONENT = 1
