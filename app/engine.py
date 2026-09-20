@@ -1,9 +1,8 @@
 """
 Trading engine -- BTC-spot-trend entry (buys the direction BTC itself
 has been trending in, not the previous window's winner or the token's
-own cheapness), continuous trailing stop that arms 3 minutes after
-window open and tightens above 0.85, a hard stop-loss override once
-deep ITM, single trade per window, TP redemption.
+own cheapness), single trade per window, TP redemption, no stop-loss
+of any kind.
 
 See app/config.py for the full strategy write-up, and app/btc_trend.py
 for how the trend signal itself is computed. Summary: a short delay
@@ -16,29 +15,18 @@ window is skipped outright. If there is, the target side is UP for an
 uptrend or DOWN for a downtrend; if that side's price is below
 ENTRY_PRICE_THRESHOLD (0.40), it's bought immediately, flat
 BASE_ORDER_SHARES; otherwise no trade is taken this window -- this is
-a single check, not a rearmed watch. From then on, TP is live
-immediately, but the trailing stop doesn't arm until
-TRAIL_START_DELAY_SECONDS (180s / 3min) after the WINDOW OPENED (not
-after entry) -- before that, only TP can close the position. The
-high-water mark keeps tracking the whole time regardless, so once the
-stop arms it starts from wherever price has already gotten to, not
-from scratch. Once armed, the stop sits behind the position's
-high-water MID -- 0.20 back normally, narrowing to 0.10 back once the
-high-water mark has gone above 0.85 -- and only ever tightens.
-Independent of that arming delay, the moment the high-water mark
-reaches HARD_STOP_TRIGGER_PRICE (0.90), the trailing stop is
-permanently deactivated for that position and replaced with a fixed
-HARD_STOP_PRICE (0.60) stop-loss -- much wider than the tightened
-trail would be, deliberately giving a deep-ITM position room to wobble
-without getting stopped out; this never reverts even if price falls
-back under 0.90. Mid price is what triggers every decision (entry
-threshold, TP, stop), but every actual fill is a real taker execution
-priced off real ask/bid order-book depth (see
-Engine._realistic_fill_price), so mid and fill price can differ by the
-spread. If mid reaches 0.99, redeem at a flat $1.00/share, fee-free,
-done for the window. If the trailing stop or hard stop is hit instead,
-the position is closed and the window is done -- no flip, no re-entry
-on the other side, at most one trade per window. No martingale
+a single check, not a rearmed watch. Once filled, the position has
+exactly two ways out: TP_PRICE (0.99) hit -> redeemed at a flat
+$1.00/share, fee-free (a CTF resolution redemption, not an orderbook
+trade); or the window closes first, in which case it's force-closed at
+whatever the market will pay (a real taker sell, priced off real bid
+depth). There is no stop-loss of any kind -- a position that's deep
+underwater just keeps riding it out until one of those two things
+happens; mid price is what triggers the TP check, but every actual
+fill (entry, or the forced close) is a real taker execution priced off
+real ask/bid order-book depth (see Engine._realistic_fill_price), so
+mid and fill price can differ by the spread. No flip, no re-entry on
+the other side -- at most one trade per window. No martingale
 anywhere; every entry is BASE_ORDER_SHARES. Every fill except TP is a
 taker order and pays the taker fee; TP is the sole fee-free exception
 since it's a CTF resolution redemption, not an orderbook trade.
@@ -92,9 +80,6 @@ class Position:
     entry_price: float
     entry_fee: float
     entry_ts: float
-    high_water_mark: float = 0.0   # best bid seen since entry -- drives the continuous trailing stop
-    hard_stop_active: bool = False # once high-water mark >= HARD_STOP_TRIGGER_PRICE, trailing is permanently
-                                    # replaced by the fixed HARD_STOP_PRICE stop -- never reverts
 
     @property
     def cost(self) -> float:
@@ -129,9 +114,7 @@ class EngineState:
     total_entries_attempted: int = 0   # entry checks where the trend side was below threshold and bought
     total_price_too_high: int = 0      # entry checks where the trend side was at/above ENTRY_PRICE_THRESHOLD
     total_tp_hits: int = 0
-    total_stop_hits: int = 0           # trailing-stop closes only
-    total_hard_stop_hits: int = 0      # fixed hard-stop closes only (position ran to 0.90+ first)
-    total_forced_closes: int = 0       # window closed before TP/stop was reached
+    total_forced_closes: int = 0       # window closed before TP was reached
     no_trade_windows: int = 0          # no clear trend, or trend side was too expensive -- nothing opened
     wins: int = 0
     losses: int = 0
@@ -141,12 +124,11 @@ class EngineState:
 
 class Engine:
     """BTC-spot-trend entry (buys the direction BTC itself has been
-    trending in) / trailing stop that arms 3 minutes after window open,
-    tightens above 0.85, and gets permanently overridden by a fixed
-    hard stop above 0.90 / single trade per window, driven off its own
-    capital pool. Kept as the class name `Engine` / constructed the
-    same way (Engine(broker)) so app/state.py doesn't need structural
-    changes."""
+    trending in) / single trade per window / no stop-loss of any kind
+    -- TP or the forced window-end close are the only two ways out --
+    driven off its own capital pool. Kept as the class name `Engine` /
+    constructed the same way (Engine(broker)) so app/state.py doesn't
+    need structural changes."""
 
     name = "FLIP"
 
@@ -172,11 +154,9 @@ class Engine:
             f"up, buy UP; if clearly down, buy DOWN; if no clear trend, skip this window entirely. The "
             f"trend side is only bought if its price is below {config.ENTRY_PRICE_THRESHOLD} at that "
             f"single check (no rearmed watch) -- flat {config.BASE_ORDER_SHARES:.0f}sh, no martingale. "
-            f"TP {config.TP_PRICE} (redeem $1) live immediately / trailing stop arms "
-            f"{config.TRAIL_START_DELAY_SECONDS:.0f}s after window open, {config.TRAIL_DISTANCE} trail "
-            f"(tightens to {config.TRAIL_DISTANCE_TIGHT} above {config.TRAIL_TIGHTEN_PRICE}, permanently "
-            f"replaced by a fixed {config.HARD_STOP_PRICE} hard stop above {config.HARD_STOP_TRIGGER_PRICE}), "
-            f"one trade per window -- no flip on stop-out."
+            f"TP {config.TP_PRICE} (redeem $1) is the only take-profit; no stop-loss of any kind -- "
+            f"the position rides everything else out until TP or the window closes and it's forced out. "
+            f"One trade per window -- no flip, no re-entry."
         ))
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: float = None, now: Optional[float] = None,
@@ -313,78 +293,27 @@ class Engine:
         fee = self.broker.taker_fee_amount(shares, fill_price)
         cost = shares * fill_price + fee
         self.capital.balance -= cost
-        mid_now = self._mid_for(side)
-        hwm_start = mid_now if mid_now is not None else fill_price
         self.s.position = Position(side=side, shares=shares, entry_price=fill_price, entry_fee=fee,
-                                    entry_ts=now, high_water_mark=hwm_start)
+                                    entry_ts=now)
         self._log("ENTRY_FILL", side=side.value, price=round(fill_price, 4), shares=shares, fee=round(fee, 4),
                    note=(f"entry buy filled (taker, real ask depth): {shares:.0f}sh @ {fill_price:.4f} "
-                         f"({zone_note}, fee ${fee:.4f}) -- TP {config.TP_PRICE} (redeem $1) / "
-                         f"trailing stop arms {config.TRAIL_START_DELAY_SECONDS:.0f}s after window open"))
+                         f"({zone_note}, fee ${fee:.4f}) -- TP {config.TP_PRICE} (redeem $1) is the only "
+                         f"exit besides a forced window-end close; no stop-loss"))
         self.capital.check_halt()
 
-    # ---- exit: TP redemption or continuous trailing-stop hit ---------------
-
-    @staticmethod
-    def _effective_stop(high_water_mark: float) -> float:
-        """Continuous trail: TRAIL_DISTANCE behind the high-water mark,
-        narrowing to TRAIL_DISTANCE_TIGHT once the high-water mark has
-        gone above TRAIL_TIGHTEN_PRICE, rounded to the price tick.
-        Monotonically non-decreasing since the caller always feeds in
-        the cumulative HWM, never the raw current price -- so it only
-        ever tightens (both from the HWM rising and from crossing the
-        tighten threshold)."""
-        trail = config.TRAIL_DISTANCE_TIGHT if high_water_mark > config.TRAIL_TIGHTEN_PRICE else config.TRAIL_DISTANCE
-        stop = high_water_mark - trail
-        return round(stop / config.PRICE_TICK) * config.PRICE_TICK
+    # ---- exit: TP redemption only -- no stop-loss of any kind --------------
 
     def _check_exit(self, now: float):
         pos = self.s.position
         mid = self._mid_for(pos.side)
         if mid is None:
             return
-        if mid > pos.high_water_mark:
-            pos.high_water_mark = mid
 
         if mid >= config.TP_PRICE:
             self.s.total_tp_hits += 1
             self._close_position(now, reason="TP_HIT",
                                   note_prefix=f"take-profit hit ({config.TP_PRICE} mid)",
                                   fill_price_override=1.0, fee_override=0.0)
-            return
-
-        # Hard stop: the instant the position has run deep enough ITM,
-        # permanently swap the trailing stop for a fixed, much wider
-        # stop-loss -- independent of the trail-arm delay below, and it
-        # never reverts even if price pulls back under the trigger
-        # afterwards.
-        if not pos.hard_stop_active and pos.high_water_mark >= config.HARD_STOP_TRIGGER_PRICE:
-            pos.hard_stop_active = True
-            self._log("HARD_STOP_ARMED", price=round(pos.high_water_mark, 4), note=(
-                f"high-water mid reached {config.HARD_STOP_TRIGGER_PRICE} -- trailing stop deactivated, "
-                f"hard stop-loss now fixed at {config.HARD_STOP_PRICE} for the rest of this position"
-            ))
-
-        if pos.hard_stop_active:
-            if mid <= config.HARD_STOP_PRICE:
-                self.s.total_hard_stop_hits += 1
-                self._close_position(now, reason="HARD_STOP_HIT", note_prefix=(
-                    f"hard stop-loss hit at {config.HARD_STOP_PRICE:.4f} (fixed -- trailing stop was "
-                    f"deactivated once high-water mid passed {config.HARD_STOP_TRIGGER_PRICE})"
-                ))
-            return   # hard-stop mode: trailing logic below no longer applies to this position
-
-        if now - self.s.window.open_ts < config.TRAIL_START_DELAY_SECONDS:
-            return   # stop isn't armed yet -- only TP can close in this window
-
-        stop = self._effective_stop(pos.high_water_mark)
-        if mid <= stop:
-            self.s.total_stop_hits += 1
-            trail = (config.TRAIL_DISTANCE_TIGHT if pos.high_water_mark > config.TRAIL_TIGHTEN_PRICE
-                     else config.TRAIL_DISTANCE)
-            self._close_position(now, reason="STOP_HIT",
-                                  note_prefix=(f"continuous trailing stop hit at mid {stop:.4f} "
-                                               f"(high-water mid {pos.high_water_mark:.4f}, {trail} trail)"))
 
     def _close_position(self, now: float, reason: str, note_prefix: str,
                          fill_price_override: Optional[float] = None, fee_override: Optional[float] = None):
@@ -426,8 +355,9 @@ class Engine:
         self.capital.check_halt()
         self.s.position = None
 
-        # TP, stop, or a forced window-end close -- every close is terminal
-        # now: one trade per window, no flip/re-entry on stop-out.
+        # TP or a forced window-end close -- every close is terminal now:
+        # one trade per window, no flip/re-entry, no stop-loss to trigger
+        # in between.
         self.s.done_for_window = True
 
     # ---- window close -------------------------------------------------------
@@ -441,7 +371,7 @@ class Engine:
             if self.s.position is not None:
                 self.s.total_forced_closes += 1
                 self._close_position(time.time(), reason="FORCED_CLOSE",
-                                      note_prefix="window closed before TP/stop, forced taker close")
+                                      note_prefix="window closed before TP, forced taker close")
             elif not self.s.entry_checked:
                 self.s.no_trade_windows += 1
                 self._log("NO_TRADE", note="window closed before the entry check ever ran")
@@ -457,22 +387,9 @@ class Engine:
             return None
         mid = self._mid_for(pos.side)
         mark = mid if mid is not None else pos.entry_price
-        hwm = max(pos.high_water_mark, mark)
-        hard_stop_active = pos.hard_stop_active or hwm >= config.HARD_STOP_TRIGGER_PRICE
         market_value = pos.shares * mark
         unrealized = market_value - pos.cost
         to_tp = round(config.TP_PRICE - mark, 4)
-
-        window_open_ts = self.s.window.open_ts if self.s.window is not None else pos.entry_ts
-        elapsed_since_open = time.time() - window_open_ts
-        stop_armed = elapsed_since_open >= config.TRAIL_START_DELAY_SECONDS
-        stop_arms_in = round(max(0.0, config.TRAIL_START_DELAY_SECONDS - elapsed_since_open), 1)
-
-        if hard_stop_active:
-            stop = config.HARD_STOP_PRICE
-        else:
-            stop = self._effective_stop(hwm)
-        to_stop = round(mark - stop, 4)
 
         return {
             "side": pos.side.value,
@@ -481,19 +398,10 @@ class Engine:
             "entry_fee": round(pos.entry_fee, 4),
             "entry_ts": pos.entry_ts,
             "mark_price": mark,
-            "high_water_mark": round(hwm, 4),
             "market_value": round(market_value, 4),
             "unrealized_pnl": round(unrealized, 4),
             "tp_price": config.TP_PRICE,
-            "stop_price": round(stop, 4),
-            "stop_armed": stop_armed,
-            "stop_arms_in": stop_arms_in,
-            "hard_stop_active": hard_stop_active,
-            "hard_stop_trigger_price": config.HARD_STOP_TRIGGER_PRICE,
-            "hard_stop_price": config.HARD_STOP_PRICE,
-            "trail_distance": config.TRAIL_DISTANCE,
             "distance_to_tp": to_tp,
-            "distance_to_stop": to_stop,
         }
 
     def snapshot(self) -> dict:
@@ -515,7 +423,7 @@ class Engine:
         down_mid = self._mid_for(Side.DOWN)
 
         return {
-            "engine": "FLIP", "label": "BTC-trend entry (buys the direction BTC itself is trending), continuous trail (tightens above 0.85), single trade",
+            "engine": "FLIP", "label": "BTC-trend entry (buys the direction BTC itself is trending), single trade, TP only — no stop-loss",
 
             "balance": round(self.capital.balance, 2),
             "starting_capital": config.STARTING_CAPITAL,
@@ -540,8 +448,6 @@ class Engine:
             "total_entries_attempted": self.s.total_entries_attempted,
             "total_price_too_high": self.s.total_price_too_high,
             "total_tp_hits": self.s.total_tp_hits,
-            "total_stop_hits": self.s.total_stop_hits,
-            "total_hard_stop_hits": self.s.total_hard_stop_hits,
             "total_forced_closes": self.s.total_forced_closes,
             "no_trade_windows": self.s.no_trade_windows,
             "wins": self.s.wins,
@@ -557,12 +463,6 @@ class Engine:
                 "btc_trend_history_blocks": config.BTC_TREND_HISTORY_BLOCKS,
                 "btc_trend_lookback_blocks": config.BTC_TREND_LOOKBACK_BLOCKS,
                 "tp_price": config.TP_PRICE,
-                "trail_distance": config.TRAIL_DISTANCE,
-                "trail_distance_tight": config.TRAIL_DISTANCE_TIGHT,
-                "trail_tighten_price": config.TRAIL_TIGHTEN_PRICE,
-                "trail_start_delay_seconds": config.TRAIL_START_DELAY_SECONDS,
-                "hard_stop_trigger_price": config.HARD_STOP_TRIGGER_PRICE,
-                "hard_stop_price": config.HARD_STOP_PRICE,
                 "base_order_shares": config.BASE_ORDER_SHARES,
             },
         }

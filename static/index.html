@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BTC-trend entry, trail tightens above 0.85, single trade — BTC 5m bot</title>
+<title>BTC-trend entry, TP only, no stop-loss — BTC 5m bot</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -153,8 +153,8 @@
 <div class="wrap">
   <header>
     <div>
-      <h1>BTC-trend entry, trail tightens above 0.85, single trade</h1>
-      <div class="sub">BTC 5m up/down — tracks real BTC spot price in rolling 30s blocks; when the last 5 blocks are cleanly trending, buys that direction (UP for an uptrend, DOWN for a downtrend) if it's below 0.40, once per window. TP 0.99 redeems at $1.00, fee-free. Trailing stop arms 3 min after window open, 0.20 back from the high-water mark, tightening to 0.10 above 0.85 — permanently replaced by a fixed 0.60 hard stop once the position runs above 0.90. One trade per window, flat size, no martingale.</div>
+      <h1>BTC-trend entry, TP only, no stop-loss</h1>
+      <div class="sub">BTC 5m up/down — tracks real BTC spot price in rolling 30s blocks; when the last 5 blocks are cleanly trending, buys that direction (UP for an uptrend, DOWN for a downtrend) if it's below 0.40, once per window. TP 0.99 redeems at $1.00, fee-free — the only exit besides the forced close if the window ends first. No stop-loss of any kind: a position rides out every other price move, including all the way to zero. One trade per window, flat size, no martingale.</div>
     </div>
     <div class="status-pill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></div>
   </header>
@@ -184,7 +184,6 @@
     <div class="gauge-legend">
       <span><i style="background:var(--amber);"></i>entry threshold (0.40)</span>
       <span><i style="background:var(--mint);"></i>take-profit (0.99)</span>
-      <span><i style="background:var(--coral);"></i>current stop (trailing or hard)</span>
       <span><i style="background:var(--violet);"></i>entry fill (open position)</span>
     </div>
   </div>
@@ -243,7 +242,6 @@ function renderGauge(trackId, midId, bidAskId, sideLblId, side, bid, ask, e, gau
   }
   if(held){
     marks += `<div class="gauge-mark tp" style="left:${e.def.tp_price*100}%"><span class="lbl">TP ${fmtP(e.def.tp_price)}</span></div>`;
-    marks += `<div class="gauge-mark sl" style="left:${pos.stop_price*100}%"><span class="lbl">stop ${fmtP(pos.stop_price)}</span></div>`;
     marks += `<div class="gauge-mark entry" style="left:${pos.entry_price*100}%"><span class="lbl">in ${fmtP(pos.entry_price)}</span></div>`;
   }
   track.innerHTML = marks;
@@ -337,7 +335,7 @@ function renderEngineCard(e){
   const el = $('engineCard');
   if(!e || !e.def){ el.innerHTML = '<div class="empty">no data</div>'; return; }
   const statusLabels = {
-    waiting_entry:'waiting for the entry check', in_position:'position open — watching TP/stop',
+    waiting_entry:'waiting for the entry check', in_position:'position open — watching TP',
     done:'done for this window', halted:'halted',
   };
 
@@ -347,9 +345,8 @@ function renderEngineCard(e){
     ['Entry rule', `uptrend → buy UP, downtrend → buy DOWN, no clear trend → skip window`],
     ['Entry price condition', `trend side must be below ${fmtP(e.def.entry_price_threshold)} at that single check — no rearmed watch`],
     ['Take-profit', `${fmtP(e.def.tp_price)} \u2192 redeemed @ $1.00, fee-free`],
-    ['Trailing stop', `arms ${fmtSh(e.def.trail_start_delay_seconds)}s after window open, then ${fmtP(e.def.trail_distance)} behind high-water mark (tightens to ${fmtP(e.def.trail_distance_tight)} above ${fmtP(e.def.trail_tighten_price)})`],
-    ['Hard stop override', `above ${fmtP(e.def.hard_stop_trigger_price)} high-water, trailing deactivates permanently — fixed stop at ${fmtP(e.def.hard_stop_price)}`],
-    ['Trades per window', 'one — no flip/re-entry on stop-out'],
+    ['Stop-loss', 'none — the position rides out every other price move; TP or the forced window-end close are the only two exits'],
+    ['Trades per window', 'one — no flip/re-entry'],
     ['Order size', `${fmtSh(e.def.base_order_shares)}sh flat, no martingale`],
   ].map(([k,v]) => `<div class="def-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
 
@@ -360,15 +357,7 @@ function renderEngineCard(e){
   } else if(e.position){
     phaseCls = 'armed';
     const p = e.position;
-    let stopTag;
-    if(p.hard_stop_active){
-      stopTag = ` — hard stop ${fmtP(p.stop_price)} (trailing deactivated, ran above ${fmtP(p.hard_stop_trigger_price)})`;
-    } else if(p.stop_armed){
-      stopTag = ` / stop ${fmtP(p.stop_price)}`;
-    } else {
-      stopTag = ` / stop arms in ${fmtSh(p.stop_arms_in)}s`;
-    }
-    phaseBanner = `Position open on ${p.side} @ ${fmtP(p.entry_price)} — TP ${fmtP(e.def.tp_price)} (redeem $1)${stopTag}, high-water ${fmtP(p.high_water_mark)}.`;
+    phaseBanner = `Position open on ${p.side} @ ${fmtP(p.entry_price)} — TP ${fmtP(e.def.tp_price)} (redeem $1), no stop-loss.`;
   } else if(e.done_for_window){
     phaseCls = 'done';
     phaseBanner = e.total_entries_attempted > 0
@@ -385,17 +374,6 @@ function renderEngineCard(e){
     const pos = e.position;
     if(!pos) return `<div class="position-box empty">no open position</div>`;
     const sideColor = pos.side==='UP' ? 'var(--mint)' : 'var(--coral)';
-    let stopLabel, stopValue;
-    if(pos.hard_stop_active){
-      stopLabel = 'Hard stop (fixed)';
-      stopValue = `${fmtP(pos.stop_price)} / ${fmtP(pos.distance_to_stop)}`;
-    } else if(pos.stop_armed){
-      stopLabel = 'Stop now / to stop';
-      stopValue = `${fmtP(pos.stop_price)} / ${fmtP(pos.distance_to_stop)}`;
-    } else {
-      stopLabel = `Stop arms in ${fmtSh(pos.stop_arms_in)}s`;
-      stopValue = `not armed (would be ${fmtP(pos.stop_price)})`;
-    }
     return `
       <div class="position-box ${(pos.unrealized_pnl||0)<0?'loss':''}">
         <div class="position-top">
@@ -404,9 +382,8 @@ function renderEngineCard(e){
         </div>
         <div class="position-grid">
           <div><div class="k">Mark</div><div class="v">${fmtP(pos.mark_price)}</div></div>
-          <div><div class="k">High-water</div><div class="v">${fmtP(pos.high_water_mark)}</div></div>
           <div><div class="k">To TP</div><div class="v" style="color:var(--mint)">${fmtP(pos.distance_to_tp)}</div></div>
-          <div><div class="k">${stopLabel}</div><div class="v" style="color:var(--coral)">${stopValue}</div></div>
+          <div><div class="k">Stop-loss</div><div class="v">none</div></div>
         </div>
         <div class="position-pnl-row">
           <span class="lbl">unrealized P&amp;L</span>
@@ -430,9 +407,8 @@ function renderEngineCard(e){
 function renderStats(e){
   const tiles = [
     ['total_entries_attempted','entries',''], ['total_price_too_high','price too high',''],
-    ['total_tp_hits','TP hits','win'], ['total_stop_hits','trail stops','loss'],
-    ['total_hard_stop_hits','hard stops','loss'],
-    ['total_forced_closes','forced close',''], ['no_trade_windows','no-trade',''],
+    ['total_tp_hits','TP hits','win'], ['total_forced_closes','forced close',''],
+    ['no_trade_windows','no-trade',''],
     ['win_rate','win rate %',''],
   ];
   $('statsGrid').innerHTML = tiles.map(([key,label,cls]) => {

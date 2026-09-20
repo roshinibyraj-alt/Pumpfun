@@ -1,14 +1,12 @@
-# BTC-trend entry, tightening trail, single trade — BTC 5m bot
+# BTC-trend entry, TP only, no stop-loss — BTC 5m bot
 
 Paper-trading bot for Polymarket's `btc-updown-5m-*` markets. Runs a
 single strategy: continuously track real BTC spot price in rolling
 30-second blocks, and when the last 5 blocks are cleanly trending one
 way, buy that direction shortly after the next window opens — if it's
-still cheap enough. Then manage the exit with a continuous trailing
-stop that arms after a delay and tightens once the position gets deep
-in the money, with a wide fixed hard stop taking over once the
-position is deep ITM. At most one trade per window — no re-entry after
-a stop-out.
+still cheap enough. From there, the position only exits at take-profit
+or when the window ends — there is no stop-loss of any kind. At most
+one trade per window — no re-entry.
 
 ## Strategy
 
@@ -40,48 +38,22 @@ a stop-out.
    - if it's at or above 0.40, **no trade is taken this window** —
      this is a single check, not a rearmed watch; the bot doesn't keep
      waiting for the price to come down.
-3. **Exit**: once filled, every tick checks that side's mid against a
-   take-profit level, a trailing stop, and a hard-stop override.
-   - **Take-profit (0.99)**: live immediately from entry, treated as a
-     certain win and **redeemed**, not sold — credited at a flat
-     **$1.00/share, fee-free** (a CTF resolution redemption, not an
-     orderbook trade), instead of taker-selling at ~0.99 and losing a
-     sliver of edge to fee/slippage.
-   - **Trailing stop**: inactive until **3 minutes after the window
-     opened** (`TRAIL_START_DELAY_SECONDS`, not 3 minutes after
-     entry). Before it arms, only TP can close the position; the
-     high-water mark keeps tracking the whole time regardless, so once
-     it arms it starts from wherever price has already gotten to, not
-     from scratch. Once armed, recomputed every tick as
-     `high_water_mark − trail_distance`, rounded to the cent. It only
-     ever moves up, since it's driven off the position's monotonic
-     high-water mark (best mid seen since entry), never the raw
-     current price:
-     - trail distance is **0.20** while the high-water mark is at or
-       below 0.85
-     - once the high-water mark climbs **above 0.85**, the trail
-       narrows to **0.10** — tightening the stop as the position gets
-       deep in the money
-   - **Hard-stop override**: independent of the 3-minute trailing-arm
-     delay above, the instant the position's high-water mark reaches
-     **0.90**, the trailing stop is **permanently deactivated** for
-     that position and replaced with a **fixed stop-loss at 0.60** —
-     much wider than where the tightened trail would sit (e.g. a 0.95
-     high-water mark would trail-stop at 0.85, but once the hard stop
-     takes over it's 0.60 instead). This deliberately gives a
-     deep-in-the-money position room to wobble near resolution instead
-     of getting stopped out by a routine pullback, and it does **not**
-     revert even if price later falls back under 0.90.
+3. **Exit — TP only, no stop-loss**: once filled, every tick checks
+   that side's mid against the take-profit level. That's the only exit
+   trigger:
+   - **Take-profit (0.99)**: treated as a certain win and
+     **redeemed**, not sold — credited at a flat **$1.00/share,
+     fee-free** (a CTF resolution redemption, not an orderbook trade),
+     instead of taker-selling at ~0.99 and losing a sliver of edge to
+     fee/slippage.
+   - **There is no stop-loss** — trailing, fixed, or otherwise. A
+     position that goes deep underwater is simply held; it doesn't get
+     cut, all the way down to zero if that's where the token ends up.
 
-     A stop exit (trailing or hard) is a real taker sell, priced by
-     walking real bid depth — unlike TP, it isn't a guaranteed-
-     resolution redemption.
-   - **A stop-out ends the window.** There's no flip into the opposite
-     side and no re-entry — at most one trade per window.
-
-   If the window closes before either TP or a stop is reached, the
-   position is force-closed at whatever the market will pay (also a
-   real taker sell).
+   The only other way out is the **window closing** before TP is hit:
+   the position is force-closed at whatever the market will pay (a
+   real taker sell). That's it — two exits total, TP or the forced
+   close.
 4. **Sizing**: flat. Every entry is exactly `BASE_ORDER_SHARES`
    (100), no martingale, no cross-window sizing memory — every window
    starts fresh.
@@ -108,14 +80,9 @@ Dashboard at http://localhost:8000
 - `BTC_BLOCK_SECONDS` (30), `BTC_TREND_HISTORY_BLOCKS` (20), `BTC_TREND_LOOKBACK_BLOCKS` (5) — trend-block sizing
 - `ENTRY_SETTLE_SECONDS` (2) — technical delay after window open before the single entry check
 - `ENTRY_PRICE_THRESHOLD` (0.40) — trend side must be strictly below this to buy
-- `TP_PRICE` (0.99)
-- `TRAIL_START_DELAY_SECONDS` (180) — trailing stop is inactive until this long after **window open** (not entry); TP is live the whole time
-- `TRAIL_DISTANCE` (0.20), `TRAIL_DISTANCE_TIGHT` (0.10), `TRAIL_TIGHTEN_PRICE` (0.85) — trail
-  narrows from 0.20 to 0.10 once the position's high-water mark climbs above 0.85
-- `HARD_STOP_TRIGGER_PRICE` (0.90), `HARD_STOP_PRICE` (0.60) — once the high-water mark reaches
-  the trigger, trailing is permanently replaced by this fixed stop, independent of the arm delay
+- `TP_PRICE` (0.99) — the only take-profit/stop-loss config in the bot; there is no stop-loss knob because there is no stop-loss
 - `BASE_ORDER_SHARES` (100) — flat size, no martingale
-- `STARTING_CAPITAL`, taker fee constants (entry, stop, and forced-close are taker fills; TP is a fee-free redemption at $1.00, not a trade)
+- `STARTING_CAPITAL`, taker fee constants (entry and forced-close are taker fills; TP is a fee-free redemption at $1.00, not a trade)
 
 ## Notes / assumptions
 
@@ -140,27 +107,19 @@ Dashboard at http://localhost:8000
   at 0.99 is a settled win — it does not model the (small) chance the
   window still resolves against it before the redemption actually
   happens on-chain.
-- The trailing stop only ever moves up. It's driven by the position's
-  high-water mark, not the current price, so a spike to 0.90 followed
-  by a pullback to 0.85 does **not** trigger a stop by itself — only a
-  further drop through the (possibly now-tightened) stop level would.
-- During the first 3 minutes **after the window opens**, the trailing
-  stop cannot fire at all, even if price craters — only TP is live.
-  The high-water mark still updates during that window, so if price
-  runs up and pulls back before the delay is over, the stop (once
-  armed) reflects the peak it already saw, not the price at the
-  moment of arming.
-- The hard-stop override is a separate mechanism from the trailing-arm
-  delay above and isn't gated by it: it can trigger in the first few
-  seconds of a position if price runs to 0.90 fast enough. Once it
-  triggers, the position no longer benefits from the tightened trail
-  at all for the rest of the window — it's protected only by the fixed
-  0.60 floor.
-- A stop-out is terminal for the window: no flip into the opposite
-  side, no re-entry. At most one trade is taken per window.
-- Both the entry and the exit are modeled as **taker** fills, priced
-  by walking real order-book depth rather than assuming unlimited size
-  at the top-of-book quote.
+- There is no stop-loss anywhere in this bot, trailing or fixed. A
+  filled position has exactly two exits: TP, or the window closing
+  first and forcing a taker close at whatever the market will pay. If
+  price collapses to near zero and never recovers before the window
+  ends, the position rides it all the way down and is force-closed
+  near $0 — this is a deliberate simplification, not a bug, per the
+  "TP at 0.99, that's it" instruction this version implements.
+- A stop-out concept no longer exists, so there's nothing terminal to
+  trigger mid-window besides TP itself. At most one trade is taken per
+  window either way, since there's still no flip/re-entry.
+- Both the entry and the forced-close exit are modeled as **taker**
+  fills, priced by walking real order-book depth rather than assuming
+  unlimited size at the top-of-book quote.
 - The cost of every fill is debited from the capital balance the
   instant it fills, and every exit's proceeds are credited back —
   `starting_capital + total_pnl` should match the final balance
