@@ -75,8 +75,39 @@ def test_limit_timeout_then_taker():
     assert engine.total_limit_cancels == 1
 
 
+def test_live_mark_to_market_equity():
+    engine = Engine(PaperBroker())
+    w = window(40)
+    engine.reset_for_window(w, Side.UP)
+    engine.on_tick(
+        0.35, 0.40, 0.20, 0.80,
+        now=w.open_ts + 1,
+        up_ask_levels=[(0.40, 1000)],
+        down_ask_levels=[(0.80, 1000)],
+    )
+    snapshot = engine.snapshot()
+    assert snapshot["cash_balance"] == 1800.0
+    assert snapshot["position"]["mark_price"] == 0.35
+    assert snapshot["position"]["market_value"] == 175.0
+    assert snapshot["unrealized_pnl"] == -25.0
+    assert snapshot["equity"] == 1975.0
+
+    # A later CLOB bid moves portfolio equity without realizing the P&L.
+    engine.on_tick(
+        0.46, 0.50, 0.20, 0.80,
+        now=w.open_ts + 2,
+        up_ask_levels=[(0.50, 1000)],
+        down_ask_levels=[(0.80, 1000)],
+    )
+    snapshot = engine.snapshot()
+    assert snapshot["realized_pnl"] == 0.0
+    assert snapshot["unrealized_pnl"] == 30.0
+    assert snapshot["equity"] == 2030.0
+
+
 if __name__ == "__main__":
     test_win_progression_and_direction_reset()
     test_loss_resets_and_binary_payout()
     test_limit_timeout_then_taker()
+    test_live_mark_to_market_equity()
     print("ENGINE TESTS PASSED")

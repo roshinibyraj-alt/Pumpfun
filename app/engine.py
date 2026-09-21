@@ -77,6 +77,7 @@ class EngineState:
     order: Optional[RestingOrder] = None
     position: Optional[Position] = None
     entry_attempted: bool = False
+    mark_price: Optional[float] = None
     last_second_up: Optional[float] = None
     last_second_down: Optional[float] = None
     last_window_pnl: float = 0.0
@@ -182,10 +183,11 @@ class Engine:
         down_bid_levels: Optional[list] = None,
         down_ask_levels: Optional[list] = None,
     ):
-        if self.s.window is None or self.capital.halted:
+        if self.s.window is None:
             return
         now = now if now is not None else time.time()
-        if self.s.signal_status != "armed" or self.s.position is not None:
+        self._mark_position(up_bid, down_bid)
+        if self.capital.halted or self.s.signal_status != "armed" or self.s.position is not None:
             return
         if now >= self.s.window.close_ts:
             return
@@ -215,6 +217,7 @@ class Engine:
                 fill = self._limit_fill_price(ask, ask_levels, self.s.order)
                 if fill is not None:
                     self._enter(side, self.s.order.shares, fill, now, "maker", 0.0)
+                    self._mark_position(up_bid, down_bid)
                     self.total_limit_fills += 1
                     self.s.order.active = False
                 return
@@ -234,6 +237,7 @@ class Engine:
         if fill is None or fill >= config.TAKER_MAX_PRICE:
             return
         self._enter(side, self.s.share_size, fill, now, "taker")
+        self._mark_position(up_bid, down_bid)
         self.total_taker_entries += 1
 
     def _limit_fill_price(
@@ -277,6 +281,26 @@ class Engine:
             note=f"{entry_type} buy filled; binary payout is $1/share if {side.value} wins",
         )
         self.capital.check_halt()
+
+    def _mark_position(self, up_bid, down_bid):
+        """Mark an open position at the live bid, its executable exit price."""
+        if self.s.position is None:
+            return
+        bid = up_bid if self.s.position.side == Side.UP else down_bid
+        if bid is not None:
+            self.s.mark_price = float(bid)
+
+    def position_market_value(self) -> float:
+        """Current liquidation value of the open position."""
+        if self.s.position is None or self.s.mark_price is None:
+            return 0.0
+        return self.s.position.shares * self.s.mark_price
+
+    def unrealized_pnl(self) -> float:
+        """Floating P&L after including the position's entry cost and fee."""
+        if self.s.position is None or self.s.mark_price is None:
+            return 0.0
+        return self.position_market_value() - self.s.position.cost
 
     def finalize_window(self, winning_side: Optional[Side]):
         """Settle the open binary position at $1/share or $0/share."""
@@ -353,12 +377,13 @@ class Engine:
             "engine": "CLOB_BINARY_5M",
             "label": "Previous-window winner continuation",
             "balance": round(self.capital.balance, 4),
+            "cash_balance": round(self.capital.balance, 4),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.capital.halted,
-            "equity": round(self.capital.balance, 4),
+            "equity": round(self.capital.balance + self.position_market_value(), 4),
             "equity_curve": self.equity_curve[-60:],
             "realized_pnl": round(self.total_pnl, 4),
-            "unrealized_pnl": 0.0,
+            "unrealized_pnl": round(self.unrealized_pnl(), 4),
             "last_window_pnl": round(self.s.last_window_pnl, 4),
             "signal_side": self.s.signal_side.value if self.s.signal_side else None,
             "signal_status": self.s.signal_status,
@@ -383,6 +408,9 @@ class Engine:
                     "cost": round(pos.cost, 4),
                     "entry_type": pos.entry_type,
                     "entry_ts": pos.entry_ts,
+                    "mark_price": self.s.mark_price,
+                    "market_value": round(self.position_market_value(), 4),
+                    "unrealized_pnl": round(self.unrealized_pnl(), 4),
                 }
                 if pos
                 else None

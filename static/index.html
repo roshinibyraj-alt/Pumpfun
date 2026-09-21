@@ -192,11 +192,12 @@
 
       <section class="card stat">
         <div>
-          <div class="label">Paper balance</div>
+          <div class="label">Portfolio equity</div>
           <div class="value mint" id="balance">—</div>
         </div>
         <div>
-          <div class="muted" id="pnl">Realized P&amp;L —</div>
+          <div class="muted" id="cash">Cash balance —</div>
+          <div class="muted" id="pnl">Realized — · floating —</div>
           <div class="muted" id="window">Window —</div>
         </div>
       </section>
@@ -213,14 +214,14 @@
           <div class="muted">wins · losses</div>
         </section>
         <section class="card mini">
-          <div class="label">Entry rule</div>
-          <div class="value gold">$0.40</div>
-          <div class="muted">limit · 30s timeout</div>
+          <div class="label">Realized P&amp;L</div>
+          <div class="value" id="realizedPnl">—</div>
+          <div class="muted">settled windows</div>
         </section>
         <section class="card mini">
-          <div class="label">Taker ceiling</div>
-          <div class="value coral">&lt; $0.60</div>
-          <div class="muted">full fill price</div>
+          <div class="label">Floating P&amp;L</div>
+          <div class="value" id="unrealizedPnl">—</div>
+          <div class="muted">marked at live bid</div>
         </section>
       </div>
 
@@ -255,6 +256,8 @@
           <div class="order-box">
             <div class="order-row"><span>Win payout</span><span class="mint">$1.00 / share</span></div>
             <div class="order-row"><span>Loss payout</span><span class="coral">$0.00 / share</span></div>
+            <div class="order-row"><span>Limit entry</span><span>$0.40 · 30s</span></div>
+            <div class="order-row"><span>Taker ceiling</span><span>&lt; $0.60</span></div>
             <div class="order-row"><span>Strategy</span><span>Continuation</span></div>
           </div>
         </div>
@@ -297,9 +300,12 @@
         ? `${side(engine.signal_side)}<small>${esc(engine.signal_status || "armed")}</small>`
         : '—<small>Waiting for previous winner</small>';
       $("shares").textContent = engine.next_shares == null ? "—" : `${engine.next_shares} shares`;
-      $("balance").textContent = money(engine.balance);
-      $("pnl").textContent = `Realized P&L ${money(engine.realized_pnl)} · last window ${money(engine.last_window_pnl)}`;
+      $("balance").textContent = money(engine.equity ?? engine.balance);
+      $("cash").textContent = `Cash balance ${money(engine.cash_balance ?? engine.balance)}`;
+      $("pnl").textContent = `Realized ${money(engine.realized_pnl)} · floating ${money(engine.unrealized_pnl)}`;
       $("record").textContent = `${engine.wins || 0} — ${engine.losses || 0}`;
+      setPnl("realizedPnl", engine.realized_pnl);
+      setPnl("unrealizedPnl", engine.unrealized_pnl);
       $("window").textContent = window ? `Window ${window.slug}` : "Window —";
       $("countdown").textContent = window ? `${Math.max(0, window.close_ts - data.server_time).toFixed(1)}s` : "—";
       $("upBook").textContent = `${price(book.up_bid)}  /  ${price(book.up_ask)}`;
@@ -311,7 +317,7 @@
       const position = engine.position;
       $("order").innerHTML = order || position
         ? (order ? `<div class="order-row"><span>Resting order</span><span>${side(order.side)} · ${order.shares} sh @ ${price(order.price)}</span></div>` : "")
-          + (position ? `<div class="order-row"><span>Position</span><span>${side(position.side)} · ${position.shares} sh @ ${price(position.entry_price)}</span></div><div class="order-row"><span>Entry type</span><span>${esc(position.entry_type)}</span></div>` : "")
+          + (position ? `<div class="order-row"><span>Position</span><span>${side(position.side)} · ${position.shares} sh @ ${price(position.entry_price)}</span></div><div class="order-row"><span>Entry type</span><span>${esc(position.entry_type)}</span></div><div class="order-row"><span>Mark / floating</span><span>${price(position.mark_price)} · ${money(position.unrealized_pnl)}</span></div>` : "")
         : '<div class="muted">No active order or position.</div>';
 
       const rows = (data.log || []).slice(0, 30);
@@ -324,6 +330,12 @@
           <td class="${Number(row.pnl) >= 0 ? "mint" : "coral"}">${row.pnl == null ? "—" : money(row.pnl)}</td>
           <td class="note">${esc(row.note || "")}</td>
         </tr>`).join("") : '<tr><td class="empty" colspan="6">Waiting for the first event.</td></tr>';
+    }
+
+    function setPnl(id, value) {
+      const element = $(id);
+      element.textContent = money(value);
+      element.className = "value " + (Number(value) > 0 ? "mint" : Number(value) < 0 ? "coral" : "");
     }
 
     async function poll() {
