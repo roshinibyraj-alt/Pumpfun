@@ -75,6 +75,57 @@ def test_limit_timeout_then_taker():
     assert engine.total_limit_cancels == 1
 
 
+def test_no_fill_winner_reduces_progression_without_pnl():
+    engine = Engine(PaperBroker())
+    w = window(35)
+    engine.reset_for_window(w, Side.UP)
+
+    # The limit is too expensive, and after 30 seconds the complete taker
+    # fill is also rejected by the below-$0.60 filter.
+    tick(engine, Side.UP, w.open_ts + 1, 0.45, [(0.45, 1000)])
+    tick(engine, Side.UP, w.open_ts + 31, 0.61, [(0.61, 1000)])
+    assert engine.s.position is None
+    before = engine.capital.balance
+
+    engine.finalize_window(Side.UP)
+
+    assert engine.next_shares == 400
+    assert engine.total_wins == 1
+    assert engine.total_no_trade == 1
+    assert engine.total_pnl == 0.0
+    assert engine.capital.balance == before
+    assert engine.s.position is None
+    assert engine.history[-1]["result"] == "WIN_NO_TRADE"
+
+
+def test_no_fill_loss_resets_progression_without_pnl():
+    engine = Engine(PaperBroker())
+    w = window(36)
+    engine.reset_for_window(w, Side.DOWN)
+    tick(engine, Side.DOWN, w.open_ts + 1, 0.45, [(0.45, 1000)])
+    tick(engine, Side.DOWN, w.open_ts + 31, 0.61, [(0.61, 1000)])
+
+    engine.finalize_window(Side.UP)
+
+    assert engine.next_shares == 500
+    assert engine.total_losses == 1
+    assert engine.total_pnl == 0.0
+    assert engine.history[-1]["result"] == "LOSS_NO_TRADE"
+
+
+def test_settlement_clears_position_and_realizes_pnl():
+    engine = Engine(PaperBroker())
+    w = window(37)
+    engine.reset_for_window(w, Side.UP)
+    tick(engine, Side.UP, w.open_ts + 1, 0.40, [(0.40, 1000)])
+    engine.finalize_window(Side.UP)
+
+    assert engine.s.position is None
+    assert engine.snapshot()["unrealized_pnl"] == 0.0
+    assert engine.snapshot()["equity"] == engine.snapshot()["cash_balance"]
+    assert engine.snapshot()["realized_pnl"] == 300.0
+
+
 def test_live_mark_to_market_equity():
     engine = Engine(PaperBroker())
     w = window(40)
@@ -109,5 +160,8 @@ if __name__ == "__main__":
     test_win_progression_and_direction_reset()
     test_loss_resets_and_binary_payout()
     test_limit_timeout_then_taker()
+    test_no_fill_winner_reduces_progression_without_pnl()
+    test_no_fill_loss_resets_progression_without_pnl()
+    test_settlement_clears_position_and_realizes_pnl()
     test_live_mark_to_market_equity()
     print("ENGINE TESTS PASSED")

@@ -303,10 +303,17 @@ class Engine:
         return self.position_market_value() - self.s.position.cost
 
     def finalize_window(self, winning_side: Optional[Side]):
-        """Settle the open binary position at $1/share or $0/share."""
+        """Settle an open position and resolve the signal progression.
+
+        A signal that was armed but never filled still participates in the
+        sizing progression. It has no cash or P&L impact because there was no
+        position, but a win reduces the next size and a loss resets it.
+        """
         if self.s.window is None:
             return
         pos = self.s.position
+        signal_side = self.s.signal_side
+        signal_shares = self.s.share_size
         pnl = 0.0
         result = "NO_RESULT"
         if pos is not None and winning_side is not None:
@@ -346,6 +353,38 @@ class Engine:
             self.s.last_window_pnl = 0.0
         elif winning_side is None:
             self._log("UNRESOLVED", note="no confirmed CLOB winner for this window")
+        elif signal_side is not None and self.s.signal_status == "armed":
+            # The signal was eligible, but both execution filters rejected
+            # the entry. Resolve the progression from the signal outcome
+            # without creating a position or changing capital.
+            won = signal_side == winning_side
+            self.total_no_trade += 1
+            self.s.last_window_pnl = 0.0
+            if won:
+                self.total_wins += 1
+                self.next_shares = max(0.0, signal_shares - config.WIN_STEP_SHARES)
+                result = "WIN_NO_TRADE"
+                event = "SIGNAL_WIN_NO_TRADE"
+                note = (
+                    f"signalled {signal_side.value} won without a fill; "
+                    f"next base {self.next_shares:.0f} shares"
+                )
+            else:
+                self.total_losses += 1
+                self.next_shares = config.BASE_SHARES
+                result = "LOSS_NO_TRADE"
+                event = "SIGNAL_LOSS_NO_TRADE"
+                note = (
+                    f"signalled {signal_side.value} lost without a fill; "
+                    f"next base {self.next_shares:.0f} shares"
+                )
+            self._log(
+                event,
+                side=signal_side.value,
+                shares=signal_shares,
+                pnl=0.0,
+                note=note,
+            )
         else:
             self._log(
                 "NO_TRADE",
@@ -356,9 +395,9 @@ class Engine:
         self.history.append(
             {
                 "slug": self.s.window.slug,
-                "signal_side": self.s.signal_side.value if self.s.signal_side else None,
+                "signal_side": signal_side.value if signal_side else None,
                 "winner": winning_side.value if winning_side else None,
-                "shares": pos.shares if pos else 0,
+                "shares": pos.shares if pos else signal_shares,
                 "entry_price": pos.entry_price if pos else None,
                 "entry_type": pos.entry_type if pos else None,
                 "result": result,
@@ -366,9 +405,23 @@ class Engine:
                 "next_shares": self.next_shares,
             }
         )
+        # The position is now closed. Keeping it attached to the live state
+        # after paying its settlement would double-count its value in equity.
+        self.s.position = None
+        self.s.mark_price = None
         self.equity_curve.append(
-            {"ts": self.s.window.close_ts, "balance": round(self.capital.balance, 4)}
+            {
+                "ts": self.s.window.close_ts,
+                "equity": round(self.equity(), 4),
+                "cash_balance": round(self.capital.balance, 4),
+                "realized_pnl": round(self.total_pnl, 4),
+                "unrealized_pnl": 0.0,
+            }
         )
+
+    def equity(self) -> float:
+        """Current portfolio equity: cash plus the live liquidation value."""
+        return self.capital.balance + self.position_market_value()
 
     def snapshot(self) -> dict:
         pos = self.s.position
@@ -380,7 +433,7 @@ class Engine:
             "cash_balance": round(self.capital.balance, 4),
             "starting_capital": config.STARTING_CAPITAL,
             "halted": self.capital.halted,
-            "equity": round(self.capital.balance + self.position_market_value(), 4),
+            "equity": round(self.equity(), 4),
             "equity_curve": self.equity_curve[-60:],
             "realized_pnl": round(self.total_pnl, 4),
             "unrealized_pnl": round(self.unrealized_pnl(), 4),

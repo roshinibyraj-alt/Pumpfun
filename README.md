@@ -30,12 +30,18 @@ trade size is reduced by 100 shares:
 
 Zero is the floor. If the next signal is the same side while the size is zero,
 the bot skips. When the signal flips to the opposite side, the size resets to
-500 shares. Any loss also resets the next size to 500 shares. A skipped or
-unresolved window does not change the size.
+500 shares. Any loss also resets the next size to 500 shares. If an eligible
+signal produces no fill because both entry filters reject it, a signal-side win
+still reduces shares and a signal-side loss resets them. An unresolved or
+ineligible window does not change the size. A no-fill result never creates a
+position or changes capital.
 
 Because this is a binary market, a winning position pays `$1.00` per share and
 a losing position pays `$0.00` per share. Entry cost and any configured taker
-fee are deducted from the paper balance.
+fee are deducted from the paper balance. While a position is open, portfolio
+equity is marked to the latest live bid: cash balance plus position market
+value. Realized P&L comes from settled positions, while unrealized P&L is the
+live mark-to-market result.
 
 ## Entry execution
 
