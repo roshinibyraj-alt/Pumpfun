@@ -1,20 +1,14 @@
-"""Shared runtime state + the background loop that drives the engine."""
+"""Async CLOB polling loop for the BTC 5-minute binary bot."""
 import asyncio
 import time
 from collections import deque
 from typing import Optional
 
-import httpx
-
 from . import config
-from .binance import fetch_window_minutes
 from .engine import Engine
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
 from .polymarket_client import PolymarketClient
-from .strategy import closes_for_window, evaluate, live_minutes
-
-SIGNAL_RETRY_SECONDS = 1.0        # how often to retry fetching the previous window's candles
 
 
 class BotState:
@@ -22,36 +16,22 @@ class BotState:
         self.broker = PaperBroker()
         self.engine = Engine(self.broker)
         self.client = PolymarketClient()
-        self.http = httpx.AsyncClient(timeout=8)       # Binance 1m candles (signal data only)
         self.current_window: Optional[WindowMarket] = None
-        self.price_history: deque = deque(maxlen=config.WINDOW_SECONDS)  # ~one window at 1s ticks
-        self.last_up_bid: Optional[float] = None
-        self.last_up_ask: Optional[float] = None
-        self.last_down_bid: Optional[float] = None
-        self.last_down_ask: Optional[float] = None
+        self.price_history: deque = deque(maxlen=config.WINDOW_SECONDS)
+        self.last_up_bid = self.last_up_ask = None
+        self.last_down_bid = self.last_down_ask = None
+        self.final_second_up: Optional[float] = None
+        self.final_second_down: Optional[float] = None
         self.status = "starting"
         self.error: Optional[str] = None
-        self.signal_error: Optional[str] = None
-        self._signal_last_attempt = 0.0
         self._task: Optional[asyncio.Task] = None
-        # Live min1-min5 BTC prices of the CURRENT window (dashboard only, refreshed by its own
-        # task so a slow Binance call can never delay the trading tick).
-        self.live: Optional[dict] = None            # live_minutes() result
-        self.live_slug: Optional[str] = None        # the window `live` belongs to
-        self.live_ts: Optional[float] = None
-        self.live_error: Optional[str] = None
-        self._live_task: Optional[asyncio.Task] = None
 
     async def start(self):
         self._task = asyncio.create_task(self._run_loop())
-        self._live_task = asyncio.create_task(self._live_loop())
 
     async def stop(self):
         if self._task:
             self._task.cancel()
-        if self._live_task:
-            self._live_task.cancel()
-        await self.http.aclose()
         await self.client.close()
 
     async def _run_loop(self):
@@ -61,152 +41,97 @@ class BotState:
             started = loop.time()
             try:
                 await self._tick()
-            except Exception as e:  # keep the loop alive no matter what
-                self.error = str(e)
-            # sleep only what is left of the interval, so slow ticks don't stretch the cadence
+            except Exception as exc:
+                self.error = f"{type(exc).__name__}: {exc}"
             await asyncio.sleep(max(0.0, config.POLL_INTERVAL_SECONDS - (loop.time() - started)))
-
-    async def _live_loop(self):
-        while True:
-            try:
-                await self._refresh_live_minutes(time.time())
-            except Exception as e:
-                self.live_error = f"{type(e).__name__}: {e}"
-            await asyncio.sleep(config.LIVE_MINUTES_POLL_SECONDS)
-
-    async def _refresh_live_minutes(self, now: float):
-        """Fetch the current window's 1-minute candles (closed + the one still forming) from Binance."""
-        window = self.current_window
-        if window is None:
-            return
-        try:
-            candles = await fetch_window_minutes(self.http, window.open_ts)
-        except Exception as e:
-            self.live_error = f"{type(e).__name__}: {e}"
-            return
-        self.live = live_minutes(candles, window.open_ts, now)
-        self.live_slug = window.slug          # captured before the await: a late reply is tagged with ITS window
-        self.live_ts = now
-        self.live_error = None
 
     async def _tick(self):
         now = time.time()
-        window, error_reason = await self.client.get_active_window(now)
+        window, reason = await self.client.get_active_window(now)
         if window is None:
-            self.error = error_reason or "No market found for current window slug"
+            self.error = reason or "no active BTC 5-minute market"
             return
         self.error = None
 
         if self.current_window is None or window.slug != self.current_window.slug:
-            await self._roll_window(window)
+            self._roll_window(window, now)
 
-        # CLOB order book only -- no Gamma price fallback. Full depth (not
-        # just top-of-book) so the engine can price fills realistically
-        # against actual available size instead of assuming unlimited
-        # depth at the best quote.
         up_book, down_book = await asyncio.gather(
             self.client.get_book_full(self.current_window.token_up),
             self.client.get_book_full(self.current_window.token_down),
         )
-        up_bid = up_book["best_bid"] if up_book else None
-        up_ask = up_book["best_ask"] if up_book else None
-        down_bid = down_book["best_bid"] if down_book else None
-        down_ask = down_book["best_ask"] if down_book else None
-        self.last_up_bid, self.last_up_ask = up_bid, up_ask
-        self.last_down_bid, self.last_down_ask = down_bid, down_ask
+        self.last_up_bid = up_book["best_bid"] if up_book else None
+        self.last_up_ask = up_book["best_ask"] if up_book else None
+        self.last_down_bid = down_book["best_bid"] if down_book else None
+        self.last_down_ask = down_book["best_ask"] if down_book else None
 
-        up_mid = self._midpoint(up_bid, up_ask)
-        down_mid = self._midpoint(down_bid, down_ask)
+        up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
+        down_mid = self._midpoint(self.last_down_bid, self.last_down_ask)
         self.price_history.append(PricePoint(ts=now, up=up_mid, down=down_mid))
 
-        await self._ensure_signal(now)
-
         seconds_to_close = self.current_window.close_ts - now
+        if 0 < seconds_to_close <= config.FINAL_SECOND_SECONDS:
+            # Last-trade-price is the CLOB settlement signal; midpoint is a
+            # fallback for a temporarily unavailable last-trade endpoint.
+            up_price, down_price = await asyncio.gather(
+                self.client.get_price(self.current_window.token_up),
+                self.client.get_price(self.current_window.token_down),
+            )
+            self.final_second_up = up_price if up_price is not None else up_mid
+            self.final_second_down = down_price if down_price is not None else down_mid
+
         self.engine.on_tick(
-            up_bid, up_ask, down_bid, down_ask, seconds_to_close, now=now,
+            self.last_up_bid,
+            self.last_up_ask,
+            self.last_down_bid,
+            self.last_down_ask,
+            seconds_to_close,
+            now=now,
             up_bid_levels=up_book["bids"] if up_book else None,
             up_ask_levels=up_book["asks"] if up_book else None,
             down_bid_levels=down_book["bids"] if down_book else None,
             down_ask_levels=down_book["asks"] if down_book else None,
         )
 
-    async def _ensure_signal(self, now: float):
-        """Read the PREVIOUS window's five 1-minute closes from Binance and hand
-        the resulting signal to the engine. Retries every second until the
-        candles are in (the last minute only finishes closing at the window
-        boundary) and gives up after SIGNAL_MAX_WAIT_SECONDS."""
-        if not self.engine.needs_signal() or now - self._signal_last_attempt < SIGNAL_RETRY_SECONDS:
-            return
-        self._signal_last_attempt = now
-        window = self.current_window
-        prev_open = window.open_ts - config.WINDOW_SECONDS
-        try:
-            candles = await fetch_window_minutes(self.http, prev_open)
-            closes = closes_for_window(candles, prev_open, now)
-            if closes is not None:
-                self.signal_error = None
-                self.engine.set_signal(evaluate(closes), now=now)
-                return
-            self.signal_error = f"waiting for the previous window's minute candles ({len(candles)}/5 closed)"
-        except Exception as e:
-            self.signal_error = f"{type(e).__name__}: {e}"
-        if now - window.open_ts > config.SIGNAL_MAX_WAIT_SECONDS:
-            self.engine.set_signal_unavailable(self.signal_error or "no data")
-
-    @staticmethod
-    def _midpoint(bid: Optional[float], ask: Optional[float]) -> Optional[float]:
-        if bid is not None and ask is not None:
-            return (bid + ask) / 2
-        return ask if ask is not None else bid
-
-    async def _roll_window(self, new_window: WindowMarket):
-        # Finalize the previous window before starting the new one.
+    def _roll_window(self, new_window: WindowMarket, now: float):
+        previous_winner = None
         if self.current_window is not None:
-            winning_side = self._infer_winner()
-            up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
-            down_mid = self._midpoint(self.last_down_bid, self.last_down_ask)
-            self.broker.log_event(
-                "SYS", self.current_window.slug, "SETTLED_BY_PRICE",
-                side=winning_side.value if winning_side else None,
-                note=(f"settled by last observed CLOB midpoint: up={up_mid}, "
-                      f"down={down_mid} (no Polymarket resolution check)"),
-            )
-            self.engine.finalize_window(winning_side)
+            previous_winner = self._resolve_final_winner()
+            self.engine.finalize_window(previous_winner)
 
         first_window = self.current_window is None
         self.current_window = new_window
         self.price_history.clear()
         self.last_up_bid = self.last_up_ask = None
         self.last_down_bid = self.last_down_ask = None
-        self.signal_error = None
-        # A window we only see well after it opened (bot just started) isn't traded: the
-        # entry is timed off the window open, so we have to be there at the open.
-        late = first_window and (time.time() - new_window.open_ts) > config.LATE_JOIN_GRACE_SECONDS
-        self.engine.reset_for_window(new_window, late_join=late)
+        self.final_second_up = self.final_second_down = None
+        late_join = first_window and now - new_window.open_ts > config.LATE_JOIN_GRACE_SECONDS
+        self.engine.reset_for_window(new_window, previous_winner, late_join=late_join)
 
-    def _infer_winner(self) -> Optional[Side]:
-        """Sole outcome source: whichever side's last observed CLOB midpoint
-        was higher when the window rolled over -- a live-market read, not
-        Polymarket's settled resolution. See fetch_resolution() in
-        polymarket_client.py if you want real-resolution settlement instead."""
-        up_mid = self._midpoint(self.last_up_bid, self.last_up_ask)
-        down_mid = self._midpoint(self.last_down_bid, self.last_down_ask)
-        if up_mid is None or down_mid is None:
+    def _resolve_final_winner(self) -> Optional[Side]:
+        up = self.final_second_up
+        down = self.final_second_down
+        threshold = config.WINNER_THRESHOLD
+        if up is None or down is None:
             return None
-        return Side.UP if up_mid >= down_mid else Side.DOWN
+        up_wins = up >= threshold
+        down_wins = down >= threshold
+        if up_wins and not down_wins:
+            return Side.UP
+        if down_wins and not up_wins:
+            return Side.DOWN
+        if up_wins and down_wins:
+            if up > down:
+                return Side.UP
+            if down > up:
+                return Side.DOWN
+        return None
 
-    # ---- dashboard payload -------------------------------------------------
-
-    def _btc_minutes_payload(self) -> dict:
-        """Min1-min5 BTC prices of the current window. Data fetched for an older window is never
-        shown against the new one -- the strip resets to 'pending' at every window open."""
-        fresh = self.live is not None and self.current_window is not None and self.live_slug == self.current_window.slug
-        live = self.live if fresh else {
-            "open_price": None,
-            "minutes": [{"minute": i + 1, "state": "pending", "price": None, "change": None} for i in range(5)],
-        }
-        return {"open_price": live["open_price"], "minutes": live["minutes"],
-                "updated_ts": self.live_ts if fresh else None, "error": self.live_error}
+    @staticmethod
+    def _midpoint(bid, ask):
+        if bid is not None and ask is not None:
+            return (bid + ask) / 2
+        return ask if ask is not None else bid
 
     def snapshot(self) -> dict:
         eng = self.engine.snapshot()
@@ -214,26 +139,35 @@ class BotState:
             "status": self.status,
             "error": self.error,
             "server_time": time.time(),
-            "signal_error": self.signal_error,
-            "window": None if not self.current_window else {
-                "slug": self.current_window.slug,
-                "open_ts": self.current_window.open_ts,
-                "close_ts": self.current_window.close_ts,
-            },
-            "btc_minutes": self._btc_minutes_payload(),
+            "window": (
+                {
+                    "slug": self.current_window.slug,
+                    "open_ts": self.current_window.open_ts,
+                    "close_ts": self.current_window.close_ts,
+                }
+                if self.current_window
+                else None
+            ),
             "book": {
-                "up_bid": self.last_up_bid, "up_ask": self.last_up_ask,
-                "down_bid": self.last_down_bid, "down_ask": self.last_down_ask,
+                "up_bid": self.last_up_bid,
+                "up_ask": self.last_up_ask,
+                "down_bid": self.last_down_bid,
+                "down_ask": self.last_down_ask,
             },
             "prices": {
                 "up": self._midpoint(self.last_up_bid, self.last_up_ask),
                 "down": self._midpoint(self.last_down_bid, self.last_down_ask),
             },
+            "final_second_prices": {
+                "up": self.final_second_up,
+                "down": self.final_second_down,
+                "threshold": config.WINNER_THRESHOLD,
+            },
             "price_history": [
                 {"ts": p.ts, "up": p.up, "down": p.down}
                 for p in list(self.price_history)[-120:]
             ],
-            "pnl_total": round(eng["realized_pnl"] + eng["unrealized_pnl"], 2),
+            "pnl_total": round(eng["realized_pnl"], 4),
             "demo_capital": {
                 "balance": eng["balance"],
                 "starting_capital": eng["starting_capital"],
@@ -242,10 +176,16 @@ class BotState:
             "engine": eng,
             "log": [
                 {
-                    "ts": e.ts, "engine": e.engine, "window": e.window_slug,
-                    "event": e.event, "side": e.side, "price": e.price,
-                    "shares": e.shares, "pnl": e.pnl,
-                    "balance_after": e.balance_after, "note": e.note,
+                    "ts": e.ts,
+                    "engine": e.engine,
+                    "window": e.window_slug,
+                    "event": e.event,
+                    "side": e.side,
+                    "price": e.price,
+                    "shares": e.shares,
+                    "pnl": e.pnl,
+                    "balance_after": e.balance_after,
+                    "note": e.note,
                 }
                 for e in reversed(self.broker.log[-100:])
             ],

@@ -1,8 +1,7 @@
-"""Shared dataclasses / enums."""
-from dataclasses import dataclass, field
+"""Small shared models for the CLOB-only binary strategy."""
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
-import time
 
 
 class Side(str, Enum):
@@ -23,9 +22,9 @@ class PricePoint:
 @dataclass
 class TradeLogEntry:
     ts: float
-    engine: str          # "BOT" or "SYS"
+    engine: str
     window_slug: str
-    event: str            # human readable event name
+    event: str
     side: Optional[str] = None
     price: Optional[float] = None
     shares: Optional[float] = None
