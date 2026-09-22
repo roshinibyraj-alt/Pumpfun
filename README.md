@@ -1,108 +1,56 @@
 # BTC 5-minute binary continuation bot
 
-Paper-trading bot for Polymarket `btc-updown-5m-*` markets. This version uses
-only the CLOB and 5-minute market windows. It does not use Binance prices,
-technical indicators, AI, ladders, or a separate signal model.
+Paper-trading bot for Polymarket btc-updown-5m-* markets. The previous window's confirmed winner is the signal for the next window.
 
-## Strategy
+## Strategy and execution
 
-The winner of the immediately previous window is the signal for the next
-window:
+- The bot starts with **$5,000** of demo capital.
+- Each eligible signal uses a fixed **$500 USDC notional** order. Shares are derived from the actual execution price; they are not the sizing input.
+- At window start, place one maker limit buy at **$0.40** on the signalled side.
+- If it has not filled after **30 seconds from window start**, cancel it.
+- After cancellation, buy as a taker only while the signalled side's best ask is **strictly below $0.60**. If the ask is $0.60 or higher, keep polling until it returns below $0.60. The paper model will not cross the $0.60 cap for slippage.
+- A full $500 notional must be available in the book; the paper model avoids partial fills.
 
-- previous winner `UP` → buy `UP`;
-- previous winner `DOWN` → buy `DOWN`.
+A winning binary position pays $1.00 per share and a losing position pays $0.00 per share. Taker fees are added to the $500 notional cost. Maker rebates are tracked separately as an accrued estimate.
 
-The previous winner is confirmed from CLOB prices in the final second of the
-closed window. A side is a winner when its CLOB price is at least `0.95`. If
-neither side reaches `0.95`, the window is unresolved and the next window has
-no signal.
+## Fee and rebate accounting
 
-The first window after startup is skipped because there is no previous result.
+Polymarket's current Crypto formula is:
 
-## Share progression
+    fee = shares × 0.07 × price × (1 - price)
 
-The first eligible trade uses 500 shares. After each winning trade, the next
-trade size is reduced by 100 shares:
+Makers pay no trading fee. The estimated Crypto maker rebate is 20% of the fee-equivalent amount:
 
-```text
-500 → 400 → 300 → 200 → 100 → 0
-```
+    maker_rebate = shares × 0.07 × price × (1 - price) × 0.20
 
-Zero is the floor. If the next signal is the same side while the size is zero,
-the bot skips. When the signal flips to the opposite side, the size resets to
-500 shares. Any loss also resets the next size to 500 shares. If an eligible
-signal produces no fill because both entry filters reject it, a signal-side win
-still reduces shares and a signal-side loss resets them. An unresolved or
-ineligible window does not change the size. A no-fill result never creates a
-position or changes capital.
+Fees are rounded to five decimal places. Actual maker rebates are distributed daily from the market-wide pool and are not guaranteed as an immediate per-fill cash payment; the paper model labels them as accrued estimates.
 
-Because this is a binary market, a winning position pays `$1.00` per share and
-a losing position pays `$0.00` per share. The `$0.35` entry cost is deducted
-from the paper balance. While a position is open, portfolio
-equity is marked to the latest live bid: cash balance plus position market
-value. Realized P&L comes from settled positions, while unrealized P&L is the
-live mark-to-market result.
+Examples:
 
-## Entry execution
-
-For an eligible signal, the bot:
-
-1. places one resting limit buy at `$0.35` immediately after the window starts;
-2. keeps the full order resting until the five-minute window closes;
-3. leaves the order unfilled if the full requested size never becomes available
-   at `$0.35`.
-
-There is no taker fallback, no ladder, no second limit order, and no Binance
-dependency.
+- Maker at $0.40: $500 / $0.40 = 1,250 shares, $0 fee, estimated $4.20 rebate.
+- Taker at $0.55: $500 / $0.55 = 909.090909 shares, $15.75 fee, $515.75 total cash cost.
 
 ## Run locally
 
-```bash
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
+    pip install -r requirements.txt
+    uvicorn app.main:app --reload
 
-Dashboard: `http://localhost:8000`
+Dashboard: http://localhost:8000
 
 ## Configuration
 
-- `BASE_SHARES` — starting and reset size, default `500`.
-- `WIN_STEP_SHARES` — reduction after a win, default `100`.
-- `LIMIT_ENTRY_PRICE` — resting entry price for the full window, default `0.35`.
-- `WINNER_THRESHOLD` — final-second CLOB winner threshold, default `0.95`.
-- `FINAL_SECOND_SECONDS` — final-second observation window, default `1`.
-- `MAKER_REBATE_RATE` — expected Crypto maker-rebate share, default `0.20`.
+- STARTING_CAPITAL — demo balance, default 5000.
+- ORDER_USD — fixed notional per eligible order, default 500.
+- LIMIT_ENTRY_PRICE — maker limit price, default 0.40.
+- LIMIT_ORDER_TIMEOUT_SECONDS — timeout from window start, default 30.
+- TAKER_ENTRY_MAX_PRICE — taker trigger/cap, default 0.60 (strictly below).
+- TAKER_FEE_RATE — Crypto fee curve rate, default 0.07.
+- MAKER_REBATE_RATE — estimated Crypto rebate share, default 0.20.
 
-## Fees, rebates, and logs
+Every bot event is written as structured JSON to logs/bot-events.jsonl and emitted to stdout. The app remains paper trading by default.
 
-Makers pay no trading fee. For the Crypto market schedule, the paper model uses
-Polymarket's documented fee-equivalent formula:
-
-```text
-fee_equivalent = shares × 0.07 × price × (1 - price)
-maker_rebate = fee_equivalent × 0.20
-```
-
-At `$0.35`, a 500-share maker fill accrues an estimated `$1.5925` rebate. The
-real Polymarket rebate is paid daily from a market-wide pool and may require a
-minimum accrued payout, so the bot labels this as an accrued estimate rather
-than a guaranteed per-fill payment.
-
-Every bot event is written as structured JSON to `logs/bot-events.jsonl` and
-also emitted to stdout for Railway logs. The tracker keeps a rotated backup and
-can be queried while the bot is running:
-
-```text
-GET /api/logs
-GET /api/logs?event=ENTRY_FILLED&limit=200
-GET /api/logs/summary
-```
-
-Relevant official references:
+Official references:
 
 - https://docs.polymarket.com/trading/fees
 - https://docs.polymarket.com/programs/maker-rebates
 - https://docs.polymarket.com/market-data/market-details#trading-fees
-
-The app remains paper trading by default. Review the behavior and paper
-results before connecting any live execution system.
