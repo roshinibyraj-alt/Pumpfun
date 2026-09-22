@@ -185,8 +185,8 @@
         <div class="signal" id="signal">—<small id="signalStatus">Waiting for market data</small></div>
         <div class="muted">Previous winner → next position</div>
         <div class="meta">
-          <div class="muted">Next size</div>
-          <strong id="shares">—</strong>
+          <div class="muted">Order size</div>
+          <strong id="orderSize">—</strong>
         </div>
       </section>
 
@@ -256,8 +256,8 @@
           <div class="order-box">
             <div class="order-row"><span>Win payout</span><span class="mint">$1.00 / share</span></div>
             <div class="order-row"><span>Loss payout</span><span class="coral">$0.00 / share</span></div>
-            <div class="order-row"><span>Limit entry</span><span>$0.35 · full window</span></div>
-            <div class="order-row"><span>Taker entry</span><span>Disabled</span></div>
+            <div class="order-row"><span>Limit entry</span><span>$0.40 · first 30s</span></div>
+            <div class="order-row"><span>Taker entry</span><span>Below $0.60 after timeout</span></div>
             <div class="order-row"><span>Strategy</span><span>Continuation</span></div>
           </div>
         </div>
@@ -269,7 +269,7 @@
           <span class="muted">latest 30 events</span>
         </div>
         <table>
-          <thead><tr><th>Event</th><th>Side</th><th>Shares</th><th>Price</th><th>P&amp;L</th><th>Details</th></tr></thead>
+          <thead><tr><th>Event</th><th>Side</th><th>Order USD</th><th>Price</th><th>P&amp;L</th><th>Details</th></tr></thead>
           <tbody id="log"><tr><td class="empty" colspan="6">Waiting for the first event.</td></tr></tbody>
         </table>
       </section>
@@ -299,7 +299,7 @@
       $("signal").innerHTML = engine.signal_side
         ? `${side(engine.signal_side)}<small>${esc(engine.signal_status || "armed")}</small>`
         : '—<small>Waiting for previous winner</small>';
-      $("shares").textContent = engine.next_shares == null ? "—" : `${engine.next_shares} shares`;
+      $("orderSize").textContent = engine.order_usd == null ? "—" : money(engine.order_usd);
       $("balance").textContent = money(engine.equity ?? engine.balance);
       $("cash").textContent = `Cash balance ${money(engine.cash_balance ?? engine.balance)}`;
       $("pnl").textContent = `Realized ${money(engine.realized_pnl)} · floating ${money(engine.unrealized_pnl)}`;
@@ -325,7 +325,7 @@
         <tr>
           <td class="event">${esc(row.event || "—")}</td>
           <td>${side(row.side)}</td>
-          <td>${row.shares == null ? "—" : esc(row.shares)}</td>
+          <td>${row.order_usd == null ? "—" : money(row.order_usd)}</td>
           <td class="mono">${price(row.price)}</td>
           <td class="${Number(row.pnl) >= 0 ? "mint" : "coral"}">${row.pnl == null ? "—" : money(row.pnl)}</td>
           <td class="note">${esc(row.note || "")}</td>
