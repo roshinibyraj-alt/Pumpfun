@@ -5,11 +5,11 @@ Paper-trading bot for Polymarket btc-updown-5m-* markets. The previous window's 
 ## Strategy and execution
 
 - The bot starts with **$5,000** of demo capital.
-- Each eligible signal uses a fixed **$500 USDC notional** order. Shares are derived from the actual execution price; they are not the sizing input.
+- Eligible signals use a dollar sizing ladder: **$500 → $400 → $300 → $200 → $100 → $0** after wins. A loss or direction flip resets the next size to $500; same-side signals at the $0 floor are skipped. Shares are derived from execution price.
 - At window start, place one maker limit buy at **$0.40** on the signalled side.
 - If it has not filled after **30 seconds from window start**, cancel it.
 - After cancellation, buy as a taker only while the signalled side's best ask is **strictly below $0.60**. If the ask is $0.60 or higher, keep polling until it returns below $0.60. The paper model will not cross the $0.60 cap for slippage.
-- A full $500 notional must be available in the book; the paper model avoids partial fills.
+- A full current-dollar notional must be available in the book; the paper model avoids partial fills.
 
 A winning binary position pays $1.00 per share and a losing position pays $0.00 per share. Taker fees are added to the $500 notional cost. Maker rebates are tracked separately as an accrued estimate.
 
@@ -40,7 +40,8 @@ Dashboard: http://localhost:8000
 ## Configuration
 
 - STARTING_CAPITAL — demo balance, default 5000.
-- ORDER_USD — fixed notional per eligible order, default 500.
+- BASE_ORDER_USD — starting/reset dollar size, default 500.
+- WIN_STEP_USD — reduction after a winning trade, default 100.
 - LIMIT_ENTRY_PRICE — maker limit price, default 0.40.
 - LIMIT_ORDER_TIMEOUT_SECONDS — timeout from window start, default 30.
 - TAKER_ENTRY_MAX_PRICE — taker trigger/cap, default 0.60 (strictly below).
