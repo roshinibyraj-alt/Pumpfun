@@ -37,8 +37,8 @@ ineligible window does not change the size. A no-fill result never creates a
 position or changes capital.
 
 Because this is a binary market, a winning position pays `$1.00` per share and
-a losing position pays `$0.00` per share. Entry cost and any configured taker
-fee are deducted from the paper balance. While a position is open, portfolio
+a losing position pays `$0.00` per share. The `$0.35` entry cost is deducted
+from the paper balance. While a position is open, portfolio
 equity is marked to the latest live bid: cash balance plus position market
 value. Realized P&L comes from settled positions, while unrealized P&L is the
 live mark-to-market result.
@@ -47,13 +47,13 @@ live mark-to-market result.
 
 For an eligible signal, the bot:
 
-1. places one resting limit buy at `$0.40` immediately after the window starts;
-2. waits up to 30 seconds for the full order to fill;
-3. cancels the resting order after 30 seconds if it is not filled;
-4. from that point until the window closes, buys as a taker only when the
-   complete depth-walked fill is below `$0.60`.
+1. places one resting limit buy at `$0.35` immediately after the window starts;
+2. keeps the full order resting until the five-minute window closes;
+3. leaves the order unfilled if the full requested size never becomes available
+   at `$0.35`.
 
-There is no ladder, no second limit order, and no Binance dependency.
+There is no taker fallback, no ladder, no second limit order, and no Binance
+dependency.
 
 ## Run locally
 
@@ -68,12 +68,9 @@ Dashboard: `http://localhost:8000`
 
 - `BASE_SHARES` — starting and reset size, default `500`.
 - `WIN_STEP_SHARES` — reduction after a win, default `100`.
-- `LIMIT_ENTRY_PRICE` — resting entry price, default `0.40`.
-- `LIMIT_TIMEOUT_SECONDS` — resting-order timeout, default `30`.
-- `TAKER_MAX_PRICE` — maximum complete fill price after timeout, default `0.60`.
+- `LIMIT_ENTRY_PRICE` — resting entry price for the full window, default `0.35`.
 - `WINNER_THRESHOLD` — final-second CLOB winner threshold, default `0.95`.
 - `FINAL_SECOND_SECONDS` — final-second observation window, default `1`.
-- `APPLY_TAKER_FEES` — whether to simulate taker fees, default `true`.
 
 The app remains paper trading by default. Review the behavior and paper
 results before connecting any live execution system.

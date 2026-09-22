@@ -34,7 +34,7 @@ def test_win_progression_and_direction_reset():
         engine.reset_for_window(w, Side.UP)
         assert engine.s.share_size == 500 - (n - 1) * 100
         size_history.append(engine.s.share_size)
-        tick(engine, Side.UP, w.open_ts + 1, 0.39, [(0.39, 1000)])
+        tick(engine, Side.UP, w.open_ts + 1, 0.34, [(0.34, 1000)])
         assert engine.s.position is not None
         engine.finalize_window(Side.UP)
     assert size_history == [500, 400, 300, 200, 100]
@@ -54,7 +54,7 @@ def test_loss_resets_and_binary_payout():
     engine = Engine(PaperBroker())
     w = window(20)
     engine.reset_for_window(w, Side.DOWN)
-    tick(engine, Side.DOWN, w.open_ts + 1, 0.40, [(0.40, 1000)])
+    tick(engine, Side.DOWN, w.open_ts + 1, 0.35, [(0.35, 1000)])
     before = engine.capital.balance
     engine.finalize_window(Side.UP)
     assert engine.next_shares == 500
@@ -63,16 +63,25 @@ def test_loss_resets_and_binary_payout():
     assert engine.capital.balance == before
 
 
-def test_limit_timeout_then_taker():
+def test_limit_order_stays_active_for_full_window():
     engine = Engine(PaperBroker())
     w = window(30)
     engine.reset_for_window(w, Side.UP)
     tick(engine, Side.UP, w.open_ts + 1, 0.45, [(0.45, 1000)])
     assert engine.s.position is None
     tick(engine, Side.UP, w.open_ts + 31, 0.55, [(0.55, 1000)])
+    assert engine.s.position is None
+    assert engine.s.order is not None
+    assert engine.s.order.active is True
+    assert engine.total_limit_cancels == 0
+    assert engine.total_taker_entries == 0
+
+    # A later ask at the limit can still fill during the same window.
+    tick(engine, Side.UP, w.open_ts + 120, 0.35, [(0.35, 1000)])
     assert engine.s.position is not None
-    assert engine.s.position.entry_type == "taker"
-    assert engine.total_limit_cancels == 1
+    assert engine.s.position.entry_type == "maker"
+    assert engine.s.position.entry_price == 0.35
+    assert engine.s.order.active is False
 
 
 def test_no_fill_winner_reduces_progression_without_pnl():
@@ -80,8 +89,7 @@ def test_no_fill_winner_reduces_progression_without_pnl():
     w = window(35)
     engine.reset_for_window(w, Side.UP)
 
-    # The limit is too expensive, and after 30 seconds the complete taker
-    # fill is also rejected by the below-$0.60 filter.
+    # The limit is too expensive at the start and remains unfilled later.
     tick(engine, Side.UP, w.open_ts + 1, 0.45, [(0.45, 1000)])
     tick(engine, Side.UP, w.open_ts + 31, 0.61, [(0.61, 1000)])
     assert engine.s.position is None
@@ -117,13 +125,13 @@ def test_settlement_clears_position_and_realizes_pnl():
     engine = Engine(PaperBroker())
     w = window(37)
     engine.reset_for_window(w, Side.UP)
-    tick(engine, Side.UP, w.open_ts + 1, 0.40, [(0.40, 1000)])
+    tick(engine, Side.UP, w.open_ts + 1, 0.35, [(0.35, 1000)])
     engine.finalize_window(Side.UP)
 
     assert engine.s.position is None
     assert engine.snapshot()["unrealized_pnl"] == 0.0
     assert engine.snapshot()["equity"] == engine.snapshot()["cash_balance"]
-    assert engine.snapshot()["realized_pnl"] == 300.0
+    assert engine.snapshot()["realized_pnl"] == 325.0
 
 
 def test_live_mark_to_market_equity():
@@ -131,15 +139,15 @@ def test_live_mark_to_market_equity():
     w = window(40)
     engine.reset_for_window(w, Side.UP)
     engine.on_tick(
-        0.35, 0.40, 0.20, 0.80,
+        0.30, 0.35, 0.20, 0.80,
         now=w.open_ts + 1,
-        up_ask_levels=[(0.40, 1000)],
+        up_ask_levels=[(0.35, 1000)],
         down_ask_levels=[(0.80, 1000)],
     )
     snapshot = engine.snapshot()
-    assert snapshot["cash_balance"] == 1800.0
-    assert snapshot["position"]["mark_price"] == 0.35
-    assert snapshot["position"]["market_value"] == 175.0
+    assert snapshot["cash_balance"] == 1825.0
+    assert snapshot["position"]["mark_price"] == 0.30
+    assert snapshot["position"]["market_value"] == 150.0
     assert snapshot["unrealized_pnl"] == -25.0
     assert snapshot["equity"] == 1975.0
 
@@ -152,14 +160,14 @@ def test_live_mark_to_market_equity():
     )
     snapshot = engine.snapshot()
     assert snapshot["realized_pnl"] == 0.0
-    assert snapshot["unrealized_pnl"] == 30.0
-    assert snapshot["equity"] == 2030.0
+    assert snapshot["unrealized_pnl"] == 55.0
+    assert snapshot["equity"] == 2055.0
 
 
 if __name__ == "__main__":
     test_win_progression_and_direction_reset()
     test_loss_resets_and_binary_payout()
-    test_limit_timeout_then_taker()
+    test_limit_order_stays_active_for_full_window()
     test_no_fill_winner_reduces_progression_without_pnl()
     test_no_fill_loss_resets_progression_without_pnl()
     test_settlement_clears_position_and_realizes_pnl()

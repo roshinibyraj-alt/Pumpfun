@@ -17,9 +17,7 @@ POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 # A binary outcome pays $1.00 per share when it wins and $0.00 when it loses.
 BASE_SHARES = float(os.getenv("BASE_SHARES", "500"))
 WIN_STEP_SHARES = float(os.getenv("WIN_STEP_SHARES", "100"))
-LIMIT_ENTRY_PRICE = float(os.getenv("LIMIT_ENTRY_PRICE", "0.40"))
-LIMIT_TIMEOUT_SECONDS = float(os.getenv("LIMIT_TIMEOUT_SECONDS", "30"))
-TAKER_MAX_PRICE = float(os.getenv("TAKER_MAX_PRICE", "0.60"))
+LIMIT_ENTRY_PRICE = float(os.getenv("LIMIT_ENTRY_PRICE", "0.35"))
 WINNER_THRESHOLD = float(os.getenv("WINNER_THRESHOLD", "0.95"))
 FINAL_SECOND_SECONDS = float(os.getenv("FINAL_SECOND_SECONDS", "1.0"))
 

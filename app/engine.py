@@ -1,9 +1,8 @@
 """CLOB-only execution and binary-settlement state machine.
 
 The signal for a window is the confirmed winner of the immediately previous
-5-minute window. The bot trades that same side. A limit order is posted at
-0.40 at the beginning of the window; after 30 seconds it is cancelled and a
-taker buy is allowed whenever the full fill can be made below 0.60.
+5-minute window. The bot trades that same side by posting one resting limit
+buy at 0.35 for the full five-minute window. There is no taker fallback.
 """
 import time
 from dataclasses import dataclass
@@ -164,9 +163,7 @@ class Engine:
             shares=self.next_shares,
             note=(
                 f"previous winner {previous_winner.value}; post {self.next_shares:.0f}sh "
-                f"limit at {config.LIMIT_ENTRY_PRICE:.2f}, cancel after "
-                f"{config.LIMIT_TIMEOUT_SECONDS:.0f}s, then taker below "
-                f"{config.TAKER_MAX_PRICE:.2f}"
+                f"resting limit at {config.LIMIT_ENTRY_PRICE:.2f} for the full window"
             ),
         )
 
@@ -212,33 +209,14 @@ class Engine:
                 note="resting limit buy placed at window open",
             )
 
-        if self.s.order.active:
-            if now < self.s.window.open_ts + config.LIMIT_TIMEOUT_SECONDS:
-                fill = self._limit_fill_price(ask, ask_levels, self.s.order)
-                if fill is not None:
-                    self._enter(side, self.s.order.shares, fill, now, "maker", 0.0)
-                    self._mark_position(up_bid, down_bid)
-                    self.total_limit_fills += 1
-                    self.s.order.active = False
-                return
+        if not self.s.order.active or ask is None:
+            return
+        fill = self._limit_fill_price(ask, ask_levels, self.s.order)
+        if fill is not None:
+            self._enter(side, self.s.order.shares, fill, now, "maker", 0.0)
+            self._mark_position(up_bid, down_bid)
+            self.total_limit_fills += 1
             self.s.order.active = False
-            self.total_limit_cancels += 1
-            self._log(
-                "LIMIT_CANCELLED",
-                side=side.value,
-                price=config.LIMIT_ENTRY_PRICE,
-                shares=self.s.share_size,
-                note="30-second limit timeout; switching to taker eligibility",
-            )
-
-        if ask is None:
-            return
-        fill = realistic_fill_price(ask_levels, self.s.share_size, ask)
-        if fill is None or fill >= config.TAKER_MAX_PRICE:
-            return
-        self._enter(side, self.s.share_size, fill, now, "taker")
-        self._mark_position(up_bid, down_bid)
-        self.total_taker_entries += 1
 
     def _limit_fill_price(
         self, ask: Optional[float], levels: Optional[list], order: RestingOrder
@@ -392,6 +370,17 @@ class Engine:
                 note="window resolved without an open position",
             )
 
+        if self.s.order is not None and self.s.order.active:
+            self.s.order.active = False
+            self.total_limit_cancels += 1
+            self._log(
+                "LIMIT_EXPIRED",
+                side=self.s.order.side.value,
+                price=self.s.order.price,
+                shares=self.s.order.shares,
+                note="resting limit expired unfilled at window close",
+            )
+
         self.history.append(
             {
                 "slug": self.s.window.slug,
@@ -481,8 +470,6 @@ class Engine:
                 "base_shares": config.BASE_SHARES,
                 "win_step_shares": config.WIN_STEP_SHARES,
                 "limit_entry_price": config.LIMIT_ENTRY_PRICE,
-                "limit_timeout_seconds": config.LIMIT_TIMEOUT_SECONDS,
-                "taker_max_price": config.TAKER_MAX_PRICE,
                 "winner_threshold": config.WINNER_THRESHOLD,
                 "binary_win_payout": 1.0,
                 "binary_loss_payout": 0.0,
