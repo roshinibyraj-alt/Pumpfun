@@ -122,6 +122,7 @@ class Engine:
         self.s = EngineState()
         self.equity_curve = []
         self.last_signal_side: Optional[Side] = None
+        self.next_order_usd = config.BASE_ORDER_USD
         self.history = []
         self.total_limit_orders = 0
         self.total_limit_fills = 0
@@ -138,7 +139,7 @@ class Engine:
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event, balance_after=self.capital.balance, **kwargs)
 
     def reset_for_window(self, window: WindowMarket, previous_winner: Optional[Side], late_join: bool = False):
-        self.s = EngineState(window=window, order_usd=config.ORDER_USD)
+        self.s = EngineState(window=window, order_usd=self.next_order_usd)
         if self.capital.halted:
             self.s.signal_status = "halted"
             self._log("HALTED", note="capital halted; no new trades")
@@ -153,11 +154,27 @@ class Engine:
             self.total_no_trade += 1
             self._log("NO_TRADE", note="no confirmed winner from the previous window")
             return
+        if self.last_signal_side is not None and previous_winner != self.last_signal_side:
+            self.next_order_usd = config.BASE_ORDER_USD
+            self.s.order_usd = self.next_order_usd
+            self._log(
+                "SIZE_RESET", side=previous_winner.value, order_usd=self.next_order_usd,
+                note="signal direction flipped; reset dollar ladder to base size",
+            )
+        if self.next_order_usd <= 0:
+            self.s.signal_status = "zero_order_skip"
+            self.total_no_trade += 1
+            self._log(
+                "NO_TRADE", side=previous_winner.value, order_usd=0.0,
+                note="same-side win progression reached the zero-dollar floor; waiting for a direction flip",
+            )
+            return
+
         self.last_signal_side = previous_winner
         self.s.signal_side = previous_winner
         self.s.signal_status = "armed"
         self._log(
-            "WINDOW_OPEN", side=previous_winner.value, order_usd=config.ORDER_USD,
+            "WINDOW_OPEN", side=previous_winner.value, order_usd=self.s.order_usd,
             note=(f"previous winner {previous_winner.value}; post {config.ORDER_USD:.2f} USD "
                   f"resting limit at {config.LIMIT_ENTRY_PRICE:.2f} for "
                   f"{config.LIMIT_ORDER_TIMEOUT_SECONDS:.0f}s"),
@@ -179,14 +196,14 @@ class Engine:
 
         if self.s.order is None:
             self.s.order = RestingOrder(
-                side=side, order_usd=config.ORDER_USD,
-                shares=config.ORDER_USD / config.LIMIT_ENTRY_PRICE,
+                side=side, order_usd=self.s.order_usd,
+                shares=self.s.order_usd / config.LIMIT_ENTRY_PRICE,
                 price=config.LIMIT_ENTRY_PRICE, placed_ts=self.s.window.open_ts,
             )
             self.total_limit_orders += 1
             self._log(
                 "LIMIT_PLACED", side=side.value, price=config.LIMIT_ENTRY_PRICE,
-                shares=self.s.order.shares, order_usd=config.ORDER_USD,
+                shares=self.s.order.shares, order_usd=self.s.order.order_usd,
                 note="fixed-dollar resting limit buy placed at window open",
             )
 
@@ -208,7 +225,7 @@ class Engine:
             return
         if ask is None or float(ask) >= config.TAKER_ENTRY_MAX_PRICE:
             return
-        fill = realistic_fill_usd(ask_levels, config.ORDER_USD, float(ask), max_price=config.TAKER_ENTRY_MAX_PRICE)
+        fill = realistic_fill_usd(ask_levels, self.s.order_usd, float(ask), max_price=config.TAKER_ENTRY_MAX_PRICE)
         if fill is None:
             return
         average_price, shares, notional_usd = fill
@@ -291,9 +308,11 @@ class Engine:
             self.s.last_window_pnl = pnl
             if won:
                 self.total_wins += 1
+                self.next_order_usd = max(0.0, pos.order_usd - config.WIN_STEP_USD)
                 result = "WIN"
             else:
                 self.total_losses += 1
+                self.next_order_usd = config.BASE_ORDER_USD
                 result = "LOSS"
             self._log(
                 result, side=pos.side.value, price=1.0 if won else 0.0,
@@ -312,11 +331,13 @@ class Engine:
             won = signal_side == winning_side
             if won:
                 self.total_wins += 1
+                self.next_order_usd = max(0.0, self.s.order_usd - config.WIN_STEP_USD)
                 result, event = "WIN_NO_TRADE", "SIGNAL_WIN_NO_TRADE"
             else:
                 self.total_losses += 1
+                self.next_order_usd = config.BASE_ORDER_USD
                 result, event = "LOSS_NO_TRADE", "SIGNAL_LOSS_NO_TRADE"
-            self._log(event, side=signal_side.value, order_usd=config.ORDER_USD, pnl=0.0, note=f"signalled {signal_side.value} {'won' if won else 'lost'} without a fill; fixed order size {config.ORDER_USD:.2f} USD")
+            self._log(event, side=signal_side.value, order_usd=self.s.order_usd, pnl=0.0, note=f"signalled {signal_side.value} {'won' if won else 'lost'} without a fill; next dollar size {self.next_order_usd:.2f} USD")
         else:
             self._log("NO_TRADE", side=winning_side.value, note="window resolved without an open position")
 
@@ -326,7 +347,7 @@ class Engine:
             "slug": self.s.window.slug,
             "signal_side": signal_side.value if signal_side else None,
             "winner": winning_side.value if winning_side else None,
-            "order_usd": pos.order_usd if pos else config.ORDER_USD,
+            "order_usd": pos.order_usd if pos else self.s.order_usd,
             "shares": pos.shares if pos else None,
             "entry_price": pos.entry_price if pos else None,
             "entry_type": pos.entry_type if pos else None,
@@ -366,6 +387,7 @@ class Engine:
             "signal_side": self.s.signal_side.value if self.s.signal_side else None,
             "signal_status": self.s.signal_status,
             "order_usd": self.s.order_usd,
+            "next_order_usd": self.next_order_usd,
             "order": ({"side": order.side.value, "order_usd": order.order_usd, "shares": order.shares, "price": order.price, "active": order.active, "placed_ts": order.placed_ts} if order else None),
             "position": ({
                 "side": pos.side.value, "order_usd": pos.order_usd, "shares": pos.shares,
@@ -385,7 +407,8 @@ class Engine:
             "status": self.s.signal_status,
             "def": {
                 "window_seconds": config.WINDOW_SECONDS,
-                "order_usd": config.ORDER_USD,
+                "base_order_usd": config.BASE_ORDER_USD,
+                "win_step_usd": config.WIN_STEP_USD,
                 "limit_entry_price": config.LIMIT_ENTRY_PRICE,
                 "limit_order_timeout_seconds": config.LIMIT_ORDER_TIMEOUT_SECONDS,
                 "taker_entry_max_price": config.TAKER_ENTRY_MAX_PRICE,
