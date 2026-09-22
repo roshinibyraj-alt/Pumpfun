@@ -1,8 +1,9 @@
 """CLOB-only execution and binary-settlement state machine.
 
-The signal for a window is the confirmed winner of the immediately previous
-5-minute window. The bot trades that same side by posting one resting limit
-buy at 0.35 for the full five-minute window. There is no taker fallback.
+Each eligible window uses one fixed $500 notional order. A $0.40 maker limit
+rests for 30 seconds from window open. If it has not filled, it is cancelled;
+the bot then waits for the signalled side's best ask to be strictly below
+$0.60 and takes the available liquidity, subject to the $500 notional size.
 """
 import time
 from dataclasses import dataclass
@@ -13,10 +14,7 @@ from .models import Side, WindowMarket
 from .paper_broker import PaperBroker
 
 
-def realistic_fill_price(
-    levels: Optional[list], shares: float, fallback_price: Optional[float]
-) -> Optional[float]:
-    """Return the depth-walked average for a complete buy, if possible."""
+def realistic_fill_price(levels: Optional[list], shares: float, fallback_price: Optional[float]) -> Optional[float]:
     if shares <= 0:
         return None
     if levels is None:
@@ -36,6 +34,36 @@ def realistic_fill_price(
     return None
 
 
+def realistic_fill_usd(levels: Optional[list], order_usd: float, fallback_price: Optional[float], max_price: Optional[float] = None) -> Optional[tuple[float, float, float]]:
+    """Return (average price, shares, notional) for a complete dollar order."""
+    if order_usd <= 0:
+        return None
+    if levels is None:
+        if fallback_price is None or fallback_price <= 0:
+            return None
+        if max_price is not None and fallback_price >= max_price:
+            return None
+        return fallback_price, order_usd / fallback_price, order_usd
+    if not levels:
+        return None
+    remaining_usd = order_usd
+    shares = 0.0
+    spent = 0.0
+    for price, size in levels:
+        if price is None or size is None or size <= 0 or price <= 0:
+            continue
+        price = float(price)
+        if max_price is not None and price >= max_price:
+            break
+        take = min(float(size), remaining_usd / price)
+        shares += take
+        spent += take * price
+        remaining_usd -= take * price
+        if remaining_usd <= 1e-9:
+            return spent / shares, shares, spent
+    return None
+
+
 @dataclass
 class CapitalPool:
     balance: float
@@ -50,6 +78,7 @@ class CapitalPool:
 @dataclass
 class Position:
     side: Side
+    order_usd: float
     shares: float
     entry_price: float
     cost: float
@@ -62,6 +91,7 @@ class Position:
 @dataclass
 class RestingOrder:
     side: Side
+    order_usd: float
     shares: float
     price: float
     placed_ts: float
@@ -73,7 +103,7 @@ class EngineState:
     window: Optional[WindowMarket] = None
     signal_side: Optional[Side] = None
     signal_status: str = "pending"
-    share_size: float = 0.0
+    order_usd: float = 0.0
     order: Optional[RestingOrder] = None
     position: Optional[Position] = None
     entry_attempted: bool = False
@@ -91,10 +121,8 @@ class Engine:
         self.capital = CapitalPool(config.STARTING_CAPITAL)
         self.s = EngineState()
         self.equity_curve = []
-        self.next_shares = config.BASE_SHARES
         self.last_signal_side: Optional[Side] = None
         self.history = []
-
         self.total_limit_orders = 0
         self.total_limit_fills = 0
         self.total_limit_cancels = 0
@@ -107,18 +135,10 @@ class Engine:
         self.pending_maker_rebates = 0.0
 
     def _log(self, event: str, **kwargs):
-        self.broker.log_event(
-            self.name,
-            self.s.window.slug if self.s.window else "",
-            event,
-            balance_after=self.capital.balance,
-            **kwargs,
-        )
+        self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event, balance_after=self.capital.balance, **kwargs)
 
-    def reset_for_window(
-        self, window: WindowMarket, previous_winner: Optional[Side], late_join: bool = False
-    ):
-        self.s = EngineState(window=window, share_size=self.next_shares)
+    def reset_for_window(self, window: WindowMarket, previous_winner: Optional[Side], late_join: bool = False):
+        self.s = EngineState(window=window, order_usd=config.ORDER_USD)
         if self.capital.halted:
             self.s.signal_status = "halted"
             self._log("HALTED", note="capital halted; no new trades")
@@ -133,56 +153,17 @@ class Engine:
             self.total_no_trade += 1
             self._log("NO_TRADE", note="no confirmed winner from the previous window")
             return
-
-        # A direction flip resets the progression before the new trade.
-        if self.last_signal_side is not None and previous_winner != self.last_signal_side:
-            self.next_shares = config.BASE_SHARES
-            self.s.share_size = self.next_shares
-            self._log(
-                "SIZE_RESET",
-                side=previous_winner.value,
-                shares=self.next_shares,
-                note="previous-window signal flipped direction; reset to base shares",
-            )
-
         self.last_signal_side = previous_winner
         self.s.signal_side = previous_winner
-        self.s.share_size = self.next_shares
-        if self.next_shares <= 0:
-            self.s.signal_status = "zero_share_skip"
-            self.total_no_trade += 1
-            self._log(
-                "NO_TRADE",
-                side=previous_winner.value,
-                shares=0,
-                note="same-side win progression reached the zero-share floor; waiting for a direction flip",
-            )
-            return
-
         self.s.signal_status = "armed"
         self._log(
-            "WINDOW_OPEN",
-            side=previous_winner.value,
-            shares=self.next_shares,
-            note=(
-                f"previous winner {previous_winner.value}; post {self.next_shares:.0f}sh "
-                f"resting limit at {config.LIMIT_ENTRY_PRICE:.2f} for the full window"
-            ),
+            "WINDOW_OPEN", side=previous_winner.value, order_usd=config.ORDER_USD,
+            note=(f"previous winner {previous_winner.value}; post {config.ORDER_USD:.2f} USD "
+                  f"resting limit at {config.LIMIT_ENTRY_PRICE:.2f} for "
+                  f"{config.LIMIT_ORDER_TIMEOUT_SECONDS:.0f}s"),
         )
 
-    def on_tick(
-        self,
-        up_bid,
-        up_ask,
-        down_bid,
-        down_ask,
-        seconds_to_close: Optional[float] = None,
-        now: Optional[float] = None,
-        up_bid_levels: Optional[list] = None,
-        up_ask_levels: Optional[list] = None,
-        down_bid_levels: Optional[list] = None,
-        down_ask_levels: Optional[list] = None,
-    ):
+    def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: Optional[float] = None, now: Optional[float] = None, up_bid_levels: Optional[list] = None, up_ask_levels: Optional[list] = None, down_bid_levels: Optional[list] = None, down_ask_levels: Optional[list] = None):
         if self.s.window is None:
             return
         now = now if now is not None else time.time()
@@ -191,98 +172,91 @@ class Engine:
             return
         if now >= self.s.window.close_ts:
             return
-
         side = self.s.signal_side
         ask = up_ask if side == Side.UP else down_ask
         ask_levels = up_ask_levels if side == Side.UP else down_ask_levels
+        elapsed = now - self.s.window.open_ts
 
         if self.s.order is None:
             self.s.order = RestingOrder(
-                side=side,
-                shares=self.s.share_size,
-                price=config.LIMIT_ENTRY_PRICE,
-                placed_ts=self.s.window.open_ts,
+                side=side, order_usd=config.ORDER_USD,
+                shares=config.ORDER_USD / config.LIMIT_ENTRY_PRICE,
+                price=config.LIMIT_ENTRY_PRICE, placed_ts=self.s.window.open_ts,
             )
             self.total_limit_orders += 1
             self._log(
-                "LIMIT_PLACED",
-                side=side.value,
-                price=config.LIMIT_ENTRY_PRICE,
-                shares=self.s.share_size,
-                note="resting limit buy placed at window open",
+                "LIMIT_PLACED", side=side.value, price=config.LIMIT_ENTRY_PRICE,
+                shares=self.s.order.shares, order_usd=config.ORDER_USD,
+                note="fixed-dollar resting limit buy placed at window open",
             )
 
-        if not self.s.order.active or ask is None:
-            return
-        fill = self._limit_fill_price(ask, ask_levels, self.s.order)
-        if fill is not None:
-            self._enter(side, self.s.order.shares, fill, now, "maker", 0.0)
-            self._mark_position(up_bid, down_bid)
-            self.total_limit_fills += 1
-            self.s.order.active = False
+        if self.s.order.active:
+            if elapsed >= config.LIMIT_ORDER_TIMEOUT_SECONDS:
+                self._cancel_limit("30-second timeout from window start")
+            else:
+                if ask is None:
+                    return
+                fill = self._limit_fill_price(ask, ask_levels, self.s.order)
+                if fill is not None and self._enter(side, self.s.order.order_usd, self.s.order.shares, fill, now, "maker", 0.0):
+                    self._mark_position(up_bid, down_bid)
+                    self.total_limit_fills += 1
+                    self.s.order.active = False
+                return
 
-    def _limit_fill_price(
-        self, ask: Optional[float], levels: Optional[list], order: RestingOrder
-    ) -> Optional[float]:
-        if ask is None:
-            return None
-        # This strategy intentionally accepts only an exact-price fill. A
-        # better offer below the posted limit is not treated as a fill because
-        # the configured entry price is part of the strategy rule.
-        if abs(float(ask) - order.price) > 1e-9:
+        # After timeout, repeat this check every poll until the ask is below 0.60.
+        if elapsed < config.LIMIT_ORDER_TIMEOUT_SECONDS:
+            return
+        if ask is None or float(ask) >= config.TAKER_ENTRY_MAX_PRICE:
+            return
+        fill = realistic_fill_usd(ask_levels, config.ORDER_USD, float(ask), max_price=config.TAKER_ENTRY_MAX_PRICE)
+        if fill is None:
+            return
+        average_price, shares, notional_usd = fill
+        if self._enter(side, notional_usd, shares, average_price, now, "taker"):
+            self._mark_position(up_bid, down_bid)
+            self.total_taker_entries += 1
+
+    def _cancel_limit(self, note: str):
+        if self.s.order is None or not self.s.order.active:
+            return
+        self.s.order.active = False
+        self.total_limit_cancels += 1
+        self._log(
+            "LIMIT_CANCELED", side=self.s.order.side.value, price=self.s.order.price,
+            shares=self.s.order.shares, order_usd=self.s.order.order_usd, note=note,
+        )
+
+    def _limit_fill_price(self, ask: Optional[float], levels: Optional[list], order: RestingOrder) -> Optional[float]:
+        if ask is None or abs(float(ask) - order.price) > 1e-9:
             return None
         if levels is None:
             return order.price
-        eligible = [
-            (price, size)
-            for price, size in levels
-            if price is not None and abs(float(price) - order.price) <= 1e-9
-        ]
+        eligible = [(price, size) for price, size in levels if price is not None and abs(float(price) - order.price) <= 1e-9]
         fill = realistic_fill_price(eligible, order.shares, order.price) if eligible else None
         return order.price if fill is not None and abs(fill - order.price) <= 1e-9 else None
 
-    def _enter(
-        self,
-        side: Side,
-        shares: float,
-        price: float,
-        now: float,
-        entry_type: str,
-        fee: Optional[float] = None,
-    ):
+    def _enter(self, side: Side, order_usd: float, shares: float, price: float, now: float, entry_type: str, fee: Optional[float] = None) -> bool:
         fee = self.broker.taker_fee_amount(shares, price) if fee is None else fee
-        maker_rebate = (
-            self.broker.maker_rebate_amount(shares, price)
-            if entry_type == "maker"
-            else 0.0
-        )
-        cost = shares * price + fee
+        maker_rebate = self.broker.maker_rebate_amount(shares, price) if entry_type == "maker" else 0.0
+        notional_usd = shares * price
+        cost = notional_usd + fee
+        if self.capital.balance + 1e-9 < cost:
+            self._log("NO_TRADE", side=side.value, price=price, shares=shares, order_usd=order_usd, fee=fee, note=f"insufficient demo capital for {cost:.5f} USD total execution cost")
+            return False
         self.capital.balance -= cost
         self.pending_maker_rebates += maker_rebate
         self.s.entry_attempted = True
-        self.s.position = Position(
-            side=side,
-            shares=shares,
-            entry_price=price,
-            cost=cost,
-            entry_ts=now,
-            entry_type=entry_type,
-            fee=fee,
-            maker_rebate=maker_rebate,
-        )
+        self.s.position = Position(side=side, order_usd=order_usd, shares=shares, entry_price=price, cost=cost, entry_ts=now, entry_type=entry_type, fee=fee, maker_rebate=maker_rebate)
         self._log(
-            "ENTRY_FILLED",
-            side=side.value,
-            price=price,
-            shares=shares,
-            fee=fee,
-            maker_rebate=maker_rebate,
-            note=f"{entry_type} buy filled; binary payout is $1/share if {side.value} wins",
+            "ENTRY_FILLED", side=side.value, price=price, shares=shares, order_usd=order_usd,
+            fee=fee, maker_rebate=maker_rebate,
+            note=(f"{entry_type} buy filled for {notional_usd:.5f} USD notional; fee {fee:.5f} USD; "
+                  f"binary payout is 1 USD/share if {side.value} wins"),
         )
         self.capital.check_halt()
+        return True
 
     def _mark_position(self, up_bid, down_bid):
-        """Mark an open position at the live bid, its executable exit price."""
         if self.s.position is None:
             return
         bid = up_bid if self.s.position.side == Side.UP else down_bid
@@ -290,157 +264,87 @@ class Engine:
             self.s.mark_price = float(bid)
 
     def position_market_value(self) -> float:
-        """Current liquidation value of the open position."""
         if self.s.position is None or self.s.mark_price is None:
             return 0.0
         return self.s.position.shares * self.s.mark_price
 
     def unrealized_pnl(self) -> float:
-        """Floating P&L after including the position's entry cost and fee."""
         if self.s.position is None or self.s.mark_price is None:
             return 0.0
         return self.position_market_value() - self.s.position.cost + self.s.position.maker_rebate
 
     def finalize_window(self, winning_side: Optional[Side]):
-        """Settle an open position and resolve the signal progression.
-
-        A signal that was armed but never filled still participates in the
-        sizing progression. It has no cash or P&L impact because there was no
-        position, but a win reduces the next size and a loss resets it.
-        """
         if self.s.window is None:
             return
         pos = self.s.position
         signal_side = self.s.signal_side
-        signal_shares = self.s.share_size
         pnl = 0.0
         result = "NO_RESULT"
         if pos is not None and winning_side is not None:
             won = pos.side == winning_side
             payout = pos.shares if won else 0.0
             self.capital.balance += payout + pos.maker_rebate
-            self.pending_maker_rebates = max(
-                0.0, self.pending_maker_rebates - pos.maker_rebate
-            )
+            self.pending_maker_rebates = max(0.0, self.pending_maker_rebates - pos.maker_rebate)
             self.total_maker_rebates += pos.maker_rebate
             pnl = payout - pos.cost + pos.maker_rebate
             self.total_pnl += pnl
             self.s.last_window_pnl = pnl
             if won:
                 self.total_wins += 1
-                self.next_shares = max(0.0, pos.shares - config.WIN_STEP_SHARES)
                 result = "WIN"
             else:
                 self.total_losses += 1
-                self.next_shares = config.BASE_SHARES
                 result = "LOSS"
             self._log(
-                result,
-                side=pos.side.value,
-                price=1.0 if won else 0.0,
-                shares=pos.shares,
-                pnl=pnl,
-                note=(
-                    f"{'won' if won else 'lost'} binary settlement: "
-                    f"{pos.shares:.0f} shares paid ${payout:.2f}; "
-                    f"maker rebate ${pos.maker_rebate:.4f}; "
-                    f"next base {self.next_shares:.0f} shares"
-                ),
+                result, side=pos.side.value, price=1.0 if won else 0.0,
+                shares=pos.shares, order_usd=pos.order_usd, pnl=pnl,
+                note=(f"{'won' if won else 'lost'} binary settlement: {pos.shares:.6f} shares paid "
+                      f"{payout:.2f} USD; entry fee {pos.fee:.5f} USD; maker rebate {pos.maker_rebate:.5f} USD"),
             )
         elif pos is not None:
-            self._log(
-                "UNRESOLVED",
-                side=pos.side.value,
-                shares=pos.shares,
-                note="no CLOB side reached the winner threshold in the final second",
-            )
+            self._log("UNRESOLVED", side=pos.side.value, shares=pos.shares, order_usd=pos.order_usd, note="no CLOB side reached the winner threshold in the final second")
             self.s.last_window_pnl = 0.0
         elif winning_side is None:
             self._log("UNRESOLVED", note="no confirmed CLOB winner for this window")
         elif signal_side is not None and self.s.signal_status == "armed":
-            # The signal was eligible, but both execution filters rejected
-            # the entry. Resolve the progression from the signal outcome
-            # without creating a position or changing capital.
-            won = signal_side == winning_side
             self.total_no_trade += 1
             self.s.last_window_pnl = 0.0
+            won = signal_side == winning_side
             if won:
                 self.total_wins += 1
-                self.next_shares = max(0.0, signal_shares - config.WIN_STEP_SHARES)
-                result = "WIN_NO_TRADE"
-                event = "SIGNAL_WIN_NO_TRADE"
-                note = (
-                    f"signalled {signal_side.value} won without a fill; "
-                    f"next base {self.next_shares:.0f} shares"
-                )
+                result, event = "WIN_NO_TRADE", "SIGNAL_WIN_NO_TRADE"
             else:
                 self.total_losses += 1
-                self.next_shares = config.BASE_SHARES
-                result = "LOSS_NO_TRADE"
-                event = "SIGNAL_LOSS_NO_TRADE"
-                note = (
-                    f"signalled {signal_side.value} lost without a fill; "
-                    f"next base {self.next_shares:.0f} shares"
-                )
-            self._log(
-                event,
-                side=signal_side.value,
-                shares=signal_shares,
-                pnl=0.0,
-                note=note,
-            )
+                result, event = "LOSS_NO_TRADE", "SIGNAL_LOSS_NO_TRADE"
+            self._log(event, side=signal_side.value, order_usd=config.ORDER_USD, pnl=0.0, note=f"signalled {signal_side.value} {'won' if won else 'lost'} without a fill; fixed order size {config.ORDER_USD:.2f} USD")
         else:
-            self._log(
-                "NO_TRADE",
-                side=winning_side.value,
-                note="window resolved without an open position",
-            )
+            self._log("NO_TRADE", side=winning_side.value, note="window resolved without an open position")
 
         if self.s.order is not None and self.s.order.active:
-            self.s.order.active = False
-            self.total_limit_cancels += 1
-            self._log(
-                "LIMIT_EXPIRED",
-                side=self.s.order.side.value,
-                price=self.s.order.price,
-                shares=self.s.order.shares,
-                note="resting limit expired unfilled at window close",
-            )
-
-        self.history.append(
-            {
-                "slug": self.s.window.slug,
-                "signal_side": signal_side.value if signal_side else None,
-                "winner": winning_side.value if winning_side else None,
-                "shares": pos.shares if pos else signal_shares,
-                "entry_price": pos.entry_price if pos else None,
-                "entry_type": pos.entry_type if pos else None,
-                "result": result,
-                "pnl": round(pnl, 4),
-                "next_shares": self.next_shares,
-            }
-        )
-        # The position is now closed. Keeping it attached to the live state
-        # after paying its settlement would double-count its value in equity.
+            self._cancel_limit("window closed before the 30-second timeout")
+        self.history.append({
+            "slug": self.s.window.slug,
+            "signal_side": signal_side.value if signal_side else None,
+            "winner": winning_side.value if winning_side else None,
+            "order_usd": pos.order_usd if pos else config.ORDER_USD,
+            "shares": pos.shares if pos else None,
+            "entry_price": pos.entry_price if pos else None,
+            "entry_type": pos.entry_type if pos else None,
+            "result": result,
+            "pnl": round(pnl, 4),
+        })
         self.s.position = None
         self.s.mark_price = None
-        self.equity_curve.append(
-            {
-                "ts": self.s.window.close_ts,
-                "equity": round(self.equity(), 4),
-                "cash_balance": round(self.capital.balance, 4),
-                "realized_pnl": round(self.total_pnl, 4),
-                "unrealized_pnl": 0.0,
-            }
-        )
+        self.equity_curve.append({
+            "ts": self.s.window.close_ts,
+            "equity": round(self.equity(), 4),
+            "cash_balance": round(self.capital.balance, 4),
+            "realized_pnl": round(self.total_pnl, 4),
+            "unrealized_pnl": 0.0,
+        })
 
     def equity(self) -> float:
-        """Current equity: cash, live position value, and accrued rebate."""
-        return (
-            self.capital.balance
-            + self.position_market_value()
-            + self.pending_maker_rebates
-        )
+        return self.capital.balance + self.position_market_value() + self.pending_maker_rebates
 
     def snapshot(self) -> dict:
         pos = self.s.position
@@ -461,35 +365,16 @@ class Engine:
             "last_window_pnl": round(self.s.last_window_pnl, 4),
             "signal_side": self.s.signal_side.value if self.s.signal_side else None,
             "signal_status": self.s.signal_status,
-            "share_size": self.s.share_size,
-            "next_shares": self.next_shares,
-            "order": (
-                {
-                    "side": order.side.value,
-                    "shares": order.shares,
-                    "price": order.price,
-                    "active": order.active,
-                    "placed_ts": order.placed_ts,
-                }
-                if order
-                else None
-            ),
-            "position": (
-                {
-                    "side": pos.side.value,
-                    "shares": pos.shares,
-                    "entry_price": pos.entry_price,
-                    "cost": round(pos.cost, 4),
-                    "entry_type": pos.entry_type,
-                    "entry_ts": pos.entry_ts,
-                    "maker_rebate": round(pos.maker_rebate, 4),
-                    "mark_price": self.s.mark_price,
-                    "market_value": round(self.position_market_value(), 4),
-                    "unrealized_pnl": round(self.unrealized_pnl(), 4),
-                }
-                if pos
-                else None
-            ),
+            "order_usd": self.s.order_usd,
+            "order": ({"side": order.side.value, "order_usd": order.order_usd, "shares": order.shares, "price": order.price, "active": order.active, "placed_ts": order.placed_ts} if order else None),
+            "position": ({
+                "side": pos.side.value, "order_usd": pos.order_usd, "shares": pos.shares,
+                "entry_price": pos.entry_price, "notional_usd": round(pos.shares * pos.entry_price, 5),
+                "cost": round(pos.cost, 5), "fee": round(pos.fee, 5), "entry_type": pos.entry_type,
+                "entry_ts": pos.entry_ts, "maker_rebate": round(pos.maker_rebate, 5),
+                "mark_price": self.s.mark_price, "market_value": round(self.position_market_value(), 4),
+                "unrealized_pnl": round(self.unrealized_pnl(), 4),
+            } if pos else None),
             "wins": self.total_wins,
             "losses": self.total_losses,
             "total_limit_orders": self.total_limit_orders,
@@ -500,11 +385,14 @@ class Engine:
             "status": self.s.signal_status,
             "def": {
                 "window_seconds": config.WINDOW_SECONDS,
-                "base_shares": config.BASE_SHARES,
-                "win_step_shares": config.WIN_STEP_SHARES,
+                "order_usd": config.ORDER_USD,
                 "limit_entry_price": config.LIMIT_ENTRY_PRICE,
+                "limit_order_timeout_seconds": config.LIMIT_ORDER_TIMEOUT_SECONDS,
+                "taker_entry_max_price": config.TAKER_ENTRY_MAX_PRICE,
                 "winner_threshold": config.WINNER_THRESHOLD,
                 "binary_win_payout": 1.0,
                 "binary_loss_payout": 0.0,
+                "taker_fee_formula": "shares * 0.07 * price * (1 - price)",
+                "maker_rebate_rate": config.MAKER_REBATE_RATE,
             },
         }
