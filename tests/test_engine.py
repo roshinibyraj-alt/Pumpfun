@@ -27,6 +27,29 @@ def tick(engine, side, now, ask, levels=None, bid=None):
     )
 
 
+
+def test_dollar_progression_and_direction_reset():
+    engine = Engine(PaperBroker())
+    sizes = [500, 400, 300, 200, 100]
+    for n, size in enumerate(sizes, start=1):
+        w = window(n)
+        engine.reset_for_window(w, Side.UP)
+        assert engine.s.order_usd == size
+        tick(engine, Side.UP, w.open_ts + 1, 0.40, [(0.40, size / 0.40)], bid=0.35)
+        assert engine.s.position.order_usd == size
+        engine.finalize_window(Side.UP)
+    assert engine.next_order_usd == 0
+
+    same = window(6)
+    engine.reset_for_window(same, Side.UP)
+    assert engine.s.signal_status == "zero_order_skip"
+
+    flipped = window(7)
+    engine.reset_for_window(flipped, Side.DOWN)
+    assert engine.s.signal_status == "armed"
+    assert engine.s.order_usd == 500
+
+
 def test_maker_uses_dollar_notional_and_rebate_formula():
     engine = Engine(PaperBroker())
     w = window(1)
@@ -126,6 +149,7 @@ def test_structured_logs_include_dollar_size_and_fees():
 
 
 if __name__ == "__main__":
+    test_dollar_progression_and_direction_reset()
     test_maker_uses_dollar_notional_and_rebate_formula()
     test_no_taker_fallback_before_30_seconds()
     test_timeout_cancels_limit_and_takes_under_060()
