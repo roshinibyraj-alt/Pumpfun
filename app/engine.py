@@ -56,6 +56,7 @@ class Position:
     entry_ts: float
     entry_type: str
     fee: float = 0.0
+    maker_rebate: float = 0.0
 
 
 @dataclass
@@ -102,6 +103,8 @@ class Engine:
         self.total_wins = 0
         self.total_losses = 0
         self.total_pnl = 0.0
+        self.total_maker_rebates = 0.0
+        self.pending_maker_rebates = 0.0
 
     def _log(self, event: str, **kwargs):
         self.broker.log_event(
@@ -223,10 +226,20 @@ class Engine:
     ) -> Optional[float]:
         if ask is None:
             return None
+        # This strategy intentionally accepts only an exact-price fill. A
+        # better offer below the posted limit is not treated as a fill because
+        # the configured entry price is part of the strategy rule.
+        if abs(float(ask) - order.price) > 1e-9:
+            return None
         if levels is None:
-            return order.price if ask <= order.price else None
-        eligible = [(price, size) for price, size in levels if price <= order.price]
-        return realistic_fill_price(eligible, order.shares, ask) if eligible else None
+            return order.price
+        eligible = [
+            (price, size)
+            for price, size in levels
+            if price is not None and abs(float(price) - order.price) <= 1e-9
+        ]
+        fill = realistic_fill_price(eligible, order.shares, order.price) if eligible else None
+        return order.price if fill is not None and abs(fill - order.price) <= 1e-9 else None
 
     def _enter(
         self,
@@ -238,8 +251,14 @@ class Engine:
         fee: Optional[float] = None,
     ):
         fee = self.broker.taker_fee_amount(shares, price) if fee is None else fee
+        maker_rebate = (
+            self.broker.maker_rebate_amount(shares, price)
+            if entry_type == "maker"
+            else 0.0
+        )
         cost = shares * price + fee
         self.capital.balance -= cost
+        self.pending_maker_rebates += maker_rebate
         self.s.entry_attempted = True
         self.s.position = Position(
             side=side,
@@ -249,6 +268,7 @@ class Engine:
             entry_ts=now,
             entry_type=entry_type,
             fee=fee,
+            maker_rebate=maker_rebate,
         )
         self._log(
             "ENTRY_FILLED",
@@ -256,6 +276,7 @@ class Engine:
             price=price,
             shares=shares,
             fee=fee,
+            maker_rebate=maker_rebate,
             note=f"{entry_type} buy filled; binary payout is $1/share if {side.value} wins",
         )
         self.capital.check_halt()
@@ -278,7 +299,7 @@ class Engine:
         """Floating P&L after including the position's entry cost and fee."""
         if self.s.position is None or self.s.mark_price is None:
             return 0.0
-        return self.position_market_value() - self.s.position.cost
+        return self.position_market_value() - self.s.position.cost + self.s.position.maker_rebate
 
     def finalize_window(self, winning_side: Optional[Side]):
         """Settle an open position and resolve the signal progression.
@@ -297,8 +318,12 @@ class Engine:
         if pos is not None and winning_side is not None:
             won = pos.side == winning_side
             payout = pos.shares if won else 0.0
-            self.capital.balance += payout
-            pnl = payout - pos.cost
+            self.capital.balance += payout + pos.maker_rebate
+            self.pending_maker_rebates = max(
+                0.0, self.pending_maker_rebates - pos.maker_rebate
+            )
+            self.total_maker_rebates += pos.maker_rebate
+            pnl = payout - pos.cost + pos.maker_rebate
             self.total_pnl += pnl
             self.s.last_window_pnl = pnl
             if won:
@@ -318,6 +343,7 @@ class Engine:
                 note=(
                     f"{'won' if won else 'lost'} binary settlement: "
                     f"{pos.shares:.0f} shares paid ${payout:.2f}; "
+                    f"maker rebate ${pos.maker_rebate:.4f}; "
                     f"next base {self.next_shares:.0f} shares"
                 ),
             )
@@ -409,8 +435,12 @@ class Engine:
         )
 
     def equity(self) -> float:
-        """Current portfolio equity: cash plus the live liquidation value."""
-        return self.capital.balance + self.position_market_value()
+        """Current equity: cash, live position value, and accrued rebate."""
+        return (
+            self.capital.balance
+            + self.position_market_value()
+            + self.pending_maker_rebates
+        )
 
     def snapshot(self) -> dict:
         pos = self.s.position
@@ -426,6 +456,8 @@ class Engine:
             "equity_curve": self.equity_curve[-60:],
             "realized_pnl": round(self.total_pnl, 4),
             "unrealized_pnl": round(self.unrealized_pnl(), 4),
+            "pending_maker_rebate": round(self.pending_maker_rebates, 4),
+            "maker_rebates": round(self.total_maker_rebates, 4),
             "last_window_pnl": round(self.s.last_window_pnl, 4),
             "signal_side": self.s.signal_side.value if self.s.signal_side else None,
             "signal_status": self.s.signal_status,
@@ -450,6 +482,7 @@ class Engine:
                     "cost": round(pos.cost, 4),
                     "entry_type": pos.entry_type,
                     "entry_ts": pos.entry_ts,
+                    "maker_rebate": round(pos.maker_rebate, 4),
                     "mark_price": self.s.mark_price,
                     "market_value": round(self.position_market_value(), 4),
                     "unrealized_pnl": round(self.unrealized_pnl(), 4),

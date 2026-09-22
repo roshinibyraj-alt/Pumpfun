@@ -71,6 +71,38 @@ Dashboard: `http://localhost:8000`
 - `LIMIT_ENTRY_PRICE` — resting entry price for the full window, default `0.35`.
 - `WINNER_THRESHOLD` — final-second CLOB winner threshold, default `0.95`.
 - `FINAL_SECOND_SECONDS` — final-second observation window, default `1`.
+- `MAKER_REBATE_RATE` — expected Crypto maker-rebate share, default `0.20`.
+
+## Fees, rebates, and logs
+
+Makers pay no trading fee. For the Crypto market schedule, the paper model uses
+Polymarket's documented fee-equivalent formula:
+
+```text
+fee_equivalent = shares × 0.07 × price × (1 - price)
+maker_rebate = fee_equivalent × 0.20
+```
+
+At `$0.35`, a 500-share maker fill accrues an estimated `$1.5925` rebate. The
+real Polymarket rebate is paid daily from a market-wide pool and may require a
+minimum accrued payout, so the bot labels this as an accrued estimate rather
+than a guaranteed per-fill payment.
+
+Every bot event is written as structured JSON to `logs/bot-events.jsonl` and
+also emitted to stdout for Railway logs. The tracker keeps a rotated backup and
+can be queried while the bot is running:
+
+```text
+GET /api/logs
+GET /api/logs?event=ENTRY_FILLED&limit=200
+GET /api/logs/summary
+```
+
+Relevant official references:
+
+- https://docs.polymarket.com/trading/fees
+- https://docs.polymarket.com/programs/maker-rebates
+- https://docs.polymarket.com/market-data/market-details#trading-fees
 
 The app remains paper trading by default. Review the behavior and paper
 results before connecting any live execution system.

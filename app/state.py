@@ -183,6 +183,7 @@ class BotState:
                     "side": e.side,
                     "price": e.price,
                     "shares": e.shares,
+                    "maker_rebate": e.maker_rebate,
                     "pnl": e.pnl,
                     "balance_after": e.balance_after,
                     "note": e.note,

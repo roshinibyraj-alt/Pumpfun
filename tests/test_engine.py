@@ -1,11 +1,13 @@
 """Regression tests for sizing, binary settlement, and entry execution."""
 import pathlib
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from app import config
 from app.engine import Engine
+from app.log_tracker import LogTracker
 from app.models import Side, WindowMarket
 from app.paper_broker import PaperBroker
 
@@ -34,7 +36,7 @@ def test_win_progression_and_direction_reset():
         engine.reset_for_window(w, Side.UP)
         assert engine.s.share_size == 500 - (n - 1) * 100
         size_history.append(engine.s.share_size)
-        tick(engine, Side.UP, w.open_ts + 1, 0.34, [(0.34, 1000)])
+        tick(engine, Side.UP, w.open_ts + 1, 0.35, [(0.35, 1000)])
         assert engine.s.position is not None
         engine.finalize_window(Side.UP)
     assert size_history == [500, 400, 300, 200, 100]
@@ -60,7 +62,7 @@ def test_loss_resets_and_binary_payout():
     assert engine.next_shares == 500
     assert engine.total_losses == 1
     assert engine.s.last_window_pnl < 0
-    assert engine.capital.balance == before
+    assert round(engine.capital.balance - before, 4) == 1.5925
 
 
 def test_limit_order_stays_active_for_full_window():
@@ -80,6 +82,25 @@ def test_limit_order_stays_active_for_full_window():
     tick(engine, Side.UP, w.open_ts + 120, 0.35, [(0.35, 1000)])
     assert engine.s.position is not None
     assert engine.s.position.entry_type == "maker"
+    assert engine.s.position.entry_price == 0.35
+    assert engine.s.order.active is False
+
+
+def test_limit_order_requires_exact_entry_price():
+    engine = Engine(PaperBroker())
+    w = window(31)
+    engine.reset_for_window(w, Side.UP)
+
+    tick(engine, Side.UP, w.open_ts + 1, 0.34, [(0.34, 1000)])
+    assert engine.s.position is None
+    assert engine.s.order.active is True
+
+    tick(engine, Side.UP, w.open_ts + 2, 0.36, [(0.36, 1000)])
+    assert engine.s.position is None
+    assert engine.s.order.active is True
+
+    tick(engine, Side.UP, w.open_ts + 3, 0.35, [(0.35, 1000)])
+    assert engine.s.position is not None
     assert engine.s.position.entry_price == 0.35
     assert engine.s.order.active is False
 
@@ -131,7 +152,7 @@ def test_settlement_clears_position_and_realizes_pnl():
     assert engine.s.position is None
     assert engine.snapshot()["unrealized_pnl"] == 0.0
     assert engine.snapshot()["equity"] == engine.snapshot()["cash_balance"]
-    assert engine.snapshot()["realized_pnl"] == 325.0
+    assert round(engine.snapshot()["realized_pnl"], 4) == 326.5925
 
 
 def test_live_mark_to_market_equity():
@@ -148,8 +169,8 @@ def test_live_mark_to_market_equity():
     assert snapshot["cash_balance"] == 1825.0
     assert snapshot["position"]["mark_price"] == 0.30
     assert snapshot["position"]["market_value"] == 150.0
-    assert snapshot["unrealized_pnl"] == -25.0
-    assert snapshot["equity"] == 1975.0
+    assert snapshot["unrealized_pnl"] == -23.4075
+    assert snapshot["equity"] == 1976.5925
 
     # A later CLOB bid moves portfolio equity without realizing the P&L.
     engine.on_tick(
@@ -160,8 +181,28 @@ def test_live_mark_to_market_equity():
     )
     snapshot = engine.snapshot()
     assert snapshot["realized_pnl"] == 0.0
-    assert snapshot["unrealized_pnl"] == 55.0
-    assert snapshot["equity"] == 2055.0
+    assert snapshot["unrealized_pnl"] == 56.5925
+    assert snapshot["equity"] == 2056.5925
+
+
+def test_maker_rebate_is_recorded_in_structured_logs():
+    with tempfile.TemporaryDirectory() as directory:
+        tracker = LogTracker(str(pathlib.Path(directory) / "events.jsonl"))
+        broker = PaperBroker(tracker)
+        broker.log_event(
+            "BOT",
+            "window-1",
+            "ENTRY_FILLED",
+            side="UP",
+            price=0.35,
+            shares=500,
+            maker_rebate=1.5925,
+        )
+
+        records = tracker.query(event="ENTRY_FILLED")
+        assert len(records) == 1
+        assert records[0]["maker_rebate"] == 1.5925
+        assert tracker.summary()["maker_rebates_logged"] == 1.5925
 
 
 if __name__ == "__main__":
@@ -172,4 +213,5 @@ if __name__ == "__main__":
     test_no_fill_loss_resets_progression_without_pnl()
     test_settlement_clears_position_and_realizes_pnl()
     test_live_mark_to_market_equity()
+    test_maker_rebate_is_recorded_in_structured_logs()
     print("ENGINE TESTS PASSED")
