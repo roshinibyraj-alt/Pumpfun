@@ -14,7 +14,11 @@ WINDOW_SECONDS = 300
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
 # Orders are sized in USDC notional; shares are derived from execution price.
-ORDER_USD = float(os.getenv("ORDER_USD", "500"))
+# Dollar sizing ladder: $500 -> $400 -> $300 -> $200 -> $100 -> $0.
+BASE_ORDER_USD = float(os.getenv("BASE_ORDER_USD", os.getenv("ORDER_USD", "500")))
+WIN_STEP_USD = float(os.getenv("WIN_STEP_USD", "100"))
+# Compatibility alias for callers that only need the base order size.
+ORDER_USD = BASE_ORDER_USD
 LIMIT_ENTRY_PRICE = float(os.getenv("LIMIT_ENTRY_PRICE", "0.40"))
 LIMIT_ORDER_TIMEOUT_SECONDS = float(os.getenv("LIMIT_ORDER_TIMEOUT_SECONDS", "30"))
 TAKER_ENTRY_MAX_PRICE = float(os.getenv("TAKER_ENTRY_MAX_PRICE", "0.60"))
