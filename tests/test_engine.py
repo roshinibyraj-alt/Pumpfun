@@ -67,6 +67,17 @@ def test_maker_uses_dollar_notional_and_rebate_formula():
     assert engine.snapshot()["cash_balance"] == 5754.2
 
 
+def test_live_fill_debits_and_settles_cash():
+    engine = Engine(PaperBroker())
+    w = window(8)
+    engine.reset_for_window(w, Side.UP)
+    assert engine.record_live_fill(Side.UP, 500, 1000, 0.50, w.open_ts + 1, "order-1")
+    assert engine.capital.balance == 4500
+    engine.finalize_window(Side.UP)
+    assert engine.capital.balance == 5500
+    assert engine.total_pnl == 500
+
+
 def test_no_taker_fallback_before_30_seconds():
     engine = Engine(PaperBroker())
     w = window(2)
@@ -151,6 +162,7 @@ def test_structured_logs_include_dollar_size_and_fees():
 if __name__ == "__main__":
     test_dollar_progression_and_direction_reset()
     test_maker_uses_dollar_notional_and_rebate_formula()
+    test_live_fill_debits_and_settles_cash()
     test_no_taker_fallback_before_30_seconds()
     test_timeout_cancels_limit_and_takes_under_060()
     test_above_threshold_waits_until_price_returns_under_060()
