@@ -136,6 +136,13 @@ class Engine:
     def _log(self, event: str, **kwargs):
         self.broker.log_event(self.name, self.s.window.slug if self.s.window else "", event, balance_after=self.capital.balance, **kwargs)
 
+    @staticmethod
+    def _next_ladder_order_usd(current: float) -> float:
+        for amount in config.ORDER_LADDER_USD:
+            if amount < current - 1e-9:
+                return amount
+        return config.ORDER_LADDER_USD[-1]
+
     def reset_for_window(self, window: WindowMarket, previous_winner: Optional[Side], late_join: bool = False):
         self.s = EngineState(window=window, order_usd=self.next_order_usd)
         if self.capital.halted:
@@ -342,7 +349,7 @@ class Engine:
             self.s.last_window_pnl = pnl
             if won:
                 self.total_wins += 1
-                self.next_order_usd = max(0.0, pos.order_usd - config.WIN_STEP_USD)
+                self.next_order_usd = self._next_ladder_order_usd(pos.order_usd)
                 result = "WIN"
             else:
                 self.total_losses += 1
@@ -365,7 +372,7 @@ class Engine:
             won = signal_side == winning_side
             if won:
                 self.total_wins += 1
-                self.next_order_usd = max(0.0, self.s.order_usd - config.WIN_STEP_USD)
+                self.next_order_usd = self._next_ladder_order_usd(self.s.order_usd)
                 result, event = "WIN_NO_TRADE", "SIGNAL_WIN_NO_TRADE"
             else:
                 self.total_losses += 1
@@ -442,6 +449,7 @@ class Engine:
             "def": {
                 "window_seconds": config.WINDOW_SECONDS,
                 "base_order_usd": config.BASE_ORDER_USD,
+                "order_ladder_usd": list(config.ORDER_LADDER_USD),
                 "win_step_usd": config.WIN_STEP_USD,
                 "limit_entry_price": config.LIMIT_ENTRY_PRICE,
                 "limit_order_timeout_seconds": config.LIMIT_ORDER_TIMEOUT_SECONDS,
