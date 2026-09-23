@@ -79,23 +79,38 @@ class LiveTrader {
       try {
         const latest = await this.clob.getOrder(orderId);
         if (latest) order = { ...order, ...latest };
-        const status = String(order.status || response?.status || '').toLowerCase();
+      } catch (_) {
+        // Keep the original response if a status read temporarily fails.
+      }
+
+      const status = String(order.status || response?.status || '').toLowerCase();
+      const matchStatus = String(order.match_status || order.matchStatus || response?.match_status || '').toLowerCase();
+      const rawTradeIds = order.tradeIDs || order.tradeIds || order.associate_trades || response?.tradeIDs || response?.tradeIds || [];
+      const tradeIds = Array.isArray(rawTradeIds) ? rawTradeIds : (rawTradeIds ? [rawTradeIds] : []);
+      const isFilled = status === 'filled' || status === 'matched' || matchStatus === 'filled' || matchStatus === 'matched' || tradeIds.length > 0;
+      if (isFilled || ['failed', 'canceled', 'cancelled', 'rejected'].includes(status)) break;
+      await new Promise(resolve => setTimeout(resolve, POLL_MS));
+    }
+
+    const status = String(order.status || response?.status || '').toLowerCase();
     const matchStatus = String(order.match_status || order.matchStatus || response?.match_status || '').toLowerCase();
-    const tradeIds = order.tradeIDs || order.tradeIds || order.associate_trades || response?.tradeIDs || response?.tradeIds || [];
-    const isFilled = status === 'filled' || status === 'matched' || matchStatus === 'filled' || matchStatus === 'matched' || (Array.isArray(tradeIds) && tradeIds.length > 0);
+    const rawTradeIds = order.tradeIDs || order.tradeIds || order.associate_trades || response?.tradeIDs || response?.tradeIds || [];
+    const tradeIds = Array.isArray(rawTradeIds) ? rawTradeIds : (rawTradeIds ? [rawTradeIds] : []);
+    const isFilled = status === 'filled' || status === 'matched' || matchStatus === 'filled' || matchStatus === 'matched' || tradeIds.length > 0;
 
     // The order price is the worst-price limit, not the realized average.
     // Resolve matched trade records so the dashboard reports actual execution.
-    let shares = number(order.size_matched ?? order.filled_size ?? response?.size_matched ?? response?.filled_size, 0);
-    let avgPrice = number(order.avg_fill_price ?? order.avgPrice ?? response?.avg_fill_price ?? response?.avgPrice, 0);
-    if (isFilled && Array.isArray(tradeIds) && tradeIds.length > 0) {
+    let shares = number(order.size_matched ?? order.sizeMatched ?? order.filled_size ?? order.filledSize ?? response?.size_matched ?? response?.filled_size, 0);
+    let avgPrice = number(order.avg_fill_price ?? order.avgFillPrice ?? order.avgPrice ?? response?.avg_fill_price ?? response?.avgPrice, 0);
+    if (isFilled && tradeIds.length > 0) {
       let filledShares = 0;
       let filledNotional = 0;
       for (const tradeId of tradeIds) {
         try {
-          const trades = await this.clob.getTrades({ id: tradeId }, true);
-          for (const trade of trades || []) {
-            const size = number(trade.size ?? trade.amount, 0);
+          const tradeResponse = await this.clob.getTrades({ id: tradeId }, true);
+          const trades = Array.isArray(tradeResponse) ? tradeResponse : (tradeResponse?.data || []);
+          for (const trade of trades) {
+            const size = number(trade.size ?? trade.amount ?? trade.size_matched, 0);
             const price = number(trade.price, 0);
             if (size > 0 && price > 0) {
               filledShares += size;
@@ -118,7 +133,7 @@ class LiveTrader {
       shares,
       avgPrice,
       maxPrice,
-      tradeCount: Array.isArray(tradeIds) ? tradeIds.length : 0,
+      tradeCount: tradeIds.length,
     };
   }
 }
