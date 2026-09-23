@@ -77,6 +77,7 @@
     }
     .status.error { color: var(--coral); background: var(--coral-soft); border-color: rgba(239, 111, 99, .2); }
     .status.error::before { box-shadow: 0 0 0 4px rgba(239, 111, 99, .12); }
+    .error-banner { margin: -8px 0 18px; padding: 12px 14px; border: 1px solid rgba(239, 111, 99, .24); border-radius: 12px; color: #a63f37; background: var(--coral-soft); font-size: 13px; }
     .pause-btn { border: 0; border-radius: 999px; padding: 10px 16px; color: #fff; background: var(--coral); font: inherit; font-weight: 800; cursor: pointer; box-shadow: 0 8px 20px rgba(239, 111, 99, .2); }
     .pause-btn.resume { background: var(--mint); }
     .pause-btn:disabled { opacity: .55; cursor: wait; }
@@ -181,6 +182,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end"><button class="pause-btn" id="pauseButton" type="button" onclick="togglePause()">Pause trading</button><div class="status" id="status">Connecting</div></div>
     </header>
+    <div class="error-banner" id="errorMessage" role="alert" hidden></div>
 
     <div class="grid">
       <section class="card hero">
@@ -261,7 +263,7 @@
             <div class="order-row"><span>Loss payout</span><span class="coral">$0.00 / share</span></div>
             <div class="order-row"><span>Live trigger</span><span>&lt;$0.40 first 30s · &lt;$0.50 after</span></div>
             <div class="order-row"><span>Order type</span><span>FOK market BUY · max valid price</span></div>
-            <div class="order-row"><span>Strategy</span><span>Dollar ladder: $5 → $0</span></div>
+            <div class="order-row"><span>Strategy</span><span>Dollar ladder: $5 → $4 → $3 → $2 → $1 → $0</span></div>
           </div>
         </div>
       </section>
@@ -301,8 +303,14 @@
       const pauseButton = $("pauseButton");
       pauseButton.textContent = paused ? "Resume trading" : "Pause trading";
       pauseButton.classList.toggle("resume", paused);
-      status.textContent = data.error ? "Connection issue" : (data.status || "Online");
-      status.classList.toggle("error", Boolean(data.error));
+      const visibleError = data.error || (data.status === "live_auth_error"
+        ? "Live authentication is not ready. Configure POLYMARKET_PRIVATE_KEY, then restart the service."
+        : "");
+      status.textContent = visibleError ? "Attention needed" : (data.status || "Online");
+      status.classList.toggle("error", Boolean(visibleError));
+      const errorMessage = $("errorMessage");
+      errorMessage.textContent = visibleError;
+      errorMessage.hidden = !visibleError;
 
       $("signal").innerHTML = engine.signal_side
         ? `${side(engine.signal_side)}<small>${esc(engine.signal_status || "armed")}</small>`
@@ -351,6 +359,7 @@
       button.disabled = true;
       try {
         const response = await fetch(`/api/pause?paused=${!paused}`, { method: "POST" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         render(await response.json());
       } catch (error) {
         $("status").textContent = "Pause request failed";
@@ -363,6 +372,7 @@
     async function poll() {
       try {
         const response = await fetch("/api/state");
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         render(await response.json());
       } catch (error) {
         $("status").textContent = "Disconnected";
