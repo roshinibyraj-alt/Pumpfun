@@ -1,9 +1,7 @@
 """CLOB-only execution and binary-settlement state machine.
 
-Each eligible window uses one fixed $500 notional order. A $0.40 maker limit
-rests for 30 seconds from window open. If it has not filled, it is cancelled;
-the bot then waits for the signalled side's best ask to be strictly below
-$0.60 and takes the available liquidity, subject to the $500 notional size.
+Paper mode retains the regression strategy. Live mode uses one FOK market BUY
+per eligible window, with dollar ladder sizing and phase-specific triggers.
 """
 import time
 from dataclasses import dataclass
@@ -175,9 +173,8 @@ class Engine:
         self.s.signal_status = "armed"
         self._log(
             "WINDOW_OPEN", side=previous_winner.value, order_usd=self.s.order_usd,
-            note=(f"previous winner {previous_winner.value}; post {config.ORDER_USD:.2f} USD "
-                  f"resting limit at {config.LIMIT_ENTRY_PRICE:.2f} for "
-                  f"{config.LIMIT_ORDER_TIMEOUT_SECONDS:.0f}s"),
+            note=(f"previous winner {previous_winner.value}; armed for {self.s.order_usd:.2f} USD "
+                  f"{'live FOK' if config.TRADING_MODE == 'live' else 'paper limit/taker'} execution"),
         )
 
     def on_tick(self, up_bid, up_ask, down_bid, down_ask, seconds_to_close: Optional[float] = None, now: Optional[float] = None, up_bid_levels: Optional[list] = None, up_ask_levels: Optional[list] = None, down_bid_levels: Optional[list] = None, down_ask_levels: Optional[list] = None):
@@ -185,7 +182,7 @@ class Engine:
             return
         now = now if now is not None else time.time()
         self._mark_position(up_bid, down_bid)
-        if self.capital.halted or self.s.signal_status != "armed" or self.s.position is not None:
+        if self.capital.halted or self.s.signal_status != "armed" or self.s.position is not None or self.s.entry_attempted:
             return
         if now >= self.s.window.close_ts:
             return
@@ -272,6 +269,37 @@ class Engine:
         )
         self.capital.check_halt()
         return True
+
+
+
+    def record_live_fill(self, side: Side, order_usd: float, shares: float, price: float, now: float, order_id: Optional[str] = None) -> bool:
+        """Record a confirmed live FOK fill without applying local fee math."""
+        if self.s.window is None or self.s.signal_status != "armed" or self.s.position is not None or self.s.entry_attempted:
+            return False
+        if order_usd <= 0 or shares <= 0 or price <= 0:
+            return False
+        notional_usd = shares * price
+        self.s.entry_attempted = True
+        self.s.position = Position(
+            side=side, order_usd=order_usd, shares=shares, entry_price=price,
+            cost=notional_usd, entry_ts=now, entry_type="live_fok", fee=0.0, maker_rebate=0.0,
+        )
+        self._log(
+            "LIVE_FOK_FILLED", side=side.value, price=price, shares=shares,
+            order_usd=order_usd, fee=0.0, maker_rebate=0.0,
+            note=f"live Polymarket FOK BUY filled at average {price:.6f}; order {order_id or 'unknown'}; Polymarket handles fees",
+        )
+        return True
+
+    def record_live_attempt(self, side: Side, order_usd: float, trigger_price: float, note: str):
+        """Prevent duplicate live orders after a FOK attempt fails."""
+        if self.s.window is None or self.s.entry_attempted:
+            return
+        self.s.entry_attempted = True
+        self._log(
+            "LIVE_FOK_UNFILLED", side=side.value, price=trigger_price,
+            order_usd=order_usd, fee=0.0, maker_rebate=0.0, note=note,
+        )
 
     def _mark_position(self, up_bid, down_bid):
         if self.s.position is None:
