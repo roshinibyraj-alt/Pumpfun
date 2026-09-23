@@ -79,19 +79,36 @@ class LiveTrader {
       try {
         const latest = await this.clob.getOrder(orderId);
         if (latest) order = { ...order, ...latest };
-        const status = String(order.status || '').toLowerCase();
-        const matchStatus = String(order.match_status || order.matchStatus || '').toLowerCase();
-        if (status === 'filled' || status === 'matched' || matchStatus === 'filled' || matchStatus === 'matched') break;
-      } catch (_) {}
-      await new Promise(resolve => setTimeout(resolve, POLL_MS));
-    }
-
-    const status = String(order.status || response?.status || '').toLowerCase();
+        const status = String(order.status || response?.status || '').toLowerCase();
     const matchStatus = String(order.match_status || order.matchStatus || response?.match_status || '').toLowerCase();
-    const tradeIds = order.tradeIDs || order.tradeIds || response?.tradeIDs || response?.tradeIds || [];
-    const shares = number(order.size_matched ?? order.filled_size ?? response?.size_matched ?? response?.filled_size, 0);
-    const avgPrice = number(order.avg_fill_price ?? order.avgPrice ?? response?.avg_fill_price ?? response?.avgPrice ?? order.price ?? response?.price, 0);
+    const tradeIds = order.tradeIDs || order.tradeIds || order.associate_trades || response?.tradeIDs || response?.tradeIds || [];
     const isFilled = status === 'filled' || status === 'matched' || matchStatus === 'filled' || matchStatus === 'matched' || (Array.isArray(tradeIds) && tradeIds.length > 0);
+
+    // The order price is the worst-price limit, not the realized average.
+    // Resolve matched trade records so the dashboard reports actual execution.
+    let shares = number(order.size_matched ?? order.filled_size ?? response?.size_matched ?? response?.filled_size, 0);
+    let avgPrice = number(order.avg_fill_price ?? order.avgPrice ?? response?.avg_fill_price ?? response?.avgPrice, 0);
+    if (isFilled && Array.isArray(tradeIds) && tradeIds.length > 0) {
+      let filledShares = 0;
+      let filledNotional = 0;
+      for (const tradeId of tradeIds) {
+        try {
+          const trades = await this.clob.getTrades({ id: tradeId }, true);
+          for (const trade of trades || []) {
+            const size = number(trade.size ?? trade.amount, 0);
+            const price = number(trade.price, 0);
+            if (size > 0 && price > 0) {
+              filledShares += size;
+              filledNotional += size * price;
+            }
+          }
+        } catch (_) {}
+      }
+      if (filledShares > 0) {
+        shares = filledShares;
+        avgPrice = filledNotional / filledShares;
+      }
+    }
 
     return {
       orderId,
