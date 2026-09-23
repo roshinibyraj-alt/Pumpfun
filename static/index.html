@@ -28,7 +28,19 @@
     <div class="cell"><div class="label">DOWN PRICE</div><div class="value down" id="tDownPrice">—</div></div>
   </div>
 
-  <div class="section-title">RUNGS — each independent, $5,000 allocated, resets on loss</div>
+  <div class="section-title">
+    <span>OPEN POSITIONS — floating, marked to live price</span>
+    <span class="hint" id="posCount"></span>
+  </div>
+  <div class="positions-wrap" id="positionsWrap"></div>
+
+  <div class="section-title">
+    <span>RUNGS — each independent, $5,000 allocated, resets on loss</span>
+    <span class="hint">win → size −100 (floor 100) · loss → reset to 500</span>
+  </div>
+  <div class="rung-header-row mono">
+    <span>RUNG</span><span>ORDERS / POSITION</span><span>SIZE (now → next win)</span><span>FLOATING P&amp;L / REALIZED</span>
+  </div>
   <div class="rungs" id="rungBoard"></div>
 
   <div class="section-title">PORTFOLIO</div>

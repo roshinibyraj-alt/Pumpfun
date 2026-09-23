@@ -16,14 +16,40 @@ function timeAgo(ts) {
   return d.toLocaleTimeString([], { hour12: false });
 }
 
-function orderBadge(order) {
-  if (order.status === 'FILLED') {
-    return `<span class="badge filled ${order.side.toLowerCase()}">FILLED @ ${order.fill_price.toFixed(2)}</span>`;
+function pnlClass(v) { return v > 0.004 ? 'pos' : (v < -0.004 ? 'neg' : 'flat'); }
+function pnlSign(v) { return v > 0.004 ? '+' : ''; }
+
+function renderPositions(snap) {
+  const wrap = document.getElementById('positionsWrap');
+  const countEl = document.getElementById('posCount');
+  const positions = snap.open_positions || [];
+  countEl.textContent = positions.length ? `${positions.length} open` : '';
+
+  if (!positions.length) {
+    wrap.innerHTML = `<div class="positions-empty">No open positions right now — all rungs are either resting orders or flat.</div>`;
+    return;
   }
-  if (order.status === 'CANCELLED') {
-    return `<span class="badge cancelled">CANCELLED</span>`;
-  }
-  return `<span class="badge pending">RESTING</span>`;
+
+  wrap.innerHTML = `<div class="positions-grid">${positions.map(p => {
+    const cls = pnlClass(p.unrealized_pnl);
+    const sideCls = p.side === 'UP' ? 'side-up' : 'side-down';
+    return `
+      <div class="position-card ${sideCls} pulse" data-key="${p.window_slug}-${p.rung_price}">
+        <div class="prow">
+          <span class="rung-tag mono">rung ${p.rung_price.toFixed(2)}</span>
+          <span class="side-tag ${p.side.toLowerCase()}">${p.side}</span>
+        </div>
+        <div class="pnl-row">
+          <span class="pnl-label">FLOATING P&amp;L</span>
+          <span class="pnl-value ${cls}">${pnlSign(p.unrealized_pnl)}${fmtMoney(p.unrealized_pnl)}</span>
+        </div>
+        <div class="sub-row">
+          <span>${p.size} sh @ <b>${p.entry_price.toFixed(2)}</b></span>
+          <span>mark <b>${fmtPrice(p.mark_price)}</b></span>
+          <span>closes ${fmtSecs(p.window_remaining)}</span>
+        </div>
+      </div>`;
+  }).join('')}</div>`;
 }
 
 function renderRungs(snap) {
@@ -32,36 +58,54 @@ function renderRungs(snap) {
 
   board.innerHTML = snap.rungs.map(r => {
     const priceKey = r.price.toFixed(2);
-    const rungOrders = win ? win.rungs[priceKey] : null;
+    const rungData = win ? win.rungs[priceKey] : null;
+    const position = rungData ? rungData.position : null;
 
-    let orderHtml = `<div class="orderline"><span class="side up">UP</span><span class="badge">—</span></div>
-                      <div class="orderline"><span class="side down">DOWN</span><span class="badge">—</span></div>`;
-    if (rungOrders) {
-      orderHtml = `
-        <div class="orderline"><span class="side up">UP</span>${orderBadge(rungOrders.up)}</div>
-        <div class="orderline"><span class="side down">DOWN</span>${orderBadge(rungOrders.down)}</div>`;
+    let statusHtml;
+    let stateClass = '';
+    if (position) {
+      const sideCls = position.side.toLowerCase();
+      stateClass = `state-position side-${sideCls}`;
+      statusHtml = `
+        <div class="status-position">
+          <span class="side-badge ${sideCls}">${position.side}</span>
+          <span class="entry">entry ${position.entry_price.toFixed(2)}</span>
+          <span class="arrow">→</span>
+          <span class="mark">mark ${fmtPrice(position.mark_price)}</span>
+        </div>`;
+    } else if (rungData) {
+      const upChip = rungData.up.status === 'CANCELLED'
+        ? `<span class="order-chip cancelled">UP cancelled</span>`
+        : `<span class="order-chip resting up"><span class="dot"></span>UP resting @ ${priceKey}</span>`;
+      const downChip = rungData.down.status === 'CANCELLED'
+        ? `<span class="order-chip cancelled">DOWN cancelled</span>`
+        : `<span class="order-chip resting down"><span class="dot"></span>DOWN resting @ ${priceKey}</span>`;
+      statusHtml = `<div class="status-resting">${upChip}${downChip}</div>`;
+    } else {
+      statusHtml = `<span class="status-idle">waiting for window to open…</span>`;
     }
 
-    const pnlClass = r.total_pnl > 0 ? 'pos' : (r.total_pnl < 0 ? 'neg' : '');
-    const balClass = r.capital_balance > r.capital_start ? 'pos' : (r.capital_balance < r.capital_start ? 'neg' : '');
+    const floatingPnl = position ? position.unrealized_pnl : null;
+    const floatCls = floatingPnl === null ? 'flat' : pnlClass(floatingPnl);
+    const floatText = floatingPnl === null
+      ? `${fmtMoney(r.total_pnl)} <span style="color:var(--muted); font-weight:400;">realized</span>`
+      : `${pnlSign(floatingPnl)}${fmtMoney(floatingPnl)} <span style="color:var(--muted); font-weight:400;">floating</span>`;
 
     return `
-      <div class="rung">
-        <div class="price-row">
-          <div class="price mono">${priceKey}</div>
-          <div class="streak">streak <b>${r.win_streak}</b></div>
+      <div class="rung ${stateClass}">
+        <div class="price-col">
+          <div class="price">${priceKey}</div>
+          <div class="streak">streak <b>${r.win_streak}</b> · ${r.win_rate}% (${r.total_trades})</div>
         </div>
-        <div class="size-block mono">
-          <div class="now">${r.current_size} sh</div>
-          <div class="next">next on win<br>${r.next_size_if_win} sh</div>
+        <div class="status-col">${statusHtml}</div>
+        <div class="size-col">
+          <span class="size-now">${r.current_size}<span style="font-size:11px;color:var(--muted)">&nbsp;sh</span></span>
+          <span class="size-arrow">→</span>
+          <span class="size-next">${r.next_size_if_win} sh on win</span>
         </div>
-        ${orderHtml}
-        <div class="stats mono">
-          <div class="stat"><div class="k">WIN RATE</div><div class="v">${r.win_rate}%</div></div>
-          <div class="stat"><div class="k">TRADES</div><div class="v">${r.total_trades}</div></div>
-          <div class="stat"><div class="k">W / L / NF</div><div class="v">${r.wins}/${r.losses}/${r.no_fills}</div></div>
-          <div class="stat"><div class="k">PNL</div><div class="v ${pnlClass}">${fmtMoney(r.total_pnl)}</div></div>
-          <div class="stat" style="grid-column:1/-1"><div class="k">BANKROLL ($${r.capital_start} start)</div><div class="v ${balClass}">${fmtMoney(r.capital_balance)}</div></div>
+        <div class="pnl-col">
+          <div class="floating ${floatCls}">${floatText}</div>
+          <div class="meta">bankroll <b>${fmtMoney(r.capital_balance)}</b> ($${r.capital_start} start)</div>
         </div>
       </div>`;
   }).join('');
@@ -70,12 +114,14 @@ function renderRungs(snap) {
 function renderAgg(snap) {
   const a = snap.aggregate;
   const el = document.getElementById('aggStrip');
-  const pnlClass = a.total_pnl > 0 ? 'pos' : (a.total_pnl < 0 ? 'neg' : '');
-  const roiClass = a.roi_pct > 0 ? 'pos' : (a.roi_pct < 0 ? 'neg' : '');
+  const realClass = pnlClass(a.realized_pnl);
+  const floatClass = pnlClass(a.floating_pnl);
+  const combClass = pnlClass(a.combined_pnl);
+  const roiClass = pnlClass(a.roi_pct);
   el.innerHTML = `
-    <div class="cell"><div class="label">TOTAL BANKROLL</div><div class="value">${fmtMoney(a.total_capital)}</div></div>
-    <div class="cell"><div class="label">TOTAL PNL</div><div class="value ${pnlClass}">${fmtMoney(a.total_pnl)}</div></div>
-    <div class="cell"><div class="label">ROI</div><div class="value ${roiClass}">${a.roi_pct > 0 ? '+' : ''}${a.roi_pct}%</div></div>
+    <div class="cell"><div class="label">REALIZED P&amp;L</div><div class="value ${realClass}">${pnlSign(a.realized_pnl)}${fmtMoney(a.realized_pnl)}</div></div>
+    <div class="cell"><div class="label">FLOATING P&amp;L</div><div class="value ${floatClass}">${pnlSign(a.floating_pnl)}${fmtMoney(a.floating_pnl)}</div></div>
+    <div class="cell"><div class="label">COMBINED P&amp;L · ROI</div><div class="value ${combClass}">${pnlSign(a.combined_pnl)}${fmtMoney(a.combined_pnl)} <span style="font-size:13px">(${a.roi_pct > 0 ? '+' : ''}${a.roi_pct}%)</span></div></div>
     <div class="cell"><div class="label">TRADES / WIN RATE</div><div class="value">${a.total_trades} · ${a.win_rate}%</div></div>
   `;
 }
@@ -121,6 +167,7 @@ function renderEvents(snap) {
 function render(snap) {
   document.getElementById('modePill').textContent = snap.mode;
   renderTicker(snap);
+  renderPositions(snap);
   renderRungs(snap);
   renderAgg(snap);
   renderLog(snap);

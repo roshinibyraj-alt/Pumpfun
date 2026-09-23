@@ -182,6 +182,36 @@ class WindowState:
     orders_placed: bool = False
 
     def to_dict(self):
+        rungs_out = {}
+        for price, ro in self.rungs.items():
+            position = None
+            if ro.filled_side is not None:
+                order = ro.up if ro.filled_side == Side.UP else ro.down
+                mark = self.last_up_price if ro.filled_side == Side.UP else self.last_down_price
+                entry = order.fill_price
+                size = order.size
+                unrealized = None
+                mark_value = None
+                if mark is not None and entry is not None:
+                    unrealized = round(size * (mark - entry), 4)
+                    mark_value = round(size * mark, 2)
+                position = {
+                    "side": ro.filled_side.value,
+                    "size": size,
+                    "entry_price": entry,
+                    "mark_price": mark,
+                    "cost_basis": round(size * entry, 2) if entry is not None else None,
+                    "mark_value": mark_value,
+                    "unrealized_pnl": unrealized,
+                    "settled": ro.settled,
+                }
+            rungs_out[str(price)] = {
+                "up": ro.up.to_dict(),
+                "down": ro.down.to_dict(),
+                "filled_side": ro.filled_side.value if ro.filled_side else None,
+                "settled": ro.settled,
+                "position": position,
+            }
         return {
             "slug": self.slug,
             "start_ts": self.start_ts,
@@ -190,13 +220,5 @@ class WindowState:
             "last_down_price": self.last_down_price,
             "winner": self.winner.value if self.winner else None,
             "settled": self.settled,
-            "rungs": {
-                str(price): {
-                    "up": ro.up.to_dict(),
-                    "down": ro.down.to_dict(),
-                    "filled_side": ro.filled_side.value if ro.filled_side else None,
-                    "settled": ro.settled,
-                }
-                for price, ro in self.rungs.items()
-            },
+            "rungs": rungs_out,
         }

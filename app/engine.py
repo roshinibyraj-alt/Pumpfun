@@ -170,6 +170,8 @@ class Engine:
                         f"({self.rungs[price].current_size} sh) — UP order cancelled."
                     )
 
+        self._assert_fill_priority(ws)
+
         # --- cutoff: no trades after 270s -------------------------------
         if elapsed >= config.ORDER_CUTOFF_SECONDS:
             for price, ro in ws.rungs.items():
@@ -215,6 +217,32 @@ class Engine:
                 f"(UP {up_p:.3f} / DOWN {down_p:.3f})"
             )
 
+    def _assert_fill_priority(self, ws: WindowState):
+        """A resting order at a higher price is always more aggressive (closer
+        to the market) than one at a lower price on the same token, so it can
+        never be skipped: if a lower rung filled, every higher rung on that
+        same side must be FILLED or CANCELLED too — never left PENDING.
+        Any violation here means a real bug in the fill loop, not normal
+        market behavior, so it's logged loudly rather than silently ignored.
+        """
+        prices_desc = sorted(ws.rungs.keys(), reverse=True)  # 0.40 -> 0.25, most to least aggressive
+        for side_attr in ("up", "down"):
+            # Walk from the highest (most aggressive) price down to the lowest.
+            # Once we've seen a higher-priced order still PENDING, no lower-priced
+            # order on the same side should ever show FILLED.
+            pending_higher_price = None
+            for price in prices_desc:
+                order = getattr(ws.rungs[price], side_attr)
+                if order.status == OrderStatus.FILLED and pending_higher_price is not None:
+                    self._log_event(
+                        f"INVARIANT VIOLATION [{ws.slug}] {side_attr.upper()} rung {price:.2f} "
+                        f"FILLED while higher rung {pending_higher_price:.2f} (more aggressive, "
+                        f"should fill first) is still PENDING — this should be impossible.",
+                        level="error",
+                    )
+                if order.status == OrderStatus.PENDING and pending_higher_price is None:
+                    pending_higher_price = price
+
     def _archive_dict(self, ws: WindowState) -> dict:
         d = ws.to_dict()
         return d
@@ -233,6 +261,35 @@ class Engine:
         total_wins = sum(r.wins for r in self.rungs.values())
         total_capital = sum(r.capital_balance for r in self.rungs.values())
         total_start_capital = sum(r.capital_start for r in self.rungs.values())
+
+        # Open positions — filled, unsettled orders across all active windows,
+        # marked to the current live price ("floating" P&L).
+        open_positions = []
+        floating_pnl = 0.0
+        for ws in self.active_windows.values():
+            for price, ro in ws.rungs.items():
+                if ro.filled_side is None or ro.settled:
+                    continue
+                order = ro.up if ro.filled_side == Side.UP else ro.down
+                mark = ws.last_up_price if ro.filled_side == Side.UP else ws.last_down_price
+                entry = order.fill_price
+                size = order.size
+                unrealized = size * (mark - entry) if (mark is not None and entry is not None) else 0.0
+                floating_pnl += unrealized
+                open_positions.append({
+                    "window_slug": ws.slug,
+                    "rung_price": price,
+                    "side": ro.filled_side.value,
+                    "size": size,
+                    "entry_price": entry,
+                    "mark_price": mark,
+                    "cost_basis": round(size * entry, 2),
+                    "mark_value": round(size * mark, 2) if mark is not None else None,
+                    "unrealized_pnl": round(unrealized, 2),
+                    "window_remaining": round(max(0.0, ws.end_ts - now), 1),
+                    "filled_at": order.filled_at,
+                })
+        open_positions.sort(key=lambda p: p["rung_price"], reverse=True)
 
         recent_trades = []
         for rung in self.rungs.values():
@@ -260,17 +317,21 @@ class Engine:
                 "window_seconds": config.WINDOW_SECONDS,
             },
             "aggregate": {
-                "total_pnl": round(total_pnl, 2),
+                "realized_pnl": round(total_pnl, 2),
+                "floating_pnl": round(floating_pnl, 2),
+                "combined_pnl": round(total_pnl + floating_pnl, 2),
+                "total_pnl": round(total_pnl, 2),   # kept for backwards-compat
                 "total_trades": total_trades,
                 "total_wins": total_wins,
                 "win_rate": round((total_wins / total_trades * 100) if total_trades else 0.0, 1),
                 "total_capital": round(total_capital, 2),
                 "total_start_capital": total_start_capital,
-                "roi_pct": round(((total_capital - total_start_capital) / total_start_capital * 100)
+                "roi_pct": round(((total_capital + floating_pnl - total_start_capital) / total_start_capital * 100)
                                   if total_start_capital else 0.0, 2),
             },
             "rungs": [self.rungs[p].to_dict() for p in config.RUNG_PRICES],
             "active_windows": [w.to_dict() for w in self.active_windows.values()],
+            "open_positions": open_positions,
             "recent_trades": [t.to_dict() for t in recent_trades],
             "events": self.events_log[-30:],
             "uptime_seconds": round(now - self.started_at),
