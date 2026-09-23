@@ -37,6 +37,10 @@ class BotState:
             except Exception as exc:
                 self.error = f"Live authentication failed: {type(exc).__name__}: {exc}"
                 self.status = "live_auth_error"
+                try:
+                    await self.live.close()
+                except Exception:
+                    pass
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self):
@@ -60,9 +64,11 @@ class BotState:
         now = time.time()
         window, reason = await self.client.get_active_window(now)
         if window is None:
-            self.error = reason or "no active BTC 5-minute market"
+            if self.status != "live_auth_error":
+                self.error = reason or "no active BTC 5-minute market"
             return
-        self.error = None
+        if self.status != "live_auth_error":
+            self.error = None
 
         if self.current_window is None or window.slug != self.current_window.slug:
             self._roll_window(window, now)
