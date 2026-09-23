@@ -28,6 +28,12 @@ async def get_state():
     return bot_state.snapshot()
 
 
+@app.post("/api/pause")
+async def set_pause(paused: bool = Query(...)):
+    bot_state.set_paused(paused)
+    return bot_state.snapshot()
+
+
 @app.get("/api/logs")
 async def get_logs(
     limit: int = Query(100, ge=1, le=1000),
