@@ -30,7 +30,7 @@ def tick(engine, side, now, ask, levels=None, bid=None):
 
 def test_dollar_progression_and_direction_reset():
     engine = Engine(PaperBroker())
-    sizes = [500, 400, 300, 200, 100]
+    sizes = [5, 4, 3, 2, 1]
     for n, size in enumerate(sizes, start=1):
         w = window(n)
         engine.reset_for_window(w, Side.UP)
@@ -47,35 +47,35 @@ def test_dollar_progression_and_direction_reset():
     flipped = window(7)
     engine.reset_for_window(flipped, Side.DOWN)
     assert engine.s.signal_status == "armed"
-    assert engine.s.order_usd == 500
+    assert engine.s.order_usd == 5
 
 
 def test_maker_uses_dollar_notional_and_rebate_formula():
     engine = Engine(PaperBroker())
     w = window(1)
     engine.reset_for_window(w, Side.UP)
-    tick(engine, Side.UP, w.open_ts + 1, 0.40, [(0.40, 1250)], bid=0.35)
+    tick(engine, Side.UP, w.open_ts + 1, 0.40, [(0.40, 12.5)], bid=0.35)
     pos = engine.s.position
     assert pos is not None
-    assert pos.order_usd == 500
-    assert pos.shares == 1250
+    assert pos.order_usd == 5
+    assert pos.shares == 12.5
     assert pos.fee == 0.0
-    assert pos.maker_rebate == 4.2
-    assert engine.capital.balance == 4500
+    assert pos.maker_rebate == 0.042
+    assert engine.capital.balance == 4995
     engine.finalize_window(Side.UP)
-    assert round(engine.total_pnl, 4) == 754.2
-    assert engine.snapshot()["cash_balance"] == 5754.2
+    assert round(engine.total_pnl, 4) == 7.542
+    assert engine.snapshot()["cash_balance"] == 5007.542
 
 
 def test_live_fill_debits_and_settles_cash():
     engine = Engine(PaperBroker())
     w = window(8)
     engine.reset_for_window(w, Side.UP)
-    assert engine.record_live_fill(Side.UP, 500, 1000, 0.50, w.open_ts + 1, "order-1")
-    assert engine.capital.balance == 4500
+    assert engine.record_live_fill(Side.UP, 5, 10, 0.50, w.open_ts + 1, "order-1")
+    assert engine.capital.balance == 4995
     engine.finalize_window(Side.UP)
-    assert engine.capital.balance == 5500
-    assert engine.total_pnl == 500
+    assert engine.capital.balance == 5005
+    assert engine.total_pnl == 5
 
 
 def test_no_taker_fallback_before_30_seconds():
@@ -99,10 +99,10 @@ def test_timeout_cancels_limit_and_takes_under_060():
     assert engine.total_taker_entries == 1
     assert pos is not None
     assert pos.entry_type == "taker"
-    assert round(pos.order_usd, 6) == 500
-    assert round(pos.shares, 6) == round(500 / 0.55, 6)
-    assert round(pos.fee, 5) == 15.75
-    assert round(pos.cost, 5) == 515.75
+    assert round(pos.order_usd, 6) == 5
+    assert round(pos.shares, 6) == round(5 / 0.55, 6)
+    assert round(pos.fee, 5) == 0.1575
+    assert round(pos.cost, 5) == 5.1575
 
 
 def test_above_threshold_waits_until_price_returns_under_060():
@@ -124,7 +124,7 @@ def test_taker_does_not_cross_price_cap_for_slippage():
     engine = Engine(PaperBroker())
     w = window(5)
     engine.reset_for_window(w, Side.UP)
-    tick(engine, Side.UP, w.open_ts + 30, 0.59, [(0.59, 100), (0.61, 2000)])
+    tick(engine, Side.UP, w.open_ts + 30, 0.59, [(0.59, 1), (0.61, 2000)])
     assert engine.s.position is None
     assert engine.total_taker_entries == 0
 
@@ -135,11 +135,11 @@ def test_mark_to_market_includes_actual_fee_and_rebate():
     engine.reset_for_window(w, Side.UP)
     tick(engine, Side.UP, w.open_ts + 1, 0.40, [(0.40, 1250)], bid=0.30)
     snapshot = engine.snapshot()
-    assert snapshot["cash_balance"] == 4500
-    assert snapshot["position"]["notional_usd"] == 500
-    assert snapshot["position"]["market_value"] == 375
-    assert snapshot["unrealized_pnl"] == -120.8
-    assert snapshot["equity"] == 4879.2
+    assert snapshot["cash_balance"] == 4995
+    assert snapshot["position"]["notional_usd"] == 5
+    assert snapshot["position"]["market_value"] == 3.75
+    assert snapshot["unrealized_pnl"] == -1.208
+    assert snapshot["equity"] == 4998.792
 
 
 def test_taker_fee_and_maker_rebate_precision():
@@ -152,11 +152,11 @@ def test_structured_logs_include_dollar_size_and_fees():
     with tempfile.TemporaryDirectory() as directory:
         tracker = LogTracker(str(pathlib.Path(directory) / "events.jsonl"))
         broker = PaperBroker(tracker)
-        broker.log_event("BOT", "window-1", "ENTRY_FILLED", side="UP", price=0.40, shares=1250, order_usd=500, fee=0.0, maker_rebate=4.2)
+        broker.log_event("BOT", "window-1", "ENTRY_FILLED", side="UP", price=0.40, shares=12.5, order_usd=5, fee=0.0, maker_rebate=0.042)
         record = tracker.query(event="ENTRY_FILLED")[0]
-        assert record["order_usd"] == 500
+        assert record["order_usd"] == 5
         assert record["fee"] == 0.0
-        assert record["maker_rebate"] == 4.2
+        assert record["maker_rebate"] == 0.042
 
 
 if __name__ == "__main__":
