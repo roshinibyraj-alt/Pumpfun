@@ -6,7 +6,7 @@ def _bool(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
-TRADING_MODE = os.getenv("TRADING_MODE", "paper")
+TRADING_MODE = os.getenv("TRADING_MODE", "live").strip().lower()
 GAMMA_API_BASE = os.getenv("GAMMA_API_BASE", "https://gamma-api.polymarket.com")
 CLOB_API_BASE = os.getenv("CLOB_API_BASE", "https://clob.polymarket.com")
 SLUG_PREFIX = "btc-updown-5m-"
@@ -22,6 +22,13 @@ ORDER_USD = BASE_ORDER_USD
 LIMIT_ENTRY_PRICE = float(os.getenv("LIMIT_ENTRY_PRICE", "0.40"))
 LIMIT_ORDER_TIMEOUT_SECONDS = float(os.getenv("LIMIT_ORDER_TIMEOUT_SECONDS", "30"))
 TAKER_ENTRY_MAX_PRICE = float(os.getenv("TAKER_ENTRY_MAX_PRICE", "0.60"))
+
+# Live entries: trigger below these prices, then submit a FOK BUY with the
+# highest valid market price (effectively no price protection).
+LIVE_FIRST_PHASE_SECONDS = float(os.getenv("LIVE_FIRST_PHASE_SECONDS", "30"))
+LIVE_FIRST_PHASE_TRIGGER = float(os.getenv("LIVE_FIRST_PHASE_TRIGGER", "0.40"))
+LIVE_SECOND_PHASE_TRIGGER = float(os.getenv("LIVE_SECOND_PHASE_TRIGGER", "0.50"))
+LIVE_MAX_PRICE = float(os.getenv("LIVE_MAX_PRICE", "0.99"))
 WINNER_THRESHOLD = float(os.getenv("WINNER_THRESHOLD", "0.95"))
 FINAL_SECOND_SECONDS = float(os.getenv("FINAL_SECOND_SECONDS", "1.0"))
 
