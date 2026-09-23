@@ -279,6 +279,11 @@ class Engine:
         if order_usd <= 0 or shares <= 0 or price <= 0:
             return False
         notional_usd = shares * price
+        # The live order has already executed at this point. Mirror its
+        # notional in the local ledger so cash, equity, and realized P&L stay
+        # consistent with paper mode. Live exchange fees remain external.
+        self.capital.balance -= notional_usd
+        self.capital.check_halt()
         self.s.entry_attempted = True
         self.s.position = Position(
             side=side, order_usd=order_usd, shares=shares, entry_price=price,
