@@ -14,10 +14,23 @@ WINDOW_SECONDS = 300
 POLL_INTERVAL_SECONDS = float(os.getenv("POLL_INTERVAL_SECONDS", "1.0"))
 
 # Orders are sized in USDC notional; shares are derived from execution price.
-# Dollar sizing ladder: $500 -> $400 -> $300 -> $200 -> $100 -> $0.
-BASE_ORDER_USD = float(os.getenv("BASE_ORDER_USD", os.getenv("ORDER_USD", "500")))
-WIN_STEP_USD = float(os.getenv("WIN_STEP_USD", "100"))
-# Compatibility alias for callers that only need the base order size.
+# The exact win ladder is explicit so a skipped or extra step cannot be
+# introduced accidentally by changing a decrement value.
+def _order_ladder(raw: str) -> tuple[float, ...]:
+    values = tuple(float(part.strip()) for part in raw.split(",") if part.strip())
+    if not values or values[0] <= 0 or any(value < 0 for value in values):
+        raise ValueError("ORDER_LADDER_USD must start above zero and contain no negative values")
+    if any(left <= right for left, right in zip(values, values[1:])):
+        raise ValueError("ORDER_LADDER_USD must be strictly descending")
+    if values[-1] != 0:
+        values = (*values, 0.0)
+    return values
+
+
+ORDER_LADDER_USD = _order_ladder(os.getenv("ORDER_LADDER_USD", "5,4,3,2,1,0"))
+BASE_ORDER_USD = ORDER_LADDER_USD[0]
+# Compatibility aliases for callers and older dashboard fields.
+WIN_STEP_USD = float(os.getenv("WIN_STEP_USD", "1"))
 ORDER_USD = BASE_ORDER_USD
 LIMIT_ENTRY_PRICE = float(os.getenv("LIMIT_ENTRY_PRICE", "0.40"))
 LIMIT_ORDER_TIMEOUT_SECONDS = float(os.getenv("LIMIT_ORDER_TIMEOUT_SECONDS", "30"))
