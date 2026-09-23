@@ -77,6 +77,9 @@
     }
     .status.error { color: var(--coral); background: var(--coral-soft); border-color: rgba(239, 111, 99, .2); }
     .status.error::before { box-shadow: 0 0 0 4px rgba(239, 111, 99, .12); }
+    .pause-btn { border: 0; border-radius: 999px; padding: 10px 16px; color: #fff; background: var(--coral); font: inherit; font-weight: 800; cursor: pointer; box-shadow: 0 8px 20px rgba(239, 111, 99, .2); }
+    .pause-btn.resume { background: var(--mint); }
+    .pause-btn:disabled { opacity: .55; cursor: wait; }
 
     .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; }
     .card {
@@ -172,11 +175,11 @@
   <main>
     <header>
       <div>
-        <div class="eyebrow">Paper trading · CLOB only</div>
+        <div class="eyebrow">Live trading · CLOB FOK</div>
         <h1>BTC 5-minute continuation</h1>
         <div class="subtitle">The last window's winner sets the next trade direction.</div>
       </div>
-      <div class="status" id="status">Connecting</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end"><button class="pause-btn" id="pauseButton" type="button" onclick="togglePause()">Pause trading</button><div class="status" id="status">Connecting</div></div>
     </header>
 
     <div class="grid">
@@ -256,9 +259,9 @@
           <div class="order-box">
             <div class="order-row"><span>Win payout</span><span class="mint">$1.00 / share</span></div>
             <div class="order-row"><span>Loss payout</span><span class="coral">$0.00 / share</span></div>
-            <div class="order-row"><span>Limit entry</span><span>$0.40 · first 30s</span></div>
-            <div class="order-row"><span>Taker entry</span><span>Below $0.60 after timeout</span></div>
-            <div class="order-row"><span>Strategy</span><span>Dollar ladder: $500 → $0</span></div>
+            <div class="order-row"><span>Live trigger</span><span>&lt;$0.40 first 30s · &lt;$0.50 after</span></div>
+            <div class="order-row"><span>Order type</span><span>FOK market BUY · max valid price</span></div>
+            <div class="order-row"><span>Strategy</span><span>Dollar ladder: $5 → $0</span></div>
           </div>
         </div>
       </section>
@@ -277,6 +280,7 @@
   </main>
 
   <script>
+    let paused = false;
     const $ = id => document.getElementById(id);
     const money = value => value == null ? "—" : "$" + Number(value).toFixed(2);
     const price = value => value == null ? "—" : Number(value).toFixed(3);
@@ -293,6 +297,10 @@
       const book = data.book || {};
       const final = data.final_second_prices || {};
       const status = $("status");
+      paused = Boolean(data.paused);
+      const pauseButton = $("pauseButton");
+      pauseButton.textContent = paused ? "Resume trading" : "Pause trading";
+      pauseButton.classList.toggle("resume", paused);
       status.textContent = data.error ? "Connection issue" : (data.status || "Online");
       status.classList.toggle("error", Boolean(data.error));
 
@@ -336,6 +344,20 @@
       const element = $(id);
       element.textContent = money(value);
       element.className = "value " + (Number(value) > 0 ? "mint" : Number(value) < 0 ? "coral" : "");
+    }
+
+    async function togglePause() {
+      const button = $("pauseButton");
+      button.disabled = true;
+      try {
+        const response = await fetch(`/api/pause?paused=${!paused}`, { method: "POST" });
+        render(await response.json());
+      } catch (error) {
+        $("status").textContent = "Pause request failed";
+        $("status").classList.add("error");
+      } finally {
+        button.disabled = false;
+      }
     }
 
     async function poll() {
