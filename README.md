@@ -5,7 +5,7 @@ This bot follows the previous BTC 5-minute window's confirmed winner and can pla
 ## Live execution
 
 - Set TRADING_MODE=live and provide POLYMARKET_PRIVATE_KEY through Replit or Railway Secrets. The key is read only by the authenticated Node bridge and is never returned to the dashboard.
-- The dollar ladder is $5 -> $4 -> $3 -> $2 -> $1 -> $0 after wins. A loss or direction flip resets the next amount to $5; at $0, same-side signals are skipped until a direction flip.
+- The exact dollar ladder is $5 -> $4 -> $3 -> $2 -> $1 -> $0 after wins. A loss or direction flip resets the next amount to $5; at $0, same-side signals are skipped until a direction flip.
 - During the first 30 seconds after window open, the bot fires when the signalled token's best ask is strictly below $0.40.
 - At 30 seconds and after, it fires when the best ask is strictly below $0.50.
 - The order is a FOK market BUY. It must fill completely immediately or Polymarket cancels it. The bridge sends the highest valid price tick below $1.00, effectively removing price protection while respecting the CLOB tick size.
