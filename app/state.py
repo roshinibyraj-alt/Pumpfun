@@ -6,6 +6,7 @@ from typing import Optional
 
 from . import config
 from .engine import Engine
+from .live_broker import LiveTraderBridge
 from .models import PricePoint, Side, WindowMarket
 from .paper_broker import PaperBroker
 from .polymarket_client import PolymarketClient
@@ -25,17 +26,27 @@ class BotState:
         self.status = "starting"
         self.error: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
+        self.paused = False
+        self.live: Optional[LiveTraderBridge] = LiveTraderBridge() if config.TRADING_MODE == "live" else None
+        self.last_live_order = None
 
     async def start(self):
+        if self.live is not None:
+            try:
+                await self.live.start()
+            except Exception as exc:
+                self.error = f"Live authentication failed: {type(exc).__name__}: {exc}"
+                self.status = "live_auth_error"
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self):
         if self._task:
             self._task.cancel()
+        if self.live is not None:
+            await self.live.close()
         await self.client.close()
 
     async def _run_loop(self):
-        self.status = "running"
         loop = asyncio.get_running_loop()
         while True:
             started = loop.time()
@@ -80,6 +91,10 @@ class BotState:
             self.final_second_up = up_price if up_price is not None else up_mid
             self.final_second_down = down_price if down_price is not None else down_mid
 
+        if self.live is not None:
+            await self._live_tick(now, up_book, down_book)
+            return
+
         self.engine.on_tick(
             self.last_up_bid,
             self.last_up_ask,
@@ -92,6 +107,59 @@ class BotState:
             down_bid_levels=down_book["bids"] if down_book else None,
             down_ask_levels=down_book["asks"] if down_book else None,
         )
+
+
+
+    async def _live_tick(self, now: float, up_book: Optional[dict], down_book: Optional[dict]):
+        """Fire one authenticated FOK BUY when the live trigger is crossed."""
+        if self.paused or self.live is None or not self.live.ready:
+            return
+        if self.current_window is None or self.engine.s.signal_status != "armed":
+            return
+        if self.engine.s.position is not None or self.engine.s.entry_attempted:
+            return
+        if now >= self.current_window.close_ts:
+            return
+
+        side = self.engine.s.signal_side
+        book = up_book if side == Side.UP else down_book
+        ask = book.get("best_ask") if book else None
+        if ask is None:
+            return
+        elapsed = now - self.current_window.open_ts
+        trigger = (config.LIVE_FIRST_PHASE_TRIGGER
+                   if elapsed < config.LIVE_FIRST_PHASE_SECONDS
+                   else config.LIVE_SECOND_PHASE_TRIGGER)
+        if float(ask) >= trigger:
+            return
+
+        token_id = self.current_window.token_up if side == Side.UP else self.current_window.token_down
+        amount = self.engine.s.order_usd
+        try:
+            result = await self.live.place_fok_buy(token_id, amount)
+        except Exception as exc:
+            self.engine.record_live_attempt(side, amount, float(ask), f"FOK request failed: {type(exc).__name__}: {exc}")
+            self.error = f"Live order failed: {type(exc).__name__}: {exc}"
+            return
+
+        self.last_live_order = {"side": side.value, "trigger_price": trigger, "ask_at_fire": float(ask), **result}
+        if not result.get("isFilled"):
+            self.engine.record_live_attempt(
+                side, amount, float(ask),
+                f"FOK not filled at max valid price {result.get('maxPrice', config.LIVE_MAX_PRICE):.3f}; no retry this window",
+            )
+            return
+
+        avg_price = float(result.get("avgPrice") or 0)
+        shares = float(result.get("shares") or 0)
+        if avg_price <= 0 and shares > 0:
+            avg_price = amount / shares
+        if shares <= 0 and avg_price > 0:
+            shares = amount / avg_price
+        if not self.engine.record_live_fill(side, amount, shares, avg_price, now, result.get("orderId")):
+            self.engine.record_live_attempt(side, amount, float(ask), "FOK response could not be converted into a confirmed position")
+            return
+        self.engine._mark_position(self.last_up_bid, self.last_down_bid)
 
     def _roll_window(self, new_window: WindowMarket, now: float):
         previous_winner = None
@@ -133,10 +201,19 @@ class BotState:
             return (bid + ask) / 2
         return ask if ask is not None else bid
 
+    def set_paused(self, paused: bool):
+        self.paused = bool(paused)
+        self.broker.log_event("LIVE" if self.live is not None else "BOT", self.current_window.slug if self.current_window else "", "PAUSED" if self.paused else "RESUMED", note="dashboard pause control")
+
     def snapshot(self) -> dict:
         eng = self.engine.snapshot()
+        status = "paused" if self.paused else (self.status if self.status == "live_auth_error" else "running")
         return {
-            "status": self.status,
+            "status": status,
+            "paused": self.paused,
+            "trading_mode": config.TRADING_MODE,
+            "live_account": ({"address": self.live.address, "funder_address": self.live.funder_address, "balance": self.live.balance, "ready": self.live.ready} if self.live is not None else None),
+            "last_live_order": self.last_live_order,
             "error": self.error,
             "server_time": time.time(),
             "window": (
