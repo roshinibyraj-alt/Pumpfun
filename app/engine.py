@@ -284,6 +284,7 @@ class Engine:
             side=side, order_usd=order_usd, shares=shares, entry_price=price,
             cost=notional_usd, entry_ts=now, entry_type="live_fok", fee=0.0, maker_rebate=0.0,
         )
+        self.total_taker_entries += 1
         self._log(
             "LIVE_FOK_FILLED", side=side.value, price=price, shares=shares,
             order_usd=order_usd, fee=0.0, maker_rebate=0.0,
