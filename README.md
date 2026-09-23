@@ -1,33 +1,82 @@
-# BTC 5-minute live continuation bot
+# BTC 5m Rung Bot — Polymarket (Paper Trading)
 
-This bot follows the previous BTC 5-minute window's confirmed winner and can place one live Polymarket FOK market BUY per eligible window.
+Simulated market-making bot for Polymarket's BTC 5-minute up/down markets
+(`btc-updown-5m-<epoch>`). Runs 4 independent "rungs," each resting limit
+orders on both the UP and DOWN token, with a martingale-style size ladder
+that steps down on wins and resets on losses.
 
-## Live execution
+**This build is paper trading only.** It never signs or sends a real
+order — no private key, no CLOB API key, nothing to leak. All prices come
+from Polymarket's public, no-auth Gamma/CLOB endpoints; fills are
+simulated locally. Wire in a real broker later (see `app/engine.py`) once
+you're ready to trade live — that's a deliberate, separate step.
 
-- Set TRADING_MODE=live and provide POLYMARKET_PRIVATE_KEY through Replit or Railway Secrets. The key is read only by the authenticated Node bridge and is never returned to the dashboard.
-- The exact dollar ladder is $5 -> $4 -> $3 -> $2 -> $1 -> $0 after wins. A loss or direction flip resets the next amount to $5; at $0, same-side signals are skipped until a direction flip.
-- During the first 30 seconds after window open, the bot fires when the signalled token's best ask is strictly below $0.40.
-- At 30 seconds and after, it fires when the best ask is strictly below $0.50.
-- The order is a FOK market BUY. It must fill completely immediately or Polymarket cancels it. The bridge sends the highest valid price tick below $1.00, effectively removing price protection while respecting the CLOB tick size.
-- There is no absolute fill guarantee: a FOK order still fails if there is not enough resting liquidity. A failed FOK is recorded and is not retried in that window.
-- Polymarket handles trading fees and settlement. The live path applies no local fee or maker-rebate calculation.
-- The dashboard Pause button prevents new live orders. FOK orders do not rest on the book, so there is no live order to cancel after submission.
+## Strategy, exactly as specified
 
-## Why FOK instead of FAK
+- **Discovery**: window slugs are deterministic — `btc-updown-5m-<epoch>`
+  where `epoch` is a clean multiple of 300s. The bot computes the current
+  and next window slug from the clock, no scraping needed.
+- **Rungs**: 0.40, 0.35, 0.30, 0.25. At window open, each rung places a
+  resting limit order on **both** UP and DOWN at its price, sized at that
+  rung's current size (500 shares at first).
+- **Fill logic**: a rung's order is simulated as filled when the token's
+  live ask price touches its limit price. Whichever side fills first
+  cancels the other side's resting order for that rung.
+- **Cutoff**: at 270s into the 5-minute window, any still-resting orders
+  are cancelled — no new fills allowed after that.
+- **Settlement**: in the last 2 seconds of the window, whichever side's
+  price is above 0.95 is the winner ($1); if neither crosses 0.95, the
+  higher of the two prices wins (your chosen tie-break).
+- **Sizing**: per rung, independently —
+  - Win → next size = `max(100, current − 100)` (500→400→300→200→100, floor 100)
+  - Loss → next size resets to 500
+  - No fill → size unchanged
+  - Cost varies with price and size; the ladder itself only ever moves in
+    100-share steps.
+- **Capital**: each rung tracks its own $5,000 paper bankroll — totally
+  separate P&L, streaks, and win rate per rung.
 
-FAK can partially fill and cancel the remainder. FOK is the correct order type when the complete $5/$4/$3/$2/$1 amount must either fill immediately or not trade at all. No order type can guarantee a match when the order book has insufficient liquidity.
+## Project layout
 
-## Required live setup
+```
+app/
+  config.py            all tunable constants
+  models.py             RungState / WindowState / SimOrder / TradeRecord
+  polymarket_client.py  Gamma + CLOB read-only client (no auth)
+  engine.py              window lifecycle, fill simulation, settlement
+  main.py                 FastAPI app, REST snapshot, websocket feed
+static/
+  index.html, style.css, app.js    the dashboard (no build step, plain JS)
+```
 
-1. Put the private key in the deployment secret manager as POLYMARKET_PRIVATE_KEY.
-2. Confirm the wallet/funder has USDC and the required CLOB allowance.
-3. Keep the dashboard paused while checking authentication and balance.
-4. Resume trading only when the live account and current market data are visible.
+## Run locally
 
-The service uses live_trader_bridge.js with @polymarket/clob-client-v2, @polymarket/builder-relayer-client, and viem. The Python service owns market discovery, signal timing, pause state, and the dashboard.
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
+```
 
-Official references:
+Open `http://localhost:8000`.
 
-- https://docs.polymarket.com/trading/place-orders
-- https://docs.polymarket.com/trading/orders/overview
-- https://docs.polymarket.com/developers/CLOB/orders/get-order
+## Deploy on Railway
+
+1. Push this repo to GitHub.
+2. In Railway: **New Project → Deploy from GitHub repo**, pick this repo.
+3. Railway auto-detects Python via Nixpacks and uses `railway.json` /
+   `Procfile` for the start command (`uvicorn app.main:app --host 0.0.0.0
+   --port $PORT`). No environment variables are required to run in paper
+   mode.
+4. Once deployed, open the Railway-provided URL — the dashboard is served
+   at `/`, live data over `/ws`, and a JSON snapshot at `/api/snapshot`.
+
+## Notes / known simplifications
+
+- Fill simulation assumes your resting order fills in full the instant
+  the ask touches your price — real order books can partial-fill or you
+  can be queued behind other resting orders at the same price.
+- Settlement uses Polymarket's live CLOB price at T‑2s as a proxy for the
+  window's outcome, per your spec — this is not the same as Polymarket's
+  own on-chain resolution, which may differ in edge cases.
+- $5,000 per rung is tracked as a running paper balance, not a hard order
+  cap — orders are always sized in shares per your ladder, regardless of
+  the balance (flag this if you want a hard capital guard added).

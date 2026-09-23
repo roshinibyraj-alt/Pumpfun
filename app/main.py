@@ -1,63 +1,54 @@
+from __future__ import annotations
+import asyncio
+import logging
+import os
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Optional
 
-from fastapi import FastAPI, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .state import BotState
+from .engine import Engine
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-bot_state = BotState()
+engine = Engine()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await bot_state.start()
+    task = asyncio.create_task(engine.run_forever())
     yield
-    await bot_state.stop()
+    task.cancel()
+    await engine.client.close()
+
+app = FastAPI(title="Polymarket 5m BTC Rung Bot", lifespan=lifespan)
 
 
-app = FastAPI(title="Pumpfun — CLOB BTC 5m Binary Bot", lifespan=lifespan)
+@app.get("/api/snapshot")
+async def snapshot():
+    return JSONResponse(engine.snapshot())
 
 
-@app.get("/api/state")
-async def get_state():
-    return bot_state.snapshot()
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
 
 
-@app.post("/api/pause")
-async def set_pause(paused: bool = Query(...)):
-    bot_state.set_paused(paused)
-    return bot_state.snapshot()
+@app.websocket("/ws")
+async def ws_feed(ws: WebSocket):
+    await ws.accept()
+    q = engine.subscribe()
+    try:
+        await ws.send_json(engine.snapshot())
+        while True:
+            snap = await q.get()
+            await ws.send_json(snap)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        engine.unsubscribe(q)
 
 
-@app.get("/api/logs")
-async def get_logs(
-    limit: int = Query(100, ge=1, le=1000),
-    event: Optional[str] = None,
-    window: Optional[str] = None,
-    side: Optional[str] = None,
-):
-    tracker = bot_state.broker.tracker
-    records = tracker.query(limit=limit, event=event, window=window, side=side)
-    return {
-        "count": len(records),
-        "events": records,
-        "summary": tracker.summary(),
-    }
-
-
-@app.get("/api/logs/summary")
-async def get_log_summary():
-    return bot_state.broker.tracker.summary()
-
-
-@app.get("/")
-async def dashboard():
-    return FileResponse(STATIC_DIR / "index.html")
-
-
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
+app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")

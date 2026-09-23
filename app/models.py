@@ -1,46 +1,202 @@
-"""Small shared models for the CLOB-only binary strategy."""
-from dataclasses import dataclass
+from __future__ import annotations
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+import time
+import itertools
+
+from . import config
+
+_trade_id_counter = itertools.count(1)
 
 
 class Side(str, Enum):
     UP = "UP"
     DOWN = "DOWN"
 
-    def other(self) -> "Side":
-        return Side.DOWN if self == Side.UP else Side.UP
+
+class OrderStatus(str, Enum):
+    PENDING = "PENDING"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+
+
+class Outcome(str, Enum):
+    WIN = "WIN"
+    LOSS = "LOSS"
+    NO_FILL = "NO_FILL"
 
 
 @dataclass
-class PricePoint:
-    ts: float
-    up: Optional[float]
-    down: Optional[float]
+class SimOrder:
+    side: Side
+    price: float
+    size: int
+    status: OrderStatus = OrderStatus.PENDING
+    fill_price: Optional[float] = None
+    filled_at: Optional[float] = None
+
+    def to_dict(self):
+        return {
+            "side": self.side.value,
+            "price": self.price,
+            "size": self.size,
+            "status": self.status.value,
+            "fill_price": self.fill_price,
+        }
 
 
 @dataclass
-class TradeLogEntry:
-    ts: float
-    engine: str
+class TradeRecord:
+    id: int
     window_slug: str
-    event: str
-    side: Optional[str] = None
-    price: Optional[float] = None
-    shares: Optional[float] = None
-    order_usd: Optional[float] = None
-    fee: Optional[float] = None
-    maker_rebate: Optional[float] = None
-    pnl: Optional[float] = None
-    balance_after: Optional[float] = None
-    note: Optional[str] = None
+    rung_price: float
+    outcome: Outcome
+    side_filled: Optional[str]
+    size: int
+    cost: float
+    pnl: float
+    balance_after: float
+    settled_at: float
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "window_slug": self.window_slug,
+            "rung_price": self.rung_price,
+            "outcome": self.outcome.value,
+            "side_filled": self.side_filled,
+            "size": self.size,
+            "cost": round(self.cost, 2),
+            "pnl": round(self.pnl, 2),
+            "balance_after": round(self.balance_after, 2),
+            "settled_at": self.settled_at,
+        }
 
 
 @dataclass
-class WindowMarket:
+class RungState:
+    """Persistent, independent strategy for one price level (e.g. 0.40).
+    Lives across many windows. Only current_size, streak and capital move.
+    """
+    price: float
+    current_size: int = config.BASE_SIZE
+    capital_start: float = config.CAPITAL_PER_RUNG
+    capital_balance: float = field(default=config.CAPITAL_PER_RUNG)
+    wins: int = 0
+    losses: int = 0
+    no_fills: int = 0
+    win_streak: int = 0
+    total_pnl: float = 0.0
+    history: list[TradeRecord] = field(default_factory=list)
+
+    @property
+    def total_trades(self) -> int:
+        return self.wins + self.losses
+
+    @property
+    def win_rate(self) -> float:
+        if self.total_trades == 0:
+            return 0.0
+        return self.wins / self.total_trades
+
+    def record_fill_outcome(self, window_slug: str, side_filled: Optional[Side],
+                             size: int, outcome: Outcome, now: float):
+        cost = size * self.price if side_filled else 0.0
+        if outcome == Outcome.WIN:
+            payout = size * 1.0
+            pnl = payout - cost
+            self.capital_balance += pnl
+            self.total_pnl += pnl
+            self.wins += 1
+            self.win_streak += 1
+            self.current_size = max(config.FLOOR_SIZE, self.current_size - config.SIZE_STEP)
+        elif outcome == Outcome.LOSS:
+            pnl = -cost
+            self.capital_balance += pnl
+            self.total_pnl += pnl
+            self.losses += 1
+            self.win_streak = 0
+            self.current_size = config.BASE_SIZE
+        else:  # NO_FILL
+            pnl = 0.0
+            self.no_fills += 1
+            # size unchanged, streak unchanged — this rung simply didn't trade
+
+        rec = TradeRecord(
+            id=next(_trade_id_counter),
+            window_slug=window_slug,
+            rung_price=self.price,
+            outcome=outcome,
+            side_filled=side_filled.value if side_filled else None,
+            size=size,
+            cost=cost,
+            pnl=pnl,
+            balance_after=self.capital_balance,
+            settled_at=now,
+        )
+        self.history.append(rec)
+        if len(self.history) > config.MAX_HISTORY:
+            self.history.pop(0)
+        return rec
+
+    def to_dict(self):
+        return {
+            "price": self.price,
+            "current_size": self.current_size,
+            "next_size_if_win": max(config.FLOOR_SIZE, self.current_size - config.SIZE_STEP),
+            "capital_start": self.capital_start,
+            "capital_balance": round(self.capital_balance, 2),
+            "wins": self.wins,
+            "losses": self.losses,
+            "no_fills": self.no_fills,
+            "win_streak": self.win_streak,
+            "total_trades": self.total_trades,
+            "win_rate": round(self.win_rate * 100, 1),
+            "total_pnl": round(self.total_pnl, 2),
+        }
+
+
+@dataclass
+class RungOrders:
+    up: SimOrder
+    down: SimOrder
+    filled_side: Optional[Side] = None
+    settled: bool = False
+    cutoff_applied: bool = False
+
+
+@dataclass
+class WindowState:
     slug: str
-    condition_id: Optional[str]
-    token_up: Optional[str]
-    token_down: Optional[str]
-    open_ts: float
-    close_ts: float
+    start_ts: float
+    end_ts: float
+    up_token_id: str
+    down_token_id: str
+    rungs: dict = field(default_factory=dict)   # price -> RungOrders
+    last_up_price: Optional[float] = None
+    last_down_price: Optional[float] = None
+    winner: Optional[Side] = None
+    settled: bool = False
+    settle_ready_at: float = 0.0
+    orders_placed: bool = False
+
+    def to_dict(self):
+        return {
+            "slug": self.slug,
+            "start_ts": self.start_ts,
+            "end_ts": self.end_ts,
+            "last_up_price": self.last_up_price,
+            "last_down_price": self.last_down_price,
+            "winner": self.winner.value if self.winner else None,
+            "settled": self.settled,
+            "rungs": {
+                str(price): {
+                    "up": ro.up.to_dict(),
+                    "down": ro.down.to_dict(),
+                    "filled_side": ro.filled_side.value if ro.filled_side else None,
+                    "settled": ro.settled,
+                }
+                for price, ro in self.rungs.items()
+            },
+        }

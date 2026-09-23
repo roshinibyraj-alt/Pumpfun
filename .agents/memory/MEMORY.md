@@ -1,1 +1,0 @@
-- [Polymarket maker rebates](polymarket-maker-rebates.md) — Crypto rebates use a fee-equivalent curve and are pooled daily, not guaranteed per fill.
