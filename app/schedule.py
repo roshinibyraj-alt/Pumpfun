@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 BRISBANE = ZoneInfo("Australia/Brisbane")
 WEEKDAY_SCHEDULE = "Mon 06:00–Fri 15:30 Brisbane"
-WEEKEND_SCHEDULE = "Fri 18:00–Sun 22:00 Brisbane"
+WEEKEND_SCHEDULE = "Fri 18:00–Mon 05:00 Brisbane"
 
 
 def session_for_timestamp(timestamp: float) -> str | None:
@@ -14,6 +14,8 @@ def session_for_timestamp(timestamp: float) -> str | None:
     day = local.weekday()  # Monday = 0
     clock = local.time().replace(tzinfo=None)
 
+    if day == 0 and clock.hour < 5:
+        return "weekend"
     if day == 0 and clock.hour >= 6:
         return "weekday"
     if 1 <= day <= 3:
@@ -23,9 +25,7 @@ def session_for_timestamp(timestamp: float) -> str | None:
 
     if day == 4 and (clock.hour, clock.minute) >= (18, 0):
         return "weekend"
-    if day == 5:
-        return "weekend"
-    if day == 6 and (clock.hour, clock.minute) < (22, 0):
+    if day in (5, 6):
         return "weekend"
 
     return None

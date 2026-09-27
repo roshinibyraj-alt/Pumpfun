@@ -32,8 +32,9 @@ class StrategyScheduleTests(unittest.TestCase):
     def test_weekend_boundaries_are_inclusive_at_open_and_exclusive_at_close(self):
         self.assertIsNone(session_for_timestamp(brisbane_timestamp(2026, 10, 2, 17, 59, 59)))
         self.assertEqual(session_for_timestamp(brisbane_timestamp(2026, 10, 2, 18, 0)), "weekend")
-        self.assertEqual(session_for_timestamp(brisbane_timestamp(2026, 10, 4, 21, 59, 59)), "weekend")
-        self.assertIsNone(session_for_timestamp(brisbane_timestamp(2026, 10, 4, 22, 0)))
+        self.assertEqual(session_for_timestamp(brisbane_timestamp(2026, 10, 4, 23, 59, 59)), "weekend")
+        self.assertEqual(session_for_timestamp(brisbane_timestamp(2026, 10, 5, 4, 59, 59)), "weekend")
+        self.assertIsNone(session_for_timestamp(brisbane_timestamp(2026, 10, 5, 5, 0)))
 
     def test_reverse_thresholds_pair_in_order_with_weekday_rungs(self):
         self.assertEqual(config.REVERSE_RUNG_PRICES, [0.60, 0.65, 0.70, 0.75])
