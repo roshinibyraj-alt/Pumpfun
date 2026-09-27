@@ -53,28 +53,6 @@ function renderPositions(snap) {
   }).join('')}</div>`;
 }
 
-function renderSessionStatus(snap) {
-  const sessions = snap.sessions;
-  const localTime = new Intl.DateTimeFormat('en-AU', {
-    timeZone: 'Australia/Brisbane',
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).format(new Date(snap.server_time * 1000));
-  document.getElementById('sessionStrip').innerHTML = `
-    <div class="session-clock"><span>BRISBANE TIME</span><b>${localTime}</b></div>
-    ${['weekday', 'weekend'].map(key => `
-      <div class="session-state ${sessions[key].active ? 'is-active' : 'is-inactive'}">
-        <span class="state-dot"></span>
-        <div><b>${key === 'weekday' ? 'WEEKDAY MAKER' : 'WEEKEND INVERSE'}</b><small>${sessions[key].schedule}</small></div>
-        <strong>${sessions[key].active ? 'ACTIVE' : 'INACTIVE'}</strong>
-      </div>
-    `).join('')}
-  `;
-}
-
 function renderStrategy(strategyKey, snap) {
   const strategy = snap.strategies[strategyKey];
   const isWeekend = strategyKey === 'weekend';
@@ -86,13 +64,13 @@ function renderStrategy(strategyKey, snap) {
   );
 
   card.classList.toggle('inactive', !strategy.active);
-  stateEl.className = `strategy-state ${strategy.active ? 'active' : 'inactive'}`;
+  stateEl.className = `rung-session-state ${strategy.active ? 'active' : 'inactive'}`;
   stateEl.textContent = strategy.active ? 'ACTIVE NOW' : 'INACTIVE';
   document.getElementById(`${strategyKey}Summary`).innerHTML = `
-    <div class="summary-cell"><span>NET REALIZED P&amp;L</span><b class="${pnlClass(strategy.realized_pnl)}">${pnlSign(strategy.realized_pnl)}${fmtMoney(strategy.realized_pnl)}</b></div>
-    <div class="summary-cell"><span>RECORD / WIN RATE</span><b>${strategy.wins}W · ${strategy.losses}L · ${strategy.win_rate}%</b></div>
-    <div class="summary-cell"><span>TAKER FEES</span><b>${fmtMoney(strategy.fees_paid)}</b></div>
-    <div class="summary-cell"><span>MAKER REBATE ESTIMATE</span><b>${fmtMoney(strategy.maker_rebate_estimate)}</b></div>
+    <span><small>NET REALIZED</small> <b class="${pnlClass(strategy.realized_pnl)}">${pnlSign(strategy.realized_pnl)}${fmtMoney(strategy.realized_pnl)}</b></span>
+    <span><small>RECORD / WIN RATE</small> <b>${strategy.wins}W · ${strategy.losses}L · ${strategy.win_rate}%</b></span>
+    <span><small>FEES PAID</small> <b>${fmtMoney(strategy.fees_paid)}</b></span>
+    <span><small>REBATE EST.</small> <b>${fmtMoney(strategy.maker_rebate_estimate)}</b></span>
   `;
 
   board.innerHTML = strategy.rungs.map(r => {
@@ -152,7 +130,8 @@ function renderStrategy(strategyKey, snap) {
         </div>
         <div class="pnl-col">
           <div class="floating ${floatCls}">${floatText}</div>
-          <div class="meta">shared pair balance <b>${fmtMoney(r.capital_balance)}</b> ($${r.capital_start} start)</div>
+          <div class="meta">bankroll <b>${fmtMoney(r.capital_balance)}</b> ($${r.capital_start} start)</div>
+          <div class="meta">fees ${fmtMoney(r.total_fees_paid)} · rebate est. ${fmtMoney(r.total_maker_rebate_estimate)}</div>
         </div>
       </div>`;
   }).join('');
@@ -164,13 +143,10 @@ function renderAgg(snap) {
   const realClass = pnlClass(a.realized_pnl);
   const floatClass = pnlClass(a.floating_pnl);
   const combClass = pnlClass(a.combined_pnl);
-  const roiClass = pnlClass(a.roi_pct);
   el.innerHTML = `
-    <div class="cell"><div class="label">NET REALIZED P&amp;L · FEES INCLUDED</div><div class="value ${realClass}">${pnlSign(a.realized_pnl)}${fmtMoney(a.realized_pnl)}</div></div>
+    <div class="cell"><div class="label">REALIZED P&amp;L</div><div class="value ${realClass}">${pnlSign(a.realized_pnl)}${fmtMoney(a.realized_pnl)}</div></div>
     <div class="cell"><div class="label">FLOATING P&amp;L</div><div class="value ${floatClass}">${pnlSign(a.floating_pnl)}${fmtMoney(a.floating_pnl)}</div></div>
     <div class="cell"><div class="label">COMBINED P&amp;L · ROI</div><div class="value ${combClass}">${pnlSign(a.combined_pnl)}${fmtMoney(a.combined_pnl)} <span style="font-size:13px">(${a.roi_pct > 0 ? '+' : ''}${a.roi_pct}%)</span></div></div>
-    <div class="cell"><div class="label">WEEKEND TAKER FEES</div><div class="value">${fmtMoney(a.fees_paid)}</div></div>
-    <div class="cell"><div class="label">WEEKDAY REBATE EST.</div><div class="value">${fmtMoney(a.maker_rebate_estimate)}</div></div>
     <div class="cell"><div class="label">TRADES / WIN RATE</div><div class="value">${a.total_trades} · ${a.win_rate}%</div></div>
   `;
 }
@@ -222,7 +198,6 @@ function renderEvents(snap) {
 function render(snap) {
   document.getElementById('modePill').textContent = snap.mode;
   renderTicker(snap);
-  renderSessionStatus(snap);
   renderPositions(snap);
   renderStrategy('weekday', snap);
   renderStrategy('weekend', snap);

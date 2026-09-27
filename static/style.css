@@ -356,7 +356,7 @@ header.top {
 /* ---------- aggregate strip ---------- */
 .agg {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -668,4 +668,87 @@ footer.foot {
   .summary-cell b { font-size: 10px; }
   table.log { min-width: 920px; }
   .session-clock { min-height: 52px; }
+}
+
+/* Keep the original flat rung ledger while identifying both session strategies. */
+.strategy-board {
+  margin-bottom: 4px;
+}
+
+.strategy-board + .strategy-board {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.strategy-board-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 2px 8px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 8px;
+}
+
+.strategy-board-title {
+  min-width: 0;
+}
+
+.strategy-board-title h2 {
+  display: inline;
+  margin: 0 10px 0 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .35px;
+}
+
+.strategy-board-title p {
+  display: inline;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.rung-session-state {
+  flex: 0 0 auto;
+  color: var(--muted-2);
+  font: 600 10px 'IBM Plex Mono', monospace;
+  letter-spacing: .25px;
+}
+
+.rung-session-state.active { color: var(--up); }
+.rung-session-state.inactive { color: var(--muted-2); }
+
+.strategy-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 20px;
+  margin: 0 2px 8px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.strategy-metrics small {
+  margin-right: 4px;
+  color: var(--muted-2);
+  font-size: 9px;
+}
+
+.strategy-metrics b {
+  color: var(--text);
+  font-family: 'IBM Plex Mono', monospace;
+  font-weight: 500;
+}
+
+.strategy-metrics b.pos { color: var(--up); }
+.strategy-metrics b.neg { color: var(--down); }
+
+@media (max-width: 700px) {
+  .strategy-board-head { align-items: flex-start; }
+  .strategy-board-title h2,
+  .strategy-board-title p { display: block; }
+  .strategy-board-title h2 { margin: 0 0 3px; }
+  .strategy-board-title p { line-height: 1.45; }
+  .strategy-metrics { gap: 6px 12px; }
 }

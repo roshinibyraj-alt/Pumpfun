@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BTC 5m Strategies — Paper Trading</title>
+<title>BTC 5m Rung Bot — Paper Trading</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -11,8 +11,8 @@
 
   <header class="top">
     <div class="brand">
-      <h1>BTC 5m Strategies</h1>
-      <span class="sub">Polymarket up/down · weekday maker + weekend inverse · demo only</span>
+      <h1>BTC 5m Rung Bot</h1>
+      <span class="sub">Polymarket up/down · weekday maker + weekend inverse · paper trading</span>
     </div>
     <div style="display:flex; align-items:center; gap:12px;">
       <span class="mode-pill" id="modePill">PAPER TRADING</span>
@@ -35,55 +35,46 @@
   <div class="positions-wrap" id="positionsWrap"></div>
 
   <div class="section-title">
-    <span>STRATEGIES — separate sizing and performance; paired rungs share tracked capital</span>
+    <span>RUNGS — capital shown per rung; matching weekday/weekend rungs share a $5,000 starting pool</span>
     <span class="hint">win → size −100 (floor 100) · loss → reset to 500 · no balance cap</span>
   </div>
-  <div class="session-strip" id="sessionStrip"></div>
 
-  <section class="strategy-card" id="weekdayCard">
-    <div class="strategy-head">
-      <div>
-        <h2>WEEKDAY MAKER STRATEGY</h2>
+  <section class="strategy-board" id="weekdayCard">
+    <div class="strategy-board-head">
+      <div class="strategy-board-title">
+        <h2>WEEKDAY MAKER</h2>
         <p>Mon 06:00–Fri 15:30 Brisbane · resting limit buys at 0.40 / 0.35 / 0.30 / 0.25</p>
       </div>
-      <span class="strategy-state" id="weekdayState">—</span>
+      <span class="rung-session-state" id="weekdayState">—</span>
     </div>
-    <div class="strategy-summary" id="weekdaySummary"></div>
+    <div class="strategy-metrics" id="weekdaySummary"></div>
     <div class="rung-header-row mono">
-      <span>RUNG</span><span>ORDERS / POSITION</span><span>SIZE (now → next win)</span><span>NET P&amp;L / SHARED CAPITAL</span>
+      <span>RUNG</span><span>ORDERS / POSITION</span><span>SIZE (now → next win)</span><span>FLOATING P&amp;L / REALIZED</span>
     </div>
     <div class="rungs" id="weekdayRungs"></div>
   </section>
 
-  <section class="strategy-card weekend-card" id="weekendCard">
-    <div class="strategy-head">
-      <div>
-        <h2>WEEKEND INVERSE STRATEGY</h2>
+  <section class="strategy-board" id="weekendCard">
+    <div class="strategy-board-head">
+      <div class="strategy-board-title">
+        <h2>WEEKEND INVERSE</h2>
         <p>Fri 18:00–Mon 05:00 Brisbane · market-buy triggers at 0.60 / 0.65 / 0.70 / 0.75</p>
       </div>
-      <span class="strategy-state" id="weekendState">—</span>
+      <span class="rung-session-state" id="weekendState">—</span>
     </div>
-    <div class="strategy-summary" id="weekendSummary"></div>
+    <div class="strategy-metrics" id="weekendSummary"></div>
     <div class="rung-header-row mono">
-      <span>RUNG</span><span>TRIGGERS / POSITION</span><span>SIZE (now → next win)</span><span>NET P&amp;L / SHARED CAPITAL</span>
+      <span>RUNG</span><span>TRIGGERS / POSITION</span><span>SIZE (now → next win)</span><span>FLOATING P&amp;L / REALIZED</span>
     </div>
     <div class="rungs" id="weekendRungs"></div>
   </section>
-
-  <p class="accounting-note">
-    Paper-only accounting. Weekend buys use the simulated execution ask and Polymarket’s
-    crypto taker-fee curve. Weekday maker rebates are shown as estimates only: actual payouts
-    depend on each market’s daily pro-rata rebate pool. The 20% estimate is a paper proxy, not
-    a calculated account payout. Rebates are shown separately and excluded from realized P&amp;L
-    and shared capital until an actual payout is known.
-  </p>
 
   <div class="section-title">PORTFOLIO</div>
   <div class="agg mono" id="aggStrip"></div>
 
   <div class="grid2">
     <div class="panel">
-      <div class="panel-head">TRADE LOG — recent settlements across both strategies</div>
+      <div class="panel-head">TRADE LOG — most recent settlements across all rungs</div>
       <div class="scroll-body">
         <table class="log mono">
           <thead>
@@ -106,6 +97,7 @@
   <footer class="foot mono">
     <span id="footUptime">uptime —</span>
     <span>simulated fills from public CLOB prices · no wallet · no signed orders</span>
+    <span>rebate estimates are separate and excluded from realized P&amp;L and capital</span>
   </footer>
 
 </div>
