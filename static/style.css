@@ -224,7 +224,7 @@ header.top {
 
 .rung {
   display: grid;
-  grid-template-columns: 86px 1fr 200px 230px;
+  grid-template-columns: 130px 1fr 180px 250px;
   align-items: center;
   gap: 18px;
   padding: 13px 18px;
@@ -254,6 +254,12 @@ header.top {
   color: var(--muted);
 }
 .rung .streak b { color: var(--up); }
+.rung .rung-record {
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.rung .rung-record b { color: var(--text); font-weight: 500; }
 
 /* middle: order/position status */
 .rung .status-col { min-width: 0; }
@@ -324,6 +330,25 @@ header.top {
   gap: 2px;
   font-family: 'IBM Plex Mono', monospace;
 }
+.rung .pnl-col .metric-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  white-space: nowrap;
+}
+.rung .pnl-col .metric-row span {
+  color: var(--muted-2);
+  font-size: 9px;
+}
+.rung .pnl-col .metric-row b {
+  font-size: 13px;
+  font-weight: 600;
+}
+.rung .pnl-col .metric-row b.pos { color: var(--up); }
+.rung .pnl-col .metric-row b.neg { color: var(--down); }
+.rung .pnl-col .metric-row b.flat { color: var(--muted); }
 .rung .pnl-col .floating {
   font-size: 17px;
   font-weight: 600;
@@ -339,7 +364,7 @@ header.top {
 
 .rung-header-row {
   display: grid;
-  grid-template-columns: 86px 1fr 200px 230px;
+  grid-template-columns: 130px 1fr 180px 250px;
   gap: 18px;
   padding: 0 18px;
   font-size: 10px;
@@ -356,7 +381,7 @@ header.top {
 /* ---------- aggregate strip ---------- */
 .agg {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -373,6 +398,11 @@ header.top {
 .agg .value { font-size: 22px; color: var(--white); font-weight: 600; }
 .agg .value.pos { color: var(--up); }
 .agg .value.neg { color: var(--down); }
+.agg .agg-note {
+  margin-top: 5px;
+  color: var(--muted-2);
+  font: 10px 'IBM Plex Mono', monospace;
+}
 
 /* ---------- two column: log + events ---------- */
 .grid2 {
@@ -456,6 +486,8 @@ footer.foot {
 
 @media (max-width: 900px) {
   .agg { grid-template-columns: repeat(2, 1fr); }
+  .agg .cell:nth-child(2n) { border-right: 0; }
+  .agg .cell:nth-child(-n + 4) { border-bottom: 1px solid var(--line); }
   .ticker { grid-template-columns: repeat(2, 1fr); }
   .grid2 { grid-template-columns: 1fr; }
   .rung-header-row { display: none; }
@@ -464,6 +496,7 @@ footer.foot {
     gap: 10px;
   }
   .rung .pnl-col { align-items: flex-start; }
+  .rung .pnl-col .metric-row { max-width: 320px; }
 }
 
 /* ---------- paired weekday / weekend strategy states ---------- */
@@ -620,7 +653,7 @@ footer.foot {
 .summary-cell b.neg { color: var(--down); }
 
 .strategy-card .rung-header-row {
-  grid-template-columns: 86px 1fr 200px 230px;
+  grid-template-columns: 130px 1fr 180px 250px;
   padding: 0 18px;
 }
 
@@ -668,6 +701,18 @@ footer.foot {
   .summary-cell b { font-size: 10px; }
   table.log { min-width: 920px; }
   .session-clock { min-height: 52px; }
+  .positions-grid {
+    display: flex;
+    overflow-x: auto;
+    padding: 2px 1px 9px;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: thin;
+  }
+  .positions-grid .position-card {
+    flex: 0 0 min(82vw, 300px);
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+  }
 }
 
 /* Keep the original flat rung ledger while identifying both session strategies. */

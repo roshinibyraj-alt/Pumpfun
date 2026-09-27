@@ -111,7 +111,10 @@ function renderStrategy(strategyKey, snap) {
     }
 
     const realizedPnl = r.total_pnl;
-    const unrealizedPnl = r.unrealized_pnl ?? 0;
+    const liveRungPnl = (snap.open_positions || [])
+      .filter(p => p.strategy === strategyKey && p.rung_price.toFixed(2) === priceKey)
+      .reduce((total, p) => total + p.unrealized_pnl, 0);
+    const unrealizedPnl = r.unrealized_pnl ?? liveRungPnl;
 
     return `
       <div class="rung ${stateClass}">

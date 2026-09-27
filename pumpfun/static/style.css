@@ -701,6 +701,18 @@ footer.foot {
   .summary-cell b { font-size: 10px; }
   table.log { min-width: 920px; }
   .session-clock { min-height: 52px; }
+  .positions-grid {
+    display: flex;
+    overflow-x: auto;
+    padding: 2px 1px 9px;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: thin;
+  }
+  .positions-grid .position-card {
+    flex: 0 0 min(82vw, 300px);
+    scroll-snap-align: start;
+    scroll-snap-stop: always;
+  }
 }
 
 /* Keep the original flat rung ledger while identifying both session strategies. */

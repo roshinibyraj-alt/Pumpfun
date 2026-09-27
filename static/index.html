@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BTC 5m Rung Bot — Paper Trading</title>
-<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/style.css?v=capital-metrics-1">
 </head>
 <body>
 <div class="shell">
@@ -28,6 +28,9 @@
     <div class="cell"><div class="label">DOWN PRICE</div><div class="value down" id="tDownPrice">—</div></div>
   </div>
 
+  <div class="section-title">PORTFOLIO</div>
+  <div class="agg mono" id="aggStrip"></div>
+
   <div class="section-title">
     <span>OPEN POSITIONS — floating, marked to live price</span>
     <span class="hint" id="posCount"></span>
@@ -35,7 +38,7 @@
   <div class="positions-wrap" id="positionsWrap"></div>
 
   <div class="section-title">
-    <span>RUNGS — capital shown per rung; matching weekday/weekend rungs share a $5,000 starting pool</span>
+    <span>RUNGS — per-rung capital and performance; matching weekday/weekend rungs share a $5,000 pair pool</span>
     <span class="hint">win → size −100 (floor 100) · loss → reset to 500 · no balance cap</span>
   </div>
 
@@ -49,7 +52,7 @@
     </div>
     <div class="strategy-metrics" id="weekdaySummary"></div>
     <div class="rung-header-row mono">
-      <span>RUNG</span><span>ORDERS / POSITION</span><span>SIZE (now → next win)</span><span>FLOATING P&amp;L / REALIZED</span>
+      <span>RUNG / RECORD</span><span>ORDERS / POSITION</span><span>SIZE (now → next win)</span><span>CAPITAL / REALIZED / UNREALIZED</span>
     </div>
     <div class="rungs" id="weekdayRungs"></div>
   </section>
@@ -64,13 +67,10 @@
     </div>
     <div class="strategy-metrics" id="weekendSummary"></div>
     <div class="rung-header-row mono">
-      <span>RUNG</span><span>TRIGGERS / POSITION</span><span>SIZE (now → next win)</span><span>FLOATING P&amp;L / REALIZED</span>
+      <span>RUNG / RECORD</span><span>TRIGGERS / POSITION</span><span>SIZE (now → next win)</span><span>CAPITAL / REALIZED / UNREALIZED</span>
     </div>
     <div class="rungs" id="weekendRungs"></div>
   </section>
-
-  <div class="section-title">PORTFOLIO</div>
-  <div class="agg mono" id="aggStrip"></div>
 
   <div class="grid2">
     <div class="panel">
@@ -101,6 +101,6 @@
   </footer>
 
 </div>
-<script src="/app.js"></script>
+<script src="/app.js?v=capital-metrics-1"></script>
 </body>
 </html>

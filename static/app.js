@@ -110,17 +110,18 @@ function renderStrategy(strategyKey, snap) {
       statusHtml = `<span class="status-idle">waiting for window to open…</span>`;
     }
 
-    const floatingPnl = position ? position.unrealized_pnl : null;
-    const floatCls = floatingPnl === null ? 'flat' : pnlClass(floatingPnl);
-    const floatText = floatingPnl === null
-      ? `${fmtMoney(r.total_pnl)} <span style="color:var(--muted); font-weight:400;">net realized</span>`
-      : `${pnlSign(floatingPnl)}${fmtMoney(floatingPnl)} <span style="color:var(--muted); font-weight:400;">floating net</span>`;
+    const realizedPnl = r.total_pnl;
+    const liveRungPnl = (snap.open_positions || [])
+      .filter(p => p.strategy === strategyKey && p.rung_price.toFixed(2) === priceKey)
+      .reduce((total, p) => total + p.unrealized_pnl, 0);
+    const unrealizedPnl = r.unrealized_pnl ?? liveRungPnl;
 
     return `
       <div class="rung ${stateClass}">
         <div class="price-col">
           <div class="price">${priceKey}</div>
-          <div class="streak">pair ${r.pair_price.toFixed(2)} · streak <b>${r.win_streak}</b> · ${r.win_rate}% (${r.total_trades})</div>
+          <div class="streak">pair ${r.pair_price.toFixed(2)} · win streak <b>${r.win_streak}</b></div>
+          <div class="rung-record">record ${r.wins}W–${r.losses}L · win rate <b>${r.win_rate}%</b> (${r.total_trades} trades)</div>
         </div>
         <div class="status-col">${statusHtml}</div>
         <div class="size-col">
@@ -129,8 +130,9 @@ function renderStrategy(strategyKey, snap) {
           <span class="size-next">${r.next_size_if_win} sh on win</span>
         </div>
         <div class="pnl-col">
-          <div class="floating ${floatCls}">${floatText}</div>
-          <div class="meta">bankroll <b>${fmtMoney(r.capital_balance)}</b> ($${r.capital_start} start)</div>
+          <div class="metric-row"><span>REALIZED NET</span><b class="${pnlClass(realizedPnl)}">${pnlSign(realizedPnl)}${fmtMoney(realizedPnl)}</b></div>
+          <div class="metric-row"><span>UNREALIZED</span><b class="${pnlClass(unrealizedPnl)}">${pnlSign(unrealizedPnl)}${fmtMoney(unrealizedPnl)}</b></div>
+          <div class="meta">PAIR CAPITAL (${r.pair_price.toFixed(2)}) <b>${fmtMoney(r.capital_balance)} / ${fmtMoney(r.capital_start)} start</b></div>
           <div class="meta">fees ${fmtMoney(r.total_fees_paid)} · rebate est. ${fmtMoney(r.total_maker_rebate_estimate)}</div>
         </div>
       </div>`;
@@ -143,7 +145,9 @@ function renderAgg(snap) {
   const realClass = pnlClass(a.realized_pnl);
   const floatClass = pnlClass(a.floating_pnl);
   const combClass = pnlClass(a.combined_pnl);
+  const combinedCapital = a.combined_capital ?? (a.total_capital + a.floating_pnl);
   el.innerHTML = `
+    <div class="cell"><div class="label">COMBINED CAPITAL</div><div class="value">${fmtMoney(combinedCapital)}</div><div class="agg-note">cash ${fmtMoney(a.total_capital)} · start ${fmtMoney(a.total_start_capital)}</div></div>
     <div class="cell"><div class="label">REALIZED P&amp;L</div><div class="value ${realClass}">${pnlSign(a.realized_pnl)}${fmtMoney(a.realized_pnl)}</div></div>
     <div class="cell"><div class="label">FLOATING P&amp;L</div><div class="value ${floatClass}">${pnlSign(a.floating_pnl)}${fmtMoney(a.floating_pnl)}</div></div>
     <div class="cell"><div class="label">COMBINED P&amp;L · ROI</div><div class="value ${combClass}">${pnlSign(a.combined_pnl)}${fmtMoney(a.combined_pnl)} <span style="font-size:13px">(${a.roi_pct > 0 ? '+' : ''}${a.roi_pct}%)</span></div></div>
