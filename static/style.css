@@ -356,7 +356,7 @@ header.top {
 /* ---------- aggregate strip ---------- */
 .agg {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -464,4 +464,208 @@ footer.foot {
     gap: 10px;
   }
   .rung .pnl-col { align-items: flex-start; }
+}
+
+/* ---------- paired weekday / weekend strategy states ---------- */
+.session-strip {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1fr;
+  gap: 8px;
+  margin: -10px 0 14px;
+}
+
+.session-clock,
+.session-state {
+  min-height: 62px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.session-clock {
+  justify-content: space-between;
+}
+
+.session-clock span,
+.summary-cell span {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .3px;
+}
+
+.session-clock b {
+  color: var(--white);
+  font: 500 15px 'IBM Plex Mono', monospace;
+}
+
+.session-state .state-dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted-2);
+}
+
+.session-state.is-active .state-dot {
+  background: var(--up);
+  box-shadow: 0 0 8px var(--up);
+}
+
+.session-state > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.session-state b,
+.session-state strong {
+  color: var(--text);
+  font-size: 10px;
+  letter-spacing: .35px;
+}
+
+.session-state small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.session-state strong {
+  margin-left: auto;
+  color: var(--muted-2);
+}
+
+.session-state.is-active strong { color: var(--up); }
+
+.strategy-card {
+  margin-bottom: 14px;
+  padding: 14px 16px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(16, 20, 28, .55);
+}
+
+.strategy-card.inactive {
+  border-color: var(--line-soft);
+}
+
+.strategy-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.strategy-head h2 {
+  margin: 0 0 4px;
+  color: var(--white);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .45px;
+}
+
+.strategy-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.strategy-state {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  color: var(--muted);
+  font: 600 10px 'IBM Plex Mono', monospace;
+}
+
+.strategy-state.active {
+  border-color: var(--up-dim);
+  color: var(--up);
+  background: rgba(53, 214, 140, .06);
+}
+
+.strategy-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+}
+
+.summary-cell {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 12px;
+  border-right: 1px solid var(--line);
+}
+
+.summary-cell:last-child { border-right: 0; }
+
+.summary-cell b {
+  color: var(--text);
+  font: 500 12px 'IBM Plex Mono', monospace;
+  white-space: nowrap;
+}
+
+.summary-cell b.pos { color: var(--up); }
+.summary-cell b.neg { color: var(--down); }
+
+.strategy-card .rung-header-row {
+  grid-template-columns: 86px 1fr 200px 230px;
+  padding: 0 18px;
+}
+
+.strategy-card .rungs {
+  margin-bottom: 14px;
+}
+
+.order-chip.filled {
+  border-color: var(--line);
+  background: var(--panel-2);
+}
+
+.order-chip.filled.up { color: var(--up); }
+.order-chip.filled.down { color: var(--down); }
+
+.position-cost-note {
+  margin-top: 8px;
+  color: var(--muted);
+  font: 10px 'IBM Plex Mono', monospace;
+  text-align: right;
+}
+
+.accounting-note {
+  margin: 0 2px 20px;
+  color: var(--muted-2);
+  font-size: 10.5px;
+  line-height: 1.55;
+}
+
+.scroll-body { overflow-x: auto; }
+
+@media (max-width: 900px) {
+  .session-strip { grid-template-columns: 1fr; }
+  .strategy-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .summary-cell:nth-child(2) { border-right: 0; }
+  .summary-cell:nth-child(-n + 2) { border-bottom: 1px solid var(--line); }
+}
+
+@media (max-width: 560px) {
+  .strategy-card { padding: 12px 10px 0; }
+  .strategy-head { align-items: flex-start; }
+  .strategy-head p { max-width: 260px; line-height: 1.45; }
+  .strategy-card .rung-header-row { display: none; }
+  .summary-cell { padding: 8px; }
+  .summary-cell b { font-size: 10px; }
+  table.log { min-width: 920px; }
+  .session-clock { min-height: 52px; }
 }

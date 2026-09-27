@@ -5,8 +5,19 @@ import time
 from typing import Optional
 
 from . import config
-from .models import RungState, RungOrders, SimOrder, Side, OrderStatus, Outcome, WindowState
+from .fees import crypto_taker_fee, estimated_maker_rebate
+from .models import (
+    CapitalPool,
+    RungState,
+    RungOrders,
+    SimOrder,
+    Side,
+    OrderStatus,
+    Outcome,
+    WindowState,
+)
 from .polymarket_client import PolymarketClient, window_start_for, slug_for_window
+from .schedule import session_for_timestamp, session_status
 
 log = logging.getLogger("engine")
 
@@ -14,7 +25,31 @@ log = logging.getLogger("engine")
 class Engine:
     def __init__(self):
         self.client = PolymarketClient()
-        self.rungs: dict[float, RungState] = {p: RungState(price=p) for p in config.RUNG_PRICES}
+        self.capital_pools = {
+            price: CapitalPool(pair_price=price) for price in config.RUNG_PRICES
+        }
+        self.strategies: dict[str, dict[float, RungState]] = {
+            "weekday": {
+                price: RungState(
+                    price=price,
+                    pair_price=price,
+                    strategy="weekday",
+                    capital_pool=self.capital_pools[price],
+                )
+                for price in config.RUNG_PRICES
+            },
+            "weekend": {
+                reverse_price: RungState(
+                    price=reverse_price,
+                    pair_price=weekday_price,
+                    strategy="weekend",
+                    capital_pool=self.capital_pools[weekday_price],
+                )
+                for weekday_price, reverse_price in zip(
+                    config.RUNG_PRICES, config.REVERSE_RUNG_PRICES
+                )
+            },
+        }
         self.active_windows: dict[str, WindowState] = {}
         self.window_history: list[dict] = []   # archived, settled windows (light dicts)
         self._token_cache: dict[str, tuple[str, str]] = {}   # slug -> (up, down)
@@ -88,9 +123,17 @@ class Engine:
                 end_ts=cur_start + config.WINDOW_SECONDS,
                 up_token_id=up_id,
                 down_token_id=down_id,
+                strategy=session_for_timestamp(cur_start),
             )
             self.active_windows[cur_slug] = ws
-            self._log_event(f"Window {cur_slug} opened — placing rung orders.")
+            if ws.strategy:
+                self._log_event(
+                    f"Window {cur_slug} opened — {ws.strategy} paper strategy is active."
+                )
+            else:
+                self._log_event(
+                    f"Window {cur_slug} opened outside both trading sessions — price tracking only."
+                )
 
         # Process every active window
         for slug in list(self.active_windows.keys()):
@@ -119,14 +162,15 @@ class Engine:
     async def _process_window(self, ws: WindowState, now: float):
         elapsed = now - ws.start_ts
 
-        # Place resting orders exactly once, at window open, sized per rung's
-        # *current* independent state.
+        # Each session has independent rung sizing, but mirrored rungs share a
+        # paper capital pool.
         if not ws.orders_placed:
-            for price, rung in self.rungs.items():
-                ws.rungs[price] = RungOrders(
-                    up=SimOrder(side=Side.UP, price=price, size=rung.current_size),
-                    down=SimOrder(side=Side.DOWN, price=price, size=rung.current_size),
-                )
+            if ws.strategy:
+                for price, rung in self.strategies[ws.strategy].items():
+                    ws.rungs[price] = RungOrders(
+                        up=SimOrder(side=Side.UP, price=price, size=rung.current_size),
+                        down=SimOrder(side=Side.DOWN, price=price, size=rung.current_size),
+                    )
             ws.orders_placed = True
 
         if ws.settled:
@@ -140,34 +184,59 @@ class Engine:
         if down_price is not None:
             ws.last_down_price = down_price
 
-        # --- fill simulation, per rung, independent ---------------------
-        if elapsed < config.ORDER_CUTOFF_SECONDS:
+        # --- paper fill simulation, per strategy and rung ----------------
+        if ws.strategy and elapsed < config.ORDER_CUTOFF_SECONDS:
             for price, ro in ws.rungs.items():
                 if ro.filled_side is not None:
                     continue  # already resolved this rung for this window
                 up_ask = ws.last_up_price
                 down_ask = ws.last_down_price
-                if ro.up.status == OrderStatus.PENDING and up_ask is not None and up_ask <= price:
+                reverse = ws.strategy == "weekend"
+                up_triggered = (
+                    up_ask is not None and (up_ask >= price if reverse else up_ask <= price)
+                )
+                down_triggered = (
+                    down_ask is not None and (down_ask >= price if reverse else down_ask <= price)
+                )
+                if ro.up.status == OrderStatus.PENDING and up_triggered:
                     ro.up.status = OrderStatus.FILLED
-                    ro.up.fill_price = price
+                    ro.up.fill_price = up_ask if reverse else price
                     ro.up.filled_at = now
+                    if reverse:
+                        ro.up.fee_usd = crypto_taker_fee(ro.up.size, ro.up.fill_price)
+                    else:
+                        ro.up.maker_rebate_estimate = estimated_maker_rebate(
+                            ro.up.size, ro.up.fill_price
+                        )
                     ro.filled_side = Side.UP
                     if ro.down.status == OrderStatus.PENDING:
                         ro.down.status = OrderStatus.CANCELLED
                     self._log_event(
-                        f"[{ws.slug}] rung {price:.2f} UP filled @ {price:.2f} "
-                        f"({self.rungs[price].current_size} sh) — DOWN order cancelled."
+                        f"[{ws.slug}] {ws.strategy} rung {price:.2f} UP "
+                        f"{'market-buy simulated' if reverse else 'maker-limit simulated'} "
+                        f"@ {ro.up.fill_price:.3f} ({ro.up.size} sh; "
+                        f"fee ${ro.up.fee_usd:.5f}; estimated rebate "
+                        f"${ro.up.maker_rebate_estimate:.5f}) — DOWN cancelled."
                     )
-                elif ro.down.status == OrderStatus.PENDING and down_ask is not None and down_ask <= price:
+                elif ro.down.status == OrderStatus.PENDING and down_triggered:
                     ro.down.status = OrderStatus.FILLED
-                    ro.down.fill_price = price
+                    ro.down.fill_price = down_ask if reverse else price
                     ro.down.filled_at = now
+                    if reverse:
+                        ro.down.fee_usd = crypto_taker_fee(ro.down.size, ro.down.fill_price)
+                    else:
+                        ro.down.maker_rebate_estimate = estimated_maker_rebate(
+                            ro.down.size, ro.down.fill_price
+                        )
                     ro.filled_side = Side.DOWN
                     if ro.up.status == OrderStatus.PENDING:
                         ro.up.status = OrderStatus.CANCELLED
                     self._log_event(
-                        f"[{ws.slug}] rung {price:.2f} DOWN filled @ {price:.2f} "
-                        f"({self.rungs[price].current_size} sh) — UP order cancelled."
+                        f"[{ws.slug}] {ws.strategy} rung {price:.2f} DOWN "
+                        f"{'market-buy simulated' if reverse else 'maker-limit simulated'} "
+                        f"@ {ro.down.fill_price:.3f} ({ro.down.size} sh; "
+                        f"fee ${ro.down.fee_usd:.5f}; estimated rebate "
+                        f"${ro.down.maker_rebate_estimate:.5f}) — UP cancelled."
                     )
 
         self._assert_fill_priority(ws)
@@ -197,23 +266,38 @@ class Engine:
                 winner = Side.UP if up_p >= down_p else Side.DOWN
             ws.winner = winner
 
-            for price, ro in ws.rungs.items():
-                rung = self.rungs[price]
-                size_used = ro.up.size if ro.filled_side == Side.UP else (
-                    ro.down.size if ro.filled_side == Side.DOWN else rung.current_size
-                )
-                if ro.filled_side is None:
-                    outcome = Outcome.NO_FILL
-                elif ro.filled_side == winner:
-                    outcome = Outcome.WIN
-                else:
-                    outcome = Outcome.LOSS
-                rung.record_fill_outcome(ws.slug, ro.filled_side, size_used, outcome, now)
-                ro.settled = True
+            if ws.strategy:
+                for price, ro in ws.rungs.items():
+                    rung = self.strategies[ws.strategy][price]
+                    filled_order = (
+                        ro.up if ro.filled_side == Side.UP else
+                        ro.down if ro.filled_side == Side.DOWN else None
+                    )
+                    size_used = filled_order.size if filled_order else rung.current_size
+                    if ro.filled_side is None:
+                        outcome = Outcome.NO_FILL
+                    elif ro.filled_side == winner:
+                        outcome = Outcome.WIN
+                    else:
+                        outcome = Outcome.LOSS
+                    rung.record_fill_outcome(
+                        ws.slug,
+                        ro.filled_side,
+                        size_used,
+                        outcome,
+                        now,
+                        entry_price=filled_order.fill_price if filled_order else None,
+                        fee_usd=filled_order.fee_usd if filled_order else 0.0,
+                        maker_rebate_estimate=(
+                            filled_order.maker_rebate_estimate if filled_order else 0.0
+                        ),
+                    )
+                    ro.settled = True
 
             ws.settled = True
             self._log_event(
                 f"[{ws.slug}] SETTLED — winner {winner.value} "
+                f"({ws.strategy or 'inactive'} session) "
                 f"(UP {up_p:.3f} / DOWN {down_p:.3f})"
             )
 
@@ -225,13 +309,17 @@ class Engine:
         Any violation here means a real bug in the fill loop, not normal
         market behavior, so it's logged loudly rather than silently ignored.
         """
-        prices_desc = sorted(ws.rungs.keys(), reverse=True)  # 0.40 -> 0.25, most to least aggressive
+        # Weekday limits with the higher price are more aggressive. Reverse
+        # market triggers with the lower threshold are reached first.
+        prices_by_aggression = sorted(
+            ws.rungs.keys(), reverse=ws.strategy != "weekend"
+        )
         for side_attr in ("up", "down"):
             # Walk from the highest (most aggressive) price down to the lowest.
             # Once we've seen a higher-priced order still PENDING, no lower-priced
             # order on the same side should ever show FILLED.
             pending_higher_price = None
-            for price in prices_desc:
+            for price in prices_by_aggression:
                 order = getattr(ws.rungs[price], side_attr)
                 if order.status == OrderStatus.FILLED and pending_higher_price is not None:
                     self._log_event(
@@ -255,12 +343,20 @@ class Engine:
         elapsed = now - cur_start
         cutoff_remaining = max(0.0, config.ORDER_CUTOFF_SECONDS - elapsed)
         window_remaining = max(0.0, config.WINDOW_SECONDS - elapsed)
+        sessions = session_status(now)
 
-        total_pnl = sum(r.total_pnl for r in self.rungs.values())
-        total_trades = sum(r.total_trades for r in self.rungs.values())
-        total_wins = sum(r.wins for r in self.rungs.values())
-        total_capital = sum(r.capital_balance for r in self.rungs.values())
-        total_start_capital = sum(r.capital_start for r in self.rungs.values())
+        all_rungs = [
+            rung for strategy_rungs in self.strategies.values()
+            for rung in strategy_rungs.values()
+        ]
+        total_pnl = sum(r.total_pnl for r in all_rungs)
+        total_trades = sum(r.total_trades for r in all_rungs)
+        total_wins = sum(r.wins for r in all_rungs)
+        total_gross_pnl = sum(r.total_gross_pnl for r in all_rungs)
+        total_fees_paid = sum(r.total_fees_paid for r in all_rungs)
+        total_rebate_estimate = sum(r.total_maker_rebate_estimate for r in all_rungs)
+        total_capital = sum(pool.capital_balance for pool in self.capital_pools.values())
+        total_start_capital = sum(pool.capital_start for pool in self.capital_pools.values())
 
         # Open positions — filled, unsettled orders across all active windows,
         # marked to the current live price ("floating" P&L).
@@ -274,17 +370,24 @@ class Engine:
                 mark = ws.last_up_price if ro.filled_side == Side.UP else ws.last_down_price
                 entry = order.fill_price
                 size = order.size
-                unrealized = size * (mark - entry) if (mark is not None and entry is not None) else 0.0
+                gross_unrealized = (
+                    size * (mark - entry) if (mark is not None and entry is not None) else 0.0
+                )
+                unrealized = gross_unrealized - order.fee_usd
                 floating_pnl += unrealized
                 open_positions.append({
                     "window_slug": ws.slug,
+                    "strategy": ws.strategy,
                     "rung_price": price,
+                    "capital_pair": self.strategies[ws.strategy][price].pair_price,
                     "side": ro.filled_side.value,
                     "size": size,
                     "entry_price": entry,
                     "mark_price": mark,
                     "cost_basis": round(size * entry, 2),
                     "mark_value": round(size * mark, 2) if mark is not None else None,
+                    "fee_usd": round(order.fee_usd, 5),
+                    "maker_rebate_estimate": round(order.maker_rebate_estimate, 5),
                     "unrealized_pnl": round(unrealized, 2),
                     "window_remaining": round(max(0.0, ws.end_ts - now), 1),
                     "filled_at": order.filled_at,
@@ -292,32 +395,66 @@ class Engine:
         open_positions.sort(key=lambda p: p["rung_price"], reverse=True)
 
         recent_trades = []
-        for rung in self.rungs.values():
+        for rung in all_rungs:
             recent_trades.extend(rung.history[-25:])
         recent_trades.sort(key=lambda t: t.settled_at, reverse=True)
         recent_trades = recent_trades[:40]
 
+        strategy_snapshots = {}
+        for name, rung_states in self.strategies.items():
+            states = list(rung_states.values())
+            wins = sum(r.wins for r in states)
+            losses = sum(r.losses for r in states)
+            trades = wins + losses
+            strategy_snapshots[name] = {
+                "active": sessions[name]["active"],
+                "schedule": sessions[name]["schedule"],
+                "rung_prices": list(rung_states.keys()),
+                "realized_pnl": round(sum(r.total_pnl for r in states), 2),
+                "gross_pnl": round(sum(r.total_gross_pnl for r in states), 2),
+                "fees_paid": round(sum(r.total_fees_paid for r in states), 5),
+                "maker_rebate_estimate": round(
+                    sum(r.total_maker_rebate_estimate for r in states), 5
+                ),
+                "wins": wins,
+                "losses": losses,
+                "no_fills": sum(r.no_fills for r in states),
+                "total_trades": trades,
+                "win_rate": round((wins / trades * 100) if trades else 0.0, 1),
+                "rungs": [rung_states[p].to_dict() for p in rung_states],
+            }
+
         return {
             "server_time": now,
             "mode": "PAPER TRADING",
+            "sessions": sessions,
             "current_window": {
                 "slug": cur_slug,
                 "elapsed": round(elapsed, 1),
                 "cutoff_remaining": round(cutoff_remaining, 1),
                 "window_remaining": round(window_remaining, 1),
                 "past_cutoff": elapsed >= config.ORDER_CUTOFF_SECONDS,
+                "strategy": session_for_timestamp(cur_start),
             },
             "config": {
                 "rung_prices": config.RUNG_PRICES,
+                "reverse_rung_prices": config.REVERSE_RUNG_PRICES,
                 "base_size": config.BASE_SIZE,
                 "size_step": config.SIZE_STEP,
                 "floor_size": config.FLOOR_SIZE,
-                "capital_per_rung": config.CAPITAL_PER_RUNG,
+                "capital_per_pair": config.CAPITAL_PER_PAIR,
                 "order_cutoff_seconds": config.ORDER_CUTOFF_SECONDS,
                 "window_seconds": config.WINDOW_SECONDS,
+                "taker_fee_rate": config.TAKER_FEE_RATE,
+                "maker_rebate_pool_share": config.MAKER_REBATE_POOL_SHARE,
+                "maker_rebate_estimate_factor": config.MAKER_REBATE_ESTIMATE_FACTOR,
             },
+            "strategies": strategy_snapshots,
             "aggregate": {
                 "realized_pnl": round(total_pnl, 2),
+                "gross_pnl": round(total_gross_pnl, 2),
+                "fees_paid": round(total_fees_paid, 5),
+                "maker_rebate_estimate": round(total_rebate_estimate, 5),
                 "floating_pnl": round(floating_pnl, 2),
                 "combined_pnl": round(total_pnl + floating_pnl, 2),
                 "total_pnl": round(total_pnl, 2),   # kept for backwards-compat
@@ -329,7 +466,6 @@ class Engine:
                 "roi_pct": round(((total_capital + floating_pnl - total_start_capital) / total_start_capital * 100)
                                   if total_start_capital else 0.0, 2),
             },
-            "rungs": [self.rungs[p].to_dict() for p in config.RUNG_PRICES],
             "active_windows": [w.to_dict() for w in self.active_windows.values()],
             "open_positions": open_positions,
             "recent_trades": [t.to_dict() for t in recent_trades],

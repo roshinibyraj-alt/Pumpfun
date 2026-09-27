@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BTC 5m Rung Bot — Paper Trading</title>
+<title>BTC 5m Strategies — Paper Trading</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -11,8 +11,8 @@
 
   <header class="top">
     <div class="brand">
-      <h1>BTC 5m Rung Bot</h1>
-      <span class="sub">Polymarket up/down · independent rung strategy</span>
+      <h1>BTC 5m Strategies</h1>
+      <span class="sub">Polymarket up/down · weekday maker + weekend inverse · demo only</span>
     </div>
     <div style="display:flex; align-items:center; gap:12px;">
       <span class="mode-pill" id="modePill">PAPER TRADING</span>
@@ -35,26 +35,61 @@
   <div class="positions-wrap" id="positionsWrap"></div>
 
   <div class="section-title">
-    <span>RUNGS — each independent, $5,000 allocated, resets on loss</span>
-    <span class="hint">win → size −100 (floor 100) · loss → reset to 500</span>
+    <span>STRATEGIES — separate sizing and performance; paired rungs share tracked capital</span>
+    <span class="hint">win → size −100 (floor 100) · loss → reset to 500 · no balance cap</span>
   </div>
-  <div class="rung-header-row mono">
-    <span>RUNG</span><span>ORDERS / POSITION</span><span>SIZE (now → next win)</span><span>FLOATING P&amp;L / REALIZED</span>
-  </div>
-  <div class="rungs" id="rungBoard"></div>
+  <div class="session-strip" id="sessionStrip"></div>
+
+  <section class="strategy-card" id="weekdayCard">
+    <div class="strategy-head">
+      <div>
+        <h2>WEEKDAY MAKER STRATEGY</h2>
+        <p>Mon 06:00–Fri 15:30 Brisbane · resting limit buys at 0.40 / 0.35 / 0.30 / 0.25</p>
+      </div>
+      <span class="strategy-state" id="weekdayState">—</span>
+    </div>
+    <div class="strategy-summary" id="weekdaySummary"></div>
+    <div class="rung-header-row mono">
+      <span>RUNG</span><span>ORDERS / POSITION</span><span>SIZE (now → next win)</span><span>NET P&amp;L / SHARED CAPITAL</span>
+    </div>
+    <div class="rungs" id="weekdayRungs"></div>
+  </section>
+
+  <section class="strategy-card weekend-card" id="weekendCard">
+    <div class="strategy-head">
+      <div>
+        <h2>WEEKEND INVERSE STRATEGY</h2>
+        <p>Fri 18:00–Sun 22:00 Brisbane · market-buy triggers at 0.60 / 0.65 / 0.70 / 0.75</p>
+      </div>
+      <span class="strategy-state" id="weekendState">—</span>
+    </div>
+    <div class="strategy-summary" id="weekendSummary"></div>
+    <div class="rung-header-row mono">
+      <span>RUNG</span><span>TRIGGERS / POSITION</span><span>SIZE (now → next win)</span><span>NET P&amp;L / SHARED CAPITAL</span>
+    </div>
+    <div class="rungs" id="weekendRungs"></div>
+  </section>
+
+  <p class="accounting-note">
+    Paper-only accounting. Weekend buys use the simulated execution ask and Polymarket’s
+    crypto taker-fee curve. Weekday maker rebates are shown as estimates only: actual payouts
+    depend on each market’s daily pro-rata rebate pool. The 20% estimate is a paper proxy, not
+    a calculated account payout. Rebates are shown separately and excluded from realized P&amp;L
+    and shared capital until an actual payout is known.
+  </p>
 
   <div class="section-title">PORTFOLIO</div>
   <div class="agg mono" id="aggStrip"></div>
 
   <div class="grid2">
     <div class="panel">
-      <div class="panel-head">TRADE LOG — most recent settlements across all rungs</div>
+      <div class="panel-head">TRADE LOG — recent settlements across both strategies</div>
       <div class="scroll-body">
         <table class="log mono">
           <thead>
             <tr>
-              <th>TIME</th><th>WINDOW</th><th>RUNG</th><th>SIDE</th>
-              <th>SIZE</th><th>COST</th><th>RESULT</th><th>PNL</th>
+              <th>TIME</th><th>WINDOW</th><th>BOT</th><th>RUNG</th><th>SIDE</th>
+              <th>SIZE</th><th>COST</th><th>FEE</th><th>REBATE EST.</th><th>RESULT</th><th>PNL</th>
             </tr>
           </thead>
           <tbody id="logBody"></tbody>
