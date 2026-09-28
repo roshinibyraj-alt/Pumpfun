@@ -21,7 +21,7 @@ class CopyEngine:
         self.seen_trade_keys: set[str] = set()
         self.last_seen_ts: float = 0.0
 
-        # capped demo ledger — this is the actual $10,000 paper account
+        # capped demo ledger — this is the actual $50,000 paper account
         self.cash_balance: float = config.DEMO_CAPITAL
         self.realized_pnl: float = 0.0
         self.peak_capital_deployed: float = 0.0   # high-water mark of capped capital in use

@@ -8,7 +8,7 @@ MASTER_WALLET = os.getenv("MASTER_WALLET", "0x2005d16a84ceefa912d4e380cd32e7ff82
 
 # ---- Copy parameters ----------------------------------------------------
 COPY_RATIO = 0.10               # copy 10% of every master position/trade
-DEMO_CAPITAL = 10_000.0         # starting paper bankroll
+DEMO_CAPITAL = 50_000.0         # starting paper bankroll
 
 # ---- APIs (all public, no auth required) ---------------------------------
 DATA_API = "https://data-api.polymarket.com"

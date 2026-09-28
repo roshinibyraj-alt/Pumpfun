@@ -7,7 +7,7 @@ capital would you actually need to copy this wallet?*
 
 Default master wallet: `0x2005d16a84ceefa912d4e380cd32e7ff827875ea`
 (override with the `MASTER_WALLET` env var). Default copy ratio: **10%**.
-Default demo capital: **$10,000**.
+Default demo capital: **$50,000**.
 
 ## What it does
 
@@ -18,7 +18,7 @@ Default demo capital: **$10,000**.
    few seconds. Every new BUY or SELL is copied at 10% of the shares
    traded, in the same market and outcome.
 3. **Two ledgers, side by side:**
-   - **Demo ledger** (capped): the actual $10,000 paper account. If a
+   - **Demo ledger** (capped): the actual $50,000 paper account. If a
      copy signal costs more than the remaining cash, it's filled as far
      as the cash allows (`PARTIAL_FILL`) or skipped entirely if cash is
      already at zero (`SKIPPED`) — both are logged and shown in the feed.
@@ -27,7 +27,7 @@ Default demo capital: **$10,000**.
      This is the dashboard's hero number — the real answer to "how much
      capital do I need to run this strategy without ever being
      cash-constrained."
-4. **Dashboard**: a hero gauge comparing the $10,000 demo capital against
+4. **Dashboard**: a hero gauge comparing the $50,000 demo capital against
    the peak capital actually required, max/min/avg cost per copied trade,
    live open positions marked to market (floating P&L), and a full feed
    of every copy action taken.
