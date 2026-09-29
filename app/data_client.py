@@ -54,34 +54,6 @@ class DataClient:
             log.warning("GET %s%s %s failed: %s", base, path, params, e)
             return None
 
-    # ---- positions ----------------------------------------------------
-    async def get_open_positions(self, wallet: str) -> list[dict]:
-        """Raw rows from /v2/positions?user=&status=OPEN, normalized to a
-        common shape regardless of the exact upstream field names."""
-        data = await self._get(config.DATA_API, "/v2/positions", {
-            "user": wallet, "status": "OPEN", "limit": 500,
-        })
-        rows = (data or {}).get("data") or []
-        out = []
-        for row in rows:
-            token_id = _s(row, "token_id", "asset_id", "position_id")
-            size = _f(row, "size", "current_size", "tokens", default=0.0)
-            if not token_id or not size or size < config.POSITION_DUST_SHARES:
-                continue
-            out.append({
-                "token_id": token_id,
-                "condition_id": _s(row, "condition_id", "conditionId", "market"),
-                "market_title": _s(row, "title", "market_title", "question", default="Unknown market"),
-                "outcome_label": _s(row, "outcome", "outcome_label", default="?"),
-                "slug": _s(row, "slug", "market_slug"),
-                "icon": _s(row, "icon", "image", "icon_url"),
-                "size": size,
-                "avg_price": _f(row, "avg_price", "entry_avg_price_usdc", "avgPrice", default=None),
-                "current_price": _f(row, "current_price", "currentPrice", default=None),
-                "entry_cost_usdc": _f(row, "entry_cost_usdc", "initial_value", default=None),
-            })
-        return out
-
     # ---- trades ---------------------------------------------------------
     async def get_recent_trades(self, wallet: str, limit: int = 50) -> list[dict]:
         """Raw rows from /v2/trades?user=, newest first, normalized."""

@@ -7,18 +7,21 @@ capital would you actually need to copy this wallet?*
 
 Default master wallet: `0x2005d16a84ceefa912d4e380cd32e7ff827875ea`
 (override with the `MASTER_WALLET` env var). Default copy ratio: **10%**.
-Default demo capital: **$50,000**.
+Default demo capital: **$10,000**.
 
 ## What it does
 
-1. **Bootstrap** — on startup, fetches the master wallet's current open
-   positions (`/v2/positions`) and copies each one at 10% of its size,
-   using demo capital, as if the bot had been mirroring it all along.
-2. **Live copying** — polls the master's trade feed (`/v2/trades`) every
-   few seconds. Every new BUY or SELL is copied at 10% of the shares
-   traded, in the same market and outcome.
+1. **Startup** — the bot deliberately does **not** copy whatever the
+   master wallet already had open before it started. It fetches their
+   recent trade history purely to mark it as "already seen," so none of
+   it gets mistaken for a new signal.
+2. **Live copying** — from that point on, it polls the master's trade
+   feed (`/v2/trades`) every few seconds. Every new BUY or SELL placed by
+   the master **after the bot started** is copied at 10% of the shares
+   traded, in the same market and outcome. Trades that predate the bot's
+   startup are never copied, even if the resulting position is still open.
 3. **Two ledgers, side by side:**
-   - **Demo ledger** (capped): the actual $50,000 paper account. If a
+   - **Demo ledger** (capped): the actual $10,000 paper account. If a
      copy signal costs more than the remaining cash, it's filled as far
      as the cash allows (`PARTIAL_FILL`) or skipped entirely if cash is
      already at zero (`SKIPPED`) — both are logged and shown in the feed.
@@ -27,7 +30,7 @@ Default demo capital: **$50,000**.
      This is the dashboard's hero number — the real answer to "how much
      capital do I need to run this strategy without ever being
      cash-constrained."
-4. **Dashboard**: a hero gauge comparing the $50,000 demo capital against
+4. **Dashboard**: a hero gauge comparing the $10,000 demo capital against
    the peak capital actually required, max/min/avg cost per copied trade,
    live open positions marked to market (floating P&L), and a full feed
    of every copy action taken.
@@ -49,10 +52,11 @@ Default demo capital: **$50,000**.
   the first batch.
 - **Sell sizing**: a SELL is copied as 10% of the shares the master sold,
   capped at whatever we currently hold in that token (never a negative
-  position). Over a long run this should track ~10% of the master's
-  position closely, but can drift slightly if the bot starts mid-way
-  through a position the master built up over many small trades before
-  bootstrap.
+  position). Because pre-existing positions are never copied, if the
+  master sells shares from a position they opened *before* the bot
+  started, we hold nothing in that token and the sell is simply skipped
+  (logged, not an error) — there's nothing for us to sell. Only positions
+  the master opens *after* the bot starts are tracked share-for-share.
 - This is **not** connected to a real wallet or the CLOB trading API —
   it cannot place, cancel, or ever touch a real order.
 
@@ -63,7 +67,7 @@ app/
   config.py         master wallet, copy ratio, demo capital, timing
   models.py          CopiedPosition / CopyTradeRecord
   data_client.py      Polymarket Data API + CLOB price client (no auth)
-  engine.py            bootstrap, live copy loop, dual capital ledgers
+  engine.py            startup, live copy loop, dual capital ledgers
   main.py               FastAPI app, REST snapshot, websocket feed
 static/
   index.html, style.css, app.js    the dashboard (no build step)

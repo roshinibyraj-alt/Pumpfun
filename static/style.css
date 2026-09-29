@@ -310,7 +310,6 @@ header.top {
 .feed-row .figures .cost { color: var(--text); font-weight: 600; font-family: 'Space Grotesk', sans-serif; }
 .feed-row .figures .cost.credit { color: var(--emerald); }
 .note-tag { display: inline-block; font-size: 9.5px; font-weight: 600; padding: 1px 6px; border-radius: 3px; margin-top: 3px; }
-.note-tag.BOOTSTRAP { color: var(--violet); background: rgba(167,139,250,0.12); }
 .note-tag.LIVE_COPY { color: var(--cyan); background: rgba(79,209,232,0.12); }
 .note-tag.PARTIAL_FILL { color: var(--amber); background: rgba(245,165,36,0.12); }
 .note-tag.SKIPPED { color: var(--muted); background: rgba(137,146,184,0.12); }

@@ -13,7 +13,6 @@ class Side(str, Enum):
 
 
 class TradeNote(str, Enum):
-    BOOTSTRAP = "BOOTSTRAP"          # initial copy of a position the master already held
     LIVE_COPY = "LIVE_COPY"          # full copy of a new master trade
     PARTIAL_FILL = "PARTIAL_FILL"    # demo cash ran short, copied a smaller size than 10%
     SKIPPED = "SKIPPED"              # demo cash was zero, no shares copied at all

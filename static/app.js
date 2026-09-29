@@ -48,9 +48,9 @@ function renderHero(snap) {
 
   const noteEl = document.getElementById('heroNote');
   if (!snap.bootstrapped) {
-    noteEl.textContent = 'Bootstrapping — copying the master wallet\'s current open positions now.';
+    noteEl.textContent = 'Initializing — existing open positions are not copied, only new trades from here on.';
   } else if (cr.total_buy_signals === 0) {
-    noteEl.textContent = 'No buy signals copied yet — this fills in as the master wallet trades.';
+    noteEl.textContent = 'No new trades from the master wallet yet — this fills in as soon as they place one.';
   } else {
     noteEl.textContent = `Based on ${cr.total_buy_signals} buy signal${cr.total_buy_signals===1?'':'s'} copied so far at ${(snap.config.copy_ratio*100).toFixed(0)}% size — this is the peak amount that was ever committed at once, uncapped by the $${demoCapital.toLocaleString()} demo limit.`;
   }

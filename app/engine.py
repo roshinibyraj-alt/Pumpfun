@@ -21,7 +21,7 @@ class CopyEngine:
         self.seen_trade_keys: set[str] = set()
         self.last_seen_ts: float = 0.0
 
-        # capped demo ledger — this is the actual $50,000 paper account
+        # capped demo ledger — this is the actual $10,000 paper account
         self.cash_balance: float = config.DEMO_CAPITAL
         self.realized_pnl: float = 0.0
         self.peak_capital_deployed: float = 0.0   # high-water mark of capped capital in use
@@ -108,7 +108,7 @@ class CopyEngine:
         while True:
             try:
                 if not self.bootstrapped:
-                    await self._bootstrap()
+                    await self._initialize()
                 else:
                     await self._poll_new_trades()
                 await self._refresh_prices()
@@ -119,60 +119,25 @@ class CopyEngine:
             await self._broadcast()
             await asyncio.sleep(config.TRADE_POLL_SECONDS)
 
-    # ---- bootstrap: copy everything the master currently holds -----------
-    async def _bootstrap(self):
-        self._log_event(f"Fetching {self.master_wallet}'s current open positions…")
-        positions = await self.client.get_open_positions(self.master_wallet)
-        if positions:
-            for row in positions:
-                master_size = row["size"]
-                price = row.get("current_price") or row.get("avg_price")
-                if price is None:
-                    price = await self.client.get_price(row["token_id"], side="sell")
-                if price is None:
-                    self._log_event(
-                        f"Skipped bootstrap of {row['market_title']} ({row['outcome_label']}) "
-                        f"— no price available.", level="error"
-                    )
-                    continue
-
-                copy_size = master_size * config.COPY_RATIO
-                ideal_cost = copy_size * price
-                self._record_ideal_buy_signal(ideal_cost)
-
-                demo_size, demo_cost, note = self._apply_capped_buy(copy_size, price)
-                pos = self._get_or_create_position(row)
-                self._add_to_position(pos, demo_size, price)
-                pos.master_size_at_last_sync = master_size
-
-                rec = CopyTradeRecord(
-                    id=next_trade_id(), timestamp=time.time(), token_id=row["token_id"],
-                    market_title=row["market_title"], outcome_label=row["outcome_label"],
-                    side=Side.BUY, note=note,
-                    master_trade_size=master_size, ideal_copy_size=copy_size, ideal_cost=ideal_cost,
-                    demo_copy_size=demo_size, demo_cost=demo_cost, price=price,
-                    cash_after=self.cash_balance,
-                )
-                self._push_trade(rec)
-                self._touch_peak()
-                self._touch_ideal_peak()
-
-            self._log_event(
-                f"Bootstrap complete — copied {len(positions)} existing position(s) at "
-                f"{config.COPY_RATIO*100:.0f}% size."
-            )
-        else:
-            self._log_event("Master wallet has no open positions right now — starting flat.")
-
-        # Seed the "already seen" set with recent trades so the live poller
-        # doesn't replay history already captured by the position bootstrap.
-        recent = await self.client.get_recent_trades(self.master_wallet, limit=config.BOOTSTRAP_TRADE_LOOKBACK)
+    # ---- initialize: copy NOTHING the master already holds ----------------
+    # By design this bot only mirrors trades placed from the moment it starts
+    # onward. Whatever the master already had open before that is ignored —
+    # we still fetch their recent trade history, but purely to mark it as
+    # "already seen" so the live poller never replays it as a new signal.
+    async def _initialize(self):
+        self._log_event(
+            f"Initializing — this bot only copies NEW trades placed by "
+            f"{self.master_wallet} from this point forward. Existing open "
+            f"positions are intentionally NOT copied."
+        )
+        recent = await self.client.get_recent_trades(self.master_wallet, limit=config.STARTUP_TRADE_LOOKBACK)
         for t in recent:
             self.seen_trade_keys.add(t["key"])
             if t["timestamp"] > self.last_seen_ts:
                 self.last_seen_ts = t["timestamp"]
 
         self.bootstrapped = True
+        self._log_event("Ready — watching the master wallet for new trades.")
 
     # ---- live loop: copy every new fill from the master -------------------
     async def _poll_new_trades(self):
@@ -230,7 +195,7 @@ class CopyEngine:
         full_cost = copy_size * price
         if full_cost <= self.cash_balance:
             self.cash_balance -= full_cost
-            return copy_size, full_cost, TradeNote.LIVE_COPY if self.bootstrapped else TradeNote.BOOTSTRAP
+            return copy_size, full_cost, TradeNote.LIVE_COPY
         if self.cash_balance > 0:
             size = self.cash_balance / price
             cost = self.cash_balance
