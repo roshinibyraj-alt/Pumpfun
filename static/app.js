@@ -122,7 +122,31 @@ function renderFeed(snap) {
   const body = document.getElementById('feedBody');
   const trades = snap.recent_trades || [];
   body.innerHTML = trades.map(t => {
+    const isSettlement = t.note === 'SETTLED_WIN' || t.note === 'SETTLED_LOSS';
     const isBuy = t.side === 'BUY';
+
+    if (isSettlement) {
+      const won = t.note === 'SETTLED_WIN';
+      const rowCls = won ? 'sell-profit' : 'sell-loss';
+      const desc = `
+        <span style="color:${won ? 'var(--emerald)' : 'var(--rose)'}; font-weight:600;">
+          ${won ? 'Settled WIN' : 'Settled LOSS'}
+        </span>
+        <span class="mkt">${t.market_title}</span> (${t.outcome_label}) —
+        mark price hit ${won ? `≥ ${(0.99).toFixed(2)}` : `≤ ${(0.01).toFixed(2)}`}, closed at $${t.price.toFixed(2)}/share
+        <br><span style="color:var(--muted)">${fmtShares(t.demo_copy_size)} sh settled</span>
+        <span class="note-tag ${t.note}">${t.note.replace('_',' ')}</span>`;
+      return `
+        <div class="feed-row ${rowCls}">
+          <span class="time">${timeAgo(t.timestamp)}</span>
+          <div class="desc">${desc}</div>
+          <div class="figures">
+            <div class="cost ${won ? 'credit' : ''}">${won ? '+' : ''}${fmtMoney(t.demo_cost)}</div>
+            <div style="color:${t.realized_pnl>=0?'var(--emerald)':'var(--rose)'}; font-size:11px;">${pnlSign(t.realized_pnl)}${fmtMoney(t.realized_pnl)} realized</div>
+          </div>
+        </div>`;
+    }
+
     let rowCls = isBuy ? 'buy' : (t.realized_pnl >= 0 ? 'sell-profit' : 'sell-loss');
     const sideSpan = isBuy
       ? `<span class="side-buy">Master bought</span>`

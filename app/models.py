@@ -17,6 +17,8 @@ class TradeNote(str, Enum):
     PARTIAL_FILL = "PARTIAL_FILL"    # demo cash ran short, copied a smaller size than 10%
     SKIPPED = "SKIPPED"              # demo cash was zero, no shares copied at all
     CLOSE = "CLOSE"                  # a sell that fully closed our copied position
+    SETTLED_WIN = "SETTLED_WIN"      # mark price hit the win threshold — closed at $1.00/share
+    SETTLED_LOSS = "SETTLED_LOSS"    # mark price hit the loss threshold — closed at $0.00/share
 
 
 @dataclass

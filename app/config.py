@@ -27,6 +27,15 @@ HTTP_TIMEOUT = 8.0
 # NEW trade the master places from that moment forward.
 STARTUP_TRADE_LOOKBACK = 200   # trades fetched at startup just to seed the "already seen" set
 
+# ---- Auto-settlement ----------------------------------------------------
+# A market at these price extremes is effectively decided. Rather than wait
+# for Polymarket's on-chain resolution, a held position is closed out here
+# and for good the moment its mark price crosses either threshold: winner
+# pays $1.00/share, loser pays $0.00/share. This updates realized P&L and
+# cash immediately.
+SETTLE_WIN_PRICE = 0.99          # mark price >= this -> settle as WIN, $1.00/share
+SETTLE_LOSS_PRICE = 0.01         # mark price <= this -> settle as LOSS, $0.00/share
+
 # ---- History / limits -------------------------------------------------
 MAX_TRADE_LOG = 500
 POSITION_DUST_SHARES = 0.5      # a position below this is treated as fully closed

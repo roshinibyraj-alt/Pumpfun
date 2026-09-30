@@ -245,7 +245,7 @@ class CopyEngine:
         if len(self.trade_log) > config.MAX_TRADE_LOG:
             self.trade_log.pop(0)
 
-    # ---- price refresh ---------------------------------------------------
+    # ---- price refresh + auto-settlement -----------------------------------
     async def _refresh_prices(self):
         for pos in self.positions.values():
             if pos.our_size <= 0:
@@ -253,6 +253,46 @@ class CopyEngine:
             price = await self.client.get_price(pos.token_id, side="sell")
             if price is not None:
                 pos.mark_price = price
+            self._maybe_auto_settle(pos)
+
+    def _maybe_auto_settle(self, pos: CopiedPosition):
+        """A market at these price extremes is effectively decided. Close the
+        position immediately at $1.00/share (win) or $0.00/share (loss) rather
+        than waiting for on-chain resolution, and book the P&L for real."""
+        if pos.our_size <= 0 or pos.mark_price is None:
+            return
+        if pos.mark_price >= config.SETTLE_WIN_PRICE:
+            self._settle_position(pos, settlement_price=1.0, note=TradeNote.SETTLED_WIN, label="WIN")
+        elif pos.mark_price <= config.SETTLE_LOSS_PRICE:
+            self._settle_position(pos, settlement_price=0.0, note=TradeNote.SETTLED_LOSS, label="LOSS")
+
+    def _settle_position(self, pos: CopiedPosition, settlement_price: float, note: TradeNote, label: str):
+        size = pos.our_size
+        proceeds = size * settlement_price
+        cost_removed = pos.cost_basis
+        realized = proceeds - cost_removed
+
+        pos.our_size = 0.0
+        pos.cost_basis = 0.0
+        pos.realized_pnl += realized
+        self.cash_balance += proceeds
+        self.realized_pnl += realized
+
+        rec = CopyTradeRecord(
+            id=next_trade_id(), timestamp=time.time(), token_id=pos.token_id,
+            market_title=pos.market_title, outcome_label=pos.outcome_label,
+            side=Side.SELL, note=note,
+            master_trade_size=0.0, ideal_copy_size=0.0, ideal_cost=0.0,
+            demo_copy_size=size, demo_cost=proceeds, price=settlement_price,
+            cash_after=self.cash_balance, realized_pnl=realized,
+        )
+        self._push_trade(rec)
+        self._log_event(
+            f"{pos.market_title} ({pos.outcome_label}) SETTLED as {label} — mark price crossed "
+            f"{'%.2f' % config.SETTLE_WIN_PRICE if label=='WIN' else '%.2f' % config.SETTLE_LOSS_PRICE}. "
+            f"Closed {size:.2f} sh @ ${settlement_price:.2f}/share, "
+            f"realized {'+' if realized >= 0 else ''}{realized:.2f}."
+        )
 
     async def _maybe_refresh_stats(self):
         now = time.time()

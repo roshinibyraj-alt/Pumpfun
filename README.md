@@ -30,10 +30,16 @@ Default demo capital: **$10,000**.
      This is the dashboard's hero number — the real answer to "how much
      capital do I need to run this strategy without ever being
      cash-constrained."
-4. **Dashboard**: a hero gauge comparing the $10,000 demo capital against
+4. **Auto-settlement**: rather than wait for Polymarket's on-chain
+   resolution, a held position is closed out the moment its mark price
+   crosses an extreme — **≥ 0.99 pays out $1.00/share (WIN)**, **≤ 0.01
+   pays $0.00/share (LOSS)** — both booked immediately as realized P&L
+   and reflected in the cash balance. Thresholds are in `app/config.py`
+   (`SETTLE_WIN_PRICE`, `SETTLE_LOSS_PRICE`).
+5. **Dashboard**: a hero gauge comparing the $10,000 demo capital against
    the peak capital actually required, max/min/avg cost per copied trade,
    live open positions marked to market (floating P&L), and a full feed
-   of every copy action taken.
+   of every copy action and settlement taken.
 
 ## Known limitations (read before relying on this)
 
