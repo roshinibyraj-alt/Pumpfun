@@ -6,8 +6,8 @@ ever signed or sent. It exists to answer one question concretely: *how much
 capital would you actually need to copy this wallet?*
 
 Default master wallet: `0x2005d16a84ceefa912d4e380cd32e7ff827875ea`
-(override with the `MASTER_WALLET` env var). Default copy ratio: **10%**.
-Default demo capital: **$10,000**.
+(override with the `MASTER_WALLET` env var). Default copy ratio: **1%**.
+Default demo capital: **$1,000**.
 
 ## What it does
 
@@ -17,26 +17,33 @@ Default demo capital: **$10,000**.
    it gets mistaken for a new signal.
 2. **Live copying** — from that point on, it polls the master's trade
    feed (`/v2/trades`) every few seconds. Every new BUY or SELL placed by
-   the master **after the bot started** is copied at 10% of the shares
+   the master **after the bot started** is copied at 1% of the shares
    traded, in the same market and outcome. Trades that predate the bot's
    startup are never copied, even if the resulting position is still open.
 3. **Two ledgers, side by side:**
-   - **Demo ledger** (capped): the actual $10,000 paper account. If a
+   - **Demo ledger** (capped): the actual $1,000 paper account. If a
      copy signal costs more than the remaining cash, it's filled as far
      as the cash allows (`PARTIAL_FILL`) or skipped entirely if cash is
      already at zero (`SKIPPED`) — both are logged and shown in the feed.
-   - **Capital-required ledger** (uncapped): tracks what 10%-of-master
-     would have cost with **no** spending limit, and its peak over time.
-     This is the dashboard's hero number — the real answer to "how much
-     capital do I need to run this strategy without ever being
-     cash-constrained."
+   - **Capital-required ledger** (uncapped): a *mirror* of the real
+     position book, kept per market/outcome, but never constrained by
+     cash. At every moment it's the sum of ideal cost basis across
+     positions that are **currently open only** — a position's ideal side
+     is zeroed the instant it closes, whether that's the master selling
+     out or the position auto-settling at TP/zero (see below). The
+     dashboard's hero number is the **peak** of that sum over time — the
+     highest amount of capital ever committed at once — which is the real
+     answer to "how much capital do I need to run this strategy without
+     ever being cash-constrained." This is recomputed fresh from the open
+     positions every tick rather than accumulated by hand, specifically so
+     a settled position's capital is always correctly freed.
 4. **Auto-settlement**: rather than wait for Polymarket's on-chain
    resolution, a held position is closed out the moment its mark price
    crosses an extreme — **≥ 0.99 pays out $1.00/share (WIN)**, **≤ 0.01
    pays $0.00/share (LOSS)** — both booked immediately as realized P&L
    and reflected in the cash balance. Thresholds are in `app/config.py`
    (`SETTLE_WIN_PRICE`, `SETTLE_LOSS_PRICE`).
-5. **Dashboard**: a hero gauge comparing the $10,000 demo capital against
+5. **Dashboard**: a hero gauge comparing the $1,000 demo capital against
    the peak capital actually required, max/min/avg cost per copied trade,
    live open positions marked to market (floating P&L), and a full feed
    of every copy action and settlement taken.
@@ -56,7 +63,7 @@ Default demo capital: **$10,000**.
   dedupes by a composite key regardless, so a different default order
   from the API would not cause replays, just a one-tick delay in seeing
   the first batch.
-- **Sell sizing**: a SELL is copied as 10% of the shares the master sold,
+- **Sell sizing**: a SELL is copied as 1% of the shares the master sold,
   capped at whatever we currently hold in that token (never a negative
   position). Because pre-existing positions are never copied, if the
   master sells shares from a position they opened *before* the bot

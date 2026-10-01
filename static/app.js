@@ -114,6 +114,7 @@ function renderPositions(snap) {
           <div>cost basis <b>${fmtMoney(p.cost_basis)}</b></div>
         </div>
         ${ratio !== null ? `<div class="ratio-note">tracking ${ratio.toFixed(1)}% of master's ${fmtShares(p.master_size_at_last_sync)} sh</div>` : ''}
+        <div class="ratio-note">capital required here (uncapped): <b style="color:var(--text)">${fmtMoney(p.ideal_cost_basis)}</b></div>
       </div>`;
   }).join('')}</div>`;
 }

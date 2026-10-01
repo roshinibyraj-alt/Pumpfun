@@ -14,7 +14,7 @@ class Side(str, Enum):
 
 class TradeNote(str, Enum):
     LIVE_COPY = "LIVE_COPY"          # full copy of a new master trade
-    PARTIAL_FILL = "PARTIAL_FILL"    # demo cash ran short, copied a smaller size than 10%
+    PARTIAL_FILL = "PARTIAL_FILL"    # demo cash ran short, copied a smaller size than 1%
     SKIPPED = "SKIPPED"              # demo cash was zero, no shares copied at all
     CLOSE = "CLOSE"                  # a sell that fully closed our copied position
     SETTLED_WIN = "SETTLED_WIN"      # mark price hit the win threshold — closed at $1.00/share
@@ -34,6 +34,14 @@ class CopiedPosition:
     our_size: float = 0.0            # shares we (the copy bot) hold
     avg_entry_price: float = 0.0     # our own weighted-average cost per share
     cost_basis: float = 0.0          # our_size * avg_entry_price, tracked directly for accuracy
+
+    # the SAME position, mirrored with no demo-cash cap — this is what
+    # answers "how much capital would this position actually need". It
+    # opens, scales and closes (incl. on auto-settlement) exactly in step
+    # with the real demo position, just never constrained by cash.
+    ideal_size: float = 0.0
+    ideal_avg_price: float = 0.0
+    ideal_cost_basis: float = 0.0
 
     master_size_at_last_sync: float = 0.0   # master's last-known share count in this token, for comparison
 
@@ -61,6 +69,7 @@ class CopiedPosition:
             "our_size": round(self.our_size, 4),
             "avg_entry_price": round(self.avg_entry_price, 4),
             "cost_basis": round(self.cost_basis, 2),
+            "ideal_cost_basis": round(self.ideal_cost_basis, 2),
             "master_size_at_last_sync": round(self.master_size_at_last_sync, 4),
             "mark_price": self.mark_price,
             "current_value": round(self.current_value, 2),
@@ -82,7 +91,7 @@ class CopyTradeRecord:
     note: TradeNote
 
     master_trade_size: float         # shares the MASTER traded
-    ideal_copy_size: float           # 10% of that, uncapped
+    ideal_copy_size: float           # 1% of that, uncapped
     ideal_cost: float                # ideal_copy_size * price — "capital this signal needs"
 
     demo_copy_size: float            # shares actually executed in the capped demo account

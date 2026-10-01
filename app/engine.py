@@ -21,12 +21,18 @@ class CopyEngine:
         self.seen_trade_keys: set[str] = set()
         self.last_seen_ts: float = 0.0
 
-        # capped demo ledger — this is the actual $10,000 paper account
+        # capped demo ledger — this is the actual $1,000 paper account
         self.cash_balance: float = config.DEMO_CAPITAL
         self.realized_pnl: float = 0.0
         self.peak_capital_deployed: float = 0.0   # high-water mark of capped capital in use
 
         # uncapped shadow ledger — answers "how much capital would I actually need"
+        # ideal_deployed is NEVER incremented/decremented by hand — it's always
+        # recomputed fresh from currently-open ideal positions (see
+        # _ideal_capital_deployed), so a position closing for ANY reason
+        # (master sells out, or it auto-settles at TP/zero) correctly frees
+        # its capital immediately. ideal_peak_deployed is the high-water mark
+        # of that number, sampled after every event that can move it.
         self.ideal_deployed: float = 0.0
         self.ideal_peak_deployed: float = 0.0
         self.ideal_max_trade_cost: Optional[float] = None
@@ -81,7 +87,16 @@ class CopyEngine:
         if deployed > self.peak_capital_deployed:
             self.peak_capital_deployed = deployed
 
+    def _ideal_capital_deployed(self) -> float:
+        """Sum of ideal cost basis across positions that are STILL OPEN in
+        the ideal (uncapped) book right now. A position's ideal side is
+        zeroed the instant it closes — via a master sell-out or via
+        auto-settlement — so this can never include capital that's no
+        longer actually at risk."""
+        return sum(p.ideal_cost_basis for p in self.positions.values() if p.ideal_size > 0)
+
     def _touch_ideal_peak(self):
+        self.ideal_deployed = self._ideal_capital_deployed()
         if self.ideal_deployed > self.ideal_peak_deployed:
             self.ideal_peak_deployed = self.ideal_deployed
 
@@ -164,12 +179,12 @@ class CopyEngine:
         pos.master_size_at_last_sync += master_size if side == Side.BUY else -master_size
 
         if side == Side.BUY:
-            self._record_ideal_buy_signal(ideal_cost)
+            self._apply_ideal_buy(pos, copy_size, price, ideal_cost)
             demo_size, demo_cost, note = self._apply_capped_buy(copy_size, price)
             self._add_to_position(pos, demo_size, price)
             realized = 0.0
         else:
-            self.ideal_deployed = max(0.0, self.ideal_deployed - ideal_cost)
+            self._apply_ideal_sell(pos, copy_size)
             demo_size, demo_cost, realized, note = self._apply_capped_sell(pos, copy_size, price)
 
         rec = CopyTradeRecord(
@@ -233,12 +248,33 @@ class CopyEngine:
         pos.cost_basis = new_cost_basis
         pos.avg_entry_price = new_cost_basis / new_total_size if new_total_size > 0 else 0.0
 
-    def _record_ideal_buy_signal(self, ideal_cost: float):
-        self.ideal_deployed += ideal_cost
+    def _apply_ideal_buy(self, pos: CopiedPosition, copy_size: float, price: float, ideal_cost: float):
+        """Mirrors _add_to_position but on the uncapped ideal side, and
+        tracks the max/min single-trade cost this signal represents."""
+        new_total_size = pos.ideal_size + copy_size
+        new_cost_basis = pos.ideal_cost_basis + ideal_cost
+        pos.ideal_size = new_total_size
+        pos.ideal_cost_basis = new_cost_basis
+        pos.ideal_avg_price = new_cost_basis / new_total_size if new_total_size > 0 else 0.0
+
         if self.ideal_max_trade_cost is None or ideal_cost > self.ideal_max_trade_cost:
             self.ideal_max_trade_cost = ideal_cost
         if self.ideal_min_trade_cost is None or ideal_cost < self.ideal_min_trade_cost:
             self.ideal_min_trade_cost = ideal_cost
+
+    def _apply_ideal_sell(self, pos: CopiedPosition, copy_size: float):
+        """Removes shares from the ideal position using ITS OWN average cost
+        (not the sell price) — same accounting the real demo sell uses —
+        capped at what the ideal position actually holds."""
+        sell_size = min(copy_size, pos.ideal_size)
+        if sell_size <= 0:
+            return
+        cost_removed = sell_size * pos.ideal_avg_price
+        pos.ideal_size -= sell_size
+        pos.ideal_cost_basis -= cost_removed
+        if pos.ideal_size <= config.POSITION_DUST_SHARES:
+            pos.ideal_size = 0.0
+            pos.ideal_cost_basis = 0.0
 
     def _push_trade(self, rec: CopyTradeRecord):
         self.trade_log.append(rec)
@@ -278,20 +314,29 @@ class CopyEngine:
         self.cash_balance += proceeds
         self.realized_pnl += realized
 
+        # The ideal (uncapped) side of this position is decided too — a
+        # settled market frees its capital in the ideal book exactly like
+        # it does in the real one, whichever way it settled.
+        ideal_size_closed = pos.ideal_size
+        pos.ideal_size = 0.0
+        pos.ideal_cost_basis = 0.0
+
         rec = CopyTradeRecord(
             id=next_trade_id(), timestamp=time.time(), token_id=pos.token_id,
             market_title=pos.market_title, outcome_label=pos.outcome_label,
             side=Side.SELL, note=note,
-            master_trade_size=0.0, ideal_copy_size=0.0, ideal_cost=0.0,
+            master_trade_size=0.0, ideal_copy_size=ideal_size_closed, ideal_cost=0.0,
             demo_copy_size=size, demo_cost=proceeds, price=settlement_price,
             cash_after=self.cash_balance, realized_pnl=realized,
         )
         self._push_trade(rec)
+        self._touch_peak()
+        self._touch_ideal_peak()
         self._log_event(
             f"{pos.market_title} ({pos.outcome_label}) SETTLED as {label} — mark price crossed "
             f"{'%.2f' % config.SETTLE_WIN_PRICE if label=='WIN' else '%.2f' % config.SETTLE_LOSS_PRICE}. "
             f"Closed {size:.2f} sh @ ${settlement_price:.2f}/share, "
-            f"realized {'+' if realized >= 0 else ''}{realized:.2f}."
+            f"realized {'+' if realized >= 0 else ''}{realized:.2f}. Capital freed in both ledgers."
         )
 
     async def _maybe_refresh_stats(self):
