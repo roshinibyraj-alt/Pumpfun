@@ -5,7 +5,7 @@
     "buildCommand": "PORT=4173 BASE_PATH=/ pnpm run build"
   },
   "deploy": {
-    "startCommand": "pnpm --filter @workspace/api-server run start",
+    "startCommand": "pnpm start",
     "healthcheckPath": "/api/healthz",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
