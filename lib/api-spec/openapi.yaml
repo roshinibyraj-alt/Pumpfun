@@ -1,0 +1,235 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: bot
+    description: Demo bot controls and live state
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /bot/state:
+    get:
+      operationId: getBotState
+      tags: [bot]
+      summary: Get the demo bot dashboard state
+      responses:
+        "200":
+          description: Current feed, positions, account, and resolution state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotState"
+  /bot/start:
+    post:
+      operationId: startBot
+      tags: [bot]
+      summary: Start demo signal processing
+      responses:
+        "200":
+          description: Bot start state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotControlResponse"
+  /bot/stop:
+    post:
+      operationId: stopBot
+      tags: [bot]
+      summary: Stop new signals while retaining current demo state
+      responses:
+        "200":
+          description: Bot stop state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotControlResponse"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    Quote:
+      type: object
+      properties:
+        bid: { type: ["number", "null"] }
+        ask: { type: ["number", "null"] }
+        mid: { type: ["number", "null"] }
+      required: [bid, ask, mid]
+    Signal:
+      type: object
+      properties:
+        side: { type: string, enum: [UP, DOWN] }
+        changeUsd: { type: number }
+        thresholdUsd: { type: number }
+        lookbackMs: { type: integer }
+        ts: { type: integer }
+      required: [side, changeUsd, thresholdUsd, lookbackMs, ts]
+    AccountState:
+      type: object
+      properties:
+        capital: { type: number }
+        cash: { type: number }
+        openValue: { type: number }
+        unrealizedPnl: { type: number }
+        equity: { type: number }
+        totalPnl: { type: number }
+        maxDrawdown: { type: number }
+        realizedPnl: { type: number }
+        estimatedFees: { type: number }
+        wins: { type: integer }
+        losses: { type: integer }
+      required: [capital, cash, openValue, unrealizedPnl, equity, totalPnl, maxDrawdown, realizedPnl, estimatedFees, wins, losses]
+    WindowState:
+      type: object
+      properties:
+        slug: { type: string }
+        status: { type: string }
+        openTs: { type: integer }
+        closeTs: { type: integer }
+        elapsedSeconds: { type: number }
+        secondsRemaining: { type: number }
+        closed: { type: boolean }
+        entryDelayRemainingSeconds: { type: number }
+        entriesThisWindow: { type: integer }
+        activeSignalSide: { type: ["string", "null"], enum: [UP, DOWN, null] }
+        lastSignal:
+          oneOf:
+            - $ref: "#/components/schemas/Signal"
+            - type: "null"
+      required: [slug, status, openTs, closeTs, elapsedSeconds, secondsRemaining, closed, entryDelayRemainingSeconds, entriesThisWindow, activeSignalSide, lastSignal]
+    BtcFeedState:
+      type: object
+      properties:
+        exchange: { type: string }
+        symbol: { type: string }
+        status: { type: string }
+        price: { type: ["number", "null"] }
+        change1s: { type: ["number", "null"] }
+        thresholdUsd: { type: ["number", "null"] }
+        thresholdReady: { type: boolean }
+        thresholdSampleCount: { type: integer }
+        thresholdMinSamples: { type: integer }
+        thresholdPercentile: { type: integer }
+        thresholdWindowMs: { type: integer }
+        receivedAt: { type: ["integer", "null"] }
+        ageMs: { type: ["number", "null"] }
+        error: { type: ["string", "null"] }
+      required: [exchange, symbol, status, price, change1s, thresholdUsd, thresholdReady, thresholdSampleCount, thresholdMinSamples, thresholdPercentile, thresholdWindowMs, receivedAt, ageMs, error]
+    StrategyInfo:
+      type: object
+      properties:
+        demoCapital: { type: number }
+        sharesPerEntry: { type: number }
+        entryDelaySeconds: { type: integer }
+        pollMs: { type: integer }
+        askMin: { type: number }
+        askMax: { type: number }
+        buySlippagePercent: { type: number }
+        buyPriceCeiling: { type: number }
+        clobWinMidpoint: { type: number }
+        clobLossBestBid: { type: number }
+        entriesPerPoll: { type: integer }
+      required: [demoCapital, sharesPerEntry, entryDelaySeconds, pollMs, askMin, askMax, buySlippagePercent, buyPriceCeiling, clobWinMidpoint, clobLossBestBid, entriesPerPoll]
+    Position:
+      type: object
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        side: { type: string, enum: [UP, DOWN] }
+        openedAt: { type: integer }
+        openTs: { type: integer }
+        closeTs: { type: integer }
+        shares: { type: number }
+        openShares: { type: number }
+        entryPrice: { type: number }
+        mark: { type: ["number", "null"] }
+        unrealizedPnl: { type: ["number", "null"] }
+        status: { type: string }
+        signalChangeUsd: { type: number }
+        signalPollAt: { type: integer }
+      required: [id, slug, side, openedAt, openTs, closeTs, shares, openShares, entryPrice, mark, unrealizedPnl, status, signalChangeUsd, signalPollAt]
+    Trade:
+      type: object
+      properties:
+        id: { type: string }
+        slug: { type: string }
+        side: { type: string, enum: [UP, DOWN] }
+        shares: { type: number }
+        entryPrice: { type: number }
+        payout: { type: number }
+        netPnl: { type: number }
+        result: { type: string, enum: [WIN, LOSS] }
+        winner: { type: string, enum: [UP, DOWN] }
+        settlementSource: { type: string, enum: [CLOB_THRESHOLD, OFFICIAL_RESOLUTION] }
+        closedAt: { type: integer }
+      required: [id, slug, side, shares, entryPrice, payout, netPnl, result, winner, settlementSource, closedAt]
+    BotEvent:
+      type: object
+      properties:
+        ts: { type: integer }
+        event: { type: string }
+        note: { type: string }
+        side: { type: ["string", "null"], enum: [UP, DOWN, null] }
+        slug: { type: ["string", "null"] }
+      required: [ts, event, note, side, slug]
+    BotState:
+      type: object
+      properties:
+        running: { type: boolean }
+        mode: { type: string, enum: [DEMO] }
+        now: { type: integer }
+        uptimeSec: { type: integer }
+        error: { type: ["string", "null"] }
+        account: { $ref: "#/components/schemas/AccountState" }
+        window:
+          oneOf:
+            - $ref: "#/components/schemas/WindowState"
+            - type: "null"
+        btc: { $ref: "#/components/schemas/BtcFeedState" }
+        prices:
+          type: object
+          properties:
+            up: { $ref: "#/components/schemas/Quote" }
+            down: { $ref: "#/components/schemas/Quote" }
+          required: [up, down]
+        strategy: { $ref: "#/components/schemas/StrategyInfo" }
+        positions:
+          type: array
+          items: { $ref: "#/components/schemas/Position" }
+        trades:
+          type: array
+          items: { $ref: "#/components/schemas/Trade" }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/BotEvent" }
+      required: [running, mode, now, uptimeSec, error, account, window, btc, prices, strategy, positions, trades, events]
+    BotControlResponse:
+      type: object
+      properties:
+        running: { type: boolean }
+        message: { type: string }
+      required: [running, message]
+

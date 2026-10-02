@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "BTC Signal Accumulator"
+description = "A demo-only Polymarket BTC five-minute bot dashboard that adds positions on every qualifying signal poll within a bounded token-price range, accumulates both UP and DOWN shares, and tracks CLOB and official settlement."
+version = "1.0.0"
+id = "artifacts/btc-signal-accumulator"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22616
+
+[services.development]
+run = "pnpm --filter @workspace/btc-signal-accumulator run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/btc-signal-accumulator", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/btc-signal-accumulator/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22616"
+BASE_PATH = "/"
