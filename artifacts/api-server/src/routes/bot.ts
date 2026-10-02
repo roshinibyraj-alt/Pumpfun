@@ -108,6 +108,7 @@ function toApiState(snapshot: Record<string, any>) {
       demoCapital: Number(sourceStrategy.demoCapital) || 1000,
       sharesPerEntry: Number(sourceStrategy.baseShares) || 100,
       entryDelaySeconds: Number(sourceStrategy.entryDelayAfterWindowStartSeconds) || 3,
+      signalCooldownSeconds: Number(sourceStrategy.signalCooldownSeconds) || 10,
       pollMs: Number(sourceStrategy.pollMs) || 500,
       askMin: 0.2,
       askMax: 0.8,

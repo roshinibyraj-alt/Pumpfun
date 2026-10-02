@@ -146,7 +146,7 @@ function Home() {
                 <div className="grid grid-cols-2 gap-2">
                   <div className="rounded-lg bg-[#f2f0e9] p-3.5">
                     <div className="eyebrow">Entries this window</div><div className="mono mt-2 text-[25px] font-medium">{windowState.entriesThisWindow}</div>
-                    <div className="mt-1 text-[10px] text-[#858a8d]">One simulated entry per qualifying poll</div>
+                    <div className="mt-1 text-[10px] text-[#858a8d]">Signals inside cooldown are skipped</div>
                   </div>
                   <div className="rounded-lg bg-[#f2f0e9] p-3.5">
                     <div className="eyebrow">Signal direction</div><div className={`mt-2 flex items-center gap-2 text-[18px] font-extrabold ${windowState.activeSignalSide === 'UP' ? 'up-color' : windowState.activeSignalSide === 'DOWN' ? 'down-color' : 'text-[#858a8d]'}`}>{windowState.activeSignalSide === 'UP' ? <ArrowUpRight size={19} /> : windowState.activeSignalSide === 'DOWN' ? <ArrowDownRight size={19} /> : <span className="h-[2px] w-4 bg-current" />}{windowState.activeSignalSide ?? 'Waiting'}</div>
@@ -192,6 +192,7 @@ function Home() {
                 <Rule label="Shares per entry" value={compact(state.strategy.sharesPerEntry)} />
                 <Rule label="Signal poll" value={`${state.strategy.pollMs} ms`} />
                 <Rule label="Entry delay" value={`${compact(state.strategy.entryDelaySeconds, 1)} sec`} />
+                <Rule label="Signal cooldown" value={`${compact(state.strategy.signalCooldownSeconds, 1)} sec`} />
                 <Rule label="Ask price band" value={`${pct(state.strategy.askMin)} – ${pct(state.strategy.askMax)}`} />
                 <Rule label="Slippage allowance" value={pct(state.strategy.buySlippagePercent)} />
                 <Rule label="Buy price ceiling" value={pct(state.strategy.buyPriceCeiling)} />

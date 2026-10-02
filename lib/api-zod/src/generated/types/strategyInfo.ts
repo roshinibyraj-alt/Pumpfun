@@ -10,6 +10,7 @@ export interface StrategyInfo {
   demoCapital: number;
   sharesPerEntry: number;
   entryDelaySeconds: number;
+  signalCooldownSeconds: number;
   pollMs: number;
   askMin: number;
   askMax: number;

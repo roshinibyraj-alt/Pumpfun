@@ -92,26 +92,62 @@ test('ask band is inclusive, positions accumulate without a window cap, and both
   assert.equal(bot.pending.length, 9);
 });
 
-test('qualifying polls queued during an order execute once each and in poll order', async () => {
+test('signals accepted at least ten seconds apart queue during an order in poll order', async () => {
   const { bot, trader } = makeBot();
   bot._running = true;
   trader.holdFirstOrder = true;
+  const realNow = Date.now;
+  let fakeNow = realNow();
+  Date.now = () => fakeNow;
   let markFirstOrderStarted;
   const firstOrderStarted = new Promise((resolve) => { markFirstOrderStarted = resolve; });
   trader.firstOrderStarted = markFirstOrderStarted;
 
-  const firstPoll = bot._handleSignal('UP', move('UP', Date.now()));
-  await firstOrderStarted;
-  await bot._handleSignal('DOWN', move('DOWN', Date.now() + 1));
-  await bot._handleSignal('UP', move('UP', Date.now() + 2));
+  try {
+    const firstPoll = bot._handleSignal('UP', move('UP', fakeNow));
+    await firstOrderStarted;
+    fakeNow += 10_000;
+    await bot._handleSignal('DOWN', move('DOWN', fakeNow));
+    fakeNow += 10_000;
+    await bot._handleSignal('UP', move('UP', fakeNow));
 
-  assert.equal(trader.executionOrder.length, 1);
-  trader.releaseFirstOrder();
-  await firstPoll;
+    assert.equal(trader.executionOrder.length, 1);
+    trader.releaseFirstOrder();
+    await firstPoll;
 
-  assert.deepEqual(trader.executionOrder.map((order) => order.tokenId), ['up', 'down', 'up']);
-  assert.equal(bot.pending.length, 3);
-  assert.equal(bot.w.entriesThisWindow, 3);
+    assert.deepEqual(trader.executionOrder.map((order) => order.tokenId), ['up', 'down', 'up']);
+    assert.equal(bot.pending.length, 3);
+    assert.equal(bot.w.entriesThisWindow, 3);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('signal cooldown skips either side until ten seconds have elapsed', async () => {
+  const { bot, trader } = makeBot();
+  bot._running = true;
+  const realNow = Date.now;
+  let fakeNow = realNow();
+  Date.now = () => fakeNow;
+
+  try {
+    await bot._handleSignal('UP', move('UP', fakeNow));
+    assert.deepEqual(trader.executionOrder.map((order) => order.tokenId), ['up']);
+
+    fakeNow += 4_000;
+    await bot._handleSignal('DOWN', move('DOWN', fakeNow));
+    fakeNow += 5_999;
+    await bot._handleSignal('UP', move('UP', fakeNow));
+    assert.deepEqual(trader.executionOrder.map((order) => order.tokenId), ['up']);
+    assert.equal(bot.log.filter((entry) => entry.event === 'SIGNAL_COOLDOWN').length, 1);
+
+    fakeNow += 1;
+    await bot._handleSignal('DOWN', move('DOWN', fakeNow));
+    assert.deepEqual(trader.executionOrder.map((order) => order.tokenId), ['up', 'down']);
+    assert.equal(bot.log.filter((entry) => entry.event === 'SIGNAL_FIRED').length, 2);
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 test('each simultaneous position settles independently at the existing CLOB thresholds', async () => {

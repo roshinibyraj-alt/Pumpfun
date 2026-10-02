@@ -144,6 +144,7 @@ components:
         demoCapital: { type: number }
         sharesPerEntry: { type: number }
         entryDelaySeconds: { type: integer }
+        signalCooldownSeconds: { type: integer }
         pollMs: { type: integer }
         askMin: { type: number }
         askMax: { type: number }
@@ -152,7 +153,7 @@ components:
         clobWinMidpoint: { type: number }
         clobLossBestBid: { type: number }
         entriesPerPoll: { type: integer }
-      required: [demoCapital, sharesPerEntry, entryDelaySeconds, pollMs, askMin, askMax, buySlippagePercent, buyPriceCeiling, clobWinMidpoint, clobLossBestBid, entriesPerPoll]
+      required: [demoCapital, sharesPerEntry, entryDelaySeconds, signalCooldownSeconds, pollMs, askMin, askMax, buySlippagePercent, buyPriceCeiling, clobWinMidpoint, clobLossBestBid, entriesPerPoll]
     Position:
       type: object
       properties:

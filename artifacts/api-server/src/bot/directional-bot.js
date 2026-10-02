@@ -60,6 +60,8 @@ class Bot {
     this.activeSignal = null;
     this._signalBusy = false;
     this._signalQueue = [];
+    this._signalCooldownUntil = 0;
+    this._signalCooldownNoticeUntil = 0;
     this._running = false;
     this._ccxtStop = null;
     this.ccxt = {
@@ -412,6 +414,30 @@ class Bot {
       w.status = 'waiting_for_window_delay';
       return;
     }
+    const firedAt = Date.now();
+    if (firedAt < this._signalCooldownUntil) {
+      if (this._signalCooldownNoticeUntil !== this._signalCooldownUntil) {
+        this._signalCooldownNoticeUntil = this._signalCooldownUntil;
+        this._push({
+          event: 'SIGNAL_COOLDOWN',
+          slug: w.slug,
+          side,
+          note: 'Qualifying ' + side + ' signal skipped; next signal is allowed in '
+            + Math.ceil((this._signalCooldownUntil - firedAt) / 1000) + ' seconds.',
+        });
+      }
+      return;
+    }
+    this._signalCooldownUntil = firedAt + cfg.SIGNAL_COOLDOWN_SECONDS * 1000;
+    this._signalCooldownNoticeUntil = 0;
+    this._push({
+      event: 'SIGNAL_FIRED',
+      slug: w.slug,
+      side,
+      cooldownSeconds: cfg.SIGNAL_COOLDOWN_SECONDS,
+      note: 'Signal fired; next qualifying signal may fire after '
+        + cfg.SIGNAL_COOLDOWN_SECONDS + ' seconds.',
+    });
     this._signalQueue.push({ side, move, window: w });
     if (!this._signalBusy) await this._drainSignalQueue();
   }
@@ -806,6 +832,7 @@ class Bot {
         baseShares: cfg.BASE_SHARES,
         demoCapital: cfg.DEMO_CAPITAL,
         entryDelayAfterWindowStartSeconds: cfg.ENTRY_DELAY_AFTER_WINDOW_START_SECONDS,
+        signalCooldownSeconds: cfg.SIGNAL_COOLDOWN_SECONDS,
         minEntryAsk: cfg.MIN_ENTRY_ASK_USD,
         maxEntryAsk: cfg.MAX_ENTRY_ASK_USD,
         entriesPerPoll: 1,

@@ -90,6 +90,7 @@ export const GetBotStateResponse = zod.object({
   "demoCapital": zod.number(),
   "sharesPerEntry": zod.number(),
   "entryDelaySeconds": zod.number().int(),
+  "signalCooldownSeconds": zod.number().int(),
   "pollMs": zod.number().int(),
   "askMin": zod.number(),
   "askMax": zod.number(),
