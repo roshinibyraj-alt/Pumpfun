@@ -132,6 +132,39 @@ test("matches a Predict market through explicit 5m boundaries or its exact Polym
   );
 });
 
+test("derives an exact aligned five-minute window from Predict's canonical slug", () => {
+  const openMs = Date.UTC(2026, 9, 6, 13, 45);
+  const market = { slug: `btc-updown-5m-${openMs / 1000}` };
+  assert.deepEqual(engine.getExplicitMarketWindow(market), {
+    openMs,
+    closeMs: openMs + 5 * 60 * 1000,
+  });
+  assert.equal(
+    engine.evaluatePredictMarketMatch(
+      {
+        ...market,
+        status: "OPEN",
+        variantData: { type: "CRYPTO_UP_DOWN" },
+        outcomes: [
+          { name: "Up", indexSet: 1 },
+          { name: "Down", indexSet: 2 },
+        ],
+      },
+      { openMs, closeMs: openMs + 5 * 60 * 1000 },
+      null,
+    ).matchMethod,
+    "slug_window",
+  );
+  assert.equal(
+    engine.getExplicitMarketWindow({ slug: "btc-updown-5m-1791299701" }),
+    null,
+  );
+  assert.equal(
+    engine.getExplicitMarketWindow({ slug: "btc-updown-15m-1791299700" }),
+    null,
+  );
+});
+
 test("sizes both legs to identical shares without exceeding $100 cash per leg", () => {
   const result = engine.evaluatePair({
     nowMs: 1000,
@@ -238,9 +271,13 @@ test("shows Predict quotes for an unmatched market without marking it pair-eligi
         }),
     }),
   });
-  bot.predictCache = { fetchedAt: nowMs, markets: [market], error: null };
-
   const window = { openMs: nowMs - 60_000, closeMs: nowMs + 240_000 };
+  bot.predictCache = {
+    fetchedAt: nowMs,
+    windowSlug: `btc-updown-5m-${Math.floor(window.openMs / 1000)}`,
+    markets: [market],
+    error: null,
+  };
   const venue = await bot._fetchPredict(window, "polymarket-condition", nowMs);
 
   assert.equal(venue.status, "unmatched");
@@ -249,6 +286,87 @@ test("shows Predict quotes for an unmatched market without marking it pair-eligi
   assert.equal(venue.up.bestAsk.price, 0.5);
   assert.equal(venue.down.bestAsk.price, 0.55);
   assert.match(venue.market.matchReason, /not matched/i);
+});
+
+test("discovers the exact Predict five-minute market through targeted search and loads its book", async () => {
+  const nowMs = Date.now();
+  const openMs = Math.floor(nowMs / (5 * 60 * 1000)) * 5 * 60 * 1000;
+  const window = { openMs, closeMs: openMs + 5 * 60 * 1000 };
+  const slug = `btc-updown-5m-${openMs / 1000}`;
+  const market = {
+    id: 2966820,
+    slug,
+    title: "Bitcoin Up or Down - current five-minute window",
+    status: "OPEN",
+    conditionId: "predict-current-window",
+    variantData: { type: "CRYPTO_UP_DOWN" },
+    outcomes: [
+      { name: "Up", indexSet: 1 },
+      { name: "Down", indexSet: 2 },
+    ],
+    decimalPrecision: 2,
+  };
+  const requests = [];
+  const bot = new ArbitrageBot({
+    predictApiKey: "test-only-placeholder",
+    fetch: async (url, options) => {
+      requests.push({ url: String(url), headers: options?.headers });
+      const parsed = new URL(String(url));
+      if (parsed.pathname === "/v1/markets") {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ data: [], cursor: null }),
+        };
+      }
+      if (parsed.pathname === "/v1/search") {
+        assert.equal(parsed.searchParams.get("query"), slug);
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              success: true,
+              data: { categories: [{ id: "btc", markets: [market] }] },
+            }),
+        };
+      }
+      assert.equal(parsed.pathname, `/v1/markets/${market.id}/orderbook`);
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            data: {
+              bids: [[0.48, 20]],
+              asks: [[0.5, 30]],
+              updateTimestampMs: nowMs,
+            },
+          }),
+      };
+    },
+  });
+
+  const venue = await bot._fetchPredict(window, null, nowMs);
+
+  assert.equal(venue.status, "connected");
+  assert.equal(venue.market.matchStatus, "matched");
+  assert.equal(venue.market.matchMethod, "slug_window");
+  assert.equal(venue.market.id, String(market.id));
+  assert.equal(venue.market.startMs, window.openMs);
+  assert.equal(venue.market.closeMs, window.closeMs);
+  assert.equal(venue.up.bestAsk.price, 0.5);
+  assert.equal(venue.down.bestAsk.price, 0.52);
+  assert.ok(
+    requests.every(
+      (request) => request.headers["x-api-key"] === "test-only-placeholder",
+    ),
+  );
+  assert.equal(
+    requests.filter((request) => new URL(request.url).pathname === "/v1/search")
+      .length,
+    1,
+  );
 });
 
 test("keeps paper P&L provisional while open and finalizes only after the shared window closes", () => {

@@ -323,6 +323,19 @@ function mapPredictUpDownOutcomes(market) {
 }
 
 function getExplicitMarketWindow(market) {
+  const slug = String(market?.slug ?? "");
+  const fiveMinuteSlug = /^btc-updown-5m-(\d+)$/.exec(slug);
+  if (fiveMinuteSlug) {
+    const openSeconds = Number(fiveMinuteSlug[1]);
+    const openMs = openSeconds * 1000;
+    if (
+      Number.isSafeInteger(openSeconds) &&
+      Number.isSafeInteger(openMs) &&
+      openMs % FIVE_MINUTES_MS === 0
+    ) {
+      return { openMs, closeMs: openMs + FIVE_MINUTES_MS };
+    }
+  }
   const records = [
     market,
     market?.variantData,
@@ -372,13 +385,11 @@ function evaluatePredictMarketMatch(market, expectedWindow, polymarketConditionI
   if (!outcomeMapping.safe) {
     return { matched: false, reason: outcomeMapping.reason, outcomeMapping };
   }
-  if (
-    market?.tradingStatus &&
-    String(market.tradingStatus).toUpperCase() !== "OPEN"
-  ) {
+  const tradingStatus = market?.tradingStatus ?? market?.status;
+  if (tradingStatus && String(tradingStatus).toUpperCase() !== "OPEN") {
     return {
       matched: false,
-      reason: `Predict market trading status is ${market.tradingStatus}, not OPEN.`,
+      reason: `Predict market trading status is ${tradingStatus}, not OPEN.`,
       outcomeMapping,
     };
   }
@@ -400,10 +411,16 @@ function evaluatePredictMarketMatch(market, expectedWindow, polymarketConditionI
   }
   return {
     matched: true,
-    matchMethod: linked ? "polymarket_condition_id" : "explicit_window",
+    matchMethod: linked
+      ? "polymarket_condition_id"
+      : /^btc-updown-5m-\d+$/.test(String(market?.slug ?? ""))
+        ? "slug_window"
+        : "explicit_window",
     reason: linked
       ? "Matched by Predict's explicit Polymarket condition ID link."
-      : "Matched by exact 5-minute start and end timestamps.",
+      : /^btc-updown-5m-\d+$/.test(String(market?.slug ?? ""))
+        ? "Matched by the exact UTC 5-minute slot encoded in Predict's market slug."
+        : "Matched by exact 5-minute start and end timestamps.",
     outcomeMapping,
     explicitWindow: explicitWindow || expectedWindow,
   };

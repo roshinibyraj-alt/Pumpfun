@@ -41,6 +41,38 @@ function parseJsonArray(value) {
   }
 }
 
+function extractPredictMarkets(response) {
+  const markets = [];
+  const seenObjects = new WeakSet();
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item);
+      return;
+    }
+    if (!value || typeof value !== "object" || seenObjects.has(value)) return;
+    seenObjects.add(value);
+    if (
+      value.id !== undefined &&
+      value.id !== null &&
+      (value.slug ||
+        value.variantData ||
+        value.marketVariant ||
+        Array.isArray(value.outcomes))
+    ) {
+      markets.push(value);
+    }
+    for (const key of ["data", "categories", "markets", "results", "items"]) {
+      if (value[key] !== undefined) visit(value[key]);
+    }
+  };
+  visit(response);
+  return markets;
+}
+
+function predictFiveMinuteSlug(window) {
+  return `btc-updown-5m-${Math.floor(Number(window.openMs) / 1000)}`;
+}
+
 function outcomeText(value) {
   return String(value?.name ?? value?.title ?? value?.label ?? value ?? "")
     .trim()
@@ -225,7 +257,12 @@ class ArbitrageBot {
     this.loopPromise = null;
     this.loaded = false;
     this.savePromise = Promise.resolve();
-    this.predictCache = { fetchedAt: 0, markets: [], error: null };
+    this.predictCache = {
+      fetchedAt: 0,
+      windowSlug: null,
+      markets: [],
+      error: null,
+    };
     this.state = {
       app: "BTC Cross-Venue Arb Demo",
       mode: "PAPER",
@@ -719,40 +756,91 @@ class ArbitrageBot {
     }
   }
 
-  async _fetchPredictMarkets() {
+  async _fetchPredictMarkets(window) {
     const now = Date.now();
-    if (now - this.predictCache.fetchedAt < PREDICT_MARKET_CACHE_MS) {
+    const expectedSlug = predictFiveMinuteSlug(window);
+    if (
+      this.predictCache.windowSlug === expectedSlug &&
+      now - this.predictCache.fetchedAt < PREDICT_MARKET_CACHE_MS
+    ) {
       return this.predictCache;
     }
     const markets = [];
     let after = null;
-    let error = null;
-    try {
-      for (let page = 0; page < 3; page += 1) {
+    let listError = null;
+    let searchError = null;
+    const headers = { "x-api-key": this.predictApiKey };
+    const hasExpectedSlug = () =>
+      markets.some((market) => String(market?.slug ?? "") === expectedSlug);
+
+    const search = async (query) => {
+      try {
         const params = new URLSearchParams({
-          first: "100",
-          status: "OPEN",
-          marketVariant: "CRYPTO_UP_DOWN",
+          query,
+          includeResolved: "false",
+          limit: "100",
         });
-        if (after) params.set("after", after);
         const response = await fetchJson(
           this.fetch,
-          `${PREDICT_API}/v1/markets?${params.toString()}`,
-          { headers: { "x-api-key": this.predictApiKey } },
+          `${PREDICT_API}/v1/search?${params.toString()}`,
+          { headers },
         );
-        const data = Array.isArray(response?.data)
-          ? response.data
-          : Array.isArray(response?.data?.data)
-            ? response.data.data
-            : [];
-        markets.push(...data);
-        after = response?.cursor || null;
-        if (!after || data.length === 0) break;
+        markets.push(...extractPredictMarkets(response));
+      } catch (err) {
+        searchError = serializeError(err);
       }
-    } catch (err) {
-      error = serializeError(err);
+    };
+
+    // Predict's general market list may omit short-window markets, so query
+    // the current canonical slug before falling back to broad discovery.
+    await search(expectedSlug);
+    if (!hasExpectedSlug()) {
+      try {
+        for (let page = 0; page < 3; page += 1) {
+          const params = new URLSearchParams({
+            first: "100",
+            status: "OPEN",
+            marketVariant: "CRYPTO_UP_DOWN",
+          });
+          if (after) params.set("after", after);
+          const response = await fetchJson(
+            this.fetch,
+            `${PREDICT_API}/v1/markets?${params.toString()}`,
+            { headers },
+          );
+          const data = extractPredictMarkets(response);
+          markets.push(...data);
+          after = response?.cursor || response?.data?.cursor || null;
+          if (!after || data.length === 0) break;
+        }
+      } catch (err) {
+        listError = serializeError(err);
+      }
     }
-    this.predictCache = { fetchedAt: now, markets, error };
+    if (!hasExpectedSlug()) {
+      await search("Bitcoin Up or Down");
+    }
+
+    const deduped = [
+      ...new Map(
+        markets.map((market, index) => [
+          String(market?.id ?? market?.slug ?? `unknown-${index}`),
+          market,
+        ]),
+      ).values(),
+    ];
+    const error =
+      deduped.length === 0 && listError && searchError
+        ? `Market list: ${listError}; targeted search: ${searchError}`
+        : deduped.length === 0
+          ? listError || searchError
+          : null;
+    this.predictCache = {
+      fetchedAt: now,
+      windowSlug: expectedSlug,
+      markets: deduped,
+      error,
+    };
     return this.predictCache;
   }
 
@@ -766,7 +854,7 @@ class ArbitrageBot {
       base.market.matchReason = "Predict.fun data is unavailable until PREDICT_API_KEY is set server-side.";
       return base;
     }
-    const cache = await this._fetchPredictMarkets();
+    const cache = await this._fetchPredictMarkets(window);
     if (cache.error) {
       base.status = "error";
       base.error = cache.error;
