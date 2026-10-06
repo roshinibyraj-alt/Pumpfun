@@ -405,7 +405,14 @@ test("resolves a missed Predict slot through its exact public page and documente
           ok: true,
           status: 200,
           text: async () =>
-            JSON.stringify({ success: true, data: { categories: [] } }),
+            JSON.stringify({
+              success: true,
+              data: {
+                categories: [
+                  { id: "btc-updown-5m-category", slug, title: "BTC 5m" },
+                ],
+              },
+            }),
         };
       }
       if (parsed.pathname === "/v1/markets") {

@@ -54,10 +54,9 @@ function extractPredictMarkets(response) {
     if (
       value.id !== undefined &&
       value.id !== null &&
-      (value.slug ||
-        value.variantData ||
+      (value.variantData ||
         value.marketVariant ||
-        Array.isArray(value.outcomes))
+        value.outcomes !== undefined)
     ) {
       markets.push(value);
     }
@@ -802,7 +801,15 @@ class ArbitrageBot {
     let canonicalPageMarketId = null;
     let discoverySource = null;
     const hasExpectedSlug = () =>
-      markets.some((market) => String(market?.slug ?? "") === expectedSlug);
+      markets.some((market) => {
+        const variant = String(
+          market?.variantData?.type ?? market?.marketVariant ?? "",
+        ).toUpperCase();
+        return (
+          variant === "CRYPTO_UP_DOWN" &&
+          String(market?.slug ?? "") === expectedSlug
+        );
+      });
 
     const search = async (query, kind) => {
       try {
