@@ -244,9 +244,12 @@ test("does not allow an opportunity when no demo capital remains", () => {
 
 test("shows Predict quotes for an unmatched market without marking it pair-eligible", async () => {
   const nowMs = Date.now();
+  const priorOpenMs =
+    Math.floor((nowMs - 5 * 60 * 1000) / (5 * 60 * 1000)) * 5 * 60 * 1000;
   const market = {
     id: 12,
-    title: "Bitcoin Up or Down on the prior day?",
+    title: "Bitcoin Up or Down 5m — prior window",
+    slug: `btc-updown-5m-${priorOpenMs / 1000}`,
     tradingStatus: "OPEN",
     conditionId: "predict-condition",
     variantData: { type: "CRYPTO_UP_DOWN" },
@@ -352,6 +355,7 @@ test("discovers the exact Predict five-minute market through targeted search and
   assert.equal(venue.status, "connected");
   assert.equal(venue.market.matchStatus, "matched");
   assert.equal(venue.market.matchMethod, "slug_window");
+  assert.equal(venue.discovery.source, "exact_search");
   assert.equal(venue.market.id, String(market.id));
   assert.equal(venue.market.startMs, window.openMs);
   assert.equal(venue.market.closeMs, window.closeMs);
@@ -460,6 +464,8 @@ test("resolves a missed Predict slot through its exact public page and documente
     request.url.endsWith(`/v1/markets/${marketId}`),
   );
   assert.equal(detailRequest.headers["x-api-key"], "test-only-placeholder");
+  assert.equal(venue.discovery.source, "canonical_page_market_id");
+  assert.equal(venue.discovery.canonicalPageMarketId, marketId);
 });
 
 test("keeps paper P&L provisional while open and finalizes only after the shared window closes", () => {

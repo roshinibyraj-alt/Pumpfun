@@ -796,10 +796,15 @@ class ArbitrageBot {
     let searchError = null;
     let pageError = null;
     const headers = { "x-api-key": this.predictApiKey };
+    let exactSearchCount = 0;
+    let openListCount = 0;
+    let titleSearchCount = 0;
+    let canonicalPageMarketId = null;
+    let discoverySource = null;
     const hasExpectedSlug = () =>
       markets.some((market) => String(market?.slug ?? "") === expectedSlug);
 
-    const search = async (query) => {
+    const search = async (query, kind) => {
       try {
         const params = new URLSearchParams({
           query,
@@ -811,7 +816,11 @@ class ArbitrageBot {
           `${PREDICT_API}/v1/search?${params.toString()}`,
           { headers },
         );
-        markets.push(...extractPredictMarkets(response));
+        const found = extractPredictMarkets(response);
+        markets.push(...found);
+        if (kind === "exact") exactSearchCount = found.length;
+        if (kind === "title") titleSearchCount = found.length;
+        if (hasExpectedSlug()) discoverySource = `${kind}_search`;
       } catch (err) {
         searchError = serializeError(err);
       }
@@ -819,7 +828,7 @@ class ArbitrageBot {
 
     // Predict's general market list may omit short-window markets, so query
     // the current canonical slug before falling back to broad discovery.
-    await search(expectedSlug);
+    await search(expectedSlug, "exact");
     if (!hasExpectedSlug()) {
       try {
         for (let page = 0; page < 3; page += 1) {
@@ -835,8 +844,10 @@ class ArbitrageBot {
             { headers },
           );
           const data = extractPredictMarkets(response);
+          openListCount += data.length;
           markets.push(...data);
           after = response?.cursor || response?.data?.cursor || null;
+          if (hasExpectedSlug()) discoverySource = "open_market_list";
           if (!after || data.length === 0) break;
         }
       } catch (err) {
@@ -844,12 +855,16 @@ class ArbitrageBot {
       }
     }
     if (!hasExpectedSlug()) {
-      await search("Bitcoin Up or Down");
+      await search("Bitcoin Up or Down", "title");
     }
     if (!hasExpectedSlug()) {
       try {
-        const market = await this._fetchPredictMarketBySlug(window);
-        if (market) markets.push(market);
+        const resolved = await this._fetchPredictMarketBySlug(window);
+        if (resolved?.market) {
+          markets.push(resolved.market);
+          canonicalPageMarketId = resolved.marketId;
+          discoverySource = "canonical_page_market_id";
+        }
       } catch (err) {
         pageError = serializeError(err);
       }
@@ -869,11 +884,24 @@ class ArbitrageBot {
       pageError && `Canonical market lookup: ${pageError}`,
     ].filter(Boolean);
     const error = deduped.length === 0 && errors.length ? errors.join("; ") : null;
+    const discovery = {
+      expectedSlug,
+      exactMarketFound: hasExpectedSlug(),
+      source: discoverySource,
+      exactSearchResults: exactSearchCount,
+      openMarketListResults: openListCount,
+      titleSearchResults: titleSearchCount,
+      canonicalPageMarketId,
+      canonicalPageError: pageError,
+      searchError,
+      marketListError: listError,
+    };
     this.predictCache = {
       fetchedAt: now,
       windowSlug: expectedSlug,
       markets: deduped,
       error,
+      discovery,
     };
     return this.predictCache;
   }
@@ -911,7 +939,7 @@ class ArbitrageBot {
     if (market.slug && String(market.slug) !== slug) {
       throw new Error("Predict market details did not match the requested 5-minute slug.");
     }
-    return market.slug ? market : { ...market, slug };
+    return { market: market.slug ? market : { ...market, slug }, marketId };
   }
 
   async _fetchPredict(window, polymarketConditionId, nowMs) {
@@ -925,6 +953,7 @@ class ArbitrageBot {
       return base;
     }
     const cache = await this._fetchPredictMarkets(window);
+    base.discovery = cache.discovery || null;
     if (cache.error) {
       base.status = "error";
       base.error = cache.error;
@@ -991,11 +1020,24 @@ class ArbitrageBot {
         const rightRank = displayRank(right);
         return leftRank[0] - rightRank[0] || leftRank[1] - rightRank[1];
       });
-    const selected = exactMatch ? matches[0] : displayCandidates[0] || evaluated[0];
+    const fiveMinuteCandidates = displayCandidates.filter((item) => {
+      const titleAndSlug = `${item.market?.title || item.market?.question || ""} ${item.market?.slug || ""}`;
+      const explicitWindow = item.match.explicitWindow;
+      return Boolean(
+        /^btc-updown-5m-\d+$/.test(String(item.market?.slug ?? "")) ||
+          (explicitWindow &&
+            Number(explicitWindow.closeMs) - Number(explicitWindow.openMs) ===
+              5 * 60 * 1000) ||
+          /(?:\b5\s*(?:m|min(?:ute)?s?)\b|\bfive[-\s]+minutes?\b)/i.test(
+            titleAndSlug,
+          ),
+      );
+    });
+    const selected = exactMatch ? matches[0] : fiveMinuteCandidates[0];
     if (!selected) {
       const reason =
-        "No open Predict CRYPTO_UP_DOWN market was returned for this 5-minute window.";
-      base.status = "unmatched";
+        "No Predict BTC 5-minute market was found for this slot; unrelated daily markets are hidden.";
+      base.status = "missing_market";
       base.market.matchReason = reason;
       return base;
     }
