@@ -7,10 +7,12 @@ const {
   DEFAULT_MAX_CASH_PER_LEG_USD,
   DEFAULT_MIN_NET_EDGE_PER_SHARE,
   DEFAULT_SAFETY_MARGIN_PER_SHARE,
+  calculatePaperCapital,
   complementYesBook,
   evaluatePair,
   evaluatePredictMarketMatch,
   finiteNumber,
+  getExplicitMarketWindow,
   normalizeLevels,
   toTimestampMs,
   updateTradeWithBenchmark,
@@ -26,6 +28,7 @@ const POLL_MS = 2000;
 const PREDICT_MARKET_CACHE_MS = 15000;
 const MAX_LOGS = 150;
 const MAX_TRADES = 250;
+const DEFAULT_STARTING_PAPER_CAPITAL_USD = 10_000;
 
 function parseJsonArray(value) {
   if (Array.isArray(value)) return value;
@@ -99,6 +102,8 @@ function emptyVenue(name, status = "waiting", error = null) {
       matchMethod: null,
       matchReason: "No market has been matched yet.",
     },
+    marketCandidates: [],
+    candidateCount: 0,
     up: blankQuote(),
     down: blankQuote(),
     observedAt: null,
@@ -168,16 +173,28 @@ function safePolymarketMarket(event, expectedWindow) {
 }
 
 function marketMetadata(market) {
+  const variantData = market?.variantData || {};
+  const explicitWindow = getExplicitMarketWindow(market);
   return {
     id: market?.id == null ? null : String(market.id),
     title: market?.title ?? null,
     question: market?.question ?? null,
+    slug: market?.slug ?? null,
     conditionId: market?.conditionId ?? null,
     outcomes: parseJsonArray(market?.outcomes).map(outcomeText),
     description: market?.description ?? null,
     resolutionSource: market?.resolutionSource ?? null,
-    externalSettlement: market?.variantData?.priceFeedProvider
-      ? `${market.variantData.priceFeedProvider} ${market.variantData.priceFeedSymbol || ""}`.trim()
+    marketVariant: market?.marketVariant ?? variantData.type ?? null,
+    tradingStatus: market?.tradingStatus ?? market?.status ?? null,
+    variantData: {
+      type: variantData.type ?? null,
+      priceFeedProvider: variantData.priceFeedProvider ?? null,
+      priceFeedSymbol: variantData.priceFeedSymbol ?? null,
+    },
+    startMs: explicitWindow?.openMs ?? null,
+    closeMs: explicitWindow?.closeMs ?? null,
+    externalSettlement: variantData.priceFeedProvider
+      ? `${variantData.priceFeedProvider} ${variantData.priceFeedSymbol || ""}`.trim()
       : null,
   };
 }
@@ -199,6 +216,9 @@ class ArbitrageBot {
     this.predictApiKey = options.predictApiKey ?? process.env.PREDICT_API_KEY ?? "";
     this.maxBookAgeMs = DEFAULT_MAX_BOOK_AGE_MS;
     this.maxCashPerLegUsd = DEFAULT_MAX_CASH_PER_LEG_USD;
+    this.startingCapitalUsd =
+      finiteNumber(options.startingCapitalUsd) ?? DEFAULT_STARTING_PAPER_CAPITAL_USD;
+    this.realizedPnlTotal = 0;
     this.minNetEdgePerShare = DEFAULT_MIN_NET_EDGE_PER_SHARE;
     this.safetyMarginPerShare = this._readSafetyMargin();
     this.running = false;
@@ -213,6 +233,7 @@ class ArbitrageBot {
       now: Date.now(),
       pollMs: POLL_MS,
       config: {
+        startingPaperCapitalUsd: this.startingCapitalUsd,
         maxCashPerLegUsd: this.maxCashPerLegUsd,
         maxCashPerOpportunityUsd: this.maxCashPerLegUsd * 2,
         minNetEdgePerShare: this.minNetEdgePerShare,
@@ -246,6 +267,10 @@ class ArbitrageBot {
         realizedPnl: 0,
         provisionalPnl: 0,
         capitalCommitted: 0,
+        startingCapitalUsd: this.startingCapitalUsd,
+        cashBalanceUsd: this.startingCapitalUsd,
+        availableCapitalUsd: this.startingCapitalUsd,
+        paperEquityUsd: this.startingCapitalUsd,
         feesPaid: 0,
       },
       events: [],
@@ -271,6 +296,17 @@ class ArbitrageBot {
       if (Array.isArray(stored.paperTrades)) {
         this.state.paperTrades = stored.paperTrades.slice(-MAX_TRADES);
       }
+      const storedStartingCapital = finiteNumber(stored.startingCapitalUsd);
+      if (storedStartingCapital !== null && storedStartingCapital >= 0) {
+        this.startingCapitalUsd = storedStartingCapital;
+      }
+      const storedRealizedPnl = finiteNumber(stored.realizedPnlTotal);
+      this.realizedPnlTotal =
+        storedRealizedPnl ??
+        this.state.paperTrades
+          .filter((trade) => trade.finalized)
+          .reduce((sum, trade) => sum + (finiteNumber(trade.realizedPnl) ?? 0), 0);
+      this.state.config.startingPaperCapitalUsd = this.startingCapitalUsd;
       if (Array.isArray(stored.events)) this.state.events = stored.events.slice(-MAX_LOGS);
       if (Array.isArray(stored.firedKeys)) this.firedKeys = new Set(stored.firedKeys);
       if (Array.isArray(stored.finalBenchmarks)) {
@@ -287,7 +323,9 @@ class ArbitrageBot {
   async _persist() {
     const data = JSON.stringify(
       {
-        version: 1,
+        version: 2,
+        startingCapitalUsd: this.startingCapitalUsd,
+        realizedPnlTotal: this.realizedPnlTotal,
         paperTrades: this.state.paperTrades.slice(-MAX_TRADES),
         events: this.state.events.slice(-MAX_LOGS),
         firedKeys: [...this.firedKeys].slice(-500),
@@ -324,21 +362,33 @@ class ArbitrageBot {
     const trades = this.state.paperTrades;
     const settled = trades.filter((trade) => trade.finalized);
     const open = trades.filter((trade) => !trade.finalized);
-    const realizedPnl = settled.reduce((sum, trade) => sum + Number(trade.realizedPnl || 0), 0);
-    const provisionalPnl = open.reduce(
-      (sum, trade) => sum + Number(trade.provisionalPnl || 0),
-      0,
-    );
+    const capital = calculatePaperCapital({
+      startingCapitalUsd: this.startingCapitalUsd,
+      realizedPnlUsd: this.realizedPnlTotal,
+      trades,
+    });
     this.state.stats = {
       pairCount: trades.length,
       settledCount: settled.length,
       wins: settled.filter((trade) => Number(trade.realizedPnl) > 0).length,
       losses: settled.filter((trade) => Number(trade.realizedPnl) < 0).length,
-      realizedPnl,
-      provisionalPnl,
-      capitalCommitted: open.reduce((sum, trade) => sum + Number(trade.pairCash || 0), 0),
+      realizedPnl: capital.realizedPnlUsd,
+      provisionalPnl: capital.provisionalPnlUsd,
+      capitalCommitted: capital.capitalCommittedUsd,
+      startingCapitalUsd: capital.startingCapitalUsd,
+      cashBalanceUsd: capital.cashBalanceUsd,
+      availableCapitalUsd: capital.availableCapitalUsd,
+      paperEquityUsd: capital.paperEquityUsd,
       feesPaid: trades.reduce((sum, trade) => sum + Number(trade.fees || 0), 0),
     };
+  }
+
+  _availablePaperCapital() {
+    return calculatePaperCapital({
+      startingCapitalUsd: this.startingCapitalUsd,
+      realizedPnlUsd: this.realizedPnlTotal,
+      trades: this.state.paperTrades,
+    }).availableCapitalUsd;
   }
 
   async start() {
@@ -454,6 +504,7 @@ class ArbitrageBot {
       if (!benchmark) continue;
       const updated = updateTradeWithBenchmark(trade, benchmark, nowMs);
       if (!trade.finalized && updated.finalized) {
+        this.realizedPnlTotal += finiteNumber(updated.realizedPnl) ?? 0;
         this._log(
           "PAPER_PAIR_FINALIZED",
           `Finalized on the shared internal BTC/USD benchmark: ${updated.finalOutcome}; this is not official venue settlement.`,
@@ -470,9 +521,9 @@ class ArbitrageBot {
   _evaluate(currentWindow, poly, predict, nowMs) {
     const polyMatched = poly.market?.matchStatus === "matched";
     const predictMatched = predict.market?.matchStatus === "matched";
+    let remainingCapital = Math.max(0, this._availablePaperCapital());
     const common = {
       nowMs,
-      maxCashPerLegUsd: this.maxCashPerLegUsd,
       minNetEdgePerShare: this.minNetEdgePerShare,
       safetyMarginPerShare: this.safetyMarginPerShare,
       maxBookAgeMs: this.maxBookAgeMs,
@@ -522,15 +573,25 @@ class ArbitrageBot {
       },
     ];
     return candidates.map((candidate) => {
-      const evaluated = evaluatePair({ ...common, ...candidate });
       const firedKey = `${currentWindow.openMs}:${candidate.direction}`;
-      return {
+      const alreadyFiredThisWindow = this.firedKeys.has(firedKey);
+      const perLegCashLimit = Math.min(this.maxCashPerLegUsd, remainingCapital / 2);
+      const evaluated = evaluatePair({
+        ...common,
+        maxCashPerLegUsd: perLegCashLimit,
+        ...candidate,
+      });
+      const result = {
         ...evaluated,
         direction: candidate.direction,
-        alreadyFiredThisWindow: this.firedKeys.has(firedKey),
-        eligible: evaluated.eligible && !this.firedKeys.has(firedKey),
+        alreadyFiredThisWindow,
+        eligible: evaluated.eligible && !alreadyFiredThisWindow,
         thresholdStatus: evaluated.eligible ? "threshold_met" : evaluated.status,
       };
+      if (result.eligible) {
+        remainingCapital = Math.max(0, remainingCapital - evaluated.pairCash);
+      }
+      return result;
     });
   }
 
@@ -725,61 +786,100 @@ class ArbitrageBot {
       match: evaluatePredictMarketMatch(market, window, polymarketConditionId),
     }));
     const matches = evaluated.filter((item) => item.match.matched);
-    if (matches.length !== 1) {
-      const display = matches.length > 1 ? null : evaluated[0];
+    base.candidateCount = evaluated.length;
+    base.marketCandidates = evaluated.slice(0, 12).map(({ market, match }) => ({
+      id: market?.id == null ? null : String(market.id),
+      title: market?.title || market?.question || null,
+      slug: market?.slug ?? null,
+      conditionId: market?.conditionId ?? null,
+      tradingStatus: market?.tradingStatus ?? market?.status ?? null,
+      startMs: match.explicitWindow?.openMs ?? null,
+      closeMs: match.explicitWindow?.closeMs ?? null,
+      outcomes: parseJsonArray(market?.outcomes).map(outcomeText),
+      matchStatus: match.matched ? "matched" : "unmatched",
+      matchReason: match.reason,
+    }));
+    if (matches.length > 1) {
       const reason =
-        matches.length > 1
-          ? "More than one Predict market matched this slot; scanner is disabled to avoid ambiguity."
-          : display?.match.reason ||
-            "No open Predict CRYPTO_UP_DOWN market was returned for this 5-minute window.";
-      base.status = matches.length > 1 ? "ambiguous" : "unmatched";
+        "More than one Predict market matched this slot; scanner is disabled to avoid ambiguity.";
+      base.status = "ambiguous";
       base.market.matchReason = reason;
-      if (display) {
-        base.market = {
-          ...base.market,
-          ...marketMetadata(display.market),
-          title: display.market.title || display.market.question || null,
-          startMs: display.match.explicitWindow?.openMs ?? null,
-          closeMs: display.match.explicitWindow?.closeMs ?? null,
-          outcomes: parseJsonArray(display.market.outcomes).map(outcomeText),
-          matchStatus: "unmatched",
-          matchReason: reason,
-        };
-      }
       return base;
     }
 
-    const { market, match } = matches[0];
-    const marketWindow = match.explicitWindow || window;
+    const exactMatch = matches.length === 1;
+    const displayCandidates = evaluated
+      .filter((item) => item.match.outcomeMapping?.safe)
+      .sort((left, right) => {
+        const displayRank = (item) => {
+          const titleAndSlug = `${item.market?.title || item.market?.question || ""} ${item.market?.slug || ""}`;
+          const explicitWindow = item.match.explicitWindow;
+          const fiveMinuteWindow =
+            explicitWindow &&
+            Number(explicitWindow.closeMs) - Number(explicitWindow.openMs) ===
+              5 * 60 * 1000;
+          const fiveMinuteLabel =
+            /(?:\b5\s*(?:m|min(?:ute)?s?)\b|\bfive[-\s]+minutes?\b)/i.test(
+              titleAndSlug,
+            );
+          return [
+            fiveMinuteWindow || fiveMinuteLabel ? 0 : 1,
+            explicitWindow
+              ? Math.abs(Number(explicitWindow.openMs) - Number(window.openMs))
+              : Number.MAX_SAFE_INTEGER,
+          ];
+        };
+        const leftRank = displayRank(left);
+        const rightRank = displayRank(right);
+        return leftRank[0] - rightRank[0] || leftRank[1] - rightRank[1];
+      });
+    const selected = exactMatch ? matches[0] : displayCandidates[0] || evaluated[0];
+    if (!selected) {
+      const reason =
+        "No open Predict CRYPTO_UP_DOWN market was returned for this 5-minute window.";
+      base.status = "unmatched";
+      base.market.matchReason = reason;
+      return base;
+    }
+
+    const { market, match } = selected;
+    if (!match.outcomeMapping?.safe) {
+      base.status = "unmatched";
+      base.market = {
+        ...base.market,
+        ...marketMetadata(market),
+        title: market.title || market.question || null,
+        outcomes: parseJsonArray(market.outcomes).map(outcomeText),
+        matchStatus: "unmatched",
+        matchReason: match.reason,
+      };
+      return base;
+    }
+    const marketWindow = exactMatch ? match.explicitWindow || window : match.explicitWindow;
+    const unmatchedReason =
+      match.reason ||
+      "Predict market is not safely matched to this Polymarket 5-minute window.";
     const marketMeta = {
       ...marketMetadata(market),
       title: market.title || market.question || null,
       conditionId: market.conditionId || null,
-      startMs: marketWindow.openMs,
-      closeMs: marketWindow.closeMs,
+      startMs: marketWindow?.openMs ?? null,
+      closeMs: marketWindow?.closeMs ?? null,
       outcomes: parseJsonArray(market.outcomes).map(outcomeText),
-      matchStatus: "matched",
-      matchMethod: match.matchMethod,
-      matchReason: match.reason,
+      matchStatus: exactMatch ? "matched" : "unmatched",
+      matchMethod: exactMatch ? match.matchMethod : null,
+      matchReason: exactMatch
+        ? match.reason
+        : `Live quotes are shown for this Predict market only. It is not matched to the current Polymarket 5-minute window, so no pair can fire. ${unmatchedReason}`,
       externalSettlement: market.variantData?.priceFeedProvider
         ? `${market.variantData.priceFeedProvider} ${market.variantData.priceFeedSymbol || ""}`.trim()
         : null,
     };
     const decimalPrecision = Number(market.decimalPrecision);
-    if (
+    const precisionInvalid =
       !Number.isInteger(decimalPrecision) ||
       decimalPrecision < 1 ||
-      decimalPrecision > 8
-    ) {
-      base.status = "unmatched";
-      base.market = {
-        ...marketMeta,
-        matchStatus: "unmatched",
-        matchReason:
-          "Predict market decimalPrecision is missing or invalid; complementary DOWN prices cannot be safely derived.",
-      };
-      return base;
-    }
+      decimalPrecision > 8;
     try {
       const response = await fetchJson(
         this.fetch,
@@ -790,19 +890,34 @@ class ArbitrageBot {
       const receivedAt = Date.now();
       const sourceTimestamp = toTimestampMs(book?.updateTimestampMs);
       const observedAt = sourceTimestamp ?? receivedAt;
-      const mapped = complementYesBook(book, decimalPrecision);
-      base.status = "connected";
+      base.status = exactMatch && !precisionInvalid ? "connected" : "unmatched";
       base.error = null;
-      base.market = marketMeta;
       const timestampKind = sourceTimestamp === null ? "received" : "source";
-      base.up = quoteFromBook(mapped.yes, observedAt, receivedAt, timestampKind);
-      base.down = quoteFromBook(mapped.no, observedAt, receivedAt, timestampKind);
+      if (precisionInvalid) {
+        base.market = {
+          ...marketMeta,
+          matchStatus: "unmatched",
+          matchReason:
+            "Predict price precision is missing or invalid. UP's raw quote is shown; DOWN cannot be safely derived, and the scanner remains blocked.",
+        };
+        base.up = quoteFromBook(book, observedAt, receivedAt, timestampKind);
+        base.down = blankQuote(
+          "unavailable",
+          "Cannot derive the complementary DOWN quote without valid market precision.",
+        );
+      } else {
+        const mapped = complementYesBook(book, decimalPrecision);
+        base.market = marketMeta;
+        base.up = quoteFromBook(mapped.yes, observedAt, receivedAt, timestampKind);
+        base.down = quoteFromBook(mapped.no, observedAt, receivedAt, timestampKind);
+      }
       base.observedAt = receivedAt;
       if (Number(nowMs) - observedAt > this.maxBookAgeMs) {
-        base.up.status = "stale";
-        base.down.status = "stale";
-        base.up.error = "Predict.fun order book timestamp is stale.";
-        base.down.error = "Predict.fun order book timestamp is stale.";
+        for (const quote of [base.up, base.down]) {
+          if (quote.status !== "ok") continue;
+          quote.status = "stale";
+          quote.error = "Predict.fun order book timestamp is stale.";
+        }
       }
       return base;
     } catch (error) {
@@ -810,8 +925,8 @@ class ArbitrageBot {
       base.error = serializeError(error);
       base.market = {
         ...marketMeta,
-        matchStatus: "matched",
-        matchReason: `Market matched, but order-book request failed: ${base.error}`,
+        matchStatus: exactMatch ? "matched" : "unmatched",
+        matchReason: `${exactMatch ? "Market matched" : "Could not load a separate Predict quote"}. Order-book request failed: ${base.error}`,
       };
       base.up = blankQuote("error", base.error);
       base.down = blankQuote("error", base.error);

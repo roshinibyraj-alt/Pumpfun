@@ -30,10 +30,27 @@ type Venue = {
     matchStatus?: string;
     matchMethod?: string | null;
     matchReason?: string | null;
+    marketVariant?: string | null;
+    tradingStatus?: string | null;
+    variantData?: {
+      type?: string | null;
+      priceFeedProvider?: string | null;
+      priceFeedSymbol?: string | null;
+    };
     externalSettlement?: string | null;
     resolutionSource?: string | null;
     description?: string | null;
   };
+  marketCandidates?: Array<{
+    id?: string | null;
+    title?: string | null;
+    slug?: string | null;
+    startMs?: number | null;
+    closeMs?: number | null;
+    matchStatus?: string;
+    matchReason?: string | null;
+  }>;
+  candidateCount?: number;
   up?: Quote;
   down?: Quote;
 };
@@ -84,6 +101,7 @@ type BotState = {
   pollMs: number;
   lastError?: string | null;
   config?: {
+    startingPaperCapitalUsd: number;
     maxCashPerLegUsd: number;
     maxCashPerOpportunityUsd: number;
     minNetEdgePerShare: number;
@@ -115,6 +133,10 @@ type BotState = {
     realizedPnl: number;
     provisionalPnl: number;
     capitalCommitted: number;
+    startingCapitalUsd: number;
+    cashBalanceUsd: number;
+    availableCapitalUsd: number;
+    paperEquityUsd: number;
     feesPaid: number;
   };
   events?: Array<{ ts: number; event: string; note: string }>;
@@ -225,6 +247,12 @@ function VenueCard({ venue }: { venue: Venue }) {
           <span>Condition: {market.conditionId || market.id || "—"}</span>
         </div>
         {market.matchReason && <p className="match-reason">{market.matchReason}</p>}
+        {!matchOk && (venue.up?.status === "ok" || venue.down?.status === "ok") && (
+          <p className="match-reason">
+            These are live quotes for the named market only. They are not used by the pair scanner
+            until its 5-minute window is exactly matched.
+          </p>
+        )}
         {market.resolutionSource && (
           <p className="match-reason">Venue resolution source: {market.resolutionSource}</p>
         )}
@@ -236,6 +264,19 @@ function VenueCard({ venue }: { venue: Venue }) {
         <QuoteTile label="UP" quote={venue.up} />
         <QuoteTile label="DOWN" quote={venue.down} />
       </div>
+      {venue.name === "Predict.fun" && (venue.candidateCount || 0) > 0 && (
+        <details className="market-candidates">
+          <summary>Open Predict markets checked ({venue.candidateCount})</summary>
+          <ul>
+            {(venue.marketCandidates || []).map((candidate, index) => (
+              <li key={`${candidate.id || candidate.slug || candidate.title || "market"}-${index}`}>
+                <strong>{candidate.title || candidate.slug || candidate.id || "Untitled market"}</strong>
+                <span>{candidate.matchStatus === "matched" ? "Exact window match" : "Not an exact window match"}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
       {venue.error && <div className="inline-error venue-error">{venue.error}</div>}
     </article>
   );
@@ -346,6 +387,16 @@ function App() {
       </section>
 
       <section className="stat-grid">
+        <article className="stat-card">
+          <span className="stat-label">Available demo capital</span>
+          <strong className={`stat-value ${(stats?.availableCapitalUsd ?? 0) >= 0 ? "" : "negative"}`}>
+            {dollars(stats?.availableCapitalUsd)}
+          </strong>
+          <span className="stat-foot">
+            {dollars(stats?.startingCapitalUsd ?? config?.startingPaperCapitalUsd)} starting ·{" "}
+            {dollars(stats?.capitalCommitted)} committed
+          </span>
+        </article>
         <article className="stat-card">
           <span className="stat-label">Minimum net edge</span>
           <strong className="stat-value accent">{dollars(config?.minNetEdgePerShare, 2)} <small>/ share</small></strong>

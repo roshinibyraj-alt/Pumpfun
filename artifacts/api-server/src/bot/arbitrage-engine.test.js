@@ -3,6 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const engine = require("./arbitrage-engine.js");
+const ArbitrageBot = require("./arbitrage-bot.js");
 
 function goodBook(asks, observedAt = 1000) {
   return { status: "ok", observedAt, asks, bids: [] };
@@ -176,6 +177,78 @@ test("requires at least $0.10 net edge per share after fees and safety margin", 
   });
   assert.equal(result.eligible, false);
   assert.equal(result.status, "below_threshold");
+});
+
+test("tracks starting demo capital, open commitment, available cash, and provisional equity", () => {
+  const result = engine.calculatePaperCapital({
+    startingCapitalUsd: 10_000,
+    realizedPnlUsd: 125.5,
+    trades: [
+      { finalized: false, pairCash: 240, provisionalPnl: -35 },
+      { finalized: true, pairCash: 180, realizedPnl: 125.5 },
+    ],
+  });
+  assert.equal(result.startingCapitalUsd, 10_000);
+  assert.equal(result.cashBalanceUsd, 10_125.5);
+  assert.equal(result.capitalCommittedUsd, 240);
+  assert.equal(result.availableCapitalUsd, 9_885.5);
+  assert.equal(result.provisionalPnlUsd, -35);
+  assert.equal(result.paperEquityUsd, 10_090.5);
+});
+
+test("does not allow an opportunity when no demo capital remains", () => {
+  const result = engine.evaluatePair({
+    nowMs: 1000,
+    maxCashPerLegUsd: 0,
+    legs: [
+      pairLeg("Polymarket", "UP", "polymarket", [{ price: 0.4, size: 1000 }]),
+      pairLeg("Predict.fun", "DOWN", "predict", [{ price: 0.4, size: 1000 }]),
+    ],
+  });
+  assert.equal(result.eligible, false);
+  assert.match(result.reason, /no available demo capital/i);
+});
+
+test("shows Predict quotes for an unmatched market without marking it pair-eligible", async () => {
+  const nowMs = Date.now();
+  const market = {
+    id: 12,
+    title: "Bitcoin Up or Down on the prior day?",
+    tradingStatus: "OPEN",
+    conditionId: "predict-condition",
+    variantData: { type: "CRYPTO_UP_DOWN" },
+    outcomes: [
+      { name: "Up", indexSet: 1 },
+      { name: "Down", indexSet: 2 },
+    ],
+    decimalPrecision: 2,
+  };
+  const bot = new ArbitrageBot({
+    predictApiKey: "test-only-placeholder",
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({
+          data: {
+            bids: [[0.45, 20]],
+            asks: [[0.5, 30]],
+            updateTimestampMs: nowMs,
+          },
+        }),
+    }),
+  });
+  bot.predictCache = { fetchedAt: nowMs, markets: [market], error: null };
+
+  const window = { openMs: nowMs - 60_000, closeMs: nowMs + 240_000 };
+  const venue = await bot._fetchPredict(window, "polymarket-condition", nowMs);
+
+  assert.equal(venue.status, "unmatched");
+  assert.equal(venue.market.matchStatus, "unmatched");
+  assert.equal(venue.marketCandidates.length, 1);
+  assert.equal(venue.up.bestAsk.price, 0.5);
+  assert.equal(venue.down.bestAsk.price, 0.55);
+  assert.match(venue.market.matchReason, /not matched/i);
 });
 
 test("keeps paper P&L provisional while open and finalizes only after the shared window closes", () => {

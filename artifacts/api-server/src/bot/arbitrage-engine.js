@@ -179,6 +179,13 @@ function evaluatePair(options) {
   if (legs.length !== 2) {
     return { status: "blocked", eligible: false, reason: "A pair must contain exactly two legs." };
   }
+  if (!Number.isFinite(maxCashPerLegUsd) || maxCashPerLegUsd <= 0) {
+    return {
+      status: "blocked",
+      eligible: false,
+      reason: "No available demo capital remains for this paper pair.",
+    };
+  }
   for (const leg of legs) {
     if (leg.marketMatched !== true) {
       return {
@@ -209,7 +216,7 @@ function evaluatePair(options) {
     return {
       status: "blocked",
       eligible: false,
-      reason: "Insufficient executable depth within the $100-per-leg cash cap.",
+      reason: `Insufficient executable depth within the $${maxCashPerLegUsd.toFixed(2)}-per-leg cash cap.`,
     };
   }
 
@@ -218,7 +225,7 @@ function evaluatePair(options) {
     return {
       status: "blocked",
       eligible: false,
-      reason: "Could not size equal shares within both per-leg cash caps.",
+      reason: `Could not size equal shares within the $${maxCashPerLegUsd.toFixed(2)}-per-leg cash cap.`,
     };
   }
   const pairCash = fills.reduce((sum, fill) => sum + fill.cash, 0);
@@ -471,6 +478,34 @@ function updateTradeWithBenchmark(trade, benchmark, nowMs = Date.now()) {
   };
 }
 
+function calculatePaperCapital(options = {}) {
+  const startingCapitalUsd = Math.max(
+    0,
+    finiteNumber(options.startingCapitalUsd) ?? 0,
+  );
+  const realizedPnlUsd = finiteNumber(options.realizedPnlUsd) ?? 0;
+  const trades = Array.isArray(options.trades) ? options.trades : [];
+  const openTrades = trades.filter((trade) => trade && trade.finalized !== true);
+  const capitalCommittedUsd = openTrades.reduce(
+    (sum, trade) => sum + (finiteNumber(trade.pairCash) ?? 0),
+    0,
+  );
+  const provisionalPnlUsd = openTrades.reduce(
+    (sum, trade) => sum + (finiteNumber(trade.provisionalPnl) ?? 0),
+    0,
+  );
+  const cashBalanceUsd = startingCapitalUsd + realizedPnlUsd;
+  return {
+    startingCapitalUsd,
+    realizedPnlUsd,
+    cashBalanceUsd,
+    capitalCommittedUsd,
+    availableCapitalUsd: cashBalanceUsd - capitalCommittedUsd,
+    provisionalPnlUsd,
+    paperEquityUsd: cashBalanceUsd + provisionalPnlUsd,
+  };
+}
+
 module.exports = {
   FIVE_MINUTES_MS,
   DEFAULT_SHARE_STEP,
@@ -497,4 +532,5 @@ module.exports = {
   benchmarkOutcome,
   pairPayoutForOutcome,
   updateTradeWithBenchmark,
+  calculatePaperCapital,
 };

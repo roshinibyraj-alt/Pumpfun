@@ -7,6 +7,7 @@ This repository runs a **paper-only** BTC 5-minute cross-venue scanner for Polym
 - Compare both directions independently: buy Polymarket UP + Predict.fun DOWN, and Predict.fun UP + Polymarket DOWN.
 - Trigger at most one simulated pair per direction per UTC 5-minute window.
 - Each leg has a maximum **$100 total cash** budget, including that leg's estimated taker fee.
+- The paper account starts with **$10,000**. Open pair cash is reserved from available demo capital; finalized P&L updates the balance, and the scanner will not open a pair larger than the remaining bankroll.
 - Both legs use the same share quantity. Quantity is sized from current executable ask depth, never from midpoint or last-trade prices.
 - Estimate fees at each consumed ask level: Polymarket `shares × 0.07 × price × (1 − price)`; Predict.fun `shares × 0.02 × min(price, 1 − price)`.
 - Require at least **$0.10 net edge per matched share after fees and the safety margin**. The default additional safety margin is $0.01 per share; set `ARB_SAFETY_MARGIN_PER_SHARE` on the server to a non-negative value below $0.50 to adjust it.
@@ -16,7 +17,7 @@ The signal is a paper model, not guaranteed or risk-free arbitrage. Cross-venue 
 
 ## Dashboard and paper finalization
 
-The dashboard shows separate UP and DOWN bid/ask books for each venue, visible depth, timestamps/age, market details, matching status, candidate pair costs, fees, simulated trades, and P&L.
+The dashboard shows separate UP and DOWN bid/ask books for each venue, visible depth, timestamps/age, market details, matching status, candidate pair costs, fees, simulated trades, demo capital, and P&L. If Predict returns a quote for an open market that cannot be matched to Polymarket's exact 5-minute window, the dashboard can still show that market's separate quotes, but labels it unmatched and keeps it out of the scanner.
 
 Paper P&L is provisional while the window is open. Once the exact UTC 5-minute window has ended and the corresponding Coinbase Exchange BTC-USD 5-minute candle is available, both paper legs are finalized against the **same internal benchmark** (`close >= open` means UP). That benchmark is not Polymarket's Chainlink BTC/USD TWAP, Predict.fun's market oracle, or an actual token payout. It is only a consistent model rule for demo accounting. Coinbase price/candle data is not used to detect arbitrage.
 
