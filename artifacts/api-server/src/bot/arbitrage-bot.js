@@ -73,6 +73,31 @@ function predictFiveMinuteSlug(window) {
   return `btc-updown-5m-${Math.floor(Number(window.openMs) / 1000)}`;
 }
 
+function marketIdFromCanonicalPage(html, expectedSlug) {
+  for (const tagMatch of String(html).matchAll(/<meta\b[^>]*>/gi)) {
+    const tag = tagMatch[0];
+    const property = tag.match(/\bproperty=["']([^"']+)["']/i)?.[1];
+    if (String(property).toLowerCase() !== "og:image") continue;
+    const content = tag.match(/\bcontent=["']([^"']+)["']/i)?.[1];
+    if (!content) return null;
+    try {
+      const imageUrl = new URL(content.replaceAll("&amp;", "&"), "https://predict.fun");
+      if (
+        imageUrl.origin !== "https://predict.fun" ||
+        imageUrl.pathname !== "/api/generate/image/market.png" ||
+        imageUrl.searchParams.get("categoryId") !== expectedSlug
+      ) {
+        return null;
+      }
+      const marketId = imageUrl.searchParams.get("marketId");
+      return /^\d+$/.test(String(marketId || "")) ? String(marketId) : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 function outcomeText(value) {
   return String(value?.name ?? value?.title ?? value?.label ?? value ?? "")
     .trim()
@@ -769,6 +794,7 @@ class ArbitrageBot {
     let after = null;
     let listError = null;
     let searchError = null;
+    let pageError = null;
     const headers = { "x-api-key": this.predictApiKey };
     const hasExpectedSlug = () =>
       markets.some((market) => String(market?.slug ?? "") === expectedSlug);
@@ -820,6 +846,14 @@ class ArbitrageBot {
     if (!hasExpectedSlug()) {
       await search("Bitcoin Up or Down");
     }
+    if (!hasExpectedSlug()) {
+      try {
+        const market = await this._fetchPredictMarketBySlug(window);
+        if (market) markets.push(market);
+      } catch (err) {
+        pageError = serializeError(err);
+      }
+    }
 
     const deduped = [
       ...new Map(
@@ -829,12 +863,12 @@ class ArbitrageBot {
         ]),
       ).values(),
     ];
-    const error =
-      deduped.length === 0 && listError && searchError
-        ? `Market list: ${listError}; targeted search: ${searchError}`
-        : deduped.length === 0
-          ? listError || searchError
-          : null;
+    const errors = [
+      listError && `Market list: ${listError}`,
+      searchError && `Predict search: ${searchError}`,
+      pageError && `Canonical market lookup: ${pageError}`,
+    ].filter(Boolean);
+    const error = deduped.length === 0 && errors.length ? errors.join("; ") : null;
     this.predictCache = {
       fetchedAt: now,
       windowSlug: expectedSlug,
@@ -842,6 +876,42 @@ class ArbitrageBot {
       error,
     };
     return this.predictCache;
+  }
+
+  async _fetchPredictMarketBySlug(window) {
+    const slug = predictFiveMinuteSlug(window);
+    const pageResponse = await this.fetch(
+      `https://predict.fun/market/${encodeURIComponent(slug)}`,
+      {
+        method: "GET",
+        headers: { accept: "text/html" },
+        signal: AbortSignal.timeout(5000),
+      },
+    );
+    const pageHtml = await pageResponse.text();
+    if (!pageResponse.ok) {
+      throw new Error(`predict.fun market page: HTTP ${pageResponse.status}`);
+    }
+    const marketId = marketIdFromCanonicalPage(pageHtml, slug);
+    if (!marketId) {
+      throw new Error("Canonical page did not identify this exact 5-minute market.");
+    }
+
+    const response = await fetchJson(
+      this.fetch,
+      `${PREDICT_API}/v1/markets/${encodeURIComponent(marketId)}`,
+      { headers: { "x-api-key": this.predictApiKey } },
+    );
+    const market = extractPredictMarkets(response).find(
+      (candidate) => String(candidate.id) === marketId,
+    );
+    if (!market) {
+      throw new Error(`Predict market details were not returned for market ${marketId}.`);
+    }
+    if (market.slug && String(market.slug) !== slug) {
+      throw new Error("Predict market details did not match the requested 5-minute slug.");
+    }
+    return market.slug ? market : { ...market, slug };
   }
 
   async _fetchPredict(window, polymarketConditionId, nowMs) {

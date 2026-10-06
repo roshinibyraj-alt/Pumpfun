@@ -369,6 +369,99 @@ test("discovers the exact Predict five-minute market through targeted search and
   );
 });
 
+test("resolves a missed Predict slot through its exact public page and documented market-details endpoint", async () => {
+  const nowMs = Date.now();
+  const openMs = Math.floor(nowMs / (5 * 60 * 1000)) * 5 * 60 * 1000;
+  const window = { openMs, closeMs: openMs + 5 * 60 * 1000 };
+  const slug = `btc-updown-5m-${openMs / 1000}`;
+  const marketId = "2967672";
+  const market = {
+    id: Number(marketId),
+    title: "Bitcoin Up or Down - current five-minute window",
+    status: "OPEN",
+    conditionId: "predict-current-window",
+    variantData: { type: "CRYPTO_UP_DOWN" },
+    outcomes: [
+      { name: "Up", indexSet: 1 },
+      { name: "Down", indexSet: 2 },
+    ],
+    decimalPrecision: 2,
+  };
+  const requests = [];
+  const bot = new ArbitrageBot({
+    predictApiKey: "test-only-placeholder",
+    fetch: async (url, options) => {
+      const parsed = new URL(String(url));
+      requests.push({
+        url: String(url),
+        headers: options?.headers,
+      });
+      if (parsed.pathname === "/v1/search") {
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({ success: true, data: { categories: [] } }),
+        };
+      }
+      if (parsed.pathname === "/v1/markets") {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ data: [], cursor: null }),
+        };
+      }
+      if (parsed.hostname === "predict.fun" && parsed.pathname === `/market/${slug}`) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            `<meta property="og:image" content="https://predict.fun/api/generate/image/market.png?marketId=${marketId}&amp;categoryId=${slug}&amp;v=2">`,
+        };
+      }
+      if (parsed.pathname === `/v1/markets/${marketId}`) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ success: true, data: market }),
+        };
+      }
+      assert.equal(parsed.pathname, `/v1/markets/${marketId}/orderbook`);
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            data: {
+              bids: [[0.29, 20]],
+              asks: [[0.31, 30]],
+              updateTimestampMs: nowMs,
+            },
+          }),
+      };
+    },
+  });
+
+  const venue = await bot._fetchPredict(window, null, nowMs);
+
+  assert.equal(venue.status, "connected");
+  assert.equal(venue.market.matchStatus, "matched");
+  assert.equal(venue.market.matchMethod, "slug_window");
+  assert.equal(venue.market.slug, slug);
+  assert.equal(venue.market.id, marketId);
+  assert.equal(venue.up.bestBid.price, 0.29);
+  assert.equal(venue.up.bestAsk.price, 0.31);
+  const pageRequest = requests.find((request) =>
+    request.url.startsWith("https://predict.fun/market/"),
+  );
+  assert.ok(pageRequest);
+  assert.equal(pageRequest.headers["x-api-key"], undefined);
+  const detailRequest = requests.find((request) =>
+    request.url.endsWith(`/v1/markets/${marketId}`),
+  );
+  assert.equal(detailRequest.headers["x-api-key"], "test-only-placeholder");
+});
+
 test("keeps paper P&L provisional while open and finalizes only after the shared window closes", () => {
   const trade = {
     openMs: 0,
