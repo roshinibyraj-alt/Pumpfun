@@ -341,8 +341,16 @@ test("discovers the exact Predict five-minute market through targeted search and
         text: async () =>
           JSON.stringify({
             data: {
-              bids: [[0.48, 20]],
-              asks: [[0.5, 30]],
+              bids: [
+                [0.01, 7007],
+                [0.5, 21],
+                [0.49, 33],
+              ],
+              asks: [
+                [0.99, 7007],
+                [0.54, 20],
+                [0.51, 30],
+              ],
               updateTimestampMs: nowMs,
             },
           }),
@@ -359,8 +367,10 @@ test("discovers the exact Predict five-minute market through targeted search and
   assert.equal(venue.market.id, String(market.id));
   assert.equal(venue.market.startMs, window.openMs);
   assert.equal(venue.market.closeMs, window.closeMs);
-  assert.equal(venue.up.bestAsk.price, 0.5);
-  assert.equal(venue.down.bestAsk.price, 0.52);
+  assert.equal(venue.up.bestBid.price, 0.5);
+  assert.equal(venue.up.bestAsk.price, 0.51);
+  assert.equal(venue.down.bestBid.price, 0.49);
+  assert.equal(venue.down.bestAsk.price, 0.5);
   assert.ok(
     requests.every(
       (request) => request.headers["x-api-key"] === "test-only-placeholder",

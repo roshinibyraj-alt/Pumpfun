@@ -104,8 +104,8 @@ function outcomeText(value) {
     .toUpperCase();
 }
 
-function toShortLevels(levels) {
-  return normalizeLevels(levels).slice(0, 20);
+function toShortLevels(levels, side = "asks") {
+  return normalizeLevels(levels, side).slice(0, 20);
 }
 
 function blankQuote(status = "missing", error = null) {
@@ -124,8 +124,8 @@ function blankQuote(status = "missing", error = null) {
 }
 
 function quoteFromBook(book, observedAt, nowMs = Date.now(), timestampKind = "received") {
-  const bids = toShortLevels(book?.bids);
-  const asks = toShortLevels(book?.asks);
+  const bids = toShortLevels(book?.bids, "bids");
+  const asks = toShortLevels(book?.asks, "asks");
   return {
     status: "ok",
     error: null,
