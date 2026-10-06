@@ -197,6 +197,21 @@ test("rejects a stale leg instead of creating a paper pair", () => {
   assert.match(result.reason, /stale/i);
 });
 
+test("blocks opportunities when cross-venue book snapshots are too far apart", () => {
+  const result = engine.evaluatePair({
+    nowMs: 20_000,
+    maxBookAgeMs: 5000,
+    maxBookSkewMs: 1000,
+    legs: [
+      pairLeg("Polymarket", "UP", "polymarket", [{ price: 0.4, size: 100 }], true, 19_500),
+      pairLeg("Predict.fun", "DOWN", "predict", [{ price: 0.4, size: 100 }], true, 18_000),
+    ],
+  });
+  assert.equal(result.eligible, false);
+  assert.equal(result.status, "blocked");
+  assert.match(result.reason, /snapshots are 1500 ms apart/i);
+});
+
 test("requires at least $0.10 net edge per share after fees and safety margin", () => {
   const result = engine.evaluatePair({
     nowMs: 1000,
@@ -210,6 +225,187 @@ test("requires at least $0.10 net edge per share after fees and safety margin", 
   });
   assert.equal(result.eligible, false);
   assert.equal(result.status, "below_threshold");
+});
+
+test("waits for modeled order arrival and misses a signal that disappears in newer books", () => {
+  const bot = new ArbitrageBot({ paperBaseLatencyMs: 500 });
+  const window = { openMs: 1_000_000, closeMs: 1_300_000 };
+  const signal = {
+    direction: "POLY_UP + PREDICT_DOWN",
+    status: "trigger",
+    eligible: true,
+    shares: 10,
+    pairCash: 7.5,
+    pairCostPerShare: 0.75,
+    netEdgePerShare: 0.15,
+    legs: [
+      { venue: "Polymarket", side: "UP", requestLatencyMs: 100 },
+      { venue: "Predict.fun", side: "DOWN", requestLatencyMs: 200 },
+    ],
+  };
+  const detectedAt = 1_000_000;
+  bot._schedulePaperPairs(window, [signal], detectedAt);
+  const pending = bot.pendingPaperPairs.get(`${window.openMs}:${signal.direction}`);
+  const arrivedAt = pending.simulatedArrivalAt;
+
+  bot._processPendingPaperPairs(
+    window,
+    [signal],
+    null,
+    arrivedAt - 1,
+  );
+  assert.equal(bot.state.paperTrades.length, 0);
+  assert.equal(bot.pendingPaperPairs.size, 1);
+
+  const movedBookOpportunity = {
+    ...signal,
+    status: "below_threshold",
+    eligible: false,
+    pairCostPerShare: 0.95,
+    netEdgePerShare: -0.05,
+    reason: "Price moved and the net edge is below threshold.",
+    legs: signal.legs.map((leg) => ({
+      ...leg,
+      quoteReceivedAt: arrivedAt + 100,
+    })),
+  };
+  bot._processPendingPaperPairs(
+    window,
+    [movedBookOpportunity],
+    null,
+    arrivedAt + 100,
+  );
+  assert.equal(bot.state.paperTrades.length, 0);
+  assert.equal(bot.pendingPaperPairs.size, 0);
+  assert.ok(bot.state.events.some((event) => event.event === "PAPER_PAIR_MISSED"));
+});
+
+test("records delayed paper fills using arrival prices and stores cost drift", () => {
+  const bot = new ArbitrageBot({ paperBaseLatencyMs: 500 });
+  const window = { openMs: 2_000_000, closeMs: 2_300_000 };
+  const signal = {
+    direction: "POLY_UP + PREDICT_DOWN",
+    status: "trigger",
+    eligible: true,
+    shares: 10,
+    pairCash: 7.5,
+    pairCostPerShare: 0.75,
+    netEdgePerShare: 0.15,
+    grossEdgePerShare: 0.16,
+    safetyMarginPerShare: 0.01,
+    fees: 0.1,
+    legs: [
+      {
+        venue: "Polymarket",
+        side: "UP",
+        feeModel: "polymarket",
+        shares: 10,
+        requestLatencyMs: 100,
+        averagePrice: 0.38,
+        bestAsk: 0.37,
+        worstFillPrice: 0.39,
+        notional: 3.8,
+        fees: 0.05,
+        cash: 3.85,
+        depthSlippagePerShare: 0.01,
+        levelsUsed: 2,
+        fills: [],
+      },
+      {
+        venue: "Predict.fun",
+        side: "DOWN",
+        feeModel: "predict",
+        shares: 10,
+        requestLatencyMs: 200,
+        averagePrice: 0.39,
+        bestAsk: 0.38,
+        worstFillPrice: 0.4,
+        notional: 3.9,
+        fees: 0.05,
+        cash: 3.95,
+        depthSlippagePerShare: 0.01,
+        levelsUsed: 2,
+        fills: [],
+      },
+    ],
+  };
+  const detectedAt = 2_000_000;
+  bot._schedulePaperPairs(window, [signal], detectedAt);
+  const pending = bot.pendingPaperPairs.get(`${window.openMs}:${signal.direction}`);
+  const executionAt = pending.simulatedArrivalAt + 100;
+  const arrivalOpportunity = {
+    ...signal,
+    pairCash: 7.8,
+    pairCostPerShare: 0.78,
+    netEdgePerShare: 0.12,
+    legs: signal.legs.map((leg) => ({
+      ...leg,
+      quoteReceivedAt: executionAt,
+    })),
+  };
+
+  bot._processPendingPaperPairs(
+    window,
+    [arrivalOpportunity],
+    null,
+    executionAt,
+  );
+
+  assert.equal(bot.state.paperTrades.length, 1);
+  const trade = bot.state.paperTrades[0];
+  assert.equal(trade.pairCostPerShare, 0.78);
+  assert.equal(trade.signalPairCostPerShare, 0.75);
+  assert.ok(trade.executionPriceDriftPerShare > 0.029);
+  assert.ok(trade.simulatedLatencyMs >= 800);
+  assert.equal(bot.firedKeys.has(`${window.openMs}:${signal.direction}`), true);
+});
+
+test("targets a non-overlapping 500 ms scan and runs venue/benchmark reads concurrently", async () => {
+  const currentWindow = engine.windowForTime(Date.now());
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const bot = new ArbitrageBot({
+    predictApiKey: "",
+    pollMs: 100,
+    fetch: async (url) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      const parsed = new URL(String(url));
+      let body = {};
+      if (parsed.hostname === "gamma-api.polymarket.com") body = [];
+      if (parsed.pathname.endsWith("/ticker")) {
+        body = { price: "100000", time: new Date().toISOString() };
+      }
+      if (parsed.pathname.endsWith("/candles")) {
+        body = [[Math.floor(currentWindow.openMs / 1000), 99_000, 101_000, 100_000, 100_100]];
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    },
+  });
+  bot._persist = async () => {};
+  bot.state.paperTrades = [
+    {
+      id: "smoke-open-trade",
+      finalized: false,
+      openMs: currentWindow.openMs,
+      closeMs: currentWindow.closeMs,
+      direction: "POLY_UP + PREDICT_DOWN",
+      legs: [
+        { venue: "Polymarket", side: "UP", shares: 2 },
+        { venue: "Predict.fun", side: "DOWN", shares: 2 },
+      ],
+      pairCash: 1.5,
+    },
+  ];
+
+  assert.equal(bot.pollMs, 500);
+  await bot._tick();
+
+  assert.ok(maxInFlight >= 2);
+  assert.ok(bot.state.polling.lastCycleMs >= 0);
+  assert.equal(bot.state.paperTrades[0].status, "open_provisional");
 });
 
 test("tracks starting demo capital, open commitment, available cash, and provisional equity", () => {

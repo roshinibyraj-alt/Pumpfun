@@ -25,8 +25,13 @@ const POLY_GAMMA = "https://gamma-api.polymarket.com";
 const POLY_CLOB = "https://clob.polymarket.com";
 const PREDICT_API = "https://api.predict.fun";
 const COINBASE_API = "https://api.exchange.coinbase.com";
-const POLL_MS = 2000;
-const PREDICT_MARKET_CACHE_MS = 15000;
+const POLL_MS = 500;
+const DEFAULT_PAPER_BASE_LATENCY_MS = 500;
+const MAX_BOOK_SKEW_MS = 1000;
+const MAX_EXECUTION_WAIT_MS = 3000;
+const RETRY_AFTER_MISSED_MS = 1000;
+const PREDICT_MARKET_CACHE_MS = 60_000;
+const POLYMARKET_MARKET_CACHE_MS = 60_000;
 const MAX_LOGS = 150;
 const MAX_TRADES = 250;
 const DEFAULT_STARTING_PAPER_CAPITAL_USD = 10_000;
@@ -113,7 +118,9 @@ function blankQuote(status = "missing", error = null) {
     status,
     error,
     observedAt: null,
+    receivedAt: null,
     ageMs: null,
+    requestLatencyMs: null,
     bids: [],
     asks: [],
     bestBid: null,
@@ -123,15 +130,23 @@ function blankQuote(status = "missing", error = null) {
   };
 }
 
-function quoteFromBook(book, observedAt, nowMs = Date.now(), timestampKind = "received") {
+function quoteFromBook(
+  book,
+  observedAt,
+  receivedAt = Date.now(),
+  timestampKind = "received",
+  requestStartedAt = receivedAt,
+) {
   const bids = toShortLevels(book?.bids, "bids");
   const asks = toShortLevels(book?.asks, "asks");
   return {
     status: "ok",
     error: null,
     observedAt,
+    receivedAt,
     timestampKind,
-    ageMs: Math.max(0, nowMs - observedAt),
+    ageMs: Math.max(0, receivedAt - observedAt),
+    requestLatencyMs: Math.max(0, receivedAt - requestStartedAt),
     bids,
     asks,
     bestBid: bids[0] || null,
@@ -278,6 +293,21 @@ class ArbitrageBot {
     this.realizedPnlTotal = 0;
     this.minNetEdgePerShare = DEFAULT_MIN_NET_EDGE_PER_SHARE;
     this.safetyMarginPerShare = this._readSafetyMargin();
+    this.pollMs = this._readBoundedMs(
+      options.pollMs ?? process.env.ARB_POLL_MS,
+      POLL_MS,
+      POLL_MS,
+      5000,
+    );
+    this.paperBaseLatencyMs = this._readBoundedMs(
+      options.paperBaseLatencyMs ?? process.env.ARB_PAPER_BASE_LATENCY_MS,
+      DEFAULT_PAPER_BASE_LATENCY_MS,
+      100,
+      5000,
+    );
+    this.rateLimitBackoffMs = 0;
+    this.rateLimitedUntil = 0;
+    this.lastCycleMs = 0;
     this.running = false;
     this.loopPromise = null;
     this.loaded = false;
@@ -288,12 +318,25 @@ class ArbitrageBot {
       markets: [],
       error: null,
     };
+    this.polymarketCache = {
+      fetchedAt: 0,
+      windowSlug: null,
+      candidate: null,
+      event: null,
+    };
+    this.pendingPaperPairs = new Map();
+    this.retryAfterByKey = new Map();
     this.state = {
       app: "BTC Cross-Venue Arb Demo",
       mode: "PAPER",
       running: false,
       now: Date.now(),
-      pollMs: POLL_MS,
+      pollMs: this.pollMs,
+      polling: {
+        targetIntervalMs: this.pollMs,
+        lastCycleMs: 0,
+        rateLimitBackoffMs: 0,
+      },
       config: {
         startingPaperCapitalUsd: this.startingCapitalUsd,
         maxCashPerLegUsd: this.maxCashPerLegUsd,
@@ -301,6 +344,9 @@ class ArbitrageBot {
         minNetEdgePerShare: this.minNetEdgePerShare,
         safetyMarginPerShare: this.safetyMarginPerShare,
         maxBookAgeMs: this.maxBookAgeMs,
+        maxBookSkewMs: MAX_BOOK_SKEW_MS,
+        paperBaseLatencyMs: this.paperBaseLatencyMs,
+        executionModel: "delayed_marketable_pair_recheck",
         equalShares: true,
         pairPayoutPerShare: 1,
         onePaperPairPerDirectionPerWindow: true,
@@ -347,6 +393,12 @@ class ArbitrageBot {
       return DEFAULT_SAFETY_MARGIN_PER_SHARE;
     }
     return configured;
+  }
+
+  _readBoundedMs(value, fallback, minimum, maximum) {
+    const configured = finiteNumber(value);
+    if (configured === null) return fallback;
+    return Math.max(minimum, Math.min(maximum, Math.round(configured)));
   }
 
   async _load() {
@@ -483,6 +535,7 @@ class ArbitrageBot {
 
   async _runLoop() {
     while (this.running) {
+      const cycleStartedAt = Date.now();
       try {
         await this._tick();
       } catch (error) {
@@ -491,13 +544,18 @@ class ArbitrageBot {
         await this._persist();
       }
       if (!this.running) break;
-      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      const elapsedMs = Date.now() - cycleStartedAt;
+      const intervalWaitMs = Math.max(0, this.pollMs - elapsedMs);
+      const rateLimitWaitMs = Math.max(0, this.rateLimitedUntil - Date.now());
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.max(intervalWaitMs, rateLimitWaitMs)),
+      );
     }
   }
 
   async _tick() {
-    const nowMs = Date.now();
-    const currentWindow = windowForTime(nowMs);
+    const tickStartedAt = Date.now();
+    const currentWindow = windowForTime(tickStartedAt);
     const slug = `btc-updown-5m-${Math.floor(currentWindow.openMs / 1000)}`;
     const activeWindow = this.state.window;
     if (!activeWindow || activeWindow.openMs !== currentWindow.openMs) {
@@ -507,22 +565,45 @@ class ArbitrageBot {
       slug,
       openMs: currentWindow.openMs,
       closeMs: currentWindow.closeMs,
-      secondsRemaining: Math.max(0, (currentWindow.closeMs - nowMs) / 1000),
+      secondsRemaining: Math.max(0, (currentWindow.closeMs - tickStartedAt) / 1000),
       timezone: "UTC",
     };
 
     const pendingWindows = this.state.paperTrades
-      .filter((trade) => !trade.finalized && Number(trade.closeMs) <= nowMs)
+      .filter((trade) => !trade.finalized && Number(trade.closeMs) <= tickStartedAt)
       .map((trade) => ({ openMs: Number(trade.openMs), closeMs: Number(trade.closeMs) }));
     const uniqueWindows = new Map(
       [[currentWindow.openMs, currentWindow], ...pendingWindows.map((w) => [w.openMs, w])],
     );
     const benchmarkWindows = [...uniqueWindows.values()];
-    const [polyResult, benchmarkResults] = await Promise.all([
+    const [polyResult, initialPredictResult, benchmarkResults] = await Promise.all([
       this._fetchPolymarket(currentWindow, slug),
-      Promise.all(benchmarkWindows.map((window) => this._fetchBenchmark(window, nowMs))),
+      this._fetchPredict(currentWindow, null, tickStartedAt),
+      Promise.all(
+        benchmarkWindows.map((window) => this._fetchBenchmark(window, tickStartedAt)),
+      ),
     ]);
+    let predictResult = initialPredictResult;
+    const polymarketConditionId = String(polyResult.market?.conditionId || "").toLowerCase();
+    if (
+      predictResult.market?.matchStatus !== "matched" &&
+      polymarketConditionId &&
+      this.predictCache.markets.some((market) =>
+        (Array.isArray(market?.polymarketConditionIds)
+          ? market.polymarketConditionIds
+          : [])
+          .map((id) => String(id).toLowerCase())
+          .includes(polymarketConditionId),
+      )
+    ) {
+      predictResult = await this._fetchPredict(
+        currentWindow,
+        polyResult.market.conditionId,
+        Date.now(),
+      );
+    }
     this.state.venues.polymarket = polyResult;
+    this.state.venues.predict = predictResult;
     const currentBenchmark = benchmarkResults.find(
       (item) => Number(item.openMs) === Number(currentWindow.openMs),
     );
@@ -535,27 +616,23 @@ class ArbitrageBot {
       if (benchmark.finalized) this.finalBenchmarks.set(benchmark.openMs, benchmark);
     }
 
-    const predictResult = await this._fetchPredict(
+    const evaluationAt = Date.now();
+    const evaluated = this._evaluate(
       currentWindow,
-      polyResult.market?.conditionId,
-      nowMs,
+      polyResult,
+      predictResult,
+      evaluationAt,
     );
-    this.state.venues.predict = predictResult;
-
-    this.state.opportunities = this._evaluate(currentWindow, polyResult, predictResult, nowMs);
-    for (const opportunity of this.state.opportunities) {
-      const key = `${currentWindow.openMs}:${opportunity.direction}`;
-      if (!opportunity.eligible || this.firedKeys.has(key)) continue;
-      const trade = this._createPaperTrade(opportunity, currentWindow, currentBenchmark);
-      this.state.paperTrades.unshift(trade);
-      this.state.paperTrades = this.state.paperTrades.slice(0, MAX_TRADES);
-      this.firedKeys.add(key);
-      this._log(
-        "PAPER_PAIR_OPENED",
-        `${opportunity.direction} simulated at ${opportunity.shares.toFixed(2)} equal shares; no orders sent.`,
-        { tradeId: trade.id, direction: opportunity.direction },
-      );
-    }
+    this._processPendingPaperPairs(
+      currentWindow,
+      evaluated,
+      currentBenchmark,
+      evaluationAt,
+    );
+    this._schedulePaperPairs(currentWindow, evaluated, evaluationAt);
+    this.state.opportunities = this._decoratePendingOpportunities(
+      this._evaluate(currentWindow, polyResult, predictResult, evaluationAt),
+    );
 
     const benchmarkByWindow = new Map(benchmarkResults.map((item) => [item.openMs, item]));
     for (const trade of this.state.paperTrades) {
@@ -564,7 +641,7 @@ class ArbitrageBot {
         benchmarkByWindow.get(Number(trade.openMs)) ||
         this.finalBenchmarks.get(Number(trade.openMs));
       if (!benchmark) continue;
-      const updated = updateTradeWithBenchmark(trade, benchmark, nowMs);
+      const updated = updateTradeWithBenchmark(trade, benchmark, evaluationAt);
       if (!trade.finalized && updated.finalized) {
         this.realizedPnlTotal += finiteNumber(updated.realizedPnl) ?? 0;
         this._log(
@@ -575,9 +652,191 @@ class ArbitrageBot {
       }
       Object.assign(trade, updated);
     }
+    const rateLimitText = [
+      polyResult.error,
+      polyResult.up?.error,
+      polyResult.down?.error,
+      predictResult.error,
+      JSON.stringify(predictResult.discovery || {}),
+      predictResult.up?.error,
+      predictResult.down?.error,
+      ...benchmarkResults.map((item) => item.error),
+    ]
+      .filter(Boolean)
+      .join(" ");
+    if (/\b429\b|too many requests|rate.?limit/i.test(rateLimitText)) {
+      this.rateLimitBackoffMs = Math.min(
+        this.rateLimitBackoffMs ? this.rateLimitBackoffMs * 2 : 2000,
+        30_000,
+      );
+      this.rateLimitedUntil = Date.now() + this.rateLimitBackoffMs;
+      this._log(
+        "API_RATE_LIMIT_BACKOFF",
+        `Read-only data endpoint rate limited the scanner; pausing requests for ${this.rateLimitBackoffMs} ms.`,
+      );
+    } else {
+      this.rateLimitBackoffMs = 0;
+      this.rateLimitedUntil = 0;
+    }
+    this.lastCycleMs = Date.now() - tickStartedAt;
+    this.state.polling = {
+      targetIntervalMs: this.pollMs,
+      lastCycleMs: this.lastCycleMs,
+      rateLimitBackoffMs: this.rateLimitBackoffMs,
+      rateLimitedUntil: this.rateLimitedUntil || null,
+    };
     this._recalculateStats();
     this.state.lastError = null;
     await this._persist();
+  }
+
+  _schedulePaperPairs(window, opportunities, nowMs) {
+    for (const opportunity of opportunities) {
+      const key = `${window.openMs}:${opportunity.direction}`;
+      if (
+        !opportunity.eligible ||
+        this.firedKeys.has(key) ||
+        this.pendingPaperPairs.has(key) ||
+        Number(this.retryAfterByKey.get(key) || 0) > nowMs
+      ) {
+        continue;
+      }
+      const arrivalAtByVenue = {};
+      for (const leg of opportunity.legs || []) {
+        const feedLatencyMs = Math.max(0, finiteNumber(leg.requestLatencyMs) ?? 0);
+        arrivalAtByVenue[leg.venue] =
+          nowMs + this.paperBaseLatencyMs + feedLatencyMs;
+      }
+      const simulatedArrivalAt = Math.max(...Object.values(arrivalAtByVenue));
+      this.pendingPaperPairs.set(key, {
+        key,
+        direction: opportunity.direction,
+        windowOpenMs: Number(window.openMs),
+        closeMs: Number(window.closeMs),
+        detectedAt: nowMs,
+        arrivalAtByVenue,
+        simulatedArrivalAt,
+        expiresAt: simulatedArrivalAt + MAX_EXECUTION_WAIT_MS,
+        signalPairCostPerShare: opportunity.pairCostPerShare,
+        signalNetEdgePerShare: opportunity.netEdgePerShare,
+        signalShares: opportunity.shares,
+      });
+      this._log(
+        "PAPER_PAIR_QUEUED",
+        `${opportunity.direction} met the signal threshold; rechecking prices, depth, and fees after ${simulatedArrivalAt - nowMs} ms of modeled arrival latency.`,
+        {
+          direction: opportunity.direction,
+          simulatedArrivalAt,
+          signalNetEdgePerShare: opportunity.netEdgePerShare,
+        },
+      );
+    }
+  }
+
+  _processPendingPaperPairs(window, opportunities, benchmark, nowMs) {
+    const byDirection = new Map(
+      opportunities.map((opportunity) => [opportunity.direction, opportunity]),
+    );
+    for (const [key, pending] of this.pendingPaperPairs) {
+      if (
+        pending.windowOpenMs !== Number(window.openMs) ||
+        nowMs >= Number(pending.closeMs)
+      ) {
+        this.pendingPaperPairs.delete(key);
+        this._log(
+          "PAPER_PAIR_MISSED",
+          `${pending.direction} was not simulated because its five-minute window ended before the delayed execution check.`,
+          { direction: pending.direction, reason: "window_closed_before_arrival" },
+        );
+        continue;
+      }
+      const opportunity = byDirection.get(pending.direction);
+      if (nowMs < pending.simulatedArrivalAt) continue;
+      const snapshotsReady =
+        opportunity?.legs?.length === 2 &&
+        opportunity.legs.every(
+          (leg) =>
+            finiteNumber(leg.quoteReceivedAt) !== null &&
+            finiteNumber(leg.quoteReceivedAt) >=
+              Number(pending.arrivalAtByVenue[leg.venue] || pending.simulatedArrivalAt),
+        );
+      if (!snapshotsReady) {
+        if (nowMs <= pending.expiresAt) continue;
+        this.pendingPaperPairs.delete(key);
+        this.retryAfterByKey.set(key, nowMs + RETRY_AFTER_MISSED_MS);
+        this._log(
+          "PAPER_PAIR_MISSED",
+          `${pending.direction} had no fresh venue snapshots after the modeled arrival time; no paper fill was recorded.`,
+          { direction: pending.direction, reason: "no_post_latency_snapshot" },
+        );
+        continue;
+      }
+      if (opportunity?.eligible) {
+        const simulatedLatencyMs = Math.max(0, nowMs - pending.detectedAt);
+        const trade = this._createPaperTrade(opportunity, window, benchmark, {
+          detectedAt: pending.detectedAt,
+          executedAt: nowMs,
+          simulatedLatencyMs,
+          signalPairCostPerShare: pending.signalPairCostPerShare,
+          signalNetEdgePerShare: pending.signalNetEdgePerShare,
+          signalShares: pending.signalShares,
+        });
+        this.state.paperTrades.unshift(trade);
+        this.state.paperTrades = this.state.paperTrades.slice(0, MAX_TRADES);
+        this.firedKeys.add(key);
+        this.pendingPaperPairs.delete(key);
+        this.retryAfterByKey.delete(key);
+        this._log(
+          "PAPER_PAIR_OPENED",
+          `${opportunity.direction} simulated at ${opportunity.shares.toFixed(2)} equal shares after ${simulatedLatencyMs} ms; current depth and fees were rechecked and no orders were sent.`,
+          {
+            tradeId: trade.id,
+            direction: trade.direction,
+            simulatedLatencyMs,
+            executionPriceDriftPerShare: trade.executionPriceDriftPerShare,
+          },
+        );
+        continue;
+      }
+      const transient =
+        opportunity?.status === "blocked" &&
+        /book|stale|missing|unavailable|snapshot|not safely matched/i.test(
+          String(opportunity.reason || ""),
+        );
+      if (transient && nowMs <= pending.expiresAt) continue;
+      this.pendingPaperPairs.delete(key);
+      this.retryAfterByKey.set(key, nowMs + RETRY_AFTER_MISSED_MS);
+      this._log(
+        "PAPER_PAIR_MISSED",
+        `${pending.direction} signal disappeared during modeled latency; no fill was recorded. ${opportunity?.reason || "Current books no longer support the signal."}`,
+        {
+          direction: pending.direction,
+          reason: opportunity?.reason || "signal_disappeared",
+          signalNetEdgePerShare: pending.signalNetEdgePerShare,
+          arrivalNetEdgePerShare: opportunity?.netEdgePerShare ?? null,
+        },
+      );
+    }
+    for (const [key, retryAt] of this.retryAfterByKey) {
+      if (retryAt <= nowMs) this.retryAfterByKey.delete(key);
+    }
+  }
+
+  _decoratePendingOpportunities(opportunities) {
+    return opportunities.map((opportunity) => {
+      const key = `${this.state.window?.openMs}:${opportunity.direction}`;
+      const pending = this.pendingPaperPairs.get(key);
+      if (!pending) return opportunity;
+      return {
+        ...opportunity,
+        status: "pending_execution",
+        eligible: false,
+        pendingExecution: true,
+        simulatedArrivalAt: pending.simulatedArrivalAt,
+        reason:
+          "Signal found; waiting for delayed venue snapshots, then rechecking the $0.10 edge, fees, and visible depth.",
+      };
+    });
   }
 
   _evaluate(currentWindow, poly, predict, nowMs) {
@@ -589,6 +848,7 @@ class ArbitrageBot {
       minNetEdgePerShare: this.minNetEdgePerShare,
       safetyMarginPerShare: this.safetyMarginPerShare,
       maxBookAgeMs: this.maxBookAgeMs,
+      maxBookSkewMs: MAX_BOOK_SKEW_MS,
     };
     const candidates = [
       {
@@ -657,11 +917,15 @@ class ArbitrageBot {
     });
   }
 
-  _createPaperTrade(opportunity, window, benchmark) {
+  _createPaperTrade(opportunity, window, benchmark, execution = {}) {
     const legs = opportunity.legs.map((leg) => ({
       venue: leg.venue,
       side: leg.side,
       shares: leg.shares,
+      quoteObservedAt: leg.quoteObservedAt,
+      quoteReceivedAt: leg.quoteReceivedAt,
+      quoteAgeMs: leg.quoteAgeMs,
+      requestLatencyMs: leg.requestLatencyMs,
       averagePrice: leg.averagePrice,
       bestAsk: leg.bestAsk,
       worstFillPrice: leg.worstFillPrice,
@@ -674,7 +938,18 @@ class ArbitrageBot {
     }));
     return {
       id: `paper-${window.openMs}-${opportunity.direction.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`,
-      openedAt: Date.now(),
+      openedAt: execution.executedAt ?? Date.now(),
+      signalDetectedAt: execution.detectedAt ?? null,
+      simulatedLatencyMs: execution.simulatedLatencyMs ?? null,
+      executionModel: "marketable_depth_after_latency",
+      signalPairCostPerShare: execution.signalPairCostPerShare ?? null,
+      signalNetEdgePerShare: execution.signalNetEdgePerShare ?? null,
+      signalShares: execution.signalShares ?? null,
+      executionPriceDriftPerShare:
+        finiteNumber(execution.signalPairCostPerShare) === null
+          ? null
+          : opportunity.pairCostPerShare - Number(execution.signalPairCostPerShare),
+      arrivalSnapshotSkewMs: opportunity.snapshotSkewMs ?? null,
       openMs: window.openMs,
       closeMs: window.closeMs,
       direction: opportunity.direction,
@@ -699,18 +974,39 @@ class ArbitrageBot {
   async _fetchPolymarket(window, slug) {
     const base = emptyVenue("Polymarket", "loading");
     try {
-      const events = await fetchJson(
-        this.fetch,
-        `${POLY_GAMMA}/events?slug=${encodeURIComponent(slug)}`,
-      );
-      const eventList = Array.isArray(events) ? events : events?.data || [];
-      const event = eventList.find((item) => item.slug === slug) || eventList[0];
+      const cacheAgeMs = Date.now() - Number(this.polymarketCache.fetchedAt || 0);
+      const hasCachedMarket =
+        this.polymarketCache.windowSlug === slug &&
+        this.polymarketCache.candidate &&
+        cacheAgeMs < POLYMARKET_MARKET_CACHE_MS;
+      const hasShortNegativeCache =
+        this.polymarketCache.windowSlug === slug &&
+        !this.polymarketCache.candidate &&
+        cacheAgeMs < 1000;
+      let event = hasCachedMarket || hasShortNegativeCache
+        ? this.polymarketCache.event
+        : null;
+      let candidate = hasCachedMarket ? this.polymarketCache.candidate : null;
+      if (!hasCachedMarket && !hasShortNegativeCache) {
+        const events = await fetchJson(
+          this.fetch,
+          `${POLY_GAMMA}/events?slug=${encodeURIComponent(slug)}`,
+        );
+        const eventList = Array.isArray(events) ? events : events?.data || [];
+        event = eventList.find((item) => item.slug === slug) || eventList[0];
+        candidate = event ? safePolymarketMarket(event, window) : null;
+        this.polymarketCache = {
+          fetchedAt: Date.now(),
+          windowSlug: slug,
+          candidate,
+          event,
+        };
+      }
       if (!event) {
         base.status = "missing_market";
         base.market.matchReason = "No Polymarket event was returned for the exact 5-minute UTC slot.";
         return base;
       }
-      const candidate = safePolymarketMarket(event, window);
       if (!candidate) {
         base.status = "unmatched";
         base.market = {
@@ -742,6 +1038,7 @@ class ArbitrageBot {
       const books = await Promise.all(
         ["UP", "DOWN"].map(async (side) => {
           try {
+            const requestStartedAt = Date.now();
             const book = await fetchJson(
               this.fetch,
               `${POLY_CLOB}/book?token_id=${encodeURIComponent(tokens[side])}`,
@@ -756,6 +1053,7 @@ class ArbitrageBot {
                 observedAt,
                 receivedAt,
                 sourceTimestamp === null ? "received" : "source",
+                requestStartedAt,
               ),
             ];
           } catch (error) {
@@ -784,9 +1082,12 @@ class ArbitrageBot {
   async _fetchPredictMarkets(window) {
     const now = Date.now();
     const expectedSlug = predictFiveMinuteSlug(window);
+    const cacheTtlMs = this.predictCache.discovery?.exactMarketFound
+      ? PREDICT_MARKET_CACHE_MS
+      : Math.min(PREDICT_MARKET_CACHE_MS, 5000);
     if (
       this.predictCache.windowSlug === expectedSlug &&
-      now - this.predictCache.fetchedAt < PREDICT_MARKET_CACHE_MS
+      now - this.predictCache.fetchedAt < cacheTtlMs
     ) {
       return this.predictCache;
     }
@@ -1090,6 +1391,7 @@ class ArbitrageBot {
       decimalPrecision < 1 ||
       decimalPrecision > 8;
     try {
+      const requestStartedAt = Date.now();
       const response = await fetchJson(
         this.fetch,
         `${PREDICT_API}/v1/markets/${encodeURIComponent(market.id)}/orderbook`,
@@ -1109,7 +1411,13 @@ class ArbitrageBot {
           matchReason:
             "Predict price precision is missing or invalid. UP's raw quote is shown; DOWN cannot be safely derived, and the scanner remains blocked.",
         };
-        base.up = quoteFromBook(book, observedAt, receivedAt, timestampKind);
+        base.up = quoteFromBook(
+          book,
+          observedAt,
+          receivedAt,
+          timestampKind,
+          requestStartedAt,
+        );
         base.down = blankQuote(
           "unavailable",
           "Cannot derive the complementary DOWN quote without valid market precision.",
@@ -1117,8 +1425,20 @@ class ArbitrageBot {
       } else {
         const mapped = complementYesBook(book, decimalPrecision);
         base.market = marketMeta;
-        base.up = quoteFromBook(mapped.yes, observedAt, receivedAt, timestampKind);
-        base.down = quoteFromBook(mapped.no, observedAt, receivedAt, timestampKind);
+        base.up = quoteFromBook(
+          mapped.yes,
+          observedAt,
+          receivedAt,
+          timestampKind,
+          requestStartedAt,
+        );
+        base.down = quoteFromBook(
+          mapped.no,
+          observedAt,
+          receivedAt,
+          timestampKind,
+          requestStartedAt,
+        );
       }
       base.observedAt = receivedAt;
       if (Number(nowMs) - observedAt > this.maxBookAgeMs) {

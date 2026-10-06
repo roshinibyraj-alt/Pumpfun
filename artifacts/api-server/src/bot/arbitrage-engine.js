@@ -186,6 +186,26 @@ function evaluatePair(options) {
       reason: "No available demo capital remains for this paper pair.",
     };
   }
+  const snapshotTimes = legs
+    .map((leg) => finiteNumber(leg.book?.receivedAt ?? leg.book?.observedAt))
+    .filter((value) => value !== null);
+  const snapshotSkewMs =
+    snapshotTimes.length === legs.length
+      ? Math.max(...snapshotTimes) - Math.min(...snapshotTimes)
+      : null;
+  const maxBookSkewMs = finiteNumber(options.maxBookSkewMs);
+  if (
+    maxBookSkewMs !== null &&
+    snapshotSkewMs !== null &&
+    snapshotSkewMs > maxBookSkewMs
+  ) {
+    return {
+      status: "blocked",
+      eligible: false,
+      reason: `Venue book snapshots are ${Math.round(snapshotSkewMs)} ms apart; the limit is ${Math.round(maxBookSkewMs)} ms.`,
+      snapshotSkewMs,
+    };
+  }
   for (const leg of legs) {
     if (leg.marketMatched !== true) {
       return {
@@ -247,6 +267,7 @@ function evaluatePair(options) {
     pairCostPerShare: pairCash / shares,
     grossEdgePerShare,
     netEdgePerShare,
+    snapshotSkewMs,
     legs: legs.map((leg, index) => {
       const fill = fills[index];
       const bestAsk = normalizeLevels(leg.book.asks, "asks")[0]?.price ?? null;
@@ -255,6 +276,10 @@ function evaluatePair(options) {
         side: leg.side,
         feeModel: leg.feeModel,
         shares,
+        quoteObservedAt: finiteNumber(leg.book.observedAt),
+        quoteReceivedAt: finiteNumber(leg.book.receivedAt),
+        quoteAgeMs: finiteNumber(leg.book.ageMs),
+        requestLatencyMs: finiteNumber(leg.book.requestLatencyMs),
         bestAsk,
         averagePrice: fill.averagePrice,
         worstFillPrice: fill.worstPrice,

@@ -5,8 +5,10 @@ type Quote = {
   status?: string;
   error?: string | null;
   observedAt?: number | null;
+  receivedAt?: number | null;
   timestampKind?: "source" | "received";
   ageMs?: number | null;
+  requestLatencyMs?: number | null;
   bids?: Level[];
   asks?: Level[];
   bestBid?: Level | null;
@@ -59,6 +61,8 @@ type Opportunity = {
   status: string;
   eligible: boolean;
   alreadyFiredThisWindow?: boolean;
+  pendingExecution?: boolean;
+  simulatedArrivalAt?: number | null;
   reason: string;
   shares?: number;
   pairCash?: number;
@@ -91,6 +95,8 @@ type PaperTrade = {
   realizedPnl?: number;
   provisionalOutcome?: string | null;
   provisionalPnl?: number | null;
+  simulatedLatencyMs?: number | null;
+  executionPriceDriftPerShare?: number | null;
   legs: Array<{ venue: string; side: string; averagePrice: number; cash: number }>;
 };
 type BotState = {
@@ -99,6 +105,11 @@ type BotState = {
   running: boolean;
   now: number;
   pollMs: number;
+  polling?: {
+    targetIntervalMs?: number;
+    lastCycleMs?: number;
+    rateLimitBackoffMs?: number;
+  };
   lastError?: string | null;
   config?: {
     startingPaperCapitalUsd: number;
@@ -107,6 +118,9 @@ type BotState = {
     minNetEdgePerShare: number;
     safetyMarginPerShare: number;
     maxBookAgeMs: number;
+    maxBookSkewMs?: number;
+    paperBaseLatencyMs?: number;
+    executionModel?: string;
   };
   window?: { slug: string; openMs: number; closeMs: number; secondsRemaining: number };
   benchmark?: {
@@ -213,7 +227,10 @@ function QuoteTile({ label, quote }: { label: string; quote?: Quote }) {
       </div>
       <div className="quote-footer">
         <span>Visible depth: {shares(quote?.askDepth)} ask / {shares(quote?.bidDepth)} bid</span>
-        <span>{ageLabel(quote)}</span>
+        <span>
+          {ageLabel(quote)}
+          {quote?.requestLatencyMs != null ? ` · read ${Math.round(quote.requestLatencyMs)} ms` : ""}
+        </span>
       </div>
       {quote?.error && <div className="inline-error">{quote.error}</div>}
     </section>
@@ -300,9 +317,17 @@ function App() {
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 2000);
-    return () => window.clearInterval(timer);
+    let active = true;
+    let timer: number | undefined;
+    const poll = async () => {
+      await refresh();
+      if (active) timer = window.setTimeout(() => void poll(), 500);
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [refresh]);
 
   const controlBot = async (action: "start" | "stop") => {
@@ -319,6 +344,7 @@ function App() {
   };
 
   const config = state?.config;
+  const polling = state?.polling;
   const benchmark = state?.benchmark;
   const stats = state?.stats;
   const trades = state?.paperTrades || [];
@@ -381,7 +407,8 @@ function App() {
           <strong>Signals use venue books only.</strong>
           <span>
             Arb detection compares the four UP/DOWN order books, executable depth, taker fees,
-            and the $0.10 net-edge threshold. BTC reference prices never trigger a signal.
+            and the $0.10 net-edge threshold. A paper fill waits for modeled latency, then rechecks
+            the new prices and depth; BTC reference prices never trigger a signal.
           </span>
         </div>
       </section>
@@ -405,11 +432,15 @@ function App() {
         <article className="stat-card">
           <span className="stat-label">Paper cap per leg</span>
           <strong className="stat-value">{dollars(config?.maxCashPerLegUsd)}</strong>
-          <span className="stat-foot">up to {dollars(config?.maxCashPerOpportunityUsd)} per pair</span>
+          <span className="stat-foot">
+            up to {dollars(config?.maxCashPerOpportunityUsd)} per pair · {config?.paperBaseLatencyMs ?? 500}ms base delay
+          </span>
         </article>
         <article className="stat-card">
-          <span className="stat-label">Ready opportunities</span>
-          <strong className={`stat-value ${readyCount ? "positive" : ""}`}>{readyCount}</strong>
+          <span className="stat-label">Ready / pending</span>
+          <strong className={`stat-value ${readyCount ? "positive" : ""}`}>
+            {readyCount} / {opportunities.filter((item) => item.pendingExecution).length}
+          </strong>
           <span className="stat-foot">one paper pair per direction / window</span>
         </article>
         <article className="stat-card">
@@ -424,7 +455,12 @@ function App() {
           <div className="eyebrow">LIVE MARKET DATA</div>
           <h2>Each venue, each outcome</h2>
         </div>
-        <span className="refresh-indicator"><span className="pulse-dot" /> refreshes every 2 seconds</span>
+        <span className="refresh-indicator">
+          <span className="pulse-dot" />
+          {polling?.rateLimitBackoffMs
+            ? `rate-limit pause · ${Math.round(polling.rateLimitBackoffMs / 1000)}s`
+            : `${polling?.targetIntervalMs ?? state?.pollMs ?? 500}ms target · last cycle ${polling?.lastCycleMs ?? 0}ms`}
+        </span>
       </section>
       <section className="venue-grid">
         <VenueCard venue={state?.venues?.polymarket || { name: "Polymarket", status: "waiting" }} />
@@ -465,6 +501,7 @@ function App() {
             <tbody>
               {opportunities.map((item) => {
                 const wasFired = item.alreadyFiredThisWindow;
+                const pending = item.pendingExecution;
                 const good = item.status === "trigger" || item.eligible;
                 const legSummary = item.legs
                   ?.map(
@@ -486,8 +523,8 @@ function App() {
                       {item.netEdgePerShare != null ? `${dollars(item.netEdgePerShare, 4)} / sh` : "—"}
                     </td>
                     <td>
-                      <span className={`status-pill ${wasFired ? "good" : good ? "good" : item.status === "blocked" ? "warn" : "quiet"}`}>
-                        {wasFired ? "Already fired" : good ? "Ready to paper" : statusLabel(item.status)}
+                      <span className={`status-pill ${wasFired || good ? "good" : pending || item.status === "blocked" ? "warn" : "quiet"}`}>
+                        {wasFired ? "Already fired" : pending ? "Latency recheck" : good ? "Ready to paper" : statusLabel(item.status)}
                       </span>
                     </td>
                   </tr>
@@ -541,7 +578,15 @@ function App() {
                 <div className="trade-row" key={trade.id}>
                   <div className="trade-main">
                     <strong>{trade.direction}</strong>
-                    <small>{shares(trade.shares)} equal shares · {dollars(trade.pairCash)} all-in</small>
+                    <small>
+                      {shares(trade.shares)} equal shares · {dollars(trade.pairCash)} all-in
+                      {trade.simulatedLatencyMs != null
+                        ? ` · ${Math.round(trade.simulatedLatencyMs)}ms modeled delay`
+                        : ""}
+                      {trade.executionPriceDriftPerShare != null
+                        ? ` · cost drift ${trade.executionPriceDriftPerShare >= 0 ? "+" : ""}${dollars(trade.executionPriceDriftPerShare, 4)}/sh`
+                        : ""}
+                    </small>
                   </div>
                   <div className="trade-result">
                     <span className={`status-pill ${trade.finalized ? "good" : "quiet"}`}>
@@ -563,7 +608,9 @@ function App() {
         <strong>Settlement warning:</strong> Polymarket’s BTC 5-minute rules use Chainlink BTC/USD TWAP;
         Predict.fun’s crypto markets can use a different feed and may include outcomes beyond UP/DOWN.
         This dashboard only pairs explicitly matched binary UP/DOWN markets. Its close-window P&amp;L is
-        an internal paper model—not a guaranteed arbitrage or an official venue payout.
+        an internal paper model—not a guaranteed arbitrage or an official venue payout. Delayed paper
+        fills walk visible asks after the latency check; the model cannot represent queue priority,
+        hidden liquidity, real acknowledgements, or actual partial-fill risk.
       </section>
 
       <footer className="footer">

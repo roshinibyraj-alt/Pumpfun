@@ -15,6 +15,14 @@ This repository runs a **paper-only** BTC 5-minute cross-venue scanner for Polym
 
 The signal is a paper model, not guaranteed or risk-free arbitrage. Cross-venue rules, oracle sources, fees, and settlement timing may differ.
 
+## Polling and paper fills
+
+- The scanner targets a **500 ms start-to-start read cycle** with no overlapping scans. Venue reads run concurrently; stable market metadata is cached so the loop focuses on the current books. The dashboard reports the target interval and recent cycle time.
+- A paper signal is **not filled at detection time**. It waits for a modeled **500 ms base order-arrival delay plus each venue’s measured order-book request time**, then requires both books to have been received after their respective arrival times. At that point the bot recalculates equal-share size, visible ask-depth fills, fees, slippage, and the $0.10 net-edge rule from the newer books.
+- If the post-delay books are stale, too far apart in time, too shallow, or no longer clear the edge threshold, the attempt is logged as missed and no position is recorded. HTTP 429 responses trigger an exponential pause (up to 30 seconds) rather than hammering a rate-limited endpoint.
+- This remains a **paper fill model**, not a prediction of an actual exchange fill: it cannot model queue position, hidden liquidity, real order acknowledgements, or leg-specific partial-fill/unhedged exposure. It only records a pair when both refreshed books support the same executable share quantity.
+- Optional server variables: `ARB_POLL_MS` (500–5000 ms; default 500) and `ARB_PAPER_BASE_LATENCY_MS` (100–5000 ms; default 500). They affect only paper scanning/simulation, never live orders.
+
 ## Dashboard and paper finalization
 
 The dashboard shows separate UP and DOWN bid/ask books for each venue, visible depth, timestamps/age, market details, matching status, candidate pair costs, fees, simulated trades, demo capital, and P&L. If Predict returns a quote for an open market that cannot be matched to Polymarket's exact 5-minute window, the dashboard can still show that market's separate quotes, but labels it unmatched and keeps it out of the scanner.
