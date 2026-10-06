@@ -409,7 +409,12 @@ test("resolves a missed Predict slot through its exact public page and documente
               success: true,
               data: {
                 categories: [
-                  { id: "btc-updown-5m-category", slug, title: "BTC 5m" },
+                  {
+                    id: "btc-updown-5m-category",
+                    slug,
+                    title: "BTC 5m",
+                    variantData: { type: "CRYPTO_UP_DOWN" },
+                  },
                 ],
               },
             }),

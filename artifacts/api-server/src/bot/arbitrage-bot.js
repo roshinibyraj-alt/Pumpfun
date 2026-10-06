@@ -13,6 +13,7 @@ const {
   evaluatePredictMarketMatch,
   finiteNumber,
   getExplicitMarketWindow,
+  mapPredictUpDownOutcomes,
   normalizeLevels,
   toTimestampMs,
   updateTradeWithBenchmark,
@@ -807,7 +808,8 @@ class ArbitrageBot {
         ).toUpperCase();
         return (
           variant === "CRYPTO_UP_DOWN" &&
-          String(market?.slug ?? "") === expectedSlug
+          String(market?.slug ?? "") === expectedSlug &&
+          mapPredictUpDownOutcomes(market).safe
         );
       });
 
