@@ -95,6 +95,10 @@ type PaperTrade = {
   realizedPnl?: number;
   provisionalOutcome?: string | null;
   provisionalPnl?: number | null;
+  venueSettlements?: {
+    polymarket?: { status?: string; outcome?: string | null; reason?: string | null };
+    predict?: { status?: string; outcome?: string | null; reason?: string | null };
+  } | null;
   simulatedLatencyMs?: number | null;
   executionPriceDriftPerShare?: number | null;
   legs: Array<{ venue: string; side: string; averagePrice: number; cash: number }>;
@@ -542,10 +546,10 @@ function App() {
         <article className="panel benchmark-panel">
           <div className="panel-heading">
             <div>
-              <div className="eyebrow">PAPER FINALIZATION ONLY</div>
-              <h2>Shared BTC benchmark</h2>
+              <div className="eyebrow">DIAGNOSTIC ONLY</div>
+              <h2>Coinbase reference feed</h2>
             </div>
-            <span className={`status-pill ${benchmark?.status === "final" ? "good" : "quiet"}`}>
+            <span className="status-pill quiet">
               {statusLabel(benchmark?.status)}
             </span>
           </div>
@@ -574,6 +578,14 @@ function App() {
           <div className="trade-list">
             {trades.slice(0, 8).map((trade) => {
               const value = trade.finalized ? trade.realizedPnl : trade.provisionalPnl;
+              const settlementTone = !trade.finalized
+                ? trade.status?.includes("awaiting")
+                  ? "warn"
+                  : "quiet"
+                : Number(trade.realizedPnl) >= 0
+                  ? "good"
+                  : "bad";
+              const venueResults = trade.venueSettlements;
               return (
                 <div className="trade-row" key={trade.id}>
                   <div className="trade-main">
@@ -586,11 +598,14 @@ function App() {
                       {trade.executionPriceDriftPerShare != null
                         ? ` · cost drift ${trade.executionPriceDriftPerShare >= 0 ? "+" : ""}${dollars(trade.executionPriceDriftPerShare, 4)}/sh`
                         : ""}
+                      {venueResults
+                        ? ` · Results: Poly ${venueResults.polymarket?.outcome || statusLabel(venueResults.polymarket?.status)}, Predict ${venueResults.predict?.outcome || statusLabel(venueResults.predict?.status)}`
+                        : ""}
                     </small>
                   </div>
                   <div className="trade-result">
-                    <span className={`status-pill ${trade.finalized ? "good" : "quiet"}`}>
-                      {trade.finalized ? `Final ${trade.finalOutcome}` : statusLabel(trade.status)}
+                    <span className={`status-pill ${settlementTone}`}>
+                      {trade.finalized ? "Venue settled" : statusLabel(trade.status)}
                     </span>
                     <strong className={value == null ? "muted" : value >= 0 ? "positive" : "negative"}>
                       {value == null ? "—" : dollars(value)}
@@ -605,10 +620,10 @@ function App() {
       </section>
 
       <section className="bottom-warning">
-        <strong>Settlement warning:</strong> Polymarket’s BTC 5-minute rules use Chainlink BTC/USD TWAP;
-        Predict.fun’s crypto markets can use a different feed and may include outcomes beyond UP/DOWN.
-        This dashboard only pairs explicitly matched binary UP/DOWN markets. Its close-window P&amp;L is
-        an internal paper model—not a guaranteed arbitrage or an official venue payout. Delayed paper
+        <strong>Settlement warning:</strong> Final paper P&amp;L waits for the exact Polymarket and
+        Predict.fun markets to publish their own resolved outcomes; the two venues may resolve
+        differently, and both paper legs can lose. The Coinbase reference above is diagnostic only
+        and never finalizes P&amp;L. Delayed paper
         fills walk visible asks after the latency check; the model cannot represent queue priority,
         hidden liquidity, real acknowledgements, or actual partial-fill risk.
       </section>

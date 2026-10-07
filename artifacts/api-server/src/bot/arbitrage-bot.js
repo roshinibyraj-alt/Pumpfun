@@ -12,11 +12,13 @@ const {
   evaluatePair,
   evaluatePredictMarketMatch,
   finiteNumber,
+  getPolymarketResolvedOutcome,
+  getPredictResolvedOutcome,
   getExplicitMarketWindow,
   mapPredictUpDownOutcomes,
   normalizeLevels,
   toTimestampMs,
-  updateTradeWithBenchmark,
+  updateTradeWithOfficialVenueSettlement,
   windowForTime,
   windowsMatch,
 } = require("./arbitrage-engine.js");
@@ -32,6 +34,10 @@ const MAX_EXECUTION_WAIT_MS = 3000;
 const RETRY_AFTER_MISSED_MS = 1000;
 const PREDICT_MARKET_CACHE_MS = 60_000;
 const POLYMARKET_MARKET_CACHE_MS = 60_000;
+const SETTLEMENT_RETRY_MS = 15_000;
+const MAX_SETTLEMENT_WINDOWS_PER_TICK = 1;
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const SETTLEMENT_MODEL = "independent-venue-v1";
 const MAX_LOGS = 150;
 const MAX_TRADES = 250;
 const DEFAULT_STARTING_PAPER_CAPITAL_USD = 10_000;
@@ -107,6 +113,13 @@ function outcomeText(value) {
   return String(value?.name ?? value?.title ?? value?.label ?? value ?? "")
     .trim()
     .toUpperCase();
+}
+
+function venueKey(value) {
+  const normalized = String(value ?? "").toLowerCase();
+  if (normalized.includes("poly")) return "polymarket";
+  if (normalized.includes("predict")) return "predict";
+  return null;
 }
 
 function toShortLevels(levels, side = "asks") {
@@ -281,6 +294,11 @@ function serializeError(error) {
 class ArbitrageBot {
   constructor(options = {}) {
     this.fetch = options.fetch || globalThis.fetch;
+    this.stdoutLogger =
+      options.stdoutLogger ||
+      ((line) => {
+        console.info(line);
+      });
     this.stateFile =
       options.stateFile ||
       process.env.ARB_STATE_PATH ||
@@ -308,6 +326,7 @@ class ArbitrageBot {
     this.rateLimitBackoffMs = 0;
     this.rateLimitedUntil = 0;
     this.lastCycleMs = 0;
+    this.lastHeartbeatAt = 0;
     this.running = false;
     this.loopPromise = null;
     this.loaded = false;
@@ -326,6 +345,8 @@ class ArbitrageBot {
     };
     this.pendingPaperPairs = new Map();
     this.retryAfterByKey = new Map();
+    this.settlementRetryAtByWindow = new Map();
+    this.predictSettlementIdBySlug = new Map();
     this.state = {
       app: "BTC Cross-Venue Arb Demo",
       mode: "PAPER",
@@ -354,7 +375,7 @@ class ArbitrageBot {
       window: null,
       benchmark: {
         source: "Coinbase Exchange BTC-USD",
-        use: "paper settlement only; never used by the arbitrage scanner",
+        use: "diagnostic/provisional reference only; never used for official venue settlement or final P&L",
         status: "waiting",
       },
       venues: {
@@ -384,7 +405,6 @@ class ArbitrageBot {
       events: [],
     };
     this.firedKeys = new Set();
-    this.finalBenchmarks = new Map();
   }
 
   _readSafetyMargin() {
@@ -407,24 +427,82 @@ class ArbitrageBot {
     try {
       const text = await fs.readFile(this.stateFile, "utf8");
       const stored = JSON.parse(text);
+      let migratedTrades = 0;
+      let priorBenchmarkPnl = 0;
       if (Array.isArray(stored.paperTrades)) {
         this.state.paperTrades = stored.paperTrades.slice(-MAX_TRADES);
+        for (const trade of this.state.paperTrades) {
+          if (
+            trade.finalized === true &&
+            trade.settlementMethod !== "official_venue_markets"
+          ) {
+            priorBenchmarkPnl += finiteNumber(trade.realizedPnl) ?? 0;
+            trade.priorBenchmarkSettlement ??= {
+              outcome: trade.finalOutcome ?? null,
+              payout: finiteNumber(trade.finalPayout),
+              pnl: finiteNumber(trade.realizedPnl),
+              label: trade.settlementLabel ?? "legacy_shared_benchmark",
+            };
+            trade.finalized = false;
+            trade.status =
+              Number(trade.closeMs) <= Date.now()
+                ? "awaiting_official_venue_settlement"
+                : "open_provisional";
+            trade.finalOutcome = null;
+            trade.finalPayout = null;
+            trade.realizedPnl = null;
+            trade.finalizedAt = null;
+            trade.provisionalOutcome = null;
+            trade.provisionalPayout = null;
+            trade.provisionalPnl = null;
+            trade.settlementLabel = "OFFICIAL_VENUE_SETTLEMENT_PENDING";
+            migratedTrades += 1;
+          } else if (
+            trade.finalized !== true &&
+            Number(trade.closeMs) <= Date.now()
+          ) {
+            trade.status = "awaiting_official_venue_settlement";
+            trade.provisionalOutcome = null;
+            trade.provisionalPayout = null;
+            trade.provisionalPnl = null;
+            trade.settlementLabel = "OFFICIAL_VENUE_SETTLEMENT_PENDING";
+          } else if (trade.finalized !== true) {
+            trade.provisionalOutcome = null;
+            trade.provisionalPayout = null;
+            trade.provisionalPnl = null;
+          }
+        }
       }
       const storedStartingCapital = finiteNumber(stored.startingCapitalUsd);
       if (storedStartingCapital !== null && storedStartingCapital >= 0) {
         this.startingCapitalUsd = storedStartingCapital;
       }
-      const storedRealizedPnl = finiteNumber(stored.realizedPnlTotal);
-      this.realizedPnlTotal =
-        storedRealizedPnl ??
-        this.state.paperTrades
-          .filter((trade) => trade.finalized)
-          .reduce((sum, trade) => sum + (finiteNumber(trade.realizedPnl) ?? 0), 0);
+      this.realizedPnlTotal = this.state.paperTrades
+        .filter(
+          (trade) =>
+            trade.finalized === true &&
+            trade.settlementMethod === "official_venue_markets",
+        )
+        .reduce((sum, trade) => sum + (finiteNumber(trade.realizedPnl) ?? 0), 0);
       this.state.config.startingPaperCapitalUsd = this.startingCapitalUsd;
       if (Array.isArray(stored.events)) this.state.events = stored.events.slice(-MAX_LOGS);
       if (Array.isArray(stored.firedKeys)) this.firedKeys = new Set(stored.firedKeys);
-      if (Array.isArray(stored.finalBenchmarks)) {
-        this.finalBenchmarks = new Map(stored.finalBenchmarks);
+      const needsSettlementMigration =
+        Number(stored.version || 0) < 3 ||
+        stored.settlementModel !== SETTLEMENT_MODEL ||
+        migratedTrades > 0;
+      if (migratedTrades > 0) {
+        this._log(
+          "OFFICIAL_SETTLEMENT_MIGRATION",
+          "Legacy shared-benchmark results were moved back to pending; closed pairs will be reconciled against both exact venue markets.",
+          {
+            migratedTrades,
+            priorBenchmarkPnl,
+          },
+        );
+      }
+      if (needsSettlementMigration) {
+        await this._persist();
       }
     } catch (error) {
       if (error?.code !== "ENOENT") {
@@ -437,13 +515,13 @@ class ArbitrageBot {
   async _persist() {
     const data = JSON.stringify(
       {
-        version: 2,
+        version: 3,
+        settlementModel: SETTLEMENT_MODEL,
         startingCapitalUsd: this.startingCapitalUsd,
         realizedPnlTotal: this.realizedPnlTotal,
         paperTrades: this.state.paperTrades.slice(-MAX_TRADES),
         events: this.state.events.slice(-MAX_LOGS),
         firedKeys: [...this.firedKeys].slice(-500),
-        finalBenchmarks: [...this.finalBenchmarks.entries()].slice(-50),
       },
       null,
       2,
@@ -463,13 +541,78 @@ class ArbitrageBot {
   }
 
   _log(event, note, extra = {}) {
-    this.state.events.unshift({
+    const entry = {
       ts: Date.now(),
       event,
       note,
       ...extra,
-    });
+    };
+    this.state.events.unshift(entry);
     this.state.events = this.state.events.slice(0, MAX_LOGS);
+    const level = /ERROR|FAILED/.test(event)
+      ? "error"
+      : /WAITING|BACKOFF/.test(event)
+        ? "warn"
+        : "info";
+    const safeNote = String(note || "").replace(
+      /(x-api-key|authorization|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi,
+      "$1=[redacted]",
+    );
+    try {
+      this.stdoutLogger(
+        JSON.stringify({
+          timestamp: new Date(entry.ts).toISOString(),
+          level,
+          component: "btc-cross-venue-paper",
+          mode: "PAPER",
+          ...entry,
+          note: safeNote,
+        }),
+      );
+    } catch {
+      // Logging must not interrupt the paper scan.
+    }
+  }
+
+  _maybeLogHeartbeat(nowMs) {
+    if (Number(nowMs) - this.lastHeartbeatAt < HEARTBEAT_INTERVAL_MS) return;
+    this.lastHeartbeatAt = Number(nowMs);
+    const summarizeVenue = (venue) => ({
+      status: venue?.status || "missing",
+      up: {
+        status: venue?.up?.status || "missing",
+        bestBid: venue?.up?.bestBid?.price ?? null,
+        bestAsk: venue?.up?.bestAsk?.price ?? null,
+        ageMs: venue?.up?.ageMs ?? null,
+      },
+      down: {
+        status: venue?.down?.status || "missing",
+        bestBid: venue?.down?.bestBid?.price ?? null,
+        bestAsk: venue?.down?.bestAsk?.price ?? null,
+        ageMs: venue?.down?.ageMs ?? null,
+      },
+    });
+    this._log("BOT_HEARTBEAT", "Paper scanner is polling read-only market data.", {
+      mode: "PAPER",
+      windowSlug: this.state.window?.slug ?? null,
+      secondsRemaining: this.state.window?.secondsRemaining ?? null,
+      targetIntervalMs: this.pollMs,
+      lastCycleMs: this.lastCycleMs,
+      venues: {
+        polymarket: summarizeVenue(this.state.venues?.polymarket),
+        predict: summarizeVenue(this.state.venues?.predict),
+      },
+      opportunities: (this.state.opportunities || []).map((item) => ({
+        direction: item.direction,
+        status: item.status,
+        eligible: item.eligible,
+        netEdgePerShare: item.netEdgePerShare ?? null,
+      })),
+      paperPairs: this.state.paperTrades.length,
+      pendingOfficialSettlements: this.state.paperTrades.filter(
+        (trade) => !trade.finalized && Number(trade.closeMs) <= Number(nowMs),
+      ).length,
+    });
   }
 
   _recalculateStats() {
@@ -569,19 +712,10 @@ class ArbitrageBot {
       timezone: "UTC",
     };
 
-    const pendingWindows = this.state.paperTrades
-      .filter((trade) => !trade.finalized && Number(trade.closeMs) <= tickStartedAt)
-      .map((trade) => ({ openMs: Number(trade.openMs), closeMs: Number(trade.closeMs) }));
-    const uniqueWindows = new Map(
-      [[currentWindow.openMs, currentWindow], ...pendingWindows.map((w) => [w.openMs, w])],
-    );
-    const benchmarkWindows = [...uniqueWindows.values()];
-    const [polyResult, initialPredictResult, benchmarkResults] = await Promise.all([
+    const [polyResult, initialPredictResult, currentBenchmark] = await Promise.all([
       this._fetchPolymarket(currentWindow, slug),
       this._fetchPredict(currentWindow, null, tickStartedAt),
-      Promise.all(
-        benchmarkWindows.map((window) => this._fetchBenchmark(window, tickStartedAt)),
-      ),
+      this._fetchBenchmark(currentWindow, tickStartedAt),
     ]);
     let predictResult = initialPredictResult;
     const polymarketConditionId = String(polyResult.market?.conditionId || "").toLowerCase();
@@ -604,17 +738,11 @@ class ArbitrageBot {
     }
     this.state.venues.polymarket = polyResult;
     this.state.venues.predict = predictResult;
-    const currentBenchmark = benchmarkResults.find(
-      (item) => Number(item.openMs) === Number(currentWindow.openMs),
-    );
     this.state.benchmark = currentBenchmark || {
       source: "Coinbase Exchange BTC-USD",
-      use: "paper settlement only; never used by the arbitrage scanner",
+      use: "diagnostic/provisional reference only; never used for official venue settlement or final P&L",
       status: "unavailable",
     };
-    for (const benchmark of benchmarkResults) {
-      if (benchmark.finalized) this.finalBenchmarks.set(benchmark.openMs, benchmark);
-    }
 
     const evaluationAt = Date.now();
     const evaluated = this._evaluate(
@@ -634,24 +762,23 @@ class ArbitrageBot {
       this._evaluate(currentWindow, polyResult, predictResult, evaluationAt),
     );
 
-    const benchmarkByWindow = new Map(benchmarkResults.map((item) => [item.openMs, item]));
     for (const trade of this.state.paperTrades) {
-      if (trade.finalized) continue;
-      const benchmark =
-        benchmarkByWindow.get(Number(trade.openMs)) ||
-        this.finalBenchmarks.get(Number(trade.openMs));
-      if (!benchmark) continue;
-      const updated = updateTradeWithBenchmark(trade, benchmark, evaluationAt);
-      if (!trade.finalized && updated.finalized) {
-        this.realizedPnlTotal += finiteNumber(updated.realizedPnl) ?? 0;
-        this._log(
-          "PAPER_PAIR_FINALIZED",
-          `Finalized on the shared internal BTC/USD benchmark: ${updated.finalOutcome}; this is not official venue settlement.`,
-          { tradeId: trade.id, finalOutcome: updated.finalOutcome },
-        );
+      if (
+        trade.finalized ||
+        Number(trade.openMs) !== Number(currentWindow.openMs) ||
+        Number(trade.closeMs) <= evaluationAt
+      ) {
+        continue;
       }
+      const updated = updateTradeWithOfficialVenueSettlement(
+        trade,
+        currentBenchmark,
+        null,
+        evaluationAt,
+      );
       Object.assign(trade, updated);
     }
+    const settlementResults = await this._processOfficialSettlements(evaluationAt);
     const rateLimitText = [
       polyResult.error,
       polyResult.up?.error,
@@ -660,7 +787,8 @@ class ArbitrageBot {
       JSON.stringify(predictResult.discovery || {}),
       predictResult.up?.error,
       predictResult.down?.error,
-      ...benchmarkResults.map((item) => item.error),
+      currentBenchmark?.error,
+      ...settlementResults.map((item) => item.error),
     ]
       .filter(Boolean)
       .join(" ");
@@ -687,6 +815,7 @@ class ArbitrageBot {
     };
     this._recalculateStats();
     this.state.lastError = null;
+    this._maybeLogHeartbeat(Date.now());
     await this._persist();
   }
 
@@ -857,6 +986,10 @@ class ArbitrageBot {
           {
             venue: "Polymarket",
             side: "UP",
+            marketId: poly.market?.id,
+            marketSlug: poly.market?.slug,
+            conditionId: poly.market?.conditionId,
+            marketTitle: poly.market?.title,
             feeModel: "polymarket",
             book: poly.up,
             marketMatched: polyMatched,
@@ -865,6 +998,10 @@ class ArbitrageBot {
           {
             venue: "Predict.fun",
             side: "DOWN",
+            marketId: predict.market?.id,
+            marketSlug: predict.market?.slug,
+            conditionId: predict.market?.conditionId,
+            marketTitle: predict.market?.title,
             feeModel: "predict",
             book: predict.down,
             marketMatched: predictMatched,
@@ -878,6 +1015,10 @@ class ArbitrageBot {
           {
             venue: "Predict.fun",
             side: "UP",
+            marketId: predict.market?.id,
+            marketSlug: predict.market?.slug,
+            conditionId: predict.market?.conditionId,
+            marketTitle: predict.market?.title,
             feeModel: "predict",
             book: predict.up,
             marketMatched: predictMatched,
@@ -886,6 +1027,10 @@ class ArbitrageBot {
           {
             venue: "Polymarket",
             side: "DOWN",
+            marketId: poly.market?.id,
+            marketSlug: poly.market?.slug,
+            conditionId: poly.market?.conditionId,
+            marketTitle: poly.market?.title,
             feeModel: "polymarket",
             book: poly.down,
             marketMatched: polyMatched,
@@ -921,6 +1066,10 @@ class ArbitrageBot {
     const legs = opportunity.legs.map((leg) => ({
       venue: leg.venue,
       side: leg.side,
+      marketId: leg.marketId ?? null,
+      marketSlug: leg.marketSlug ?? null,
+      conditionId: leg.conditionId ?? null,
+      marketTitle: leg.marketTitle ?? null,
       shares: leg.shares,
       quoteObservedAt: leg.quoteObservedAt,
       quoteReceivedAt: leg.quoteReceivedAt,
@@ -963,12 +1112,267 @@ class ArbitrageBot {
       safetyMarginPerShare: opportunity.safetyMarginPerShare,
       status: "open_provisional",
       benchmarkSource: benchmark?.source || "Coinbase Exchange BTC-USD",
+      settlementLabel: "OFFICIAL_VENUE_SETTLEMENT_PENDING",
+      settlementMethod: null,
+      venueSettlements: null,
+      legSettlements: null,
       provisionalOutcome: null,
       provisionalPayout: null,
       provisionalPnl: null,
       finalized: false,
       mode: "PAPER",
     };
+  }
+
+  async _processOfficialSettlements(nowMs) {
+    const groups = new Map();
+    for (const trade of this.state.paperTrades) {
+      if (trade.finalized || Number(trade.closeMs) > Number(nowMs)) continue;
+      const key = Number(trade.openMs);
+      if (!groups.has(key)) {
+        groups.set(key, {
+          window: { openMs: key, closeMs: Number(trade.closeMs) },
+          trades: [],
+        });
+      }
+      groups.get(key).trades.push(trade);
+    }
+    const dueGroups = [...groups.entries()]
+      .filter(
+        ([openMs]) => Number(this.settlementRetryAtByWindow.get(openMs) || 0) <= nowMs,
+      )
+      .sort((left, right) => left[0] - right[0])
+      .slice(0, MAX_SETTLEMENT_WINDOWS_PER_TICK);
+    const results = [];
+    for (const [openMs, group] of dueGroups) {
+      this.settlementRetryAtByWindow.set(openMs, nowMs + SETTLEMENT_RETRY_MS);
+      const [polymarket, predict] = await Promise.all([
+        this._fetchOfficialPolymarketOutcome(group.window, group.trades),
+        this._fetchOfficialPredictOutcome(group.window, group.trades),
+      ]);
+      for (const venueResult of [polymarket, predict]) {
+        if (venueResult.error) results.push({ error: venueResult.error });
+      }
+      for (const trade of group.trades) {
+        const updated = updateTradeWithOfficialVenueSettlement(
+          trade,
+          null,
+          { polymarket, predict },
+          nowMs,
+        );
+        Object.assign(trade, updated);
+        if (updated.finalized) {
+          this.realizedPnlTotal += finiteNumber(updated.realizedPnl) ?? 0;
+          this._log(
+            "PAPER_PAIR_FINALIZED",
+            `Venue-specific results finalized the pair: ${updated.finalOutcome}.`,
+            {
+              tradeId: trade.id,
+              finalOutcome: updated.finalOutcome,
+              finalPayout: updated.finalPayout,
+              realizedPnl: updated.realizedPnl,
+            },
+          );
+        } else {
+          const shouldLog =
+            !trade.lastSettlementLogAt ||
+            Number(nowMs) - Number(trade.lastSettlementLogAt) >= 60_000;
+          if (shouldLog) {
+            trade.lastSettlementLogAt = Number(nowMs);
+            this._log(
+              "OFFICIAL_SETTLEMENT_WAITING",
+              "At least one exact venue market has not published a confirmed final outcome; the pair remains pending and is excluded from realized P&L.",
+              {
+                tradeId: trade.id,
+                polymarketStatus: polymarket.status,
+                predictStatus: predict.status,
+              },
+            );
+          }
+        }
+      }
+      if (group.trades.every((trade) => trade.finalized)) {
+        this.settlementRetryAtByWindow.delete(openMs);
+      }
+    }
+    for (const openMs of this.settlementRetryAtByWindow.keys()) {
+      if (!groups.has(openMs)) this.settlementRetryAtByWindow.delete(openMs);
+    }
+    return results;
+  }
+
+  async _fetchOfficialPolymarketOutcome(window, trades) {
+    const slug = predictFiveMinuteSlug(window);
+    const result = {
+      status: "pending",
+      outcome: null,
+      marketSlug: slug,
+      source: "Polymarket Gamma resolved market",
+    };
+    try {
+      const response = await fetchJson(
+        this.fetch,
+        `${POLY_GAMMA}/events?slug=${encodeURIComponent(slug)}`,
+      );
+      const events = Array.isArray(response) ? response : response?.data || [];
+      const event = events.find((item) => item.slug === slug);
+      if (!event) {
+        return { ...result, reason: "No exact Polymarket event was returned for this slot." };
+      }
+      const candidate = safePolymarketMarket(event, window);
+      if (!candidate) {
+        return {
+          ...result,
+          status: "unavailable",
+          reason: "The closed Polymarket event did not contain one exact binary UP/DOWN market for this window.",
+        };
+      }
+      const storedPolyLeg = trades
+        .flatMap((trade) => trade.legs || [])
+        .find((leg) => venueKey(leg.venue) === "polymarket");
+      const expectedConditionId = String(storedPolyLeg?.conditionId || "").toLowerCase();
+      const actualConditionId = String(candidate.market?.conditionId || "").toLowerCase();
+      if (
+        expectedConditionId &&
+        actualConditionId &&
+        expectedConditionId !== actualConditionId
+      ) {
+        return {
+          ...result,
+          status: "unavailable",
+          reason: "Polymarket returned a different condition ID than the one stored at paper entry.",
+        };
+      }
+      const outcome = getPolymarketResolvedOutcome(candidate.market);
+      if (!outcome) {
+        return {
+          ...result,
+          reason: "Polymarket has not published a confirmed 1/0 result for both UP and DOWN.",
+        };
+      }
+      return {
+        ...result,
+        status: "resolved",
+        outcome,
+        marketId: candidate.market.id == null ? null : String(candidate.market.id),
+        conditionId: candidate.market.conditionId ?? null,
+        source: "Polymarket Gamma closed market outcome prices",
+        resolvedAt:
+          toTimestampMs(candidate.market.resolvedAt) ??
+          toTimestampMs(candidate.market.closedTime) ??
+          null,
+      };
+    } catch (error) {
+      return { ...result, status: "error", reason: serializeError(error), error: serializeError(error) };
+    }
+  }
+
+  async _fetchOfficialPredictOutcome(window, trades) {
+    const slug = predictFiveMinuteSlug(window);
+    const result = {
+      status: "pending",
+      outcome: null,
+      marketSlug: slug,
+      source: "Predict.fun resolved market outcome",
+    };
+    if (!this.predictApiKey) {
+      return {
+        ...result,
+        status: "unavailable",
+        reason: "PREDICT_API_KEY is not configured on the server.",
+      };
+    }
+    try {
+      const storedPredictLeg = trades
+        .flatMap((trade) => trade.legs || [])
+        .find((leg) => venueKey(leg.venue) === "predict");
+      const storedSlug = String(storedPredictLeg?.marketSlug || slug);
+      if (storedSlug !== slug) {
+        return {
+          ...result,
+          status: "unavailable",
+          reason: "The stored Predict.fun market slug does not match this five-minute window.",
+        };
+      }
+      let marketId = String(storedPredictLeg?.marketId || "");
+      if (!marketId) marketId = this.predictSettlementIdBySlug.get(slug) || "";
+      let market;
+      if (marketId) {
+        const response = await fetchJson(
+          this.fetch,
+          `${PREDICT_API}/v1/markets/${encodeURIComponent(marketId)}`,
+          { headers: { "x-api-key": this.predictApiKey } },
+        );
+        market = extractPredictMarkets(response).find(
+          (candidate) => String(candidate.id) === marketId,
+        );
+      } else {
+        const resolved = await this._fetchPredictMarketBySlug(window);
+        market = resolved?.market;
+        marketId = String(resolved?.marketId || market?.id || "");
+        if (marketId) this.predictSettlementIdBySlug.set(slug, marketId);
+      }
+      if (!market) {
+        return {
+          ...result,
+          status: "unavailable",
+          reason: "Predict.fun did not return details for the exact market ID.",
+        };
+      }
+      const actualSlug = String(market.slug || storedSlug);
+      if (actualSlug !== slug) {
+        return {
+          ...result,
+          status: "unavailable",
+          reason: "Predict.fun market details do not match this exact five-minute slug.",
+        };
+      }
+      const expectedConditionId = String(storedPredictLeg?.conditionId || "").toLowerCase();
+      const actualConditionId = String(market.conditionId || "").toLowerCase();
+      if (
+        expectedConditionId &&
+        actualConditionId &&
+        expectedConditionId !== actualConditionId
+      ) {
+        return {
+          ...result,
+          status: "unavailable",
+          reason: "Predict.fun returned a different condition ID than the one stored at paper entry.",
+        };
+      }
+      const explicitWindow = getExplicitMarketWindow({
+        ...market,
+        slug: actualSlug,
+      });
+      if (!windowsMatch(explicitWindow, window)) {
+        return {
+          ...result,
+          status: "unavailable",
+          reason: "Predict.fun market boundaries do not match the stored UTC five-minute window.",
+        };
+      }
+      const outcome = getPredictResolvedOutcome(market);
+      if (!outcome) {
+        return {
+          ...result,
+          reason:
+            String(market.status || "").toUpperCase() === "RESOLVED"
+              ? "Predict.fun's result is not an unambiguous binary UP/DOWN resolution."
+              : "Predict.fun has not marked the exact market RESOLVED.",
+        };
+      }
+      return {
+        ...result,
+        status: "resolved",
+        outcome,
+        marketId: marketId || String(market.id || ""),
+        conditionId: market.conditionId ?? null,
+        source: "Predict.fun market status, resolution and outcome records",
+        resolvedAt: toTimestampMs(market.resolution?.createdAt) ?? null,
+      };
+    } catch (error) {
+      return { ...result, status: "error", reason: serializeError(error), error: serializeError(error) };
+    }
   }
 
   async _fetchPolymarket(window, slug) {
@@ -1473,7 +1877,7 @@ class ArbitrageBot {
     });
     const result = {
       source: "Coinbase Exchange BTC-USD",
-      use: "paper settlement only; never used by the arbitrage scanner",
+      use: "diagnostic/provisional reference only; never used for official venue settlement or final P&L",
       status: "unavailable",
       openMs: window.openMs,
       closeMs: window.closeMs,
@@ -1485,9 +1889,10 @@ class ArbitrageBot {
       finalOutcome: null,
       finalized: false,
       finalizedAt: null,
-      settlementRule: "UP if final BTC-USD candle close is greater than or equal to its open; otherwise DOWN.",
+      settlementRule:
+        "Diagnostic only: UP if the BTC-USD candle close is at least its open; otherwise DOWN. This never finalizes a paper pair.",
       warning:
-        "Internal paper benchmark only. It is not Polymarket/Chainlink or Predict.fun/Pyth settlement and not an actual token payout.",
+        "Display-only diagnostic. It is not either venue's official outcome or actual token payout, and it is never used for final P&L.",
     };
     try {
       const [ticker, candles] = await Promise.all([
@@ -1521,7 +1926,7 @@ class ArbitrageBot {
         openPrice !== null &&
         finalClosePrice !== null
       ) {
-        result.status = "final";
+        result.status = "reference_final";
         result.finalized = true;
         result.finalizedAt = Math.max(Date.now(), Number(window.closeMs));
         result.finalOutcome = finalClosePrice >= openPrice ? "UP" : "DOWN";

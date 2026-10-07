@@ -2,6 +2,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
 const engine = require("./arbitrage-engine.js");
 const ArbitrageBot = require("./arbitrage-bot.js");
 
@@ -88,6 +91,74 @@ test("maps Predict UP/DOWN only when the actual binary outcomes are explicit and
       ],
     }).safe,
     false,
+  );
+});
+
+test("reads Polymarket settlement only from a closed binary market with definitive 1/0 prices", () => {
+  const resolved = {
+    closed: true,
+    umaResolutionStatus: "resolved",
+    outcomes: '["Up","Down"]',
+    outcomePrices: '["1","0"]',
+  };
+  assert.equal(engine.getPolymarketResolvedOutcome(resolved), "UP");
+  assert.equal(
+    engine.getPolymarketResolvedOutcome({
+      ...resolved,
+      closed: false,
+    }),
+    null,
+  );
+  assert.equal(
+    engine.getPolymarketResolvedOutcome({
+      ...resolved,
+      outcomePrices: '["0.75","0.25"]',
+    }),
+    null,
+  );
+  assert.equal(
+    engine.getPolymarketResolvedOutcome({
+      ...resolved,
+      outcomes: '["Yes","No"]',
+    }),
+    null,
+  );
+});
+
+test("reads Predict settlement only from its exact resolved binary UP/DOWN result", () => {
+  const resolved = {
+    marketVariant: "CRYPTO_UP_DOWN",
+    status: "RESOLVED",
+    outcomes: {
+      edges: [
+        { node: { name: "Up", index: 1, status: "LOST" } },
+        { node: { name: "Down", index: 2, status: "WON" } },
+      ],
+    },
+    resolution: { name: "Down", index: 2, status: "WON" },
+  };
+  assert.equal(engine.getPredictResolvedOutcome(resolved), "DOWN");
+  assert.equal(
+    engine.getPredictResolvedOutcome({
+      ...resolved,
+      resolution: { name: "Up", index: 1, status: "WON" },
+    }),
+    null,
+  );
+  assert.equal(
+    engine.getPredictResolvedOutcome({
+      ...resolved,
+      outcomes: [
+        { name: "Up", indexSet: 1, status: "WON" },
+        { name: "Down", indexSet: 2, status: "LOST" },
+        { name: "Flat", indexSet: 4, status: "LOST" },
+      ],
+    }),
+    null,
+  );
+  assert.equal(
+    engine.getPredictResolvedOutcome({ ...resolved, status: "CLOSED" }),
+    null,
   );
 });
 
@@ -686,14 +757,116 @@ test("resolves a missed Predict slot through its exact public page and documente
   assert.equal(venue.discovery.canonicalPageMarketId, marketId);
 });
 
-test("keeps paper P&L provisional while open and finalizes only after the shared window closes", () => {
+test("reconciles an expired paper pair from both exact venue markets using read-only GETs", async () => {
+  const openMs = Date.UTC(2026, 9, 7, 5, 10);
+  const window = { openMs, closeMs: openMs + 5 * 60 * 1000 };
+  const slug = `btc-updown-5m-${openMs / 1000}`;
+  const polyEvent = {
+    slug,
+    title: "Bitcoin Up or Down",
+    startTime: new Date(window.openMs).toISOString(),
+    endDate: new Date(window.closeMs).toISOString(),
+    markets: [
+      {
+        id: "poly-101",
+        conditionId: "0xpoly-condition",
+        outcomes: '["Up","Down"]',
+        clobTokenIds: '["token-up","token-down"]',
+        closed: true,
+        umaResolutionStatus: "resolved",
+        outcomePrices: '["1","0"]',
+      },
+    ],
+  };
+  const predictMarket = {
+    id: 501,
+    slug,
+    marketVariant: "CRYPTO_UP_DOWN",
+    variantData: { type: "CRYPTO_UP_DOWN" },
+    conditionId: "predict-condition",
+    status: "RESOLVED",
+    outcomes: [
+      { name: "Up", indexSet: 1, status: "LOST" },
+      { name: "Down", indexSet: 2, status: "WON" },
+    ],
+    resolution: { name: "Down", index: 2, status: "WON" },
+  };
+  const requests = [];
+  const bot = new ArbitrageBot({
+    predictApiKey: "test-only-placeholder",
+    stdoutLogger: () => {},
+    fetch: async (url, options = {}) => {
+      const parsed = new URL(String(url));
+      requests.push({
+        url: String(url),
+        method: options.method || "GET",
+        headers: options.headers || {},
+      });
+      if (parsed.hostname === "gamma-api.polymarket.com") {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify([polyEvent]),
+        };
+      }
+      assert.equal(parsed.pathname, "/v1/markets/501");
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ success: true, data: predictMarket }),
+      };
+    },
+  });
+  const trade = {
+    id: "known-both-lose",
+    openMs: window.openMs,
+    closeMs: window.closeMs,
+    finalized: false,
+    direction: "PREDICT_UP + POLY_DOWN",
+    pairCash: 7.5,
+    legs: [
+      {
+        venue: "Predict.fun",
+        side: "UP",
+        shares: 10,
+        marketId: "501",
+        marketSlug: slug,
+        conditionId: "predict-condition",
+      },
+      {
+        venue: "Polymarket",
+        side: "DOWN",
+        shares: 10,
+        marketId: "poly-101",
+        marketSlug: slug,
+        conditionId: "0xpoly-condition",
+      },
+    ],
+  };
+  bot.state.paperTrades = [trade];
+
+  await bot._processOfficialSettlements(window.closeMs + 1_000);
+
+  assert.equal(trade.finalized, true);
+  assert.equal(trade.finalPayout, 0);
+  assert.equal(trade.realizedPnl, -7.5);
+  assert.equal(trade.venueSettlements.polymarket.outcome, "UP");
+  assert.equal(trade.venueSettlements.predict.outcome, "DOWN");
+  assert.equal(bot.realizedPnlTotal, -7.5);
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every((request) => request.method === "GET"));
+  assert.equal(requests[0].headers["x-api-key"], undefined);
+  assert.equal(requests[1].headers["x-api-key"], "test-only-placeholder");
+});
+
+test("keeps P&L provisional while open, then waits for both official venue results", () => {
   const trade = {
     openMs: 0,
     closeMs: 300_000,
-    pairCash: 8,
+    pairCash: 148.78010975,
     legs: [
-      { side: "UP", shares: 10 },
-      { side: "DOWN", shares: 10 },
+      { venue: "Predict.fun", side: "UP", shares: 185.39 },
+      { venue: "Polymarket", side: "DOWN", shares: 185.39 },
     ],
   };
   const openBenchmark = {
@@ -703,21 +876,18 @@ test("keeps paper P&L provisional while open and finalizes only after the shared
     currentPrice: 99,
     finalized: false,
   };
-  const beforeClose = engine.updateTradeWithBenchmark(trade, openBenchmark, 299_999);
+  const beforeClose = engine.updateTradeWithOfficialVenueSettlement(
+    trade,
+    { ...openBenchmark, currentPrice: 101 },
+    null,
+    299_999,
+  );
   assert.equal(beforeClose.finalized, false);
   assert.equal(beforeClose.status, "open_provisional");
-  assert.equal(beforeClose.provisionalOutcome, "DOWN");
-  assert.equal(beforeClose.provisionalPnl, 2);
+  assert.equal(beforeClose.provisionalOutcome, "UP");
+  assert.ok(Math.abs(beforeClose.provisionalPnl - (185.39 - trade.pairCash)) < 1e-9);
 
-  const notYetFinal = engine.updateTradeWithBenchmark(
-    trade,
-    { ...openBenchmark, currentPrice: 98, finalClosePrice: 98, finalized: false },
-    300_000,
-  );
-  assert.equal(notYetFinal.finalized, false);
-  assert.equal(notYetFinal.status, "awaiting_final_benchmark");
-
-  const final = engine.updateTradeWithBenchmark(
+  const notYetFinal = engine.updateTradeWithOfficialVenueSettlement(
     trade,
     {
       ...openBenchmark,
@@ -726,12 +896,164 @@ test("keeps paper P&L provisional while open and finalizes only after the shared
       finalized: true,
       finalizedAt: 300_500,
     },
+    {
+      polymarket: { status: "resolved", outcome: "UP" },
+      predict: { status: "pending" },
+    },
+    300_000,
+  );
+  assert.equal(notYetFinal.finalized, false);
+  assert.equal(notYetFinal.status, "awaiting_official_venue_settlement");
+  assert.equal(notYetFinal.provisionalPnl, null);
+  assert.equal(notYetFinal.realizedPnl, undefined);
+
+  const bothLose = engine.updateTradeWithOfficialVenueSettlement(
+    trade,
+    null,
+    {
+      polymarket: { status: "resolved", outcome: "UP", source: "Polymarket" },
+      predict: { status: "resolved", outcome: "DOWN", source: "Predict.fun" },
+    },
     300_500,
   );
-  assert.equal(final.finalized, true);
-  assert.equal(final.status, "finalized_internal_benchmark");
-  assert.equal(final.finalOutcome, "DOWN");
-  assert.equal(final.finalPayout, 10);
-  assert.equal(final.realizedPnl, 2);
-  assert.equal(final.settlementLabel, "INTERNAL_BENCHMARK_NOT_OFFICIAL_SETTLEMENT");
+  assert.equal(bothLose.finalized, true);
+  assert.equal(bothLose.status, "finalized_official_venue_settlement");
+  assert.equal(bothLose.finalPayout, 0);
+  assert.ok(Math.abs(bothLose.realizedPnl + trade.pairCash) < 1e-9);
+  assert.equal(bothLose.venueSettlements.polymarket.outcome, "UP");
+  assert.equal(bothLose.venueSettlements.predict.outcome, "DOWN");
+  assert.equal(bothLose.settlementMethod, "official_venue_markets");
+  assert.equal(
+    bothLose.settlementLabel,
+    "INDEPENDENT_OFFICIAL_VENUE_SETTLEMENT",
+  );
+});
+
+test("settles a pair leg-by-leg when the two venues resolve differently", () => {
+  const trade = {
+    openMs: 0,
+    closeMs: 300_000,
+    pairCash: 7.5,
+    legs: [
+      { venue: "Polymarket", side: "UP", shares: 10 },
+      { venue: "Predict.fun", side: "DOWN", shares: 10 },
+    ],
+  };
+  const oneWin = engine.updateTradeWithOfficialVenueSettlement(
+    trade,
+    null,
+    {
+      polymarket: { status: "resolved", outcome: "UP" },
+      predict: { status: "resolved", outcome: "UP" },
+    },
+    301_000,
+  );
+  assert.equal(oneWin.finalPayout, 10);
+  assert.equal(oneWin.realizedPnl, 2.5);
+  assert.deepEqual(
+    oneWin.legSettlements.map((leg) => leg.payout),
+    [10, 0],
+  );
+
+  const bothWin = engine.updateTradeWithOfficialVenueSettlement(
+    trade,
+    null,
+    {
+      polymarket: { status: "resolved", outcome: "UP" },
+      predict: { status: "resolved", outcome: "DOWN" },
+    },
+    301_000,
+  );
+  assert.equal(bothWin.finalPayout, 20);
+  assert.equal(bothWin.realizedPnl, 12.5);
+});
+
+test("migrates old shared-benchmark results to pending without resetting demo capital", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "arb-state-migration-"));
+  const stateFile = path.join(directory, "arb-state.json");
+  const logs = [];
+  try {
+    await fs.writeFile(
+      stateFile,
+      JSON.stringify({
+        version: 2,
+        startingCapitalUsd: 10_000,
+        realizedPnlTotal: 36.61,
+        paperTrades: [
+          {
+            id: "legacy-benchmark-trade",
+            finalized: true,
+            status: "finalized_internal_benchmark",
+            settlementLabel: "INTERNAL_BENCHMARK_NOT_OFFICIAL_SETTLEMENT",
+            finalOutcome: "UP",
+            finalPayout: 185.39,
+            realizedPnl: 36.61,
+            pairCash: 148.78,
+            openMs: 0,
+            closeMs: 300_000,
+            legs: [
+              { venue: "Predict.fun", side: "UP", shares: 185.39 },
+              { venue: "Polymarket", side: "DOWN", shares: 185.39 },
+            ],
+          },
+        ],
+        events: [],
+        firedKeys: [],
+      }),
+    );
+    const bot = new ArbitrageBot({
+      stateFile,
+      stdoutLogger: (line) => logs.push(JSON.parse(line)),
+    });
+
+    await bot._load();
+
+    const trade = bot.state.paperTrades[0];
+    assert.equal(bot.startingCapitalUsd, 10_000);
+    assert.equal(bot.realizedPnlTotal, 0);
+    assert.equal(trade.finalized, false);
+    assert.equal(trade.status, "awaiting_official_venue_settlement");
+    assert.equal(trade.priorBenchmarkSettlement.pnl, 36.61);
+    assert.equal(bot.state.stats.capitalCommitted, 148.78);
+    assert.equal(bot.state.stats.availableCapitalUsd, 9_851.22);
+    assert.ok(logs.some((entry) => entry.event === "OFFICIAL_SETTLEMENT_MIGRATION"));
+    const migratedFile = JSON.parse(await fs.readFile(stateFile, "utf8"));
+    assert.equal(migratedFile.version, 3);
+    assert.equal(migratedFile.settlementModel, "independent-venue-v1");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("emits a structured Railway heartbeat every 30 seconds, not every scan tick", () => {
+  const logs = [];
+  const bot = new ArbitrageBot({
+    stdoutLogger: (line) => logs.push(JSON.parse(line)),
+  });
+  bot.state.window = {
+    slug: "btc-updown-5m-1791349800",
+    secondsRemaining: 120,
+  };
+  bot.state.venues.polymarket.status = "connected";
+  bot.state.venues.predict.status = "needs_api_key";
+  bot.state.opportunities = [
+    {
+      direction: "POLY_UP + PREDICT_DOWN",
+      status: "blocked",
+      eligible: false,
+      reason: "Missing data",
+    },
+  ];
+  const start = Date.now();
+
+  bot._maybeLogHeartbeat(start);
+  bot._maybeLogHeartbeat(start + 29_999);
+  bot._maybeLogHeartbeat(start + 30_000);
+
+  assert.equal(logs.length, 2);
+  assert.equal(logs[0].event, "BOT_HEARTBEAT");
+  assert.equal(logs[0].mode, "PAPER");
+  assert.equal(logs[0].component, "btc-cross-venue-paper");
+  assert.equal(logs[0].venues.polymarket.status, "connected");
+  assert.equal(logs[0].venues.predict.status, "needs_api_key");
 });

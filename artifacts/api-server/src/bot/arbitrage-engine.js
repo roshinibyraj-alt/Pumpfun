@@ -274,6 +274,10 @@ function evaluatePair(options) {
       return {
         venue: leg.venue,
         side: leg.side,
+        marketId: leg.marketId ?? null,
+        marketSlug: leg.marketSlug ?? null,
+        conditionId: leg.conditionId ?? null,
+        marketTitle: leg.marketTitle ?? null,
         feeModel: leg.feeModel,
         shares,
         quoteObservedAt: finiteNumber(leg.book.observedAt),
@@ -311,6 +315,10 @@ function parseOutcomeList(raw) {
       return [];
     }
   }
+  if (outcomes && Array.isArray(outcomes.edges)) {
+    return outcomes.edges.map((edge) => edge?.node ?? edge).filter(Boolean);
+  }
+  if (outcomes && Array.isArray(outcomes.nodes)) return outcomes.nodes;
   return Array.isArray(outcomes) ? outcomes : [];
 }
 
@@ -330,8 +338,8 @@ function mapPredictUpDownOutcomes(market) {
   }
   const firstName = normalizedOutcomeName(outcomes[0]);
   const secondName = normalizedOutcomeName(outcomes[1]);
-  const firstIndex = Number(outcomes[0]?.indexSet);
-  const secondIndex = Number(outcomes[1]?.indexSet);
+  const firstIndex = Number(outcomes[0]?.indexSet ?? outcomes[0]?.index);
+  const secondIndex = Number(outcomes[1]?.indexSet ?? outcomes[1]?.index);
   if (
     firstName !== "UP" ||
     secondName !== "DOWN" ||
@@ -458,6 +466,96 @@ function benchmarkOutcome(openPrice, closePrice) {
   return close >= open ? "UP" : "DOWN";
 }
 
+function getPolymarketResolvedOutcome(market) {
+  const outcomes = parseOutcomeList(market?.outcomes);
+  const names = outcomes.map(normalizedOutcomeName);
+  if (names.length !== 2 || !names.includes("UP") || !names.includes("DOWN")) {
+    return null;
+  }
+  const prices = parseOutcomeList(market?.outcomePrices).map(finiteNumber);
+  if (prices.length !== 2 || prices.some((price) => price === null)) return null;
+  if (
+    market?.closed === false ||
+    String(market?.closed).toLowerCase() === "false" ||
+    market?.resolved === false
+  ) {
+    return null;
+  }
+  const closeConfirmed =
+    market?.closed === true ||
+    String(market?.closed).toLowerCase() === "true" ||
+    market?.resolved === true ||
+    String(market?.umaResolutionStatus ?? market?.resolutionStatus ?? market?.status)
+      .toLowerCase() === "resolved";
+  if (!closeConfirmed) return null;
+  const winners = prices
+    .map((price, index) => (price >= 1 - 1e-6 ? index : -1))
+    .filter((index) => index >= 0);
+  const losers = prices
+    .map((price, index) => (price <= 1e-6 ? index : -1))
+    .filter((index) => index >= 0);
+  if (winners.length !== 1 || losers.length !== 1 || winners[0] === losers[0]) {
+    return null;
+  }
+  return names[winners[0]];
+}
+
+function resolvedPredictOutcomeName(value, outcomes) {
+  const name = normalizedOutcomeName(value);
+  if (name === "UP" || name === "DOWN") return name;
+  const index = Number(value?.indexSet ?? value?.index);
+  if (!Number.isFinite(index)) return null;
+  const matched = outcomes.find(
+    (outcome) => Number(outcome?.indexSet ?? outcome?.index) === index,
+  );
+  const matchedName = normalizedOutcomeName(matched);
+  return matchedName === "UP" || matchedName === "DOWN" ? matchedName : null;
+}
+
+function getPredictResolvedOutcome(market) {
+  if (String(market?.status ?? market?.tradingStatus ?? "").toUpperCase() !== "RESOLVED") {
+    return null;
+  }
+  const mapping = mapPredictUpDownOutcomes(market);
+  if (!mapping.safe) return null;
+  const outcomes = mapping.outcomes;
+  const winnerRecords = outcomes.filter(
+    (outcome) => String(outcome?.status ?? "").toUpperCase() === "WON",
+  );
+  const statusRecords = outcomes.filter((outcome) => outcome?.status != null);
+  if (
+    (statusRecords.length > 0 &&
+      (winnerRecords.length !== 1 ||
+        outcomes.some(
+          (outcome) => !["WON", "LOST"].includes(String(outcome?.status).toUpperCase()),
+        ))) ||
+    winnerRecords.length > 1
+  ) {
+    return null;
+  }
+  const outcomeFromRecords =
+    winnerRecords.length === 1 ? normalizedOutcomeName(winnerRecords[0]) : null;
+  const resolution = market?.resolution;
+  if (
+    resolution?.status != null &&
+    String(resolution.status).toUpperCase() !== "WON"
+  ) {
+    return null;
+  }
+  const outcomeFromResolution = resolution
+    ? resolvedPredictOutcomeName(resolution, outcomes)
+    : null;
+  if (resolution && !outcomeFromResolution) return null;
+  if (
+    outcomeFromRecords &&
+    outcomeFromResolution &&
+    outcomeFromRecords !== outcomeFromResolution
+  ) {
+    return null;
+  }
+  return outcomeFromResolution || outcomeFromRecords || null;
+}
+
 function pairPayoutForOutcome(trade, outcome) {
   if (outcome !== "UP" && outcome !== "DOWN") return null;
   return (trade.legs || []).reduce(
@@ -466,7 +564,52 @@ function pairPayoutForOutcome(trade, outcome) {
   );
 }
 
-function updateTradeWithBenchmark(trade, benchmark, nowMs = Date.now()) {
+function venueKey(value) {
+  const normalized = String(value ?? "").toLowerCase();
+  if (normalized.includes("poly")) return "polymarket";
+  if (normalized.includes("predict")) return "predict";
+  return null;
+}
+
+function settlementForVenue(settlements, key) {
+  const raw = settlements?.[key] ??
+    settlements?.[key === "polymarket" ? "Polymarket" : "Predict.fun"];
+  if (typeof raw === "string") {
+    return ["UP", "DOWN"].includes(raw.toUpperCase())
+      ? { status: "resolved", outcome: raw.toUpperCase() }
+      : { status: "pending", outcome: null };
+  }
+  if (!raw || typeof raw !== "object") return { status: "pending", outcome: null };
+  const outcome = String(raw.outcome ?? "").toUpperCase();
+  const rawStatus = String(raw.status ?? "pending").toLowerCase();
+  const status =
+    rawStatus === "resolved" && (outcome === "UP" || outcome === "DOWN")
+      ? "resolved"
+      : rawStatus;
+  return {
+    status,
+    outcome: status === "resolved" ? outcome : null,
+    marketId: raw.marketId ?? null,
+    marketSlug: raw.marketSlug ?? null,
+    conditionId: raw.conditionId ?? null,
+    source: raw.source ?? null,
+    resolvedAt: finiteNumber(raw.resolvedAt),
+    reason: raw.reason ?? null,
+  };
+}
+
+function updateTradeWithOfficialVenueSettlement(
+  trade,
+  benchmark,
+  venueSettlements,
+  nowMs = Date.now(),
+) {
+  if (
+    trade.finalized === true &&
+    trade.settlementMethod === "official_venue_markets"
+  ) {
+    return trade;
+  }
   const base = { ...trade, finalized: false };
   const sameWindow =
     Number(benchmark?.openMs) === Number(trade.openMs) &&
@@ -491,32 +634,80 @@ function updateTradeWithBenchmark(trade, benchmark, nowMs = Date.now()) {
       provisionalPnl: payout === null ? null : payout - Number(trade.pairCash),
     };
   }
-  const hasFinalReference =
-    sameWindow &&
-    benchmark?.finalized === true &&
-    Number(benchmark.finalizedAt) >= Number(trade.closeMs) &&
-    finiteNumber(benchmark.openPrice) !== null &&
-    finiteNumber(benchmark.finalClosePrice) !== null;
-  if (!hasFinalReference) {
+  const normalizedSettlements = {
+    polymarket: settlementForVenue(venueSettlements, "polymarket"),
+    predict: settlementForVenue(venueSettlements, "predict"),
+  };
+  const requiredVenues = new Set((trade.legs || []).map((leg) => venueKey(leg.venue)));
+  const allRequiredVenuesResolved =
+    requiredVenues.size === 2 &&
+    requiredVenues.has("polymarket") &&
+    requiredVenues.has("predict") &&
+    normalizedSettlements.polymarket.status === "resolved" &&
+    normalizedSettlements.predict.status === "resolved";
+  if (!allRequiredVenuesResolved) {
     return {
       ...base,
-      status: "awaiting_final_benchmark",
+      status: "awaiting_official_venue_settlement",
+      venueSettlements: normalizedSettlements,
       provisionalOutcome: null,
       provisionalPayout: null,
       provisionalPnl: null,
     };
   }
-  const outcome = benchmarkOutcome(benchmark.openPrice, benchmark.finalClosePrice);
-  const payout = pairPayoutForOutcome(trade, outcome);
+  const legSettlements = [];
+  for (const leg of trade.legs || []) {
+    const key = venueKey(leg.venue);
+    const outcome = normalizedSettlements[key]?.outcome;
+    const shares = finiteNumber(leg.shares);
+    const side = String(leg.side ?? "").toUpperCase();
+    if (!outcome || shares === null || shares < 0 || !["UP", "DOWN"].includes(side)) {
+      return {
+        ...base,
+        status: "awaiting_official_venue_settlement",
+        venueSettlements: normalizedSettlements,
+        provisionalOutcome: null,
+        provisionalPayout: null,
+        provisionalPnl: null,
+      };
+    }
+    legSettlements.push({
+      venue: leg.venue,
+      side,
+      winningOutcome: outcome,
+      shares,
+      payout: side === outcome ? shares : 0,
+    });
+  }
+  const payout = legSettlements.reduce((sum, leg) => sum + leg.payout, 0);
+  const pairCash = finiteNumber(trade.pairCash);
+  if (pairCash === null) {
+    return {
+      ...base,
+      status: "awaiting_official_venue_settlement",
+      venueSettlements: normalizedSettlements,
+      provisionalOutcome: null,
+      provisionalPayout: null,
+      provisionalPnl: null,
+    };
+  }
+  const polyOutcome = normalizedSettlements.polymarket.outcome;
+  const predictOutcome = normalizedSettlements.predict.outcome;
   return {
     ...base,
-    status: "finalized_internal_benchmark",
+    status: "finalized_official_venue_settlement",
     finalized: true,
-    finalOutcome: outcome,
+    finalOutcome: `Polymarket ${polyOutcome} / Predict.fun ${predictOutcome}`,
     finalPayout: payout,
-    realizedPnl: payout - Number(trade.pairCash),
-    finalizedAt: Number(benchmark.finalizedAt),
-    settlementLabel: "INTERNAL_BENCHMARK_NOT_OFFICIAL_SETTLEMENT",
+    realizedPnl: payout - pairCash,
+    finalizedAt: Math.max(Number(nowMs), Number(trade.closeMs) || 0),
+    settlementLabel: "INDEPENDENT_OFFICIAL_VENUE_SETTLEMENT",
+    settlementMethod: "official_venue_markets",
+    venueSettlements: normalizedSettlements,
+    legSettlements,
+    provisionalOutcome: null,
+    provisionalPayout: null,
+    provisionalPnl: null,
   };
 }
 
@@ -572,7 +763,9 @@ module.exports = {
   getExplicitMarketWindow,
   evaluatePredictMarketMatch,
   benchmarkOutcome,
+  getPolymarketResolvedOutcome,
+  getPredictResolvedOutcome,
   pairPayoutForOutcome,
-  updateTradeWithBenchmark,
+  updateTradeWithOfficialVenueSettlement,
   calculatePaperCapital,
 };
