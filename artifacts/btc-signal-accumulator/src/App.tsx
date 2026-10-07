@@ -212,7 +212,7 @@ function QuoteTile({ label, quote }: { label: string; quote?: Quote }) {
         ? "warn"
         : "quiet";
   return (
-    <section className={`quote-tile ${tone}`}>
+    <section className={`quote-tile ${label.toLowerCase()} ${tone}`}>
       <div className="quote-tile-head">
         <strong>{label}</strong>
         <span className={`tiny-status ${tone}`}>{statusLabel(quoteStatus)}</span>
@@ -247,7 +247,7 @@ function VenueCard({ venue }: { venue: Venue }) {
   const stateTone =
     venue.status === "connected" ? "good" : venue.status === "error" ? "bad" : "warn";
   return (
-    <article className="panel venue-panel">
+    <article className={`panel venue-panel ${venue.name === "Predict.fun" ? "venue-predict" : "venue-poly"}`}>
       <div className="panel-heading">
         <div>
           <div className="eyebrow">VENUE</div>
@@ -418,7 +418,7 @@ function App() {
       </section>
 
       <section className="stat-grid">
-        <article className="stat-card">
+        <article className="stat-card stat-capital">
           <span className="stat-label">Available demo capital</span>
           <strong className={`stat-value ${(stats?.availableCapitalUsd ?? 0) >= 0 ? "" : "negative"}`}>
             {dollars(stats?.availableCapitalUsd)}
@@ -428,26 +428,26 @@ function App() {
             {dollars(stats?.capitalCommitted)} committed
           </span>
         </article>
-        <article className="stat-card">
+        <article className="stat-card stat-edge">
           <span className="stat-label">Minimum net edge</span>
           <strong className="stat-value accent">{dollars(config?.minNetEdgePerShare, 2)} <small>/ share</small></strong>
           <span className="stat-foot">after fees + {dollars(config?.safetyMarginPerShare)} safety margin</span>
         </article>
-        <article className="stat-card">
+        <article className="stat-card stat-leg">
           <span className="stat-label">Paper cap per leg</span>
           <strong className="stat-value">{dollars(config?.maxCashPerLegUsd)}</strong>
           <span className="stat-foot">
             up to {dollars(config?.maxCashPerOpportunityUsd)} per pair · {config?.paperBaseLatencyMs ?? 500}ms base delay
           </span>
         </article>
-        <article className="stat-card">
+        <article className="stat-card stat-ready">
           <span className="stat-label">Ready / pending</span>
           <strong className={`stat-value ${readyCount ? "positive" : ""}`}>
             {readyCount} / {opportunities.filter((item) => item.pendingExecution).length}
           </strong>
           <span className="stat-foot">one paper pair per direction / window</span>
         </article>
-        <article className="stat-card">
+        <article className="stat-card stat-pnl">
           <span className="stat-label">Realized model P&amp;L</span>
           <strong className={`stat-value ${pnl >= 0 ? "positive" : "negative"}`}>{dollars(pnl)}</strong>
           <span className="stat-foot">{stats?.wins || 0} model wins · {stats?.losses || 0} model losses</span>
@@ -459,12 +459,18 @@ function App() {
           <div className="eyebrow">LIVE MARKET DATA</div>
           <h2>Each venue, each outcome</h2>
         </div>
-        <span className="refresh-indicator">
-          <span className="pulse-dot" />
-          {polling?.rateLimitBackoffMs
-            ? `rate-limit pause · ${Math.round(polling.rateLimitBackoffMs / 1000)}s`
-            : `${polling?.targetIntervalMs ?? state?.pollMs ?? 500}ms target · last cycle ${polling?.lastCycleMs ?? 0}ms`}
-        </span>
+        <div className="heading-tools">
+          <div className="outcome-legend" aria-label="Outcome color key">
+            <span className="legend-up"><i /> UP</span>
+            <span className="legend-down"><i /> DOWN</span>
+          </div>
+          <span className="refresh-indicator">
+            <span className="pulse-dot" />
+            {polling?.rateLimitBackoffMs
+              ? `rate-limit pause · ${Math.round(polling.rateLimitBackoffMs / 1000)}s`
+              : `${polling?.targetIntervalMs ?? state?.pollMs ?? 500}ms target · last cycle ${polling?.lastCycleMs ?? 0}ms`}
+          </span>
+        </div>
       </section>
       <section className="venue-grid">
         <VenueCard venue={state?.venues?.polymarket || { name: "Polymarket", status: "waiting" }} />
