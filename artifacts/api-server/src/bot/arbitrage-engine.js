@@ -1,10 +1,6 @@
 "use strict";
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
-const DEFAULT_SHARE_STEP = 0.01;
-const DEFAULT_MAX_CASH_PER_LEG_USD = 100;
-const DEFAULT_MIN_NET_EDGE_PER_SHARE = 0.10;
-const DEFAULT_SAFETY_MARGIN_PER_SHARE = 0.01;
 const DEFAULT_MAX_BOOK_AGE_MS = 8000;
 
 function finiteNumber(value) {
@@ -122,26 +118,35 @@ function walkAsks(asks, shares, feeModel) {
   };
 }
 
-function maxAffordableShares(asks, cashBudget, feeModel, shareStep = DEFAULT_SHARE_STEP) {
-  const levels = normalizeLevels(asks, "asks");
-  const depth = levels.reduce((sum, level) => sum + level.size, 0);
-  if (!depth || !Number.isFinite(cashBudget) || cashBudget <= 0) return 0;
-  let low = 0;
-  let high = depth;
-  for (let i = 0; i < 48; i += 1) {
-    const mid = (low + high) / 2;
-    const fill = walkAsks(levels, mid, feeModel);
-    if (fill && fill.cash <= cashBudget) low = mid;
-    else high = mid;
+function walkBids(bids, shares, feeModel) {
+  let remaining = Number(shares);
+  let notional = 0;
+  let fees = 0;
+  let worstPrice = null;
+  let levelsUsed = 0;
+  const fills = [];
+  for (const level of normalizeLevels(bids, "bids")) {
+    if (remaining <= 1e-8) break;
+    const quantity = Math.min(remaining, level.size);
+    if (quantity <= 0) continue;
+    notional += quantity * level.price;
+    fees += feeForModel(feeModel, quantity, level.price);
+    remaining -= quantity;
+    worstPrice = level.price;
+    levelsUsed += 1;
+    fills.push({ price: level.price, shares: quantity });
   }
-  let shares = Math.floor((low + 1e-9) / shareStep) * shareStep;
-  shares = Number(shares.toFixed(8));
-  while (shares > 0) {
-    const fill = walkAsks(levels, shares, feeModel);
-    if (fill && fill.cash <= cashBudget + 1e-7) break;
-    shares = Number((shares - shareStep).toFixed(8));
-  }
-  return Math.max(0, shares);
+  if (remaining > 1e-6) return null;
+  return {
+    shares: Number(shares),
+    notional,
+    fees,
+    proceeds: notional - fees,
+    averagePrice: notional / Number(shares),
+    worstPrice,
+    levelsUsed,
+    fills,
+  };
 }
 
 function checkBookFresh(book, nowMs, maxBookAgeMs = DEFAULT_MAX_BOOK_AGE_MS) {
@@ -161,141 +166,148 @@ function checkBookFresh(book, nowMs, maxBookAgeMs = DEFAULT_MAX_BOOK_AGE_MS) {
   return { ok: true, ageMs: Math.max(0, ageMs) };
 }
 
-function evaluatePair(options) {
+function evaluateLaggingVenueEntry(options = {}) {
   const nowMs = Number(options.nowMs ?? Date.now());
-  const maxCashPerLegUsd = Number(
-    options.maxCashPerLegUsd ?? DEFAULT_MAX_CASH_PER_LEG_USD,
-  );
-  const minNetEdgePerShare = Number(
-    options.minNetEdgePerShare ?? DEFAULT_MIN_NET_EDGE_PER_SHARE,
-  );
-  const safetyMarginPerShare = Number(
-    options.safetyMarginPerShare ?? DEFAULT_SAFETY_MARGIN_PER_SHARE,
-  );
-  const shareStep = Number(options.shareStep ?? DEFAULT_SHARE_STEP);
+  const shares = Number(options.shares ?? 500);
+  const referenceBidThreshold = Number(options.referenceBidThreshold ?? 0.9);
+  const minimumEntryAsk = Number(options.minimumEntryAsk ?? 0.4);
+  const maximumEntryAsk = Number(options.maximumEntryAsk ?? 0.7);
+  const maxEntrySeconds = Number(options.maxEntrySeconds ?? 270);
   const maxBookAgeMs = Number(options.maxBookAgeMs ?? DEFAULT_MAX_BOOK_AGE_MS);
-  const legs = options.legs || [];
-
-  if (legs.length !== 2) {
-    return { status: "blocked", eligible: false, reason: "A pair must contain exactly two legs." };
-  }
-  if (!Number.isFinite(maxCashPerLegUsd) || maxCashPerLegUsd <= 0) {
-    return {
-      status: "blocked",
-      eligible: false,
-      reason: "No available demo capital remains for this paper pair.",
-    };
-  }
-  const snapshotTimes = legs
-    .map((leg) => finiteNumber(leg.book?.receivedAt ?? leg.book?.observedAt))
-    .filter((value) => value !== null);
-  const snapshotSkewMs =
-    snapshotTimes.length === legs.length
-      ? Math.max(...snapshotTimes) - Math.min(...snapshotTimes)
-      : null;
   const maxBookSkewMs = finiteNumber(options.maxBookSkewMs);
-  if (
-    maxBookSkewMs !== null &&
-    snapshotSkewMs !== null &&
-    snapshotSkewMs > maxBookSkewMs
-  ) {
-    return {
-      status: "blocked",
-      eligible: false,
-      reason: `Venue book snapshots are ${Math.round(snapshotSkewMs)} ms apart; the limit is ${Math.round(maxBookSkewMs)} ms.`,
-      snapshotSkewMs,
-    };
+  const referenceBook = options.referenceBook;
+  const entryBook = options.entryBook;
+  const blocked = (reason, extra = {}) => ({
+    status: "blocked",
+    eligible: false,
+    triggerMet: false,
+    signalObserved: false,
+    reason,
+    ...extra,
+  });
+
+  if (!Number.isFinite(shares) || shares <= 0) {
+    return blocked("Paper share quantity must be positive.");
   }
-  for (const leg of legs) {
-    if (leg.marketMatched !== true) {
-      return {
-        status: "blocked",
-        eligible: false,
-        reason: leg.matchReason || `${leg.venue} market window is not safely matched.`,
-      };
-    }
-    const fresh = checkBookFresh(leg.book, nowMs, maxBookAgeMs);
-    if (!fresh.ok) {
-      return {
-        status: "blocked",
-        eligible: false,
-        reason: `${leg.venue} ${leg.side} book: ${fresh.reason}`,
-      };
-    }
+  if (options.referenceMarketMatched !== true || options.entryMarketMatched !== true) {
+    return blocked(
+      options.matchReason || "Both venue markets must be safely matched to the same window.",
+    );
+  }
+  const referenceFresh = checkBookFresh(referenceBook, nowMs, maxBookAgeMs);
+  if (!referenceFresh.ok) {
+    return blocked(`Reference venue book: ${referenceFresh.reason}`);
+  }
+  const entryFresh = checkBookFresh(entryBook, nowMs, maxBookAgeMs);
+  if (!entryFresh.ok) {
+    return blocked(`Entry venue book: ${entryFresh.reason}`);
+  }
+  const snapshotTimes = [
+    finiteNumber(referenceBook?.receivedAt ?? referenceBook?.observedAt),
+    finiteNumber(entryBook?.receivedAt ?? entryBook?.observedAt),
+  ];
+  if (snapshotTimes.some((value) => value === null)) {
+    return blocked("A venue book timestamp is missing.");
+  }
+  const snapshotSkewMs = Math.max(...snapshotTimes) - Math.min(...snapshotTimes);
+  if (maxBookSkewMs !== null && snapshotSkewMs > maxBookSkewMs) {
+    return blocked(
+      `Venue book snapshots are ${Math.round(snapshotSkewMs)} ms apart; the limit is ${Math.round(maxBookSkewMs)} ms.`,
+      { snapshotSkewMs },
+    );
   }
 
-  const capacities = legs.map((leg) =>
-    maxAffordableShares(leg.book.asks, maxCashPerLegUsd, leg.feeModel, shareStep),
-  );
-  const shares = Number(
-    (
-      Math.floor((Math.min(...capacities) + 1e-9) / shareStep) * shareStep
-    ).toFixed(8),
-  );
-  if (!Number.isFinite(shares) || shares < shareStep) {
-    return {
-      status: "blocked",
-      eligible: false,
-      reason: `Insufficient executable depth within the $${maxCashPerLegUsd.toFixed(2)}-per-leg cash cap.`,
-    };
-  }
-
-  const fills = legs.map((leg) => walkAsks(leg.book.asks, shares, leg.feeModel));
-  if (fills.some((fill) => !fill || fill.cash > maxCashPerLegUsd + 1e-6)) {
-    return {
-      status: "blocked",
-      eligible: false,
-      reason: `Could not size equal shares within the $${maxCashPerLegUsd.toFixed(2)}-per-leg cash cap.`,
-    };
-  }
-  const pairCash = fills.reduce((sum, fill) => sum + fill.cash, 0);
-  const grossEdgePerShare = 1 - pairCash / shares;
-  const netEdgePerShare = grossEdgePerShare - safetyMarginPerShare;
-  const eligible = netEdgePerShare + 1e-9 >= minNetEdgePerShare;
-  return {
-    status: eligible ? "trigger" : "below_threshold",
-    eligible,
-    reason: eligible
-      ? `Net edge is at least $${minNetEdgePerShare.toFixed(2)} per share after fees and safety margin.`
-      : `Net edge $${netEdgePerShare.toFixed(4)}/share is below the $${minNetEdgePerShare.toFixed(2)} threshold.`,
-    direction: options.direction || "UNSPECIFIED",
-    shares,
-    maxCashPerLegUsd,
-    minNetEdgePerShare,
-    safetyMarginPerShare,
-    pairCash,
-    pairCostPerShare: pairCash / shares,
-    grossEdgePerShare,
-    netEdgePerShare,
+  const referenceBid = normalizeLevels(referenceBook?.bids, "bids")[0]?.price ?? null;
+  const entryAsk = normalizeLevels(entryBook?.asks, "asks")[0]?.price ?? null;
+  if (referenceBid === null) return blocked("Reference venue has no executable best bid.");
+  if (entryAsk === null) return blocked("Entry venue has no executable best ask.");
+  const signalObserved = true;
+  const triggerMet =
+    referenceBid + 1e-9 >= referenceBidThreshold &&
+    entryAsk + 1e-9 >= minimumEntryAsk &&
+    entryAsk < maximumEntryAsk - 1e-9;
+  const observed = {
+    referenceBid,
+    entryAsk,
     snapshotSkewMs,
-    legs: legs.map((leg, index) => {
-      const fill = fills[index];
-      const bestAsk = normalizeLevels(leg.book.asks, "asks")[0]?.price ?? null;
-      return {
-        venue: leg.venue,
-        side: leg.side,
-        marketId: leg.marketId ?? null,
-        marketSlug: leg.marketSlug ?? null,
-        conditionId: leg.conditionId ?? null,
-        marketTitle: leg.marketTitle ?? null,
-        feeModel: leg.feeModel,
-        shares,
-        quoteObservedAt: finiteNumber(leg.book.observedAt),
-        quoteReceivedAt: finiteNumber(leg.book.receivedAt),
-        quoteAgeMs: finiteNumber(leg.book.ageMs),
-        requestLatencyMs: finiteNumber(leg.book.requestLatencyMs),
-        bestAsk,
-        averagePrice: fill.averagePrice,
-        worstFillPrice: fill.worstPrice,
-        depthSlippagePerShare:
-          bestAsk === null ? null : Math.max(0, fill.averagePrice - bestAsk),
-        notional: fill.notional,
-        fees: fill.fees,
-        cash: fill.cash,
-        levelsUsed: fill.levelsUsed,
-        fills: fill.fills,
-      };
-    }),
+    signalObserved,
+    triggerMet,
+    referenceBidThreshold,
+    minimumEntryAsk,
+    maximumEntryAsk,
+  };
+  if (!triggerMet) {
+    return {
+      status: "below_threshold",
+      eligible: false,
+      reason: `Waiting for reference best bid ≥ $${referenceBidThreshold.toFixed(2)} and entry best ask in [$${minimumEntryAsk.toFixed(2)}, $${maximumEntryAsk.toFixed(2)}).`,
+      ...observed,
+    };
+  }
+
+  const windowOpenMs = finiteNumber(options.windowOpenMs);
+  if (windowOpenMs === null || nowMs < windowOpenMs) {
+    return {
+      status: "blocked",
+      eligible: false,
+      reason: "The matching five-minute window has not started.",
+      ...observed,
+    };
+  }
+  const elapsedSeconds = (nowMs - windowOpenMs) / 1000;
+  if (elapsedSeconds >= maxEntrySeconds) {
+    return {
+      status: "cutoff",
+      eligible: false,
+      reason: `No new entries after ${maxEntrySeconds} seconds of the window.`,
+      elapsedSeconds,
+      ...observed,
+    };
+  }
+
+  const eligibleAsks = normalizeLevels(entryBook?.asks, "asks").filter(
+    (level) => level.price >= minimumEntryAsk && level.price < maximumEntryAsk,
+  );
+  const fill = walkAsks(eligibleAsks, shares, options.feeModel);
+  if (!fill) {
+    return {
+      status: "insufficient_depth",
+      eligible: false,
+      reason: `Fewer than ${shares} shares are executable below $${maximumEntryAsk.toFixed(2)} on the entry venue.`,
+      elapsedSeconds,
+      ...observed,
+    };
+  }
+  const availableCash = finiteNumber(options.availableCashUsd);
+  if (availableCash !== null && fill.cash > availableCash + 1e-6) {
+    return {
+      status: "insufficient_capital",
+      eligible: false,
+      reason: `The $${fill.cash.toFixed(2)} paper entry exceeds available demo capital of $${availableCash.toFixed(2)}.`,
+      elapsedSeconds,
+      shares,
+      entryCash: fill.cash,
+      ...observed,
+    };
+  }
+
+  const bestAsk = eligibleAsks[0]?.price ?? null;
+  return {
+    status: "trigger",
+    eligible: true,
+    reason: `Reference best bid reached $${referenceBid.toFixed(2)} while the other venue's same-side best ask is $${entryAsk.toFixed(2)}; paper-buying ${shares} shares on executable depth.`,
+    shares,
+    entryCash: fill.cash,
+    notional: fill.notional,
+    fees: fill.fees,
+    averagePrice: fill.averagePrice,
+    bestAsk,
+    worstFillPrice: fill.worstPrice,
+    depthSlippagePerShare: bestAsk === null ? null : Math.max(0, fill.averagePrice - bestAsk),
+    levelsUsed: fill.levelsUsed,
+    fills: fill.fills,
+    elapsedSeconds,
+    ...observed,
   };
 }
 
@@ -631,7 +643,10 @@ function updateTradeWithOfficialVenueSettlement(
       status: "open_provisional",
       provisionalOutcome: outcome,
       provisionalPayout: payout,
-      provisionalPnl: payout === null ? null : payout - Number(trade.pairCash),
+      provisionalPnl:
+        payout === null
+          ? null
+          : payout - Number(trade.entryCash ?? trade.pairCash),
     };
   }
   const normalizedSettlements = {
@@ -640,11 +655,10 @@ function updateTradeWithOfficialVenueSettlement(
   };
   const requiredVenues = new Set((trade.legs || []).map((leg) => venueKey(leg.venue)));
   const allRequiredVenuesResolved =
-    requiredVenues.size === 2 &&
-    requiredVenues.has("polymarket") &&
-    requiredVenues.has("predict") &&
-    normalizedSettlements.polymarket.status === "resolved" &&
-    normalizedSettlements.predict.status === "resolved";
+    requiredVenues.size > 0 &&
+    [...requiredVenues].every(
+      (key) => normalizedSettlements[key]?.status === "resolved",
+    );
   if (!allRequiredVenuesResolved) {
     return {
       ...base,
@@ -680,8 +694,8 @@ function updateTradeWithOfficialVenueSettlement(
     });
   }
   const payout = legSettlements.reduce((sum, leg) => sum + leg.payout, 0);
-  const pairCash = finiteNumber(trade.pairCash);
-  if (pairCash === null) {
+  const entryCash = finiteNumber(trade.entryCash ?? trade.pairCash);
+  if (entryCash === null) {
     return {
       ...base,
       status: "awaiting_official_venue_settlement",
@@ -691,15 +705,16 @@ function updateTradeWithOfficialVenueSettlement(
       provisionalPnl: null,
     };
   }
-  const polyOutcome = normalizedSettlements.polymarket.outcome;
-  const predictOutcome = normalizedSettlements.predict.outcome;
+  const finalOutcome = [...requiredVenues]
+    .map((key) => `${key === "polymarket" ? "Polymarket" : "Predict.fun"} ${normalizedSettlements[key].outcome}`)
+    .join(" / ");
   return {
     ...base,
     status: "finalized_official_venue_settlement",
     finalized: true,
-    finalOutcome: `Polymarket ${polyOutcome} / Predict.fun ${predictOutcome}`,
+    finalOutcome,
     finalPayout: payout,
-    realizedPnl: payout - pairCash,
+    realizedPnl: payout - entryCash,
     finalizedAt: Math.max(Number(nowMs), Number(trade.closeMs) || 0),
     settlementLabel: "INDEPENDENT_OFFICIAL_VENUE_SETTLEMENT",
     settlementMethod: "official_venue_markets",
@@ -720,7 +735,7 @@ function calculatePaperCapital(options = {}) {
   const trades = Array.isArray(options.trades) ? options.trades : [];
   const openTrades = trades.filter((trade) => trade && trade.finalized !== true);
   const capitalCommittedUsd = openTrades.reduce(
-    (sum, trade) => sum + (finiteNumber(trade.pairCash) ?? 0),
+    (sum, trade) => sum + (finiteNumber(trade.entryCash ?? trade.pairCash) ?? 0),
     0,
   );
   const provisionalPnlUsd = openTrades.reduce(
@@ -741,10 +756,6 @@ function calculatePaperCapital(options = {}) {
 
 module.exports = {
   FIVE_MINUTES_MS,
-  DEFAULT_SHARE_STEP,
-  DEFAULT_MAX_CASH_PER_LEG_USD,
-  DEFAULT_MIN_NET_EDGE_PER_SHARE,
-  DEFAULT_SAFETY_MARGIN_PER_SHARE,
   DEFAULT_MAX_BOOK_AGE_MS,
   finiteNumber,
   toTimestampMs,
@@ -756,9 +767,9 @@ module.exports = {
   polymarketTakerFee,
   predictTakerFee,
   walkAsks,
-  maxAffordableShares,
+  walkBids,
   checkBookFresh,
-  evaluatePair,
+  evaluateLaggingVenueEntry,
   mapPredictUpDownOutcomes,
   getExplicitMarketWindow,
   evaluatePredictMarketMatch,

@@ -4,12 +4,9 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const {
   DEFAULT_MAX_BOOK_AGE_MS,
-  DEFAULT_MAX_CASH_PER_LEG_USD,
-  DEFAULT_MIN_NET_EDGE_PER_SHARE,
-  DEFAULT_SAFETY_MARGIN_PER_SHARE,
   calculatePaperCapital,
   complementYesBook,
-  evaluatePair,
+  evaluateLaggingVenueEntry,
   evaluatePredictMarketMatch,
   finiteNumber,
   getPolymarketResolvedOutcome,
@@ -19,6 +16,7 @@ const {
   normalizeLevels,
   toTimestampMs,
   updateTradeWithOfficialVenueSettlement,
+  walkBids,
   windowForTime,
   windowsMatch,
 } = require("./arbitrage-engine.js");
@@ -41,6 +39,21 @@ const SETTLEMENT_MODEL = "independent-venue-v1";
 const MAX_LOGS = 150;
 const MAX_TRADES = 250;
 const DEFAULT_STARTING_PAPER_CAPITAL_USD = 10_000;
+const STRATEGY = Object.freeze({
+  referenceBidThreshold: 0.9,
+  minimumEntryAsk: 0.4,
+  maximumEntryAsk: 0.7,
+  shares: 500,
+  stopBid: 0.3,
+  takeProfitBid: 0.99,
+  takeProfitCreditPerShare: 1,
+  maxEntrySeconds: 270,
+  maxEntriesPerSidePerWindow: 2,
+});
+const SIMULATED_EXIT_METHODS = new Set([
+  "simulated_take_profit",
+  "simulated_stop_loss",
+]);
 
 function parseJsonArray(value) {
   if (Array.isArray(value)) return value;
@@ -305,12 +318,9 @@ class ArbitrageBot {
       path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.cwd(), "data", "arb-state.json");
     this.predictApiKey = options.predictApiKey ?? process.env.PREDICT_API_KEY ?? "";
     this.maxBookAgeMs = DEFAULT_MAX_BOOK_AGE_MS;
-    this.maxCashPerLegUsd = DEFAULT_MAX_CASH_PER_LEG_USD;
     this.startingCapitalUsd =
       finiteNumber(options.startingCapitalUsd) ?? DEFAULT_STARTING_PAPER_CAPITAL_USD;
     this.realizedPnlTotal = 0;
-    this.minNetEdgePerShare = DEFAULT_MIN_NET_EDGE_PER_SHARE;
-    this.safetyMarginPerShare = this._readSafetyMargin();
     this.pollMs = this._readBoundedMs(
       options.pollMs ?? process.env.ARB_POLL_MS,
       POLL_MS,
@@ -343,7 +353,8 @@ class ArbitrageBot {
       candidate: null,
       event: null,
     };
-    this.pendingPaperPairs = new Map();
+    this.pendingPaperEntries = new Map();
+    this.activeSignalSides = new Set();
     this.retryAfterByKey = new Map();
     this.settlementRetryAtByWindow = new Map();
     this.predictSettlementIdBySlug = new Map();
@@ -360,17 +371,16 @@ class ArbitrageBot {
       },
       config: {
         startingPaperCapitalUsd: this.startingCapitalUsd,
-        maxCashPerLegUsd: this.maxCashPerLegUsd,
-        maxCashPerOpportunityUsd: this.maxCashPerLegUsd * 2,
-        minNetEdgePerShare: this.minNetEdgePerShare,
-        safetyMarginPerShare: this.safetyMarginPerShare,
         maxBookAgeMs: this.maxBookAgeMs,
         maxBookSkewMs: MAX_BOOK_SKEW_MS,
         paperBaseLatencyMs: this.paperBaseLatencyMs,
-        executionModel: "delayed_marketable_pair_recheck",
-        equalShares: true,
-        pairPayoutPerShare: 1,
-        onePaperPairPerDirectionPerWindow: true,
+        executionModel: "delayed_single_side_entry_and_exit_recheck",
+        strategy: {
+          type: "lagging-venue-single-side",
+          ...STRATEGY,
+          entryCutoffSeconds: STRATEGY.maxEntrySeconds,
+          maxReentriesPerSidePerWindow: 1,
+        },
       },
       window: null,
       benchmark: {
@@ -389,6 +399,7 @@ class ArbitrageBot {
       opportunities: [],
       paperTrades: [],
       stats: {
+        positionCount: 0,
         pairCount: 0,
         settledCount: 0,
         wins: 0,
@@ -404,15 +415,6 @@ class ArbitrageBot {
       },
       events: [],
     };
-    this.firedKeys = new Set();
-  }
-
-  _readSafetyMargin() {
-    const configured = finiteNumber(process.env.ARB_SAFETY_MARGIN_PER_SHARE);
-    if (configured === null || configured < 0 || configured >= 0.5) {
-      return DEFAULT_SAFETY_MARGIN_PER_SHARE;
-    }
-    return configured;
   }
 
   _readBoundedMs(value, fallback, minimum, maximum) {
@@ -434,7 +436,8 @@ class ArbitrageBot {
         for (const trade of this.state.paperTrades) {
           if (
             trade.finalized === true &&
-            trade.settlementMethod !== "official_venue_markets"
+            trade.settlementMethod !== "official_venue_markets" &&
+            !SIMULATED_EXIT_METHODS.has(trade.settlementMethod)
           ) {
             priorBenchmarkPnl += finiteNumber(trade.realizedPnl) ?? 0;
             trade.priorBenchmarkSettlement ??= {
@@ -478,23 +481,21 @@ class ArbitrageBot {
         this.startingCapitalUsd = storedStartingCapital;
       }
       this.realizedPnlTotal = this.state.paperTrades
-        .filter(
-          (trade) =>
-            trade.finalized === true &&
-            trade.settlementMethod === "official_venue_markets",
-        )
+        .filter((trade) => trade.finalized === true)
         .reduce((sum, trade) => sum + (finiteNumber(trade.realizedPnl) ?? 0), 0);
       this.state.config.startingPaperCapitalUsd = this.startingCapitalUsd;
       if (Array.isArray(stored.events)) this.state.events = stored.events.slice(-MAX_LOGS);
-      if (Array.isArray(stored.firedKeys)) this.firedKeys = new Set(stored.firedKeys);
+      if (Array.isArray(stored.activeSignalKeys)) {
+        this.activeSignalSides = new Set(stored.activeSignalKeys);
+      }
       const needsSettlementMigration =
-        Number(stored.version || 0) < 3 ||
+        Number(stored.version || 0) < 4 ||
         stored.settlementModel !== SETTLEMENT_MODEL ||
         migratedTrades > 0;
       if (migratedTrades > 0) {
         this._log(
           "OFFICIAL_SETTLEMENT_MIGRATION",
-          "Legacy shared-benchmark results were moved back to pending; closed pairs will be reconciled against both exact venue markets.",
+          "Legacy shared-benchmark results were moved back to pending; open positions will be reconciled against the exact venue holding the shares.",
           {
             migratedTrades,
             priorBenchmarkPnl,
@@ -515,13 +516,13 @@ class ArbitrageBot {
   async _persist() {
     const data = JSON.stringify(
       {
-        version: 3,
+        version: 4,
         settlementModel: SETTLEMENT_MODEL,
         startingCapitalUsd: this.startingCapitalUsd,
         realizedPnlTotal: this.realizedPnlTotal,
         paperTrades: this.state.paperTrades.slice(-MAX_TRADES),
         events: this.state.events.slice(-MAX_LOGS),
-        firedKeys: [...this.firedKeys].slice(-500),
+        activeSignalKeys: [...this.activeSignalSides].slice(-20),
       },
       null,
       2,
@@ -604,11 +605,14 @@ class ArbitrageBot {
       },
       opportunities: (this.state.opportunities || []).map((item) => ({
         direction: item.direction,
+        side: item.side ?? null,
+        entryVenue: item.entryVenue ?? null,
+        referenceVenue: item.referenceVenue ?? null,
         status: item.status,
         eligible: item.eligible,
-        netEdgePerShare: item.netEdgePerShare ?? null,
+        triggerMet: item.triggerMet ?? false,
       })),
-      paperPairs: this.state.paperTrades.length,
+      paperPositions: this.state.paperTrades.length,
       pendingOfficialSettlements: this.state.paperTrades.filter(
         (trade) => !trade.finalized && Number(trade.closeMs) <= Number(nowMs),
       ).length,
@@ -625,6 +629,7 @@ class ArbitrageBot {
       trades,
     });
     this.state.stats = {
+      positionCount: trades.length,
       pairCount: trades.length,
       settledCount: settled.length,
       wins: settled.filter((trade) => Number(trade.realizedPnl) > 0).length,
@@ -751,15 +756,22 @@ class ArbitrageBot {
       predictResult,
       evaluationAt,
     );
-    this._processPendingPaperPairs(
+    this._processPaperPositionExits(currentWindow, evaluationAt);
+    this._processPendingPaperEntries(
       currentWindow,
       evaluated,
       currentBenchmark,
       evaluationAt,
     );
-    this._schedulePaperPairs(currentWindow, evaluated, evaluationAt);
-    this.state.opportunities = this._decoratePendingOpportunities(
-      this._evaluate(currentWindow, polyResult, predictResult, evaluationAt),
+    this._schedulePaperEntries(currentWindow, evaluated, evaluationAt);
+    const currentOpportunities = this._evaluate(
+      currentWindow,
+      polyResult,
+      predictResult,
+      evaluationAt,
+    );
+    this.state.opportunities = this._decoratePendingEntries(
+      currentOpportunities,
     );
 
     for (const trade of this.state.paperTrades) {
@@ -768,6 +780,10 @@ class ArbitrageBot {
         Number(trade.openMs) !== Number(currentWindow.openMs) ||
         Number(trade.closeMs) <= evaluationAt
       ) {
+        continue;
+      }
+      if (trade.strategyVersion === "lagging-venue-v1") {
+        this._markPaperPosition(trade, evaluationAt);
         continue;
       }
       const updated = updateTradeWithOfficialVenueSettlement(
@@ -819,130 +835,307 @@ class ArbitrageBot {
     await this._persist();
   }
 
-  _schedulePaperPairs(window, opportunities, nowMs) {
+  _evaluate(currentWindow, poly, predict, nowMs) {
+    const venueData = {
+      Polymarket: {
+        key: "polymarket",
+        state: poly,
+        feeModel: "polymarket",
+      },
+      "Predict.fun": {
+        key: "predict",
+        state: predict,
+        feeModel: "predict",
+      },
+    };
+    let remainingCapital = Math.max(0, this._availablePaperCapital());
+    const results = [];
+    for (const side of ["UP", "DOWN"]) {
+      for (const entryVenue of ["Polymarket", "Predict.fun"]) {
+        const referenceVenue =
+          entryVenue === "Polymarket" ? "Predict.fun" : "Polymarket";
+        const entry = venueData[entryVenue];
+        const reference = venueData[referenceVenue];
+        const entryBook = entry.state[side.toLowerCase()];
+        const referenceBook = reference.state[side.toLowerCase()];
+        const entryMarketMatched = entry.state.market?.matchStatus === "matched";
+        const referenceMarketMatched =
+          reference.state.market?.matchStatus === "matched";
+        const sideTrades = this.state.paperTrades.filter(
+          (trade) =>
+            trade.strategyVersion === "lagging-venue-v1" &&
+            Number(trade.openMs) === Number(currentWindow.openMs) &&
+            String(trade.side).toUpperCase() === side,
+        );
+        const openPosition = sideTrades.some((trade) => !trade.finalized);
+        const entryCount = sideTrades.length;
+        const previousExitAllowsReentry =
+          entryCount === 0 ||
+          (entryCount === 1 &&
+            sideTrades[0].finalized === true &&
+            SIMULATED_EXIT_METHODS.has(sideTrades[0].settlementMethod));
+        const evaluation = evaluateLaggingVenueEntry({
+          nowMs,
+          windowOpenMs: currentWindow.openMs,
+          maxEntrySeconds: STRATEGY.maxEntrySeconds,
+          shares: STRATEGY.shares,
+          referenceBidThreshold: STRATEGY.referenceBidThreshold,
+          minimumEntryAsk: STRATEGY.minimumEntryAsk,
+          maximumEntryAsk: STRATEGY.maximumEntryAsk,
+          maxBookAgeMs: this.maxBookAgeMs,
+          maxBookSkewMs: MAX_BOOK_SKEW_MS,
+          referenceBook,
+          entryBook,
+          referenceMarketMatched,
+          entryMarketMatched,
+          matchReason:
+            entry.state.market?.matchReason ||
+            reference.state.market?.matchReason ||
+            "Both exact venue markets must be matched to the same five-minute window.",
+          feeModel: entry.feeModel,
+          availableCashUsd: remainingCapital,
+        });
+        const direction = `BUY ${side} on ${entryVenue} · ${referenceVenue} confirms`;
+        const signalKey = `${currentWindow.openMs}:${side}`;
+        const leg = {
+          venue: entryVenue,
+          side,
+          marketId: entry.state.market?.id ?? null,
+          marketSlug: entry.state.market?.slug ?? null,
+          conditionId: entry.state.market?.conditionId ?? null,
+          marketTitle: entry.state.market?.title ?? null,
+          feeModel: entry.feeModel,
+          shares: evaluation.shares ?? STRATEGY.shares,
+          quoteObservedAt: finiteNumber(entryBook?.observedAt),
+          quoteReceivedAt: finiteNumber(entryBook?.receivedAt),
+          quoteAgeMs: finiteNumber(entryBook?.ageMs),
+          requestLatencyMs: finiteNumber(entryBook?.requestLatencyMs),
+          averagePrice: evaluation.averagePrice ?? null,
+          bestAsk: evaluation.bestAsk ?? evaluation.entryAsk ?? null,
+          worstFillPrice: evaluation.worstFillPrice ?? null,
+          notional: evaluation.notional ?? null,
+          fees: evaluation.fees ?? null,
+          cash: evaluation.entryCash ?? null,
+          depthSlippagePerShare: evaluation.depthSlippagePerShare ?? null,
+          levelsUsed: evaluation.levelsUsed ?? null,
+          fills: evaluation.fills ?? [],
+        };
+        const referenceRequestLatencyMs = finiteNumber(
+          referenceBook?.requestLatencyMs,
+        );
+        const signalExecutable = evaluation.eligible === true;
+        const eligible =
+          signalExecutable &&
+          !openPosition &&
+          previousExitAllowsReentry &&
+          nowMs < Number(currentWindow.openMs) + STRATEGY.maxEntrySeconds * 1000;
+        const reasons = [evaluation.reason];
+        if (openPosition) reasons.push(`A ${side} paper position is already open.`);
+        else if (!previousExitAllowsReentry) {
+          reasons.push("The one-re-entry-per-side limit has been reached.");
+        }
+        const result = {
+          ...evaluation,
+          direction,
+          side,
+          signalKey,
+          entryVenue,
+          referenceVenue,
+          referenceRequestLatencyMs,
+          referenceQuoteReceivedAt: finiteNumber(referenceBook?.receivedAt),
+          referenceQuoteObservedAt: finiteNumber(referenceBook?.observedAt),
+          quoteReceivedAt: finiteNumber(entryBook?.receivedAt),
+          quoteObservedAt: finiteNumber(entryBook?.observedAt),
+          entryCount,
+          reentriesRemaining: Math.max(
+            0,
+            STRATEGY.maxEntriesPerSidePerWindow - entryCount,
+          ),
+          alreadyFiredThisWindow: entryCount > 0,
+          openPosition,
+          signalExecutable,
+          eligible,
+          thresholdStatus: evaluation.status,
+          reason: reasons.join(" "),
+          legs: [leg],
+        };
+        if (eligible) remainingCapital = Math.max(0, remainingCapital - result.entryCash);
+        results.push(result);
+      }
+    }
+    return results;
+  }
+
+  _schedulePaperEntries(window, opportunities, nowMs) {
+    const sameWindowPrefix = `${window.openMs}:`;
+    this.activeSignalSides = new Set(
+      [...this.activeSignalSides].filter((key) => key.startsWith(sameWindowPrefix)),
+    );
+    const observedSides = new Set(
+      opportunities.filter((item) => item.signalObserved).map((item) => item.side),
+    );
+    const triggeredSides = new Set(
+      opportunities.filter((item) => item.triggerMet).map((item) => item.side),
+    );
+    const scheduledSides = new Set();
     for (const opportunity of opportunities) {
-      const key = `${window.openMs}:${opportunity.direction}`;
+      const key = opportunity.signalKey;
+      const sideLatchKey = `${window.openMs}:${opportunity.side}`;
       if (
         !opportunity.eligible ||
-        this.firedKeys.has(key) ||
-        this.pendingPaperPairs.has(key) ||
+        this.activeSignalSides.has(sideLatchKey) ||
+        scheduledSides.has(opportunity.side) ||
+        this.pendingPaperEntries.has(key) ||
         Number(this.retryAfterByKey.get(key) || 0) > nowMs
       ) {
         continue;
       }
-      const arrivalAtByVenue = {};
-      for (const leg of opportunity.legs || []) {
-        const feedLatencyMs = Math.max(0, finiteNumber(leg.requestLatencyMs) ?? 0);
-        arrivalAtByVenue[leg.venue] =
-          nowMs + this.paperBaseLatencyMs + feedLatencyMs;
-      }
-      const simulatedArrivalAt = Math.max(...Object.values(arrivalAtByVenue));
-      this.pendingPaperPairs.set(key, {
+      const referenceLatency = Math.max(
+        0,
+        finiteNumber(opportunity.referenceRequestLatencyMs) ?? 0,
+      );
+      const entryLatency = Math.max(
+        0,
+        finiteNumber(opportunity.legs?.[0]?.requestLatencyMs) ?? 0,
+      );
+      const simulatedArrivalAt =
+        nowMs + this.paperBaseLatencyMs + Math.max(referenceLatency, entryLatency);
+      const entryCutoffAt =
+        Number(window.openMs) + STRATEGY.maxEntrySeconds * 1000;
+      this.pendingPaperEntries.set(key, {
         key,
         direction: opportunity.direction,
+        side: opportunity.side,
+        entryVenue: opportunity.entryVenue,
+        referenceVenue: opportunity.referenceVenue,
         windowOpenMs: Number(window.openMs),
         closeMs: Number(window.closeMs),
+        entryCutoffAt,
         detectedAt: nowMs,
-        arrivalAtByVenue,
         simulatedArrivalAt,
-        expiresAt: simulatedArrivalAt + MAX_EXECUTION_WAIT_MS,
-        signalPairCostPerShare: opportunity.pairCostPerShare,
-        signalNetEdgePerShare: opportunity.netEdgePerShare,
-        signalShares: opportunity.shares,
+        expiresAt: Math.min(
+          simulatedArrivalAt + MAX_EXECUTION_WAIT_MS,
+          entryCutoffAt,
+        ),
+        signalEntryAsk: opportunity.entryAsk,
+        signalReferenceBid: opportunity.referenceBid,
+        signalShares: STRATEGY.shares,
       });
+      scheduledSides.add(opportunity.side);
       this._log(
-        "PAPER_PAIR_QUEUED",
-        `${opportunity.direction} met the signal threshold; rechecking prices, depth, and fees after ${simulatedArrivalAt - nowMs} ms of modeled arrival latency.`,
+        "PAPER_ENTRY_QUEUED",
+        `${opportunity.direction} met the price rules; rechecking both venue books after ${simulatedArrivalAt - nowMs} ms of modeled arrival latency.`,
         {
-          direction: opportunity.direction,
+          side: opportunity.side,
+          entryVenue: opportunity.entryVenue,
+          referenceVenue: opportunity.referenceVenue,
           simulatedArrivalAt,
-          signalNetEdgePerShare: opportunity.netEdgePerShare,
+          entryCutoffAt,
         },
       );
     }
+    for (const side of observedSides) {
+      const key = `${window.openMs}:${side}`;
+      if (triggeredSides.has(side)) this.activeSignalSides.add(key);
+      else this.activeSignalSides.delete(key);
+    }
   }
 
-  _processPendingPaperPairs(window, opportunities, benchmark, nowMs) {
+  _processPendingPaperEntries(window, opportunities, benchmark, nowMs) {
     const byDirection = new Map(
       opportunities.map((opportunity) => [opportunity.direction, opportunity]),
     );
-    for (const [key, pending] of this.pendingPaperPairs) {
+    for (const [key, pending] of this.pendingPaperEntries) {
       if (
         pending.windowOpenMs !== Number(window.openMs) ||
         nowMs >= Number(pending.closeMs)
       ) {
-        this.pendingPaperPairs.delete(key);
+        this.pendingPaperEntries.delete(key);
         this._log(
-          "PAPER_PAIR_MISSED",
-          `${pending.direction} was not simulated because its five-minute window ended before the delayed execution check.`,
-          { direction: pending.direction, reason: "window_closed_before_arrival" },
+          "PAPER_ENTRY_MISSED",
+          `${pending.direction} was not paper-filled because the window closed before the delayed execution check.`,
+          { side: pending.side, reason: "window_closed_before_arrival" },
         );
         continue;
       }
-      const opportunity = byDirection.get(pending.direction);
-      if (nowMs < pending.simulatedArrivalAt) continue;
-      const snapshotsReady =
-        opportunity?.legs?.length === 2 &&
-        opportunity.legs.every(
-          (leg) =>
-            finiteNumber(leg.quoteReceivedAt) !== null &&
-            finiteNumber(leg.quoteReceivedAt) >=
-              Number(pending.arrivalAtByVenue[leg.venue] || pending.simulatedArrivalAt),
+      if (nowMs >= Number(pending.entryCutoffAt)) {
+        this.pendingPaperEntries.delete(key);
+        this._log(
+          "PAPER_ENTRY_MISSED",
+          `${pending.direction} was canceled because modeled arrival would be at or after the 270-second entry cutoff.`,
+          { side: pending.side, reason: "entry_cutoff_during_latency" },
         );
+        continue;
+      }
+      if (nowMs < pending.simulatedArrivalAt) continue;
+      const opportunity = byDirection.get(pending.direction);
+      const snapshotsReady =
+        finiteNumber(opportunity?.quoteReceivedAt) !== null &&
+        finiteNumber(opportunity?.quoteReceivedAt) >= pending.simulatedArrivalAt &&
+        finiteNumber(opportunity?.referenceQuoteReceivedAt) !== null &&
+        finiteNumber(opportunity?.referenceQuoteReceivedAt) >= pending.simulatedArrivalAt;
       if (!snapshotsReady) {
         if (nowMs <= pending.expiresAt) continue;
-        this.pendingPaperPairs.delete(key);
+        this.pendingPaperEntries.delete(key);
         this.retryAfterByKey.set(key, nowMs + RETRY_AFTER_MISSED_MS);
         this._log(
-          "PAPER_PAIR_MISSED",
-          `${pending.direction} had no fresh venue snapshots after the modeled arrival time; no paper fill was recorded.`,
-          { direction: pending.direction, reason: "no_post_latency_snapshot" },
+          "PAPER_ENTRY_MISSED",
+          `${pending.direction} had no fresh post-latency snapshots from both venues; no paper fill was recorded.`,
+          { side: pending.side, reason: "no_post_latency_snapshot" },
         );
         continue;
       }
-      if (opportunity?.eligible) {
+      if (opportunity?.signalExecutable && opportunity.triggerMet) {
         const simulatedLatencyMs = Math.max(0, nowMs - pending.detectedAt);
-        const trade = this._createPaperTrade(opportunity, window, benchmark, {
-          detectedAt: pending.detectedAt,
-          executedAt: nowMs,
-          simulatedLatencyMs,
-          signalPairCostPerShare: pending.signalPairCostPerShare,
-          signalNetEdgePerShare: pending.signalNetEdgePerShare,
-          signalShares: pending.signalShares,
-        });
+        const trade = this._createPaperPosition(
+          opportunity,
+          window,
+          benchmark,
+          {
+            detectedAt: pending.detectedAt,
+            executedAt: nowMs,
+            simulatedLatencyMs,
+            signalEntryAsk: pending.signalEntryAsk,
+            signalReferenceBid: pending.signalReferenceBid,
+          },
+        );
         this.state.paperTrades.unshift(trade);
         this.state.paperTrades = this.state.paperTrades.slice(0, MAX_TRADES);
-        this.firedKeys.add(key);
-        this.pendingPaperPairs.delete(key);
+        this.pendingPaperEntries.delete(key);
         this.retryAfterByKey.delete(key);
         this._log(
-          "PAPER_PAIR_OPENED",
-          `${opportunity.direction} simulated at ${opportunity.shares.toFixed(2)} equal shares after ${simulatedLatencyMs} ms; current depth and fees were rechecked and no orders were sent.`,
+          "PAPER_POSITION_OPENED",
+          `${trade.side} paper position opened on ${trade.venue}: ${trade.shares} shares at an average of $${trade.entryAveragePrice.toFixed(4)} after ${simulatedLatencyMs} ms modeled latency. No order was sent.`,
           {
             tradeId: trade.id,
-            direction: trade.direction,
+            side: trade.side,
+            venue: trade.venue,
+            shares: trade.shares,
+            entryCash: trade.entryCash,
+            entryAveragePrice: trade.entryAveragePrice,
             simulatedLatencyMs,
-            executionPriceDriftPerShare: trade.executionPriceDriftPerShare,
           },
         );
         continue;
       }
       const transient =
         opportunity?.status === "blocked" &&
-        /book|stale|missing|unavailable|snapshot|not safely matched/i.test(
+        /book|stale|missing|unavailable|snapshot|matched/i.test(
           String(opportunity.reason || ""),
         );
       if (transient && nowMs <= pending.expiresAt) continue;
-      this.pendingPaperPairs.delete(key);
+      this.pendingPaperEntries.delete(key);
       this.retryAfterByKey.set(key, nowMs + RETRY_AFTER_MISSED_MS);
       this._log(
-        "PAPER_PAIR_MISSED",
-        `${pending.direction} signal disappeared during modeled latency; no fill was recorded. ${opportunity?.reason || "Current books no longer support the signal."}`,
+        "PAPER_ENTRY_MISSED",
+        `${pending.direction} no longer met the entry rules after modeled latency; no paper position was recorded.`,
         {
-          direction: pending.direction,
+          side: pending.side,
           reason: opportunity?.reason || "signal_disappeared",
-          signalNetEdgePerShare: pending.signalNetEdgePerShare,
-          arrivalNetEdgePerShare: opportunity?.netEdgePerShare ?? null,
+          signalReferenceBid: pending.signalReferenceBid,
+          arrivalReferenceBid: opportunity?.referenceBid ?? null,
+          signalEntryAsk: pending.signalEntryAsk,
+          arrivalEntryAsk: opportunity?.entryAsk ?? null,
         },
       );
     }
@@ -951,10 +1144,9 @@ class ArbitrageBot {
     }
   }
 
-  _decoratePendingOpportunities(opportunities) {
+  _decoratePendingEntries(opportunities) {
     return opportunities.map((opportunity) => {
-      const key = `${this.state.window?.openMs}:${opportunity.direction}`;
-      const pending = this.pendingPaperPairs.get(key);
+      const pending = this.pendingPaperEntries.get(opportunity.signalKey);
       if (!pending) return opportunity;
       return {
         ...opportunity,
@@ -963,114 +1155,27 @@ class ArbitrageBot {
         pendingExecution: true,
         simulatedArrivalAt: pending.simulatedArrivalAt,
         reason:
-          "Signal found; waiting for delayed venue snapshots, then rechecking the $0.10 edge, fees, and visible depth.",
+          "Price signal found; waiting for fresh delayed snapshots from both venues before simulating the 500-share entry.",
       };
     });
   }
 
-  _evaluate(currentWindow, poly, predict, nowMs) {
-    const polyMatched = poly.market?.matchStatus === "matched";
-    const predictMatched = predict.market?.matchStatus === "matched";
-    let remainingCapital = Math.max(0, this._availablePaperCapital());
-    const common = {
-      nowMs,
-      minNetEdgePerShare: this.minNetEdgePerShare,
-      safetyMarginPerShare: this.safetyMarginPerShare,
-      maxBookAgeMs: this.maxBookAgeMs,
-      maxBookSkewMs: MAX_BOOK_SKEW_MS,
-    };
-    const candidates = [
-      {
-        direction: "POLY_UP + PREDICT_DOWN",
-        legs: [
-          {
-            venue: "Polymarket",
-            side: "UP",
-            marketId: poly.market?.id,
-            marketSlug: poly.market?.slug,
-            conditionId: poly.market?.conditionId,
-            marketTitle: poly.market?.title,
-            feeModel: "polymarket",
-            book: poly.up,
-            marketMatched: polyMatched,
-            matchReason: poly.market?.matchReason,
-          },
-          {
-            venue: "Predict.fun",
-            side: "DOWN",
-            marketId: predict.market?.id,
-            marketSlug: predict.market?.slug,
-            conditionId: predict.market?.conditionId,
-            marketTitle: predict.market?.title,
-            feeModel: "predict",
-            book: predict.down,
-            marketMatched: predictMatched,
-            matchReason: predict.market?.matchReason,
-          },
-        ],
-      },
-      {
-        direction: "PREDICT_UP + POLY_DOWN",
-        legs: [
-          {
-            venue: "Predict.fun",
-            side: "UP",
-            marketId: predict.market?.id,
-            marketSlug: predict.market?.slug,
-            conditionId: predict.market?.conditionId,
-            marketTitle: predict.market?.title,
-            feeModel: "predict",
-            book: predict.up,
-            marketMatched: predictMatched,
-            matchReason: predict.market?.matchReason,
-          },
-          {
-            venue: "Polymarket",
-            side: "DOWN",
-            marketId: poly.market?.id,
-            marketSlug: poly.market?.slug,
-            conditionId: poly.market?.conditionId,
-            marketTitle: poly.market?.title,
-            feeModel: "polymarket",
-            book: poly.down,
-            marketMatched: polyMatched,
-            matchReason: poly.market?.matchReason,
-          },
-        ],
-      },
-    ];
-    return candidates.map((candidate) => {
-      const firedKey = `${currentWindow.openMs}:${candidate.direction}`;
-      const alreadyFiredThisWindow = this.firedKeys.has(firedKey);
-      const perLegCashLimit = Math.min(this.maxCashPerLegUsd, remainingCapital / 2);
-      const evaluated = evaluatePair({
-        ...common,
-        maxCashPerLegUsd: perLegCashLimit,
-        ...candidate,
-      });
-      const result = {
-        ...evaluated,
-        direction: candidate.direction,
-        alreadyFiredThisWindow,
-        eligible: evaluated.eligible && !alreadyFiredThisWindow,
-        thresholdStatus: evaluated.eligible ? "threshold_met" : evaluated.status,
-      };
-      if (result.eligible) {
-        remainingCapital = Math.max(0, remainingCapital - evaluated.pairCash);
-      }
-      return result;
-    });
-  }
-
-  _createPaperTrade(opportunity, window, benchmark, execution = {}) {
-    const legs = opportunity.legs.map((leg) => ({
+  _createPaperPosition(opportunity, window, benchmark, execution = {}) {
+    const leg = opportunity.legs[0];
+    const priorEntries = this.state.paperTrades.filter(
+      (trade) =>
+        trade.strategyVersion === "lagging-venue-v1" &&
+        Number(trade.openMs) === Number(window.openMs) &&
+        String(trade.side).toUpperCase() === opportunity.side,
+    ).length;
+    const legRecord = {
       venue: leg.venue,
       side: leg.side,
-      marketId: leg.marketId ?? null,
-      marketSlug: leg.marketSlug ?? null,
-      conditionId: leg.conditionId ?? null,
-      marketTitle: leg.marketTitle ?? null,
-      shares: leg.shares,
+      marketId: leg.marketId,
+      marketSlug: leg.marketSlug,
+      conditionId: leg.conditionId,
+      marketTitle: leg.marketTitle,
+      shares: STRATEGY.shares,
       quoteObservedAt: leg.quoteObservedAt,
       quoteReceivedAt: leg.quoteReceivedAt,
       quoteAgeMs: leg.quoteAgeMs,
@@ -1084,33 +1189,35 @@ class ArbitrageBot {
       depthSlippagePerShare: leg.depthSlippagePerShare,
       levelsUsed: leg.levelsUsed,
       feeModel: leg.feeModel,
-    }));
+      fills: leg.fills,
+    };
     return {
-      id: `paper-${window.openMs}-${opportunity.direction.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`,
+      id: `paper-${window.openMs}-${opportunity.side.toLowerCase()}-${priorEntries + 1}`,
+      strategyVersion: "lagging-venue-v1",
+      entryNumber: priorEntries + 1,
       openedAt: execution.executedAt ?? Date.now(),
       signalDetectedAt: execution.detectedAt ?? null,
       simulatedLatencyMs: execution.simulatedLatencyMs ?? null,
-      executionModel: "marketable_depth_after_latency",
-      signalPairCostPerShare: execution.signalPairCostPerShare ?? null,
-      signalNetEdgePerShare: execution.signalNetEdgePerShare ?? null,
-      signalShares: execution.signalShares ?? null,
-      executionPriceDriftPerShare:
-        finiteNumber(execution.signalPairCostPerShare) === null
-          ? null
-          : opportunity.pairCostPerShare - Number(execution.signalPairCostPerShare),
-      arrivalSnapshotSkewMs: opportunity.snapshotSkewMs ?? null,
+      executionModel: "delayed_single_venue_marketable_depth",
       openMs: window.openMs,
       closeMs: window.closeMs,
       direction: opportunity.direction,
-      shares: opportunity.shares,
-      legs,
-      pairCash: opportunity.pairCash,
-      pairCostPerShare: opportunity.pairCostPerShare,
-      fees: legs.reduce((sum, leg) => sum + leg.fees, 0),
-      grossEdgePerShare: opportunity.grossEdgePerShare,
-      netEdgePerShare: opportunity.netEdgePerShare,
-      safetyMarginPerShare: opportunity.safetyMarginPerShare,
-      status: "open_provisional",
+      side: opportunity.side,
+      venue: opportunity.entryVenue,
+      referenceVenue: opportunity.referenceVenue,
+      shares: STRATEGY.shares,
+      legs: [legRecord],
+      entryCash: leg.cash,
+      entryAveragePrice: leg.averagePrice,
+      fees: leg.fees,
+      triggerReferenceBid: execution.signalReferenceBid ?? opportunity.referenceBid,
+      triggerEntryAsk: execution.signalEntryAsk ?? opportunity.entryAsk,
+      referenceBidAtFill: opportunity.referenceBid,
+      entryAskAtFill: opportunity.entryAsk,
+      stopBid: STRATEGY.stopBid,
+      takeProfitBid: STRATEGY.takeProfitBid,
+      takeProfitCreditPerShare: STRATEGY.takeProfitCreditPerShare,
+      status: "open_position",
       benchmarkSource: benchmark?.source || "Coinbase Exchange BTC-USD",
       settlementLabel: "OFFICIAL_VENUE_SETTLEMENT_PENDING",
       settlementMethod: null,
@@ -1122,6 +1229,203 @@ class ArbitrageBot {
       finalized: false,
       mode: "PAPER",
     };
+  }
+
+  _markPaperPosition(trade, nowMs) {
+    const venueKey = String(trade.venue).toLowerCase().includes("predict")
+      ? "predict"
+      : "polymarket";
+    const quote = this.state.venues?.[venueKey]?.[
+      String(trade.side).toLowerCase()
+    ];
+    const observedAt = finiteNumber(quote?.observedAt);
+    const invalidQuote =
+      quote?.status !== "ok" ||
+      observedAt === null ||
+      nowMs - observedAt > this.maxBookAgeMs ||
+      nowMs - observedAt < -1000;
+    if (
+      invalidQuote
+    ) {
+      trade.markPrice = null;
+      trade.markedAt = null;
+      trade.provisionalPayout = null;
+      trade.provisionalPnl = null;
+      return;
+    }
+    const bestBid = normalizeLevels(quote?.bids, "bids")[0]?.price ?? null;
+    if (bestBid === null) {
+      trade.markPrice = null;
+      trade.markedAt = null;
+      trade.provisionalPayout = null;
+      trade.provisionalPnl = null;
+      return;
+    }
+    trade.markPrice = bestBid;
+    trade.markedAt = finiteNumber(quote?.receivedAt) ?? nowMs;
+    trade.provisionalPayout = Number(trade.shares) * bestBid;
+    trade.provisionalPnl = trade.provisionalPayout - Number(trade.entryCash);
+    trade.provisionalOutcome = null;
+    if (!trade.pendingExit) trade.status = "open_position";
+  }
+
+  _processPaperPositionExits(window, nowMs) {
+    for (const trade of this.state.paperTrades) {
+      if (
+        trade.finalized ||
+        trade.strategyVersion !== "lagging-venue-v1" ||
+        Number(trade.openMs) !== Number(window.openMs) ||
+        nowMs >= Number(trade.closeMs)
+      ) {
+        continue;
+      }
+      this._markPaperPosition(trade, nowMs);
+      const venueKey = String(trade.venue).toLowerCase().includes("predict")
+        ? "predict"
+        : "polymarket";
+      const quote = this.state.venues?.[venueKey]?.[
+        String(trade.side).toLowerCase()
+      ];
+      const bestBid = normalizeLevels(quote?.bids, "bids")[0]?.price ?? null;
+      const observedAt = finiteNumber(quote?.observedAt);
+      const receivedAt = finiteNumber(quote?.receivedAt);
+      if (
+        quote?.status !== "ok" ||
+        bestBid === null ||
+        observedAt === null ||
+        receivedAt === null ||
+        nowMs - observedAt > this.maxBookAgeMs
+      ) {
+        continue;
+      }
+
+      if (!trade.pendingExit) {
+        const exitType =
+          bestBid >= STRATEGY.takeProfitBid
+            ? "take_profit"
+            : bestBid <= STRATEGY.stopBid
+              ? "stop_loss"
+              : null;
+        if (!exitType) continue;
+        const feedLatency = Math.max(
+          0,
+          finiteNumber(quote?.requestLatencyMs) ?? 0,
+        );
+        trade.pendingExit = {
+          type: exitType,
+          triggeredAt: nowMs,
+          simulatedArrivalAt: nowMs + this.paperBaseLatencyMs + feedLatency,
+          thresholdBid:
+            exitType === "take_profit"
+              ? STRATEGY.takeProfitBid
+              : STRATEGY.stopBid,
+        };
+        trade.status = `pending_${exitType}`;
+        this._log(
+          "PAPER_EXIT_QUEUED",
+          `${trade.side} ${exitType.replace("_", " ")} triggered at best bid $${bestBid.toFixed(2)}; rechecking after modeled latency.`,
+          {
+            tradeId: trade.id,
+            side: trade.side,
+            venue: trade.venue,
+            exitType,
+            bestBid,
+            simulatedArrivalAt: trade.pendingExit.simulatedArrivalAt,
+          },
+        );
+        continue;
+      }
+
+      const pending = trade.pendingExit;
+      if (nowMs < Number(pending.simulatedArrivalAt)) continue;
+      if (receivedAt < Number(pending.simulatedArrivalAt)) continue;
+      if (pending.type === "take_profit") {
+        if (bestBid + 1e-9 < STRATEGY.takeProfitBid) {
+          delete trade.pendingExit;
+          trade.status = "open_position";
+          this._log(
+            "PAPER_EXIT_MISSED",
+            `${trade.side} take-profit quote fell below $${STRATEGY.takeProfitBid.toFixed(2)} before modeled arrival; position remains open.`,
+            { tradeId: trade.id, bestBid },
+          );
+          continue;
+        }
+        this._finalizeSimulatedPositionExit(
+          trade,
+          "take_profit",
+          Number(trade.shares) * STRATEGY.takeProfitCreditPerShare,
+          STRATEGY.takeProfitCreditPerShare,
+          0,
+          nowMs,
+        );
+        continue;
+      }
+
+      const feeModel = trade.legs?.[0]?.feeModel;
+      const fill = walkBids(quote?.bids, Number(trade.shares), feeModel);
+      if (!fill) {
+        trade.status = "stop_exit_waiting_for_depth";
+        if (!pending.lastDepthWarningAt || nowMs - pending.lastDepthWarningAt >= 5000) {
+          pending.lastDepthWarningAt = nowMs;
+          this._log(
+            "PAPER_EXIT_WAITING_FOR_DEPTH",
+            `${trade.side} stop order is triggered, but current visible bid depth cannot fill all ${trade.shares} shares yet.`,
+            { tradeId: trade.id, venue: trade.venue },
+          );
+        }
+        continue;
+      }
+      this._finalizeSimulatedPositionExit(
+        trade,
+        "stop_loss",
+        fill.proceeds,
+        fill.averagePrice,
+        fill.fees,
+        nowMs,
+      );
+    }
+  }
+
+  _finalizeSimulatedPositionExit(trade, type, payout, exitPrice, exitFees, nowMs) {
+    const settlementMethod =
+      type === "take_profit" ? "simulated_take_profit" : "simulated_stop_loss";
+    const realizedPnl = Number(payout) - Number(trade.entryCash);
+    Object.assign(trade, {
+      status: type === "take_profit" ? "closed_take_profit" : "closed_stop_loss",
+      finalized: true,
+      finalizedAt: nowMs,
+      finalOutcome:
+        type === "take_profit"
+          ? "Simulated TP: credited $1.00/share"
+          : "Simulated hard stop: marketable bid-depth exit",
+      finalPayout: Number(payout),
+      realizedPnl,
+      settlementLabel: "SIMULATED_PAPER_EXIT",
+      settlementMethod,
+      exitReason: type,
+      exitPrice: Number(exitPrice),
+      exitFees: Number(exitFees),
+      exitTriggeredAt: trade.pendingExit?.triggeredAt ?? nowMs,
+      pendingExit: null,
+      provisionalPayout: null,
+      provisionalPnl: null,
+      provisionalOutcome: null,
+    });
+    trade.fees = Number(trade.fees || 0) + Number(exitFees || 0);
+    this.realizedPnlTotal += realizedPnl;
+    this._log(
+      type === "take_profit" ? "PAPER_POSITION_TP" : "PAPER_POSITION_STOP",
+      `${trade.side} position on ${trade.venue} closed by ${type === "take_profit" ? "TP" : "hard stop"}; realized paper P&L ${realizedPnl >= 0 ? "+" : ""}$${realizedPnl.toFixed(2)}.`,
+      {
+        tradeId: trade.id,
+        side: trade.side,
+        venue: trade.venue,
+        exitPrice: trade.exitPrice,
+        exitFees: trade.exitFees,
+        finalPayout: trade.finalPayout,
+        realizedPnl,
+      },
+    );
   }
 
   async _processOfficialSettlements(nowMs) {
@@ -1164,8 +1468,8 @@ class ArbitrageBot {
         if (updated.finalized) {
           this.realizedPnlTotal += finiteNumber(updated.realizedPnl) ?? 0;
           this._log(
-            "PAPER_PAIR_FINALIZED",
-            `Venue-specific results finalized the pair: ${updated.finalOutcome}.`,
+            "PAPER_POSITION_FINALIZED",
+            `The exact venue holding this position finalized it: ${updated.finalOutcome}.`,
             {
               tradeId: trade.id,
               finalOutcome: updated.finalOutcome,
@@ -1181,7 +1485,7 @@ class ArbitrageBot {
             trade.lastSettlementLogAt = Number(nowMs);
             this._log(
               "OFFICIAL_SETTLEMENT_WAITING",
-              "At least one exact venue market has not published a confirmed final outcome; the pair remains pending and is excluded from realized P&L.",
+              "The exact venue holding this position has not published a confirmed final outcome; it remains pending and excluded from realized P&L.",
               {
                 tradeId: trade.id,
                 polymarketStatus: polymarket.status,

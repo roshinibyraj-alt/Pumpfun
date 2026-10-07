@@ -58,17 +58,24 @@ type Venue = {
 };
 type Opportunity = {
   direction: string;
+  side?: "UP" | "DOWN";
+  entryVenue?: string;
+  referenceVenue?: string;
   status: string;
   eligible: boolean;
+  triggerMet?: boolean;
   alreadyFiredThisWindow?: boolean;
   pendingExecution?: boolean;
   simulatedArrivalAt?: number | null;
   reason: string;
   shares?: number;
-  pairCash?: number;
-  pairCostPerShare?: number;
-  grossEdgePerShare?: number;
-  netEdgePerShare?: number;
+  entryCash?: number;
+  entryAsk?: number;
+  referenceBid?: number;
+  entryAveragePrice?: number;
+  entryCount?: number;
+  reentriesRemaining?: number;
+  openPosition?: boolean;
   legs?: Array<{
     venue: string;
     side: string;
@@ -84,10 +91,18 @@ type PaperTrade = {
   openedAt: number;
   closeMs: number;
   direction: string;
+  side?: string;
+  venue?: string;
+  entryNumber?: number;
   shares: number;
-  pairCash: number;
+  entryCash?: number;
+  entryAveragePrice?: number;
+  pairCash?: number;
   fees: number;
-  netEdgePerShare: number;
+  exitReason?: string;
+  exitPrice?: number;
+  exitFees?: number;
+  settlementMethod?: string | null;
   status: string;
   finalized: boolean;
   finalOutcome?: string;
@@ -117,14 +132,21 @@ type BotState = {
   lastError?: string | null;
   config?: {
     startingPaperCapitalUsd: number;
-    maxCashPerLegUsd: number;
-    maxCashPerOpportunityUsd: number;
-    minNetEdgePerShare: number;
-    safetyMarginPerShare: number;
     maxBookAgeMs: number;
     maxBookSkewMs?: number;
     paperBaseLatencyMs?: number;
     executionModel?: string;
+    strategy?: {
+      referenceBidThreshold: number;
+      minimumEntryAsk: number;
+      maximumEntryAsk: number;
+      shares: number;
+      stopBid: number;
+      takeProfitBid: number;
+      takeProfitCreditPerShare: number;
+      maxEntrySeconds: number;
+      maxReentriesPerSidePerWindow: number;
+    };
   };
   window?: { slug: string; openMs: number; closeMs: number; secondsRemaining: number };
   benchmark?: {
@@ -144,7 +166,8 @@ type BotState = {
   opportunities?: Opportunity[];
   paperTrades?: PaperTrade[];
   stats?: {
-    pairCount: number;
+    positionCount?: number;
+    pairCount?: number;
     settledCount: number;
     wins: number;
     losses: number;
@@ -270,8 +293,8 @@ function VenueCard({ venue }: { venue: Venue }) {
         {market.matchReason && <p className="match-reason">{market.matchReason}</p>}
         {!matchOk && (venue.up?.status === "ok" || venue.down?.status === "ok") && (
           <p className="match-reason">
-            These are live quotes for the named market only. They are not used by the pair scanner
-            until its 5-minute window is exactly matched.
+            These are live quotes for the named market only. No signal can fire until both exact
+            five-minute windows are matched.
           </p>
         )}
         {market.resolutionSource && (
@@ -359,10 +382,10 @@ function App() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <a className="brand" href="/" aria-label="BTC cross-venue paper arbitrage dashboard">
+        <a className="brand" href="/" aria-label="BTC cross-venue paper signal dashboard">
           <span className="brand-mark"><i /><i /><i /></span>
           <span>
-            <strong>PAIR / SIGNAL</strong>
+            <strong>LAG / SIGNAL</strong>
             <small>BTC 5-minute cross-venue</small>
           </span>
         </a>
@@ -384,10 +407,11 @@ function App() {
       <section className="hero">
         <div>
           <div className="eyebrow">CROSS-VENUE PAPER SCANNER</div>
-          <h1>BTC Up / Down Arb</h1>
+          <h1>BTC Cross-Venue Lag Signal</h1>
           <p>
-            Compares executable UP and DOWN asks on Polymarket and Predict.fun.
-            It sends no orders and uses no wallet.
+            If one venue’s same-side best bid reaches $0.90 while the other venue’s ask is
+            $0.40–&lt;$0.70, the paper model buys 500 shares on the lagging venue. No orders or
+            wallet are used.
           </p>
         </div>
         <div className="window-clock">
@@ -408,11 +432,13 @@ function App() {
       <section className="notice-strip">
         <div className="notice-icon">i</div>
         <div>
-          <strong>Signals use venue books only.</strong>
+          <strong>Single-side paper strategy · no live trading.</strong>
           <span>
-            Arb detection compares the four UP/DOWN order books, executable depth, taker fees,
-            and the $0.10 net-edge threshold. A paper fill waits for modeled latency, then rechecks
-            the new prices and depth; BTC reference prices never trigger a signal.
+            Entry uses the leader’s best bid ≥ $0.90 and the other venue’s same-outcome best ask
+            from $0.40 to below $0.70. It buys 500 shares only when visible depth covers the full
+            size, rechecks after modeled latency, stops at a best bid ≤ $0.30, and takes profit at
+            a best bid ≥ $0.99 credited as $1.00/share. One re-entry per side; no entries at or
+            after 270 seconds.
           </span>
         </div>
       </section>
@@ -429,23 +455,29 @@ function App() {
           </span>
         </article>
         <article className="stat-card stat-edge">
-          <span className="stat-label">Minimum net edge</span>
-          <strong className="stat-value accent">{dollars(config?.minNetEdgePerShare, 2)} <small>/ share</small></strong>
-          <span className="stat-foot">after fees + {dollars(config?.safetyMarginPerShare)} safety margin</span>
+          <span className="stat-label">Entry conditions</span>
+          <strong className="stat-value accent">
+            ≥{dollars(config?.strategy?.referenceBidThreshold, 2)} <small>leader bid</small>
+          </strong>
+          <span className="stat-foot">
+            Buy ask {dollars(config?.strategy?.minimumEntryAsk, 2)}–&lt;{dollars(config?.strategy?.maximumEntryAsk, 2)}
+          </span>
         </article>
         <article className="stat-card stat-leg">
-          <span className="stat-label">Paper cap per leg</span>
-          <strong className="stat-value">{dollars(config?.maxCashPerLegUsd)}</strong>
+          <span className="stat-label">Paper entry size</span>
+          <strong className="stat-value">{shares(config?.strategy?.shares)} <small>shares</small></strong>
           <span className="stat-foot">
-            up to {dollars(config?.maxCashPerOpportunityUsd)} per pair · {config?.paperBaseLatencyMs ?? 500}ms base delay
+            TP {dollars(config?.strategy?.takeProfitBid, 2)} → {dollars(config?.strategy?.takeProfitCreditPerShare, 2)}/share
           </span>
         </article>
         <article className="stat-card stat-ready">
-          <span className="stat-label">Ready / pending</span>
-          <strong className={`stat-value ${readyCount ? "positive" : ""}`}>
-            {readyCount} / {opportunities.filter((item) => item.pendingExecution).length}
+          <span className="stat-label">Stop / entry cutoff</span>
+          <strong className="stat-value">
+            {dollars(config?.strategy?.stopBid, 2)} / {config?.strategy?.maxEntrySeconds ?? 270}s
           </strong>
-          <span className="stat-foot">one paper pair per direction / window</span>
+          <span className="stat-foot">
+            {readyCount} ready · {opportunities.filter((item) => item.pendingExecution).length} pending · one re-entry/side
+          </span>
         </article>
         <article className="stat-card stat-pnl">
           <span className="stat-label">Realized model P&amp;L</span>
@@ -491,32 +523,37 @@ function App() {
 
       <section className="section-heading">
         <div>
-          <div className="eyebrow">PAPER SIGNAL MODEL</div>
-          <h2>Both arbitrage directions</h2>
+          <div className="eyebrow">PAPER ENTRY SIGNALS</div>
+          <h2>UP and DOWN lagging-venue checks</h2>
         </div>
-        <span className="subtle">Matched shares · depth-aware fees · no live orders</span>
+        <span className="subtle">500 shares · depth-aware entry fees · no live orders</span>
       </section>
       <section className="panel table-panel">
         <div className="table-scroll">
           <table>
             <thead>
               <tr>
-                <th>Pair direction</th>
-                <th>Equal shares</th>
-                <th>All-in pair cost</th>
-                <th>Net edge / share</th>
-                <th>Model state</th>
+                <th>Entry setup</th>
+                <th>Lagging venue</th>
+                <th>Entry size</th>
+                <th>Estimated cash</th>
+                <th>Signal state</th>
               </tr>
             </thead>
             <tbody>
               {opportunities.map((item) => {
                 const wasFired = item.alreadyFiredThisWindow;
                 const pending = item.pendingExecution;
-                const good = item.status === "trigger" || item.eligible;
+                const good = item.triggerMet === true;
+                const signalTone = item.eligible
+                  ? "good"
+                  : pending || wasFired || good || item.status === "blocked"
+                    ? "warn"
+                    : "quiet";
                 const legSummary = item.legs
                   ?.map(
                     (leg) =>
-                      `${leg.venue} ${leg.side}: avg ${dollars(leg.averagePrice, 4)}, fee ${dollars(leg.fees, 4)}, depth slip +${dollars(leg.depthSlippagePerShare, 4)}/sh`,
+                      `entry avg ${dollars(leg.averagePrice, 4)}, fee ${dollars(leg.fees, 4)}, depth slip +${dollars(leg.depthSlippagePerShare, 4)}/sh`,
                   )
                   .join(" · ");
                 return (
@@ -527,14 +564,27 @@ function App() {
                         {legSummary ? `${legSummary} · ` : ""}{item.reason}
                       </small>
                     </td>
-                    <td>{item.shares ? `${shares(item.shares)} sh` : "—"}</td>
-                    <td>{item.pairCash != null ? dollars(item.pairCash) : "—"}</td>
-                    <td className={good ? "positive" : "muted"}>
-                      {item.netEdgePerShare != null ? `${dollars(item.netEdgePerShare, 4)} / sh` : "—"}
-                    </td>
                     <td>
-                      <span className={`status-pill ${wasFired || good ? "good" : pending || item.status === "blocked" ? "warn" : "quiet"}`}>
-                        {wasFired ? "Already fired" : pending ? "Latency recheck" : good ? "Ready to paper" : statusLabel(item.status)}
+                      <strong>{item.entryVenue || "—"}</strong>
+                      <small className="table-note">
+                        {item.side || "—"} · lead: {item.referenceVenue || "—"}
+                      </small>
+                    </td>
+                    <td>{item.shares ? `${shares(item.shares)} shares` : "500 shares"}</td>
+                    <td>{item.entryCash != null ? dollars(item.entryCash) : "—"}</td>
+                    <td>
+                      <span className={`status-pill ${signalTone}`}>
+                        {pending
+                          ? "Latency recheck"
+                          : item.eligible
+                            ? `Ready · entry ${Number(item.entryCount || 0) + 1}/2`
+                            : wasFired && Number(item.reentriesRemaining || 0) === 0
+                              ? "Entry limit used"
+                              : good && item.openPosition
+                                ? "Position open"
+                                : good && !item.reentriesRemaining
+                                  ? "Re-entry used"
+                                  : statusLabel(item.status)}
                       </span>
                     </td>
                   </tr>
@@ -577,9 +627,9 @@ function App() {
           <div className="panel-heading">
             <div>
               <div className="eyebrow">SIMULATED POSITIONS</div>
-              <h2>Recent paper pairs</h2>
+              <h2>Recent paper positions</h2>
             </div>
-            <span className="subtle">{stats?.pairCount || 0} total · {dollars(stats?.capitalCommitted || 0)} open</span>
+            <span className="subtle">{stats?.positionCount ?? stats?.pairCount ?? 0} total · {dollars(stats?.capitalCommitted || 0)} open</span>
           </div>
           <div className="trade-list">
             {trades.slice(0, 8).map((trade) => {
@@ -597,7 +647,9 @@ function App() {
                   <div className="trade-main">
                     <strong>{trade.direction}</strong>
                     <small>
-                      {shares(trade.shares)} equal shares · {dollars(trade.pairCash)} all-in
+                      {trade.venue ? `${trade.venue} ${trade.side || ""} · ` : ""}
+                      {shares(trade.shares)} shares · {dollars(trade.entryCash ?? trade.pairCash)} entry
+                      {trade.entryNumber ? ` · entry ${trade.entryNumber}/2` : ""}
                       {trade.simulatedLatencyMs != null
                         ? ` · ${Math.round(trade.simulatedLatencyMs)}ms modeled delay`
                         : ""}
@@ -611,7 +663,13 @@ function App() {
                   </div>
                   <div className="trade-result">
                     <span className={`status-pill ${settlementTone}`}>
-                      {trade.finalized ? "Venue settled" : statusLabel(trade.status)}
+                      {trade.settlementMethod === "simulated_take_profit"
+                        ? "TP · $1/share"
+                        : trade.settlementMethod === "simulated_stop_loss"
+                          ? "Hard stop"
+                          : trade.finalized
+                            ? "Venue settled"
+                            : statusLabel(trade.status)}
                     </span>
                     <strong className={value == null ? "muted" : value >= 0 ? "positive" : "negative"}>
                       {value == null ? "—" : dollars(value)}
@@ -620,22 +678,22 @@ function App() {
                 </div>
               );
             })}
-            {!trades.length && <div className="empty-state">No paper pairs have fired yet.</div>}
+            {!trades.length && <div className="empty-state">No paper positions have fired yet.</div>}
           </div>
         </article>
       </section>
 
       <section className="bottom-warning">
-        <strong>Settlement warning:</strong> Final paper P&amp;L waits for the exact Polymarket and
-        Predict.fun markets to publish their own resolved outcomes; the two venues may resolve
-        differently, and both paper legs can lose. The Coinbase reference above is diagnostic only
-        and never finalizes P&amp;L. Delayed paper
-        fills walk visible asks after the latency check; the model cannot represent queue priority,
-        hidden liquidity, real acknowledgements, or actual partial-fill risk.
+        <strong>Settlement warning:</strong> Positions still open at window end wait for the exact
+        venue holding those shares to publish its own resolved outcome. TP and stop exits are
+        simulated from delayed venue snapshots; TP credits exactly $1/share as specified, while
+        stop fills use visible bid depth and venue fees. The Coinbase reference is diagnostic only
+        and never triggers or settles a position. This paper model cannot represent queue priority,
+        hidden liquidity, exchange acknowledgements, or actual partial-fill risk.
       </section>
 
       <footer className="footer">
-        <span>PAIR / SIGNAL · DEMO ONLY</span>
+        <span>LAG / SIGNAL · DEMO ONLY</span>
         <span>Read-only market data · no signing · no order endpoints</span>
       </footer>
     </main>

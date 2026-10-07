@@ -8,17 +8,15 @@ const path = require("node:path");
 const engine = require("./arbitrage-engine.js");
 const ArbitrageBot = require("./arbitrage-bot.js");
 
-function goodBook(asks, observedAt = 1000) {
-  return { status: "ok", observedAt, asks, bids: [] };
-}
-
-function pairLeg(venue, side, model, asks, marketMatched = true, observedAt = 1000) {
+function strategyBook({ ask, bid, size = 1000, observedAt = 100_000 }) {
   return {
-    venue,
-    side,
-    feeModel: model,
-    marketMatched,
-    book: goodBook(asks, observedAt),
+    status: "ok",
+    observedAt,
+    receivedAt: observedAt,
+    ageMs: 0,
+    requestLatencyMs: 0,
+    asks: [{ price: ask, size }],
+    bids: [{ price: bid, size }],
   };
 }
 
@@ -236,199 +234,340 @@ test("derives an exact aligned five-minute window from Predict's canonical slug"
   );
 });
 
-test("sizes both legs to identical shares without exceeding $100 cash per leg", () => {
-  const result = engine.evaluatePair({
-    nowMs: 1000,
-    maxCashPerLegUsd: 100,
-    minNetEdgePerShare: 0.1,
-    safetyMarginPerShare: 0.01,
-    legs: [
-      pairLeg("Polymarket", "UP", "polymarket", [{ price: 0.4, size: 1000 }]),
-      pairLeg("Predict.fun", "DOWN", "predict", [{ price: 0.4, size: 1000 }]),
+test("lagging-venue entry requires a $0.90 leader bid and a $0.40–<$0.70 lagging ask", () => {
+  const referenceBook = strategyBook({ ask: 0.92, bid: 0.9 });
+  const entryBook = {
+    ...strategyBook({ ask: 0.4, bid: 0.39 }),
+    asks: [
+      { price: 0.4, size: 250 },
+      { price: 0.45, size: 250 },
     ],
+  };
+  const result = engine.evaluateLaggingVenueEntry({
+    nowMs: 100_000,
+    windowOpenMs: 0,
+    referenceBook,
+    entryBook,
+    referenceMarketMatched: true,
+    entryMarketMatched: true,
+    feeModel: "predict",
+    availableCashUsd: 10_000,
   });
   assert.equal(result.eligible, true);
-  assert.equal(result.legs[0].shares, result.legs[1].shares);
-  assert.ok(result.legs.every((leg) => leg.cash <= 100 + 1e-6));
-  assert.ok(result.netEdgePerShare >= 0.1);
-  assert.ok(result.legs.every((leg) => leg.shares === result.shares));
+  assert.equal(result.triggerMet, true);
+  assert.equal(result.shares, 500);
+  assert.equal(result.bestAsk, 0.4);
+  assert.equal(result.averagePrice, 0.425);
+  assert.equal(result.levelsUsed, 2);
+  assert.equal(result.fees, 4.25);
+  assert.equal(result.entryCash, 216.75);
 });
 
-test("rejects a stale leg instead of creating a paper pair", () => {
-  const result = engine.evaluatePair({
-    nowMs: 20_000,
-    maxBookAgeMs: 5000,
-    legs: [
-      pairLeg("Polymarket", "UP", "polymarket", [{ price: 0.4, size: 100 }], true, 19_000),
-      pairLeg("Predict.fun", "DOWN", "predict", [{ price: 0.4, size: 100 }], true, 10_000),
-    ],
+test("rejects lagging asks below $0.40, at $0.70, or with leader bid below $0.90", () => {
+  const evaluate = (entryAsk, referenceBid) =>
+    engine.evaluateLaggingVenueEntry({
+      nowMs: 100_000,
+      windowOpenMs: 0,
+      referenceBook: strategyBook({ ask: 0.95, bid: referenceBid }),
+      entryBook: strategyBook({ ask: entryAsk, bid: Math.max(0.01, entryAsk - 0.01) }),
+      referenceMarketMatched: true,
+      entryMarketMatched: true,
+      feeModel: "polymarket",
+      availableCashUsd: 10_000,
+    });
+  assert.equal(evaluate(0.39, 0.95).eligible, false);
+  assert.equal(evaluate(0.7, 0.95).eligible, false);
+  assert.equal(evaluate(0.5, 0.899).eligible, false);
+  assert.equal(evaluate(0.5, 0.95).eligible, true);
+});
+
+test("lagging-venue entry requires 500 shares of visible depth and stops opening at 270 seconds", () => {
+  const shared = {
+    referenceBook: strategyBook({ ask: 0.95, bid: 0.91 }),
+    referenceMarketMatched: true,
+    entryMarketMatched: true,
+    feeModel: "predict",
+    windowOpenMs: 0,
+  };
+  const shallow = engine.evaluateLaggingVenueEntry({
+    ...shared,
+    nowMs: 100_000,
+    entryBook: strategyBook({ ask: 0.45, bid: 0.44, size: 499 }),
+    availableCashUsd: 10_000,
   });
-  assert.equal(result.eligible, false);
-  assert.equal(result.status, "blocked");
-  assert.match(result.reason, /stale/i);
-});
+  assert.equal(shallow.eligible, false);
+  assert.equal(shallow.status, "insufficient_depth");
 
-test("blocks opportunities when cross-venue book snapshots are too far apart", () => {
-  const result = engine.evaluatePair({
-    nowMs: 20_000,
-    maxBookAgeMs: 5000,
-    maxBookSkewMs: 1000,
-    legs: [
-      pairLeg("Polymarket", "UP", "polymarket", [{ price: 0.4, size: 100 }], true, 19_500),
-      pairLeg("Predict.fun", "DOWN", "predict", [{ price: 0.4, size: 100 }], true, 18_000),
-    ],
+  const exactlyAtCutoff = engine.evaluateLaggingVenueEntry({
+    ...shared,
+    nowMs: 270_000,
+    referenceBook: strategyBook({ ask: 0.95, bid: 0.91, observedAt: 270_000 }),
+    entryBook: strategyBook({ ask: 0.45, bid: 0.44, observedAt: 270_000 }),
+    availableCashUsd: 10_000,
   });
-  assert.equal(result.eligible, false);
-  assert.equal(result.status, "blocked");
-  assert.match(result.reason, /snapshots are 1500 ms apart/i);
-});
+  assert.equal(exactlyAtCutoff.triggerMet, true);
+  assert.equal(exactlyAtCutoff.eligible, false);
+  assert.equal(exactlyAtCutoff.status, "cutoff");
 
-test("requires at least $0.10 net edge per share after fees and safety margin", () => {
-  const result = engine.evaluatePair({
-    nowMs: 1000,
-    maxCashPerLegUsd: 100,
-    minNetEdgePerShare: 0.1,
-    safetyMarginPerShare: 0.01,
-    legs: [
-      pairLeg("Polymarket", "UP", "polymarket", [{ price: 0.45, size: 1000 }]),
-      pairLeg("Predict.fun", "DOWN", "predict", [{ price: 0.45, size: 1000 }]),
-    ],
+  const noCapital = engine.evaluateLaggingVenueEntry({
+    ...shared,
+    nowMs: 100_000,
+    entryBook: strategyBook({ ask: 0.45, bid: 0.44 }),
+    availableCashUsd: 0,
   });
-  assert.equal(result.eligible, false);
-  assert.equal(result.status, "below_threshold");
+  assert.equal(noCapital.triggerMet, true);
+  assert.equal(noCapital.eligible, false);
+  assert.equal(noCapital.status, "insufficient_capital");
 });
 
-test("waits for modeled order arrival and misses a signal that disappears in newer books", () => {
-  const bot = new ArbitrageBot({ paperBaseLatencyMs: 500 });
-  const window = { openMs: 1_000_000, closeMs: 1_300_000 };
-  const signal = {
-    direction: "POLY_UP + PREDICT_DOWN",
-    status: "trigger",
-    eligible: true,
-    shares: 10,
-    pairCash: 7.5,
-    pairCostPerShare: 0.75,
-    netEdgePerShare: 0.15,
-    legs: [
-      { venue: "Polymarket", side: "UP", requestLatencyMs: 100 },
-      { venue: "Predict.fun", side: "DOWN", requestLatencyMs: 200 },
-    ],
-  };
-  const detectedAt = 1_000_000;
-  bot._schedulePaperPairs(window, [signal], detectedAt);
-  const pending = bot.pendingPaperPairs.get(`${window.openMs}:${signal.direction}`);
-  const arrivedAt = pending.simulatedArrivalAt;
+test("lagging-venue entry rejects stale books and unsafe cross-venue market matches", () => {
+  const freshReference = strategyBook({ ask: 0.95, bid: 0.91 });
+  const freshEntry = strategyBook({ ask: 0.45, bid: 0.44 });
+  const stale = engine.evaluateLaggingVenueEntry({
+    nowMs: 100_000,
+    windowOpenMs: 0,
+    referenceBook: { ...freshReference, observedAt: 90_000, receivedAt: 90_000 },
+    entryBook: freshEntry,
+    referenceMarketMatched: true,
+    entryMarketMatched: true,
+    feeModel: "polymarket",
+    availableCashUsd: 10_000,
+  });
+  assert.equal(stale.eligible, false);
+  assert.match(stale.reason, /stale/);
 
-  bot._processPendingPaperPairs(
-    window,
-    [signal],
-    null,
-    arrivedAt - 1,
-  );
-  assert.equal(bot.state.paperTrades.length, 0);
-  assert.equal(bot.pendingPaperPairs.size, 1);
-
-  const movedBookOpportunity = {
-    ...signal,
-    status: "below_threshold",
-    eligible: false,
-    pairCostPerShare: 0.95,
-    netEdgePerShare: -0.05,
-    reason: "Price moved and the net edge is below threshold.",
-    legs: signal.legs.map((leg) => ({
-      ...leg,
-      quoteReceivedAt: arrivedAt + 100,
-    })),
-  };
-  bot._processPendingPaperPairs(
-    window,
-    [movedBookOpportunity],
-    null,
-    arrivedAt + 100,
-  );
-  assert.equal(bot.state.paperTrades.length, 0);
-  assert.equal(bot.pendingPaperPairs.size, 0);
-  assert.ok(bot.state.events.some((event) => event.event === "PAPER_PAIR_MISSED"));
+  const unmatched = engine.evaluateLaggingVenueEntry({
+    nowMs: 100_000,
+    windowOpenMs: 0,
+    referenceBook: freshReference,
+    entryBook: freshEntry,
+    referenceMarketMatched: true,
+    entryMarketMatched: false,
+    feeModel: "polymarket",
+    availableCashUsd: 10_000,
+  });
+  assert.equal(unmatched.eligible, false);
+  assert.match(unmatched.reason, /safely matched/);
 });
 
-test("records delayed paper fills using arrival prices and stores cost drift", () => {
-  const bot = new ArbitrageBot({ paperBaseLatencyMs: 500 });
-  const window = { openMs: 2_000_000, closeMs: 2_300_000 };
-  const signal = {
-    direction: "POLY_UP + PREDICT_DOWN",
-    status: "trigger",
-    eligible: true,
-    shares: 10,
-    pairCash: 7.5,
-    pairCostPerShare: 0.75,
-    netEdgePerShare: 0.15,
-    grossEdgePerShare: 0.16,
-    safetyMarginPerShare: 0.01,
-    fees: 0.1,
-    legs: [
-      {
-        venue: "Polymarket",
-        side: "UP",
-        feeModel: "polymarket",
-        shares: 10,
-        requestLatencyMs: 100,
-        averagePrice: 0.38,
-        bestAsk: 0.37,
-        worstFillPrice: 0.39,
-        notional: 3.8,
-        fees: 0.05,
-        cash: 3.85,
-        depthSlippagePerShare: 0.01,
-        levelsUsed: 2,
-        fills: [],
-      },
-      {
-        venue: "Predict.fun",
-        side: "DOWN",
-        feeModel: "predict",
-        shares: 10,
-        requestLatencyMs: 200,
-        averagePrice: 0.39,
-        bestAsk: 0.38,
-        worstFillPrice: 0.4,
-        notional: 3.9,
-        fees: 0.05,
-        cash: 3.95,
-        depthSlippagePerShare: 0.01,
-        levelsUsed: 2,
-        fills: [],
-      },
-    ],
+test("enforces one re-entry per side only after the first position exits", () => {
+  const bot = new ArbitrageBot();
+  const window = { openMs: 0, closeMs: 300_000 };
+  const poly = {
+    market: { matchStatus: "matched", id: "poly", conditionId: "poly-condition" },
+    up: strategyBook({ ask: 0.93, bid: 0.9 }),
+    down: strategyBook({ ask: 0.5, bid: 0.49 }),
   };
-  const detectedAt = 2_000_000;
-  bot._schedulePaperPairs(window, [signal], detectedAt);
-  const pending = bot.pendingPaperPairs.get(`${window.openMs}:${signal.direction}`);
-  const executionAt = pending.simulatedArrivalAt + 100;
-  const arrivalOpportunity = {
-    ...signal,
-    pairCash: 7.8,
-    pairCostPerShare: 0.78,
-    netEdgePerShare: 0.12,
-    legs: signal.legs.map((leg) => ({
-      ...leg,
-      quoteReceivedAt: executionAt,
-    })),
+  const predict = {
+    market: { matchStatus: "matched", id: "predict", conditionId: "predict-condition" },
+    up: strategyBook({ ask: 0.4, bid: 0.39 }),
+    down: strategyBook({ ask: 0.5, bid: 0.49 }),
   };
+  const direction = "BUY UP on Predict.fun · Polymarket confirms";
+  const first = bot._evaluate(window, poly, predict, 100_000);
+  assert.equal(first.find((item) => item.direction === direction).eligible, true);
 
-  bot._processPendingPaperPairs(
-    window,
-    [arrivalOpportunity],
-    null,
-    executionAt,
+  bot.state.paperTrades.push({
+    id: "open-up",
+    strategyVersion: "lagging-venue-v1",
+    side: "UP",
+    openMs: 0,
+    finalized: false,
+    entryCash: 205,
+  });
+  assert.equal(
+    bot._evaluate(window, poly, predict, 100_000).find((item) => item.direction === direction)
+      .eligible,
+    false,
   );
 
+  bot.state.paperTrades[0].finalized = true;
+  bot.state.paperTrades[0].settlementMethod = "simulated_stop_loss";
+  assert.equal(
+    bot._evaluate(window, poly, predict, 100_000).find((item) => item.direction === direction)
+      .eligible,
+    true,
+  );
+  bot.state.paperTrades.push({
+    id: "reentry-up",
+    strategyVersion: "lagging-venue-v1",
+    side: "UP",
+    openMs: 0,
+    finalized: true,
+    settlementMethod: "simulated_take_profit",
+    pairCash: 205,
+  });
+  const afterReentry = bot._evaluate(window, poly, predict, 100_000);
+  assert.equal(afterReentry.find((item) => item.direction === direction).eligible, false);
+  assert.equal(afterReentry.find((item) => item.direction === direction).entryCount, 2);
+});
+
+test("opens one lagging-side position only after delayed fresh snapshots, then cannot fill after 270 seconds", () => {
+  const window = { openMs: 0, closeMs: 300_000 };
+  const makeVenues = (observedAt) => ({
+    poly: {
+      market: { matchStatus: "matched", id: "poly", conditionId: "poly-condition" },
+      up: strategyBook({ ask: 0.93, bid: 0.9, observedAt }),
+      down: strategyBook({ ask: 0.5, bid: 0.49, observedAt }),
+    },
+    predict: {
+      market: { matchStatus: "matched", id: "predict", conditionId: "predict-condition" },
+      up: strategyBook({ ask: 0.4, bid: 0.39, observedAt }),
+      down: strategyBook({ ask: 0.5, bid: 0.49, observedAt }),
+    },
+  });
+  const bot = new ArbitrageBot({ paperBaseLatencyMs: 100 });
+  const detectedAt = 100_000;
+  const initialVenues = makeVenues(detectedAt);
+  const initial = bot._evaluate(window, initialVenues.poly, initialVenues.predict, detectedAt);
+  const upEntry = initial.find(
+    (item) => item.side === "UP" && item.entryVenue === "Predict.fun",
+  );
+  assert.equal(upEntry.eligible, true);
+  bot._schedulePaperEntries(window, [upEntry], detectedAt);
+  const pending = bot.pendingPaperEntries.get(`${window.openMs}:UP`);
+  assert.ok(pending);
+  bot._schedulePaperEntries(window, [upEntry], detectedAt + 20);
+  assert.equal(bot.pendingPaperEntries.size, 1);
+
+  const fillAt = pending.simulatedArrivalAt;
+  const arrivedVenues = makeVenues(fillAt);
+  const arrivalOpportunities = bot._evaluate(
+    window,
+    arrivedVenues.poly,
+    arrivedVenues.predict,
+    fillAt,
+  );
+  bot._processPendingPaperEntries(window, arrivalOpportunities, null, fillAt);
   assert.equal(bot.state.paperTrades.length, 1);
   const trade = bot.state.paperTrades[0];
-  assert.equal(trade.pairCostPerShare, 0.78);
-  assert.equal(trade.signalPairCostPerShare, 0.75);
-  assert.ok(trade.executionPriceDriftPerShare > 0.029);
-  assert.ok(trade.simulatedLatencyMs >= 800);
-  assert.equal(bot.firedKeys.has(`${window.openMs}:${signal.direction}`), true);
+  assert.equal(trade.strategyVersion, "lagging-venue-v1");
+  assert.equal(trade.venue, "Predict.fun");
+  assert.equal(trade.side, "UP");
+  assert.equal(trade.shares, 500);
+  assert.equal(trade.legs.length, 1);
+  bot._schedulePaperEntries(window, [upEntry], fillAt + 10);
+  assert.equal(bot.pendingPaperEntries.size, 0);
+  trade.finalized = true;
+  trade.settlementMethod = "simulated_take_profit";
+  trade.realizedPnl = 295;
+  const clearedVenues = makeVenues(fillAt + 20);
+  clearedVenues.poly.up.bids[0].price = 0.89;
+  clearedVenues.predict.up.asks[0].price = 0.39;
+  const clearedEntry = bot
+    ._evaluate(window, clearedVenues.poly, clearedVenues.predict, fillAt + 20)
+    .find((item) => item.side === "UP" && item.entryVenue === "Predict.fun");
+  assert.equal(clearedEntry.triggerMet, false);
+  bot._schedulePaperEntries(window, [clearedEntry], fillAt + 20);
+
+  const rearmedVenues = makeVenues(fillAt + 30);
+  const reentry = bot
+    ._evaluate(window, rearmedVenues.poly, rearmedVenues.predict, fillAt + 30)
+    .find((item) => item.side === "UP" && item.entryVenue === "Predict.fun");
+  assert.equal(reentry.entryCount, 1);
+  assert.equal(reentry.eligible, true);
+  bot._schedulePaperEntries(window, [reentry], fillAt + 30);
+  assert.equal(bot.pendingPaperEntries.size, 1);
+
+  const lateBot = new ArbitrageBot({ paperBaseLatencyMs: 500 });
+  const lateDetectedAt = 269_900;
+  const lateVenues = makeVenues(lateDetectedAt);
+  const lateOpportunity = lateBot
+    ._evaluate(window, lateVenues.poly, lateVenues.predict, lateDetectedAt)
+    .find((item) => item.side === "UP" && item.entryVenue === "Predict.fun");
+  assert.equal(lateOpportunity.eligible, true);
+  lateBot._schedulePaperEntries(window, [lateOpportunity], lateDetectedAt);
+  lateBot._processPendingPaperEntries(
+    window,
+    [lateOpportunity],
+    null,
+    270_000,
+  );
+  assert.equal(lateBot.state.paperTrades.length, 0);
+  assert.equal(lateBot.pendingPaperEntries.size, 0);
+});
+
+test("TP credits $1 per share after delayed confirmation; stop exits against bid depth and fees", () => {
+  const window = { openMs: 0, closeMs: 300_000 };
+  const makeTrade = (venue, side, feeModel, entryCash) => ({
+    id: `${venue}-${side}`,
+    strategyVersion: "lagging-venue-v1",
+    openMs: 0,
+    closeMs: 300_000,
+    side,
+    venue,
+    shares: 500,
+    entryCash,
+    fees: 5,
+    finalized: false,
+    legs: [{ feeModel }],
+  });
+  const tpBot = new ArbitrageBot({ paperBaseLatencyMs: 100 });
+  const tpTrade = makeTrade("Polymarket", "UP", "polymarket", 205);
+  tpBot.state.paperTrades = [tpTrade];
+  tpBot.state.venues.polymarket.up = {
+    ...strategyBook({ ask: 1, bid: 0.99 }),
+    requestLatencyMs: 0,
+  };
+  tpBot._processPaperPositionExits(window, 100_000);
+  assert.equal(tpTrade.finalized, false);
+  assert.equal(tpTrade.pendingExit.type, "take_profit");
+  const tpArrival = tpTrade.pendingExit.simulatedArrivalAt;
+  tpBot.state.venues.polymarket.up = {
+    ...strategyBook({ ask: 1, bid: 0.99, observedAt: tpArrival }),
+    requestLatencyMs: 0,
+  };
+  tpBot._processPaperPositionExits(window, tpArrival);
+  assert.equal(tpTrade.finalized, true);
+  assert.equal(tpTrade.settlementMethod, "simulated_take_profit");
+  assert.equal(tpTrade.finalPayout, 500);
+  assert.equal(tpTrade.realizedPnl, 295);
+
+  const stopBot = new ArbitrageBot({ paperBaseLatencyMs: 100 });
+  const stopTrade = makeTrade("Predict.fun", "DOWN", "predict", 205);
+  stopBot.state.paperTrades = [stopTrade];
+  stopBot.state.venues.predict.down = {
+    ...strategyBook({ ask: 0.31, bid: 0.3, size: 500 }),
+    requestLatencyMs: 0,
+  };
+  stopBot._processPaperPositionExits(window, 100_000);
+  const stopArrival = stopTrade.pendingExit.simulatedArrivalAt;
+  stopBot.state.venues.predict.down = {
+    ...strategyBook({ ask: 0.31, bid: 0.3, size: 500, observedAt: stopArrival }),
+    requestLatencyMs: 0,
+  };
+  stopBot._processPaperPositionExits(window, stopArrival);
+  assert.equal(stopTrade.finalized, true);
+  assert.equal(stopTrade.settlementMethod, "simulated_stop_loss");
+  assert.equal(stopTrade.exitPrice, 0.3);
+  assert.equal(stopTrade.exitFees, 3);
+  assert.equal(stopTrade.finalPayout, 147);
+  assert.equal(stopTrade.realizedPnl, -58);
+});
+
+test("a single-venue position settles from only the venue that holds its shares", () => {
+  const trade = {
+    id: "single-poly-up",
+    openMs: 0,
+    closeMs: 300_000,
+    side: "UP",
+    entryCash: 205,
+    finalized: false,
+    legs: [{ venue: "Polymarket", side: "UP", shares: 500 }],
+  };
+  const settled = engine.updateTradeWithOfficialVenueSettlement(
+    trade,
+    null,
+    {
+      polymarket: { status: "resolved", outcome: "UP" },
+      predict: { status: "pending" },
+    },
+    300_000,
+  );
+  assert.equal(settled.finalized, true);
+  assert.equal(settled.finalOutcome, "Polymarket UP");
+  assert.equal(settled.finalPayout, 500);
+  assert.equal(settled.realizedPnl, 295);
 });
 
 test("targets a non-overlapping 500 ms scan and runs venue/benchmark reads concurrently", async () => {
@@ -496,20 +635,7 @@ test("tracks starting demo capital, open commitment, available cash, and provisi
   assert.equal(result.paperEquityUsd, 10_090.5);
 });
 
-test("does not allow an opportunity when no demo capital remains", () => {
-  const result = engine.evaluatePair({
-    nowMs: 1000,
-    maxCashPerLegUsd: 0,
-    legs: [
-      pairLeg("Polymarket", "UP", "polymarket", [{ price: 0.4, size: 1000 }]),
-      pairLeg("Predict.fun", "DOWN", "predict", [{ price: 0.4, size: 1000 }]),
-    ],
-  });
-  assert.equal(result.eligible, false);
-  assert.match(result.reason, /no available demo capital/i);
-});
-
-test("shows Predict quotes for an unmatched market without marking it pair-eligible", async () => {
+test("shows Predict quotes for an unmatched market without allowing a paper entry", async () => {
   const nowMs = Date.now();
   const priorOpenMs =
     Math.floor((nowMs - 5 * 60 * 1000) / (5 * 60 * 1000)) * 5 * 60 * 1000;
@@ -998,7 +1124,6 @@ test("migrates old shared-benchmark results to pending without resetting demo ca
           },
         ],
         events: [],
-        firedKeys: [],
       }),
     );
     const bot = new ArbitrageBot({
@@ -1018,7 +1143,7 @@ test("migrates old shared-benchmark results to pending without resetting demo ca
     assert.equal(bot.state.stats.availableCapitalUsd, 9_851.22);
     assert.ok(logs.some((entry) => entry.event === "OFFICIAL_SETTLEMENT_MIGRATION"));
     const migratedFile = JSON.parse(await fs.readFile(stateFile, "utf8"));
-    assert.equal(migratedFile.version, 3);
+    assert.equal(migratedFile.version, 4);
     assert.equal(migratedFile.settlementModel, "independent-venue-v1");
   } finally {
     await fs.rm(directory, { recursive: true, force: true });

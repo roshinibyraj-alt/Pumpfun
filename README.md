@@ -1,49 +1,51 @@
 # BTC Cross-Venue Arb Demo
 
-This repository runs a **paper-only** BTC 5-minute cross-venue scanner for Polymarket and Predict.fun. It reads public market data and records simulated pairs. It has no live order placement, wallet, private key, signing, or trading API path.
+This is a **paper-only** BTC 5-minute cross-venue scanner for Polymarket and Predict.fun. It reads market data and simulates one-sided positions. It does not place orders and contains no wallet signing, private keys, or live-trading execution path.
 
-## Signal rule
+## Paper strategy
 
-- Compare both directions independently: buy Polymarket UP + Predict.fun DOWN, and Predict.fun UP + Polymarket DOWN.
-- Trigger at most one simulated pair per direction per UTC 5-minute window.
-- Each leg has a maximum **$100 total cash** budget, including that leg's estimated taker fee.
-- The paper account starts with **$10,000**. Open pair cash is reserved from available demo capital; finalized P&L updates the balance, and the scanner will not open a pair larger than the remaining bankroll.
-- Both legs use the same share quantity. Quantity is sized from current executable ask depth, never from midpoint or last-trade prices.
-- Estimate fees at each consumed ask level: Polymarket `shares × 0.07 × price × (1 − price)`; Predict.fun `shares × 0.02 × min(price, 1 − price)`.
-- Require at least **$0.10 net edge per matched share after fees and the safety margin**. The default additional safety margin is $0.01 per share; set `ARB_SAFETY_MARGIN_PER_SHARE` on the server to a non-negative value below $0.50 to adjust it.
-- Reject stale books, insufficient depth, non-matching windows, ambiguous markets, and markets whose actual outcomes cannot safely map to exactly UP and DOWN. Titles alone never establish equivalence.
+For each outcome (UP and DOWN), compare the same outcome on both venues:
 
-The signal is a paper model, not guaranteed or risk-free arbitrage. Cross-venue rules, oracle sources, fees, and settlement timing may differ.
+- A venue confirms the signal when its executable best bid is **$0.90 or higher**.
+- The other venue is the lagging entry venue when its best ask is **at least $0.40 and below $0.70**. The bot buys only that same-side outcome on the lagging venue.
+- Each entry is **500 shares**, sized from visible ask depth. If the full quantity is not executable within the entry band, no position is simulated.
+- New entries are not allowed at or after **270 seconds** into the five-minute window. A pending entry is canceled if modeled arrival would be at or after that cutoff.
+- The hard stop triggers when the holding venue's best bid is **$0.30 or lower**. After modeled latency, the simulated exit consumes visible bid depth and deducts the venue's taker fees.
+- Take profit triggers when the holding venue's best bid is **$0.99 or higher**. The paper model closes at exactly **$1.00 per share**, as requested.
+- Allow one re-entry per side in a window, only after the first position exits and the entry signal has cleared and then appeared again. That means at most two entries per side per five-minute window.
+- The demo account starts with **$10,000**. Entry cost is reserved from available capital; exits and official settlement update realized paper P&L.
 
-## Polling and paper fills
+The signal is a paper model, not guaranteed or risk-free arbitrage. Venue prices, fees, order-book depth, execution timing, and settlement rules can differ.
 
-- The scanner targets a **500 ms start-to-start read cycle** with no overlapping scans. Venue reads run concurrently; stable market metadata is cached so the loop focuses on the current books. The dashboard reports the target interval and recent cycle time.
-- A paper signal is **not filled at detection time**. It waits for a modeled **500 ms base order-arrival delay plus each venue’s measured order-book request time**, then requires both books to have been received after their respective arrival times. At that point the bot recalculates equal-share size, visible ask-depth fills, fees, slippage, and the $0.10 net-edge rule from the newer books.
-- If the post-delay books are stale, too far apart in time, too shallow, or no longer clear the edge threshold, the attempt is logged as missed and no position is recorded. HTTP 429 responses trigger an exponential pause (up to 30 seconds) rather than hammering a rate-limited endpoint.
-- This remains a **paper fill model**, not a prediction of an actual exchange fill: it cannot model queue position, hidden liquidity, real order acknowledgements, or leg-specific partial-fill/unhedged exposure. It only records a pair when both refreshed books support the same executable share quantity.
-- Railway stdout receives structured lifecycle events and a compact scanner heartbeat every 30 seconds. Heartbeats include each feed's health/quote age, the active window, scan timing, opportunity states, and pending official settlements; the 500 ms scan cycles themselves are not logged.
-- Optional server variables: `ARB_POLL_MS` (500–5000 ms; default 500) and `ARB_PAPER_BASE_LATENCY_MS` (100–5000 ms; default 500). They affect only paper scanning/simulation, never live orders.
+## Polling and simulated fills
 
-## Dashboard and venue-specific paper settlement
+- The scanner targets a **500 ms start-to-start read cycle** with no overlapping scans. Polymarket and Predict.fun books are read concurrently; the dashboard reports the target interval and recent cycle time.
+- A signal is not filled at detection time. The bot waits for a modeled **500 ms base delay plus measured market-data request latency**, then requires fresh snapshots from both venues and rechecks the entry prices and 500-share depth.
+- If the signal disappears, a book is stale, the market match is unsafe, or the full quantity is unavailable, the attempt is logged as missed and no position is recorded.
+- Paper exits also wait through modeled latency. TP is rechecked at arrival; stop-loss exits use the then-visible bid depth and fees. This model cannot reproduce queue position, hidden liquidity, exchange acknowledgements, or actual fills.
+- HTTP 429 responses trigger an exponential pause (up to 30 seconds) instead of repeated requests.
+- Railway stdout receives structured entry/exit lifecycle events and a compact scanner heartbeat every 30 seconds. The 500 ms scan cycles are not individually logged.
+- Optional server variables: `ARB_POLL_MS` (500–5000 ms; default 500) and `ARB_PAPER_BASE_LATENCY_MS` (100–5000 ms; default 500). These affect paper simulation only.
 
-The dashboard shows separate UP and DOWN bid/ask books for each venue, visible depth, timestamps/age, market details, matching status, candidate pair costs, fees, simulated trades, demo capital, and P&L. If Predict returns a quote for an open market that cannot be matched to Polymarket's exact 5-minute window, the dashboard can still show that market's separate quotes, but labels it unmatched and keeps it out of the scanner.
+## Dashboard and settlement
 
-While the five-minute window is open, any P&L estimate is explicitly provisional and based on the Coinbase reference feed. After close, the bot waits for **both exact venue markets** to publish confirmed results: Polymarket's closed binary market outcome prices and Predict.fun's resolved market outcome/status. It settles each leg independently at $1 per winning share and $0 per losing share, then subtracts the pair's actual simulated cash cost. If outcomes disagree, one leg can lose; both legs can lose. Coinbase is a display-only diagnostic and never finalizes P&L.
+The dashboard shows separate UP and DOWN bid/ask books for each venue, visible depth, quote age, market details, match status, trigger prices, paper positions, demo capital, and realized/provisional P&L. If a market's outcomes cannot be safely mapped to the same five-minute UP/DOWN window, the scanner blocks entries.
 
-Window expiry is not the same as official resolution. A trade remains pending, its capital stays reserved, and it is excluded from realized P&L until both venues confirm their outcomes. Predict.fun's oracle resolution and challenge process can take hours or longer. Existing trades previously finalized from the shared benchmark are migrated back to pending and reconciled against the original venue windows; their former benchmark values are retained only as audit metadata. No paper state or starting capital is reset by this migration.
+An open position is marked provisionally from the bid on the venue where its shares are held. A stale or missing quote clears the provisional mark rather than carrying forward an old value. A TP or stop closes the paper position according to the simulated exit rules above. If it remains open at expiry, the bot waits for the **exact holding venue's official market outcome** and settles only that venue's shares at $1 per winning share or $0 per losing share. It does not require the other venue to resolve and does not use the shared BTC benchmark to decide settlement.
 
-Paper trades and event logs are written to `data/arb-state.json` (or `ARB_STATE_PATH`). Set `RAILWAY_VOLUME_MOUNT_PATH` or `ARB_STATE_PATH` if a persistent Railway volume is available; otherwise Railway's filesystem may reset on redeploy.
+Coinbase BTC-USD data is labeled as an internal diagnostic/provisional reference only. It does not trigger entries, exits, or official-settlement P&L.
 
-## Data feeds and setup
+Paper positions and event logs are stored in `data/arb-state.json` (or `ARB_STATE_PATH`). Set `RAILWAY_VOLUME_MOUNT_PATH` or `ARB_STATE_PATH` if a persistent Railway volume is available; otherwise Railway's filesystem may reset on redeploy.
 
-- Polymarket market discovery: public Gamma endpoint; books: public CLOB read-only `GET /book`.
-- Predict.fun markets: documented read-only `GET /v1/markets`; book: documented read-only `GET /v1/markets/{id}/orderbook`. Its order book is YES-side only; the NO side is derived by complementing prices at the market's `decimalPrecision` and swapping bid/ask sides.
-- Predict.fun requires an API key for its mainnet read endpoints. In Railway, add `PREDICT_API_KEY` under the service's **Variables**. The key is read only by the server and is never included in API responses or browser code. Without it, Polymarket and the benchmark continue to work, but paired scanning remains disabled until Predict.fun books are available.
-- The Coinbase Exchange ticker and 5-minute candles provide a clearly labeled provisional/diagnostic reference only; they are not used for arbitrage signals or final P&L.
+## Read-only data feeds
+
+- Polymarket: public Gamma market discovery and public CLOB `GET /book` order books.
+- Predict.fun: documented read-only `GET /v1/markets` and `GET /v1/markets/{id}/orderbook`. Predict's book is YES-side only; NO quotes are derived using the market's documented decimal precision and complementary bid/ask levels.
+- Predict.fun requires a server-side `PREDICT_API_KEY` for its mainnet read endpoints. Add it under the Railway service's **Variables**. It is never returned to the browser. Without it, Predict quotes and cross-venue scanning remain unavailable; Polymarket data and the dashboard still work.
 
 ## Railway
 
-The existing Railway build/start/healthcheck configuration is intentionally retained:
+The existing Railway build/start/healthcheck configuration is retained:
 
 - Build: `PORT=4173 BASE_PATH=/ pnpm run build`
 - Start: `pnpm start`
