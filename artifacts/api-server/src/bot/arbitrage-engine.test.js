@@ -234,8 +234,8 @@ test("derives an exact aligned five-minute window from Predict's canonical slug"
   );
 });
 
-test("lagging-venue entry requires a $0.97 leader bid and a $0.60–<$0.90 lagging ask", () => {
-  const referenceBook = strategyBook({ ask: 0.99, bid: 0.97 });
+test("lagging-venue entry requires a $0.80 leader bid and a $0.60–<$0.70 lagging ask", () => {
+  const referenceBook = strategyBook({ ask: 0.99, bid: 0.8 });
   const entryBook = {
     ...strategyBook({ ask: 0.6, bid: 0.59 }),
     asks: [
@@ -263,7 +263,7 @@ test("lagging-venue entry requires a $0.97 leader bid and a $0.60–<$0.90 laggi
   assert.equal(result.entryCash, 316.25);
 });
 
-test("rejects lagging asks below $0.60, at $0.90, or with leader bid below $0.97", () => {
+test("rejects lagging asks below $0.60, at $0.70, or with leader bid below $0.80", () => {
   const evaluate = (entryAsk, referenceBid) =>
     engine.evaluateLaggingVenueEntry({
       nowMs: 100_000,
@@ -276,11 +276,10 @@ test("rejects lagging asks below $0.60, at $0.90, or with leader bid below $0.97
       availableCashUsd: 10_000,
     });
   assert.equal(evaluate(0.59, 0.99).eligible, false);
-  assert.equal(evaluate(0.9, 0.99).eligible, false);
-  assert.equal(evaluate(0.6, 0.97).eligible, true);
-  assert.equal(evaluate(0.89, 0.97).eligible, true);
-  assert.equal(evaluate(0.7, 0.969).eligible, false);
-  assert.equal(evaluate(0.7, 0.97).eligible, true);
+  assert.equal(evaluate(0.7, 0.99).eligible, false);
+  assert.equal(evaluate(0.6, 0.8).eligible, true);
+  assert.equal(evaluate(0.69, 0.8).eligible, true);
+  assert.equal(evaluate(0.6, 0.799).eligible, false);
 });
 
 test("lagging-venue entry requires 500 shares of visible depth and stops opening at 270 seconds", () => {
@@ -449,7 +448,8 @@ test("opens one lagging-side position only after delayed fresh snapshots, then c
   assert.equal(trade.shares, 500);
   assert.equal(trade.legs.length, 1);
   assert.equal(trade.entryAveragePrice, 0.6);
-  assert.equal(trade.stopBid, 0.4);
+  assert.equal(trade.stopBid, 0.45);
+  assert.equal(trade.hardStopBid, 0.45);
   bot._schedulePaperEntries(window, [upEntry], fillAt + 10);
   assert.equal(bot.pendingPaperEntries.size, 0);
   trade.finalized = true;
@@ -491,7 +491,7 @@ test("opens one lagging-side position only after delayed fresh snapshots, then c
   assert.equal(lateBot.pendingPaperEntries.size, 0);
 });
 
-test("TP credits $1 per share; hard stop triggers $0.20 below average entry and exits against bid depth", () => {
+test("TP credits $1 per share; hard stop triggers at an absolute $0.45 best bid and exits against bid depth", () => {
   const window = { openMs: 0, closeMs: 300_000 };
   const makeTrade = (venue, side, feeModel, entryCash, entryAveragePrice) => ({
     id: `${venue}-${side}`,
@@ -537,24 +537,24 @@ test("TP credits $1 per share; hard stop triggers $0.20 below average entry and 
   };
   stopBot._processPaperPositionExits(window, 100_000);
   assert.equal(stopTrade.pendingExit, undefined);
-  assert.equal(stopTrade.stopBid, 0.55);
+  assert.equal(stopTrade.stopBid, 0.45);
   stopBot.state.venues.predict.down = {
-    ...strategyBook({ ask: 0.56, bid: 0.55, size: 500 }),
+    ...strategyBook({ ask: 0.46, bid: 0.45, size: 500 }),
     requestLatencyMs: 0,
   };
   stopBot._processPaperPositionExits(window, 100_000);
   const stopArrival = stopTrade.pendingExit.simulatedArrivalAt;
   stopBot.state.venues.predict.down = {
-    ...strategyBook({ ask: 0.55, bid: 0.54, size: 500, observedAt: stopArrival }),
+    ...strategyBook({ ask: 0.45, bid: 0.44, size: 500, observedAt: stopArrival }),
     requestLatencyMs: 0,
   };
   stopBot._processPaperPositionExits(window, stopArrival);
   assert.equal(stopTrade.finalized, true);
   assert.equal(stopTrade.settlementMethod, "simulated_stop_loss");
-  assert.equal(stopTrade.exitPrice, 0.54);
-  assert.equal(stopTrade.exitFees, 4.6);
-  assert.equal(stopTrade.finalPayout, 265.4);
-  assert.ok(Math.abs(stopTrade.realizedPnl - -112.1) < 1e-9);
+  assert.equal(stopTrade.exitPrice, 0.44);
+  assert.equal(stopTrade.exitFees, 4.4);
+  assert.equal(stopTrade.finalPayout, 215.6);
+  assert.ok(Math.abs(stopTrade.realizedPnl - -161.9) < 1e-9);
 });
 
 test("a single-venue position settles from only the venue that holds its shares", () => {

@@ -142,7 +142,7 @@ type BotState = {
       minimumEntryAsk: number;
       maximumEntryAsk: number;
       shares: number;
-      stopLossOffset: number;
+      hardStopBid: number;
       takeProfitBid: number;
       takeProfitCreditPerShare: number;
       maxEntrySeconds: number;
@@ -410,8 +410,8 @@ function App() {
           <div className="eyebrow">CROSS-VENUE PAPER SCANNER</div>
           <h1>BTC Cross-Venue Lag Signal</h1>
           <p>
-            If one venue’s same-side best bid reaches $0.97 while the other venue’s ask is
-            $0.60–&lt;$0.90, the paper model buys 500 shares on the lagging venue. No orders or
+            If one venue’s same-side best bid reaches $0.80 while the other venue’s ask is
+            $0.60–&lt;$0.70, the paper model buys 500 shares on the lagging venue. No orders or
             wallet are used.
           </p>
         </div>
@@ -435,10 +435,10 @@ function App() {
         <div>
           <strong>Single-side paper strategy · no live trading.</strong>
           <span>
-            Entry uses the leader’s best bid ≥ $0.97 and the other venue’s same-outcome best ask
-            from $0.60 to below $0.90. It buys 500 shares only when visible depth covers the full
-            size, rechecks after modeled latency, stops when the best bid is $0.20 below the
-            executed average entry price, and takes profit at
+            Entry uses the leader’s best bid ≥ $0.80 and the other venue’s same-outcome best ask
+            from $0.60 to below $0.70. It buys 500 shares only when visible depth covers the full
+            size, rechecks after modeled latency, stops when the best bid is at or below $0.45,
+            and takes profit at
             a best bid ≥ $0.99 credited as $1.00/share. One re-entry per side; no entries at or
             after 270 seconds.
           </span>
@@ -475,7 +475,7 @@ function App() {
         <article className="stat-card stat-ready">
           <span className="stat-label">Stop / entry cutoff</span>
           <strong className="stat-value">
-            −{dollars(config?.strategy?.stopLossOffset, 2)} from entry / {config?.strategy?.maxEntrySeconds ?? 270}s
+            ≤{dollars(config?.strategy?.hardStopBid, 2)} best bid / {config?.strategy?.maxEntrySeconds ?? 270}s
           </strong>
           <span className="stat-foot">
             {readyCount} ready · {opportunities.filter((item) => item.pendingExecution).length} pending · one re-entry/side
