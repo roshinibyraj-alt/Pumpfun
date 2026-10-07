@@ -40,16 +40,24 @@ const MAX_LOGS = 150;
 const MAX_TRADES = 250;
 const DEFAULT_STARTING_PAPER_CAPITAL_USD = 10_000;
 const STRATEGY = Object.freeze({
-  referenceBidThreshold: 0.9,
-  minimumEntryAsk: 0.4,
-  maximumEntryAsk: 0.8,
+  referenceBidThreshold: 0.97,
+  minimumEntryAsk: 0.6,
+  maximumEntryAsk: 0.9,
   shares: 500,
-  stopBid: 0.3,
+  stopLossOffset: 0.2,
   takeProfitBid: 0.99,
   takeProfitCreditPerShare: 1,
   maxEntrySeconds: 270,
   maxEntriesPerSidePerWindow: 2,
 });
+
+function stopBidForEntry(entryAveragePrice) {
+  const entry = finiteNumber(entryAveragePrice);
+  if (entry === null) return null;
+  const stopBid = Math.max(0, entry - STRATEGY.stopLossOffset);
+  return Math.round((stopBid + Number.EPSILON) * 1e8) / 1e8;
+}
+
 const SIMULATED_EXIT_METHODS = new Set([
   "simulated_take_profit",
   "simulated_stop_loss",
@@ -1214,7 +1222,8 @@ class ArbitrageBot {
       triggerEntryAsk: execution.signalEntryAsk ?? opportunity.entryAsk,
       referenceBidAtFill: opportunity.referenceBid,
       entryAskAtFill: opportunity.entryAsk,
-      stopBid: STRATEGY.stopBid,
+      stopBid: stopBidForEntry(leg.averagePrice),
+      stopLossOffset: STRATEGY.stopLossOffset,
       takeProfitBid: STRATEGY.takeProfitBid,
       takeProfitCreditPerShare: STRATEGY.takeProfitCreditPerShare,
       status: "open_position",
@@ -1299,11 +1308,23 @@ class ArbitrageBot {
         continue;
       }
 
+      const entryAveragePrice =
+        finiteNumber(trade.entryAveragePrice) ??
+        finiteNumber(trade.legs?.[0]?.averagePrice);
+      const stopBid =
+        entryAveragePrice === null
+          ? finiteNumber(trade.stopBid)
+          : stopBidForEntry(entryAveragePrice);
+      if (stopBid !== null) {
+        trade.stopBid = stopBid;
+        trade.stopLossOffset = STRATEGY.stopLossOffset;
+      }
+
       if (!trade.pendingExit) {
         const exitType =
           bestBid >= STRATEGY.takeProfitBid
             ? "take_profit"
-            : bestBid <= STRATEGY.stopBid
+            : stopBid !== null && bestBid <= stopBid
               ? "stop_loss"
               : null;
         if (!exitType) continue;
@@ -1318,7 +1339,7 @@ class ArbitrageBot {
           thresholdBid:
             exitType === "take_profit"
               ? STRATEGY.takeProfitBid
-              : STRATEGY.stopBid,
+              : stopBid,
         };
         trade.status = `pending_${exitType}`;
         this._log(
