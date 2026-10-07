@@ -234,7 +234,7 @@ test("derives an exact aligned five-minute window from Predict's canonical slug"
   );
 });
 
-test("lagging-venue entry requires a $0.90 leader bid and a $0.40–<$0.70 lagging ask", () => {
+test("lagging-venue entry requires a $0.90 leader bid and a $0.40–<$0.80 lagging ask", () => {
   const referenceBook = strategyBook({ ask: 0.92, bid: 0.9 });
   const entryBook = {
     ...strategyBook({ ask: 0.4, bid: 0.39 }),
@@ -263,7 +263,7 @@ test("lagging-venue entry requires a $0.90 leader bid and a $0.40–<$0.70 laggi
   assert.equal(result.entryCash, 216.75);
 });
 
-test("rejects lagging asks below $0.40, at $0.70, or with leader bid below $0.90", () => {
+test("rejects lagging asks below $0.40, at $0.80, or with leader bid below $0.90", () => {
   const evaluate = (entryAsk, referenceBid) =>
     engine.evaluateLaggingVenueEntry({
       nowMs: 100_000,
@@ -276,7 +276,9 @@ test("rejects lagging asks below $0.40, at $0.70, or with leader bid below $0.90
       availableCashUsd: 10_000,
     });
   assert.equal(evaluate(0.39, 0.95).eligible, false);
-  assert.equal(evaluate(0.7, 0.95).eligible, false);
+  assert.equal(evaluate(0.8, 0.95).eligible, false);
+  assert.equal(evaluate(0.7, 0.95).eligible, true);
+  assert.equal(evaluate(0.79, 0.95).eligible, true);
   assert.equal(evaluate(0.5, 0.899).eligible, false);
   assert.equal(evaluate(0.5, 0.95).eligible, true);
 });

@@ -7,7 +7,7 @@ This is a **paper-only** BTC 5-minute cross-venue scanner for Polymarket and Pre
 For each outcome (UP and DOWN), compare the same outcome on both venues:
 
 - A venue confirms the signal when its executable best bid is **$0.90 or higher**.
-- The other venue is the lagging entry venue when its best ask is **at least $0.40 and below $0.70**. The bot buys only that same-side outcome on the lagging venue.
+- The other venue is the lagging entry venue when its best ask is **at least $0.40 and below $0.80**. The bot buys only that same-side outcome on the lagging venue.
 - Each entry is **500 shares**, sized from visible ask depth. If the full quantity is not executable within the entry band, no position is simulated.
 - New entries are not allowed at or after **270 seconds** into the five-minute window. A pending entry is canceled if modeled arrival would be at or after that cutoff.
 - The hard stop triggers when the holding venue's best bid is **$0.30 or lower**. After modeled latency, the simulated exit consumes visible bid depth and deducts the venue's taker fees.

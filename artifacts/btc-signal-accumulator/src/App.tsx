@@ -410,7 +410,7 @@ function App() {
           <h1>BTC Cross-Venue Lag Signal</h1>
           <p>
             If one venue’s same-side best bid reaches $0.90 while the other venue’s ask is
-            $0.40–&lt;$0.70, the paper model buys 500 shares on the lagging venue. No orders or
+            $0.40–&lt;$0.80, the paper model buys 500 shares on the lagging venue. No orders or
             wallet are used.
           </p>
         </div>
@@ -435,7 +435,7 @@ function App() {
           <strong>Single-side paper strategy · no live trading.</strong>
           <span>
             Entry uses the leader’s best bid ≥ $0.90 and the other venue’s same-outcome best ask
-            from $0.40 to below $0.70. It buys 500 shares only when visible depth covers the full
+            from $0.40 to below $0.80. It buys 500 shares only when visible depth covers the full
             size, rechecks after modeled latency, stops at a best bid ≤ $0.30, and takes profit at
             a best bid ≥ $0.99 credited as $1.00/share. One re-entry per side; no entries at or
             after 270 seconds.

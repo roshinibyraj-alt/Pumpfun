@@ -42,7 +42,7 @@ const DEFAULT_STARTING_PAPER_CAPITAL_USD = 10_000;
 const STRATEGY = Object.freeze({
   referenceBidThreshold: 0.9,
   minimumEntryAsk: 0.4,
-  maximumEntryAsk: 0.7,
+  maximumEntryAsk: 0.8,
   shares: 500,
   stopBid: 0.3,
   takeProfitBid: 0.99,
