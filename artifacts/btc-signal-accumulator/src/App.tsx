@@ -72,6 +72,10 @@ type Opportunity = {
   entryCash?: number;
   entryAsk?: number;
   referenceBid?: number;
+  referenceBidThreshold?: number;
+  minimumEntryAsk?: number;
+  maximumEntryAsk?: number;
+  elapsedSeconds?: number;
   entryAveragePrice?: number;
   entryCount?: number;
   reentriesRemaining?: number;
@@ -227,6 +231,92 @@ function statusLabel(status?: string) {
   return status.replaceAll("_", " ");
 }
 
+function opportunityView(
+  item: Opportunity,
+  strategy?: NonNullable<BotState["config"]>["strategy"],
+) {
+  const referenceThreshold = Number(
+    item.referenceBidThreshold ?? strategy?.referenceBidThreshold ?? 0.8,
+  );
+  const minimumAsk = Number(item.minimumEntryAsk ?? strategy?.minimumEntryAsk ?? 0.6);
+  const maximumAsk = Number(item.maximumEntryAsk ?? strategy?.maximumEntryAsk ?? 0.7);
+  const hasBid = item.referenceBid != null && Number.isFinite(Number(item.referenceBid));
+  const hasAsk = item.entryAsk != null && Number.isFinite(Number(item.entryAsk));
+  const leaderPass = hasBid && Number(item.referenceBid) + 1e-9 >= referenceThreshold;
+  const askPass =
+    hasAsk &&
+    Number(item.entryAsk) + 1e-9 >= minimumAsk &&
+    Number(item.entryAsk) < maximumAsk - 1e-9;
+
+  let label = "Waiting";
+  let tone = "quiet";
+  let reason = item.reason;
+  if (item.pendingExecution) {
+    label = "Latency recheck";
+    tone = "warn";
+    reason = "Price and depth qualified; both books are being checked again after modeled latency.";
+  } else if (item.eligible) {
+    label = `Ready · entry ${Number(item.entryCount || 0) + 1}/2`;
+    tone = "good";
+    reason = "All entry gates pass; the paper entry is ready to queue.";
+  } else if (item.openPosition) {
+    label = "Position open";
+    tone = "warn";
+    reason = "A position on this outcome is already open; the strategy will not add another until it exits.";
+  } else if (item.entryCount && Number(item.reentriesRemaining || 0) === 0) {
+    label = "Re-entry used";
+    tone = "quiet";
+    reason = "The one re-entry allowed for this side and window has already been used.";
+  } else if (item.status === "below_threshold") {
+    label = "Waiting on price";
+    tone = "quiet";
+    const unmet = [];
+    if (!leaderPass) {
+      unmet.push(
+        hasBid
+          ? `Leader bid ${dollars(item.referenceBid)} is below ${dollars(referenceThreshold)}.`
+          : "Leader best bid is unavailable.",
+      );
+    }
+    if (!askPass) {
+      unmet.push(
+        !hasAsk
+          ? "Entry best ask is unavailable."
+          : Number(item.entryAsk) < minimumAsk
+            ? `Entry ask ${dollars(item.entryAsk)} is below ${dollars(minimumAsk)}.`
+            : `Entry ask ${dollars(item.entryAsk)} must be below the ${dollars(maximumAsk)} cap.`,
+      );
+    }
+    reason = unmet.join(" ");
+  } else if (item.status === "insufficient_depth") {
+    label = "Depth short";
+    tone = "warn";
+    reason = `Fewer than ${shares(strategy?.shares ?? 500)} shares are available below ${dollars(maximumAsk)}.`;
+  } else if (item.status === "insufficient_capital") {
+    label = "Capital short";
+    tone = "warn";
+  } else if (item.status === "cutoff") {
+    label = "Entry cutoff";
+    tone = "quiet";
+  } else if (item.status === "blocked") {
+    label = "Feed / match blocked";
+    tone = "bad";
+  }
+
+  return {
+    label,
+    tone,
+    reason,
+    referenceThreshold,
+    minimumAsk,
+    maximumAsk,
+    leaderPass,
+    askPass,
+    hasBid,
+    hasAsk,
+  };
+}
+
 function QuoteTile({ label, quote }: { label: string; quote?: Quote }) {
   const quoteStatus = quote?.status || "missing";
   const tone =
@@ -287,23 +377,27 @@ function VenueCard({ venue }: { venue: Venue }) {
             {matchOk ? "Window matched" : "Not matched"}
           </span>
         </div>
-        <div className="meta-row subtle">
-          <span>Outcomes: {market.outcomes?.join(" / ") || "not available"}</span>
-          <span>Condition: {market.conditionId || market.id || "—"}</span>
-        </div>
-        {market.matchReason && <p className="match-reason">{market.matchReason}</p>}
+        {!matchOk && market.matchReason && <p className="match-reason">{market.matchReason}</p>}
         {!matchOk && (venue.up?.status === "ok" || venue.down?.status === "ok") && (
           <p className="match-reason">
             These are live quotes for the named market only. No signal can fire until both exact
             five-minute windows are matched.
           </p>
         )}
-        {market.resolutionSource && (
-          <p className="match-reason">Venue resolution source: {market.resolutionSource}</p>
-        )}
-        {market.externalSettlement && (
-          <p className="match-reason">Venue oracle metadata: {market.externalSettlement}</p>
-        )}
+        <details className="market-details">
+          <summary>Market &amp; settlement details</summary>
+          <div className="meta-row subtle">
+            <span>Outcomes: {market.outcomes?.join(" / ") || "not available"}</span>
+            <span>Condition: {market.conditionId || market.id || "—"}</span>
+          </div>
+          {market.matchReason && matchOk && <p className="match-reason">{market.matchReason}</p>}
+          {market.resolutionSource && (
+            <p className="match-reason">Venue resolution source: {market.resolutionSource}</p>
+          )}
+          {market.externalSettlement && (
+            <p className="match-reason">Venue oracle metadata: {market.externalSettlement}</p>
+          )}
+        </details>
       </div>
       <div className="quote-grid">
         <QuoteTile label="UP" quote={venue.up} />
@@ -378,6 +472,7 @@ function App() {
   const trades = state?.paperTrades || [];
   const opportunities = state?.opportunities || [];
   const readyCount = opportunities.filter((item) => item.eligible).length;
+  const priceQualifiedCount = opportunities.filter((item) => item.triggerMet).length;
   const pnl = stats?.realizedPnl ?? 0;
 
   return (
@@ -410,9 +505,7 @@ function App() {
           <div className="eyebrow">CROSS-VENUE PAPER SCANNER</div>
           <h1>BTC Cross-Venue Lag Signal</h1>
           <p>
-            If one venue’s same-side best bid reaches $0.80 while the other venue’s ask is
-            $0.60–&lt;$0.70, the paper model buys 500 shares on the lagging venue. No orders or
-            wallet are used.
+            Paper-only execution across the same outcome in both matched five-minute markets.
           </p>
         </div>
         <div className="window-clock">
@@ -429,21 +522,6 @@ function App() {
       {(loadError || state?.lastError) && (
         <div className="alert alert-error">{loadError || state?.lastError}</div>
       )}
-
-      <section className="notice-strip">
-        <div className="notice-icon">i</div>
-        <div>
-          <strong>Single-side paper strategy · no live trading.</strong>
-          <span>
-            Entry uses the leader’s best bid ≥ $0.80 and the other venue’s same-outcome best ask
-            from $0.60 to below $0.70. It buys 500 shares only when visible depth covers the full
-            size, rechecks after modeled latency, stops when the best bid is at or below $0.45,
-            and takes profit at
-            a best bid ≥ $0.99 credited as $1.00/share. One re-entry per side; no entries at or
-            after 270 seconds.
-          </span>
-        </div>
-      </section>
 
       <section className="stat-grid">
         <article className="stat-card stat-capital">
@@ -525,111 +603,75 @@ function App() {
 
       <section className="section-heading">
         <div>
-          <div className="eyebrow">PAPER ENTRY SIGNALS</div>
-          <h2>UP and DOWN lagging-venue checks</h2>
+          <div className="eyebrow">ENTRY GATES</div>
+          <h2>Why an entry is ready or blocked</h2>
         </div>
-        <span className="subtle">500 shares · depth-aware entry fees · no live orders</span>
+        <span className="subtle">{readyCount} ready · {priceQualifiedCount} price-qualified</span>
       </section>
-      <section className="panel table-panel">
-        <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Entry setup</th>
-                <th>Lagging venue</th>
-                <th>Entry size</th>
-                <th>Estimated cash</th>
-                <th>Signal state</th>
-              </tr>
-            </thead>
-            <tbody>
-              {opportunities.map((item) => {
-                const wasFired = item.alreadyFiredThisWindow;
-                const pending = item.pendingExecution;
-                const good = item.triggerMet === true;
-                const signalTone = item.eligible
-                  ? "good"
-                  : pending || wasFired || good || item.status === "blocked"
-                    ? "warn"
-                    : "quiet";
-                const legSummary = item.legs
-                  ?.map(
-                    (leg) =>
-                      `entry avg ${dollars(leg.averagePrice, 4)}, fee ${dollars(leg.fees, 4)}, depth slip +${dollars(leg.depthSlippagePerShare, 4)}/sh`,
-                  )
-                  .join(" · ");
-                return (
-                  <tr key={item.direction}>
-                    <td>
-                      <strong>{item.direction}</strong>
-                      <small className="table-note">
-                        {legSummary ? `${legSummary} · ` : ""}{item.reason}
-                      </small>
-                    </td>
-                    <td>
-                      <strong>{item.entryVenue || "—"}</strong>
-                      <small className="table-note">
-                        {item.side || "—"} · lead: {item.referenceVenue || "—"}
-                      </small>
-                    </td>
-                    <td>{item.shares ? `${shares(item.shares)} shares` : "500 shares"}</td>
-                    <td>{item.entryCash != null ? dollars(item.entryCash) : "—"}</td>
-                    <td>
-                      <span className={`status-pill ${signalTone}`}>
-                        {pending
-                          ? "Latency recheck"
-                          : item.eligible
-                            ? `Ready · entry ${Number(item.entryCount || 0) + 1}/2`
-                            : wasFired && Number(item.reentriesRemaining || 0) === 0
-                              ? "Entry limit used"
-                              : good && item.openPosition
-                                ? "Position open"
-                                : good && !item.reentriesRemaining
-                                  ? "Re-entry used"
-                                  : statusLabel(item.status)}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-              {!opportunities.length && (
-                <tr><td colSpan={5} className="empty-cell">Waiting for market data…</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+      <section className="signal-board">
+        {opportunities.map((item) => {
+          const view = opportunityView(item, config?.strategy);
+          const priceTone = (hasPrice: boolean, passes: boolean) =>
+            hasPrice ? (passes ? "pass" : "fail") : "unknown";
+          return (
+            <article className="panel signal-card" key={item.direction}>
+              <div className="signal-card-head">
+                <div className="signal-route">
+                  <span className={`outcome-mark ${item.side?.toLowerCase() || ""}`}>
+                    {item.side || "—"}
+                  </span>
+                  <div>
+                    <strong>{item.entryVenue || "—"}</strong>
+                    <small>Entry venue · {item.referenceVenue || "—"} leads</small>
+                  </div>
+                </div>
+                <span className={`status-pill ${view.tone}`}>{view.label}</span>
+              </div>
+              <div className="signal-gates">
+                <div className={`signal-gate ${priceTone(view.hasBid, view.leaderPass)}`}>
+                  <span>Leader best bid</span>
+                  <strong>
+                    {dollars(item.referenceBid)}
+                    <small> / ≥ {dollars(view.referenceThreshold)}</small>
+                  </strong>
+                  <em>{view.hasBid ? (view.leaderPass ? "PASS" : "BELOW") : "NO DATA"}</em>
+                </div>
+                <div className={`signal-gate ${priceTone(view.hasAsk, view.askPass)}`}>
+                  <span>Lagging best ask</span>
+                  <strong>
+                    {dollars(item.entryAsk)}
+                    <small> / {dollars(view.minimumAsk)}–&lt;{dollars(view.maximumAsk)}</small>
+                  </strong>
+                  <em>{view.hasAsk ? (view.askPass ? "PASS" : "OUTSIDE BAND") : "NO DATA"}</em>
+                </div>
+                <div className="signal-gate signal-size">
+                  <span>500-share entry</span>
+                  <strong>{item.entryCash != null ? dollars(item.entryCash) : "—"}</strong>
+                  <em>
+                    {item.entryCash != null
+                      ? "ESTIMATED CASH"
+                      : item.status === "insufficient_depth"
+                        ? "DEPTH SHORT"
+                        : "DEPTH CHECK AFTER PRICE"}
+                  </em>
+                </div>
+              </div>
+              <p className={`signal-reason ${view.tone}`}>
+                <strong>Why:</strong> {view.reason}
+              </p>
+            </article>
+          );
+        })}
+        {!opportunities.length && (
+          <div className="panel empty-state">Waiting for both venue books…</div>
+        )}
       </section>
 
-      <section className="lower-grid">
-        <article className="panel benchmark-panel">
+      <section className="panel trades-panel">
           <div className="panel-heading">
             <div>
-              <div className="eyebrow">DIAGNOSTIC ONLY</div>
-              <h2>Coinbase reference feed</h2>
-            </div>
-            <span className="status-pill quiet">
-              {statusLabel(benchmark?.status)}
-            </span>
-          </div>
-          <div className="benchmark-source">{benchmark?.source || "Coinbase Exchange BTC-USD"}</div>
-          <div className="benchmark-grid">
-            <div><span>Window open</span><strong>{dollars(benchmark?.openPrice, 2)}</strong></div>
-            <div><span>Current spot</span><strong>{dollars(benchmark?.currentPrice, 2)}</strong></div>
-            <div><span>Provisional</span><strong className={benchmark?.currentOutcome === "UP" ? "positive" : benchmark?.currentOutcome === "DOWN" ? "negative" : ""}>{benchmark?.currentOutcome || "—"}</strong></div>
-            <div><span>Final close</span><strong>{dollars(benchmark?.finalClosePrice, 2)}</strong></div>
-          </div>
-          <p className="warning-text">
-            {benchmark?.warning || "Internal benchmark only—not either venue’s official resolution or actual token payout."}
-          </p>
-          {benchmark?.error && <p className="inline-error">{benchmark.error}</p>}
-          <p className="settlement-rule">{benchmark?.settlementRule}</p>
-        </article>
-
-        <article className="panel trades-panel">
-          <div className="panel-heading">
-            <div>
-              <div className="eyebrow">SIMULATED POSITIONS</div>
-              <h2>Recent paper positions</h2>
+              <div className="eyebrow">PAPER POSITIONS</div>
+              <h2>Recent entries and exits</h2>
             </div>
             <span className="subtle">{stats?.positionCount ?? stats?.pairCount ?? 0} total · {dollars(stats?.capitalCommitted || 0)} open</span>
           </div>
@@ -683,17 +725,48 @@ function App() {
             })}
             {!trades.length && <div className="empty-state">No paper positions have fired yet.</div>}
           </div>
-        </article>
       </section>
 
-      <section className="bottom-warning">
-        <strong>Settlement warning:</strong> Positions still open at window end wait for the exact
-        venue holding those shares to publish its own resolved outcome. TP and stop exits are
-        simulated from delayed venue snapshots; TP credits exactly $1/share as specified, while
-        stop fills use visible bid depth and venue fees. The Coinbase reference is diagnostic only
-        and never triggers or settles a position. This paper model cannot represent queue priority,
-        hidden liquidity, exchange acknowledgements, or actual partial-fill risk.
-      </section>
+      <details className="diagnostic-disclosure">
+        <summary>Settlement and diagnostic feed details</summary>
+        <div className="lower-grid">
+          <article className="panel benchmark-panel">
+            <div className="panel-heading">
+              <div>
+                <div className="eyebrow">DIAGNOSTIC ONLY</div>
+                <h2>Coinbase reference feed</h2>
+              </div>
+              <span className="status-pill quiet">{statusLabel(benchmark?.status)}</span>
+            </div>
+            <div className="benchmark-source">{benchmark?.source || "Coinbase Exchange BTC-USD"}</div>
+            <div className="benchmark-grid">
+              <div><span>Window open</span><strong>{dollars(benchmark?.openPrice, 2)}</strong></div>
+              <div><span>Current spot</span><strong>{dollars(benchmark?.currentPrice, 2)}</strong></div>
+              <div><span>Provisional</span><strong className={benchmark?.currentOutcome === "UP" ? "positive" : benchmark?.currentOutcome === "DOWN" ? "negative" : ""}>{benchmark?.currentOutcome || "—"}</strong></div>
+              <div><span>Final close</span><strong>{dollars(benchmark?.finalClosePrice, 2)}</strong></div>
+            </div>
+            <p className="warning-text">
+              {benchmark?.warning || "Internal benchmark only—not either venue’s official resolution or actual token payout."}
+            </p>
+            {benchmark?.error && <p className="inline-error">{benchmark.error}</p>}
+            <p className="settlement-rule">{benchmark?.settlementRule}</p>
+          </article>
+          <article className="panel settlement-note">
+            <div className="eyebrow">PAPER MODEL LIMITS</div>
+            <h2>Execution and settlement</h2>
+            <p>
+              Open positions wait for the exact venue holding those shares to publish its own
+              resolved outcome. Take-profit and stop exits use delayed snapshots, visible depth,
+              and venue fees. The Coinbase reference is diagnostic only and never triggers or
+              settles a position.
+            </p>
+            <p>
+              This is a simulation; it cannot represent queue priority, hidden liquidity, actual
+              order acknowledgements, or real partial-fill risk.
+            </p>
+          </article>
+        </div>
+      </details>
 
       <footer className="footer">
         <span>LAG / SIGNAL · DEMO ONLY</span>
