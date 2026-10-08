@@ -36,15 +36,20 @@ const SETTLEMENT_RETRY_MS = 15_000;
 const MAX_SETTLEMENT_WINDOWS_PER_TICK = 1;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SETTLEMENT_MODEL = "independent-venue-v1";
+const STRATEGY_VERSION = "contrarian-lagging-venue-v2";
+const LEGACY_STRATEGY_VERSION = "lagging-venue-v1";
+const ACTIVE_STRATEGY_VERSIONS = new Set([
+  LEGACY_STRATEGY_VERSION,
+  STRATEGY_VERSION,
+]);
 const MAX_LOGS = 150;
 const MAX_TRADES = 250;
 const DEFAULT_STARTING_PAPER_CAPITAL_USD = 10_000;
 const STRATEGY = Object.freeze({
   referenceBidThreshold: 0.8,
-  minimumEntryAsk: 0.6,
-  maximumEntryAsk: 0.7,
+  maxLaggingSignalAsk: 0.7,
   shares: 500,
-  hardStopBid: 0.45,
+  hardStopBid: null,
   takeProfitBid: 0.99,
   takeProfitCreditPerShare: 1,
   maxEntrySeconds: 270,
@@ -377,7 +382,9 @@ class ArbitrageBot {
         paperBaseLatencyMs: this.paperBaseLatencyMs,
         executionModel: "delayed_single_side_entry_and_exit_recheck",
         strategy: {
-          type: "lagging-venue-single-side",
+          type: "contrarian-lagging-venue",
+          entrySide: "opposite_of_signal",
+          entryPriceRule: "any_executable_ask",
           ...STRATEGY,
           entryCutoffSeconds: STRATEGY.maxEntrySeconds,
           maxReentriesPerSidePerWindow: 1,
@@ -783,7 +790,7 @@ class ArbitrageBot {
       ) {
         continue;
       }
-      if (trade.strategyVersion === "lagging-venue-v1") {
+      if (ACTIVE_STRATEGY_VERSIONS.has(trade.strategyVersion)) {
         this._markPaperPosition(trade, evaluationAt);
         continue;
       }
@@ -851,20 +858,22 @@ class ArbitrageBot {
     };
     let remainingCapital = Math.max(0, this._availablePaperCapital());
     const results = [];
-    for (const side of ["UP", "DOWN"]) {
+    for (const signalSide of ["UP", "DOWN"]) {
+      const side = signalSide === "UP" ? "DOWN" : "UP";
       for (const entryVenue of ["Polymarket", "Predict.fun"]) {
         const referenceVenue =
           entryVenue === "Polymarket" ? "Predict.fun" : "Polymarket";
         const entry = venueData[entryVenue];
         const reference = venueData[referenceVenue];
         const entryBook = entry.state[side.toLowerCase()];
-        const referenceBook = reference.state[side.toLowerCase()];
+        const referenceBook = reference.state[signalSide.toLowerCase()];
+        const laggingSignalBook = entry.state[signalSide.toLowerCase()];
         const entryMarketMatched = entry.state.market?.matchStatus === "matched";
         const referenceMarketMatched =
           reference.state.market?.matchStatus === "matched";
         const sideTrades = this.state.paperTrades.filter(
           (trade) =>
-            trade.strategyVersion === "lagging-venue-v1" &&
+            ACTIVE_STRATEGY_VERSIONS.has(trade.strategyVersion) &&
             Number(trade.openMs) === Number(currentWindow.openMs) &&
             String(trade.side).toUpperCase() === side,
         );
@@ -881,12 +890,13 @@ class ArbitrageBot {
           maxEntrySeconds: STRATEGY.maxEntrySeconds,
           shares: STRATEGY.shares,
           referenceBidThreshold: STRATEGY.referenceBidThreshold,
-          minimumEntryAsk: STRATEGY.minimumEntryAsk,
-          maximumEntryAsk: STRATEGY.maximumEntryAsk,
+          maxLaggingSignalAsk: STRATEGY.maxLaggingSignalAsk,
           maxBookAgeMs: this.maxBookAgeMs,
           maxBookSkewMs: MAX_BOOK_SKEW_MS,
           referenceBook,
+          laggingSignalBook,
           entryBook,
+          signalSide,
           referenceMarketMatched,
           entryMarketMatched,
           matchReason:
@@ -896,7 +906,7 @@ class ArbitrageBot {
           feeModel: entry.feeModel,
           availableCashUsd: remainingCapital,
         });
-        const direction = `BUY ${side} on ${entryVenue} · ${referenceVenue} confirms`;
+        const direction = `BUY ${side} (opposite of ${signalSide}) on ${entryVenue} · ${referenceVenue} signals`;
         const signalKey = `${currentWindow.openMs}:${side}`;
         const leg = {
           venue: entryVenue,
@@ -921,8 +931,10 @@ class ArbitrageBot {
           levelsUsed: evaluation.levelsUsed ?? null,
           fills: evaluation.fills ?? [],
         };
-        const referenceRequestLatencyMs = finiteNumber(
-          referenceBook?.requestLatencyMs,
+        const referenceRequestLatencyMs = Math.max(
+          0,
+          finiteNumber(referenceBook?.requestLatencyMs) ?? 0,
+          finiteNumber(laggingSignalBook?.requestLatencyMs) ?? 0,
         );
         const signalExecutable = evaluation.eligible === true;
         const eligible =
@@ -939,12 +951,15 @@ class ArbitrageBot {
           ...evaluation,
           direction,
           side,
+          signalSide,
           signalKey,
           entryVenue,
           referenceVenue,
           referenceRequestLatencyMs,
           referenceQuoteReceivedAt: finiteNumber(referenceBook?.receivedAt),
           referenceQuoteObservedAt: finiteNumber(referenceBook?.observedAt),
+          laggingSignalQuoteReceivedAt: finiteNumber(laggingSignalBook?.receivedAt),
+          laggingSignalQuoteObservedAt: finiteNumber(laggingSignalBook?.observedAt),
           quoteReceivedAt: finiteNumber(entryBook?.receivedAt),
           quoteObservedAt: finiteNumber(entryBook?.observedAt),
           entryCount,
@@ -1007,6 +1022,7 @@ class ArbitrageBot {
         key,
         direction: opportunity.direction,
         side: opportunity.side,
+        signalSide: opportunity.signalSide,
         entryVenue: opportunity.entryVenue,
         referenceVenue: opportunity.referenceVenue,
         windowOpenMs: Number(window.openMs),
@@ -1019,6 +1035,7 @@ class ArbitrageBot {
           entryCutoffAt,
         ),
         signalEntryAsk: opportunity.entryAsk,
+        signalLaggingAsk: opportunity.laggingSignalAsk,
         signalReferenceBid: opportunity.referenceBid,
         signalShares: STRATEGY.shares,
       });
@@ -1028,6 +1045,7 @@ class ArbitrageBot {
         `${opportunity.direction} met the price rules; rechecking both venue books after ${simulatedArrivalAt - nowMs} ms of modeled arrival latency.`,
         {
           side: opportunity.side,
+          signalSide: opportunity.signalSide,
           entryVenue: opportunity.entryVenue,
           referenceVenue: opportunity.referenceVenue,
           simulatedArrivalAt,
@@ -1074,7 +1092,10 @@ class ArbitrageBot {
         finiteNumber(opportunity?.quoteReceivedAt) !== null &&
         finiteNumber(opportunity?.quoteReceivedAt) >= pending.simulatedArrivalAt &&
         finiteNumber(opportunity?.referenceQuoteReceivedAt) !== null &&
-        finiteNumber(opportunity?.referenceQuoteReceivedAt) >= pending.simulatedArrivalAt;
+        finiteNumber(opportunity?.referenceQuoteReceivedAt) >= pending.simulatedArrivalAt &&
+        finiteNumber(opportunity?.laggingSignalQuoteReceivedAt) !== null &&
+        finiteNumber(opportunity?.laggingSignalQuoteReceivedAt) >=
+          pending.simulatedArrivalAt;
       if (!snapshotsReady) {
         if (nowMs <= pending.expiresAt) continue;
         this.pendingPaperEntries.delete(key);
@@ -1097,6 +1118,7 @@ class ArbitrageBot {
             executedAt: nowMs,
             simulatedLatencyMs,
             signalEntryAsk: pending.signalEntryAsk,
+            signalLaggingAsk: pending.signalLaggingAsk,
             signalReferenceBid: pending.signalReferenceBid,
           },
         );
@@ -1136,6 +1158,8 @@ class ArbitrageBot {
           signalReferenceBid: pending.signalReferenceBid,
           arrivalReferenceBid: opportunity?.referenceBid ?? null,
           signalEntryAsk: pending.signalEntryAsk,
+          signalLaggingAsk: pending.signalLaggingAsk,
+          arrivalLaggingSignalAsk: opportunity?.laggingSignalAsk ?? null,
           arrivalEntryAsk: opportunity?.entryAsk ?? null,
         },
       );
@@ -1165,7 +1189,7 @@ class ArbitrageBot {
     const leg = opportunity.legs[0];
     const priorEntries = this.state.paperTrades.filter(
       (trade) =>
-        trade.strategyVersion === "lagging-venue-v1" &&
+        ACTIVE_STRATEGY_VERSIONS.has(trade.strategyVersion) &&
         Number(trade.openMs) === Number(window.openMs) &&
         String(trade.side).toUpperCase() === opportunity.side,
     ).length;
@@ -1194,7 +1218,7 @@ class ArbitrageBot {
     };
     return {
       id: `paper-${window.openMs}-${opportunity.side.toLowerCase()}-${priorEntries + 1}`,
-      strategyVersion: "lagging-venue-v1",
+      strategyVersion: STRATEGY_VERSION,
       entryNumber: priorEntries + 1,
       openedAt: execution.executedAt ?? Date.now(),
       signalDetectedAt: execution.detectedAt ?? null,
@@ -1204,6 +1228,7 @@ class ArbitrageBot {
       closeMs: window.closeMs,
       direction: opportunity.direction,
       side: opportunity.side,
+      signalSide: opportunity.signalSide,
       venue: opportunity.entryVenue,
       referenceVenue: opportunity.referenceVenue,
       shares: STRATEGY.shares,
@@ -1213,6 +1238,8 @@ class ArbitrageBot {
       fees: leg.fees,
       triggerReferenceBid: execution.signalReferenceBid ?? opportunity.referenceBid,
       triggerEntryAsk: execution.signalEntryAsk ?? opportunity.entryAsk,
+      triggerLaggingSignalAsk:
+        execution.signalLaggingAsk ?? opportunity.laggingSignalAsk,
       referenceBidAtFill: opportunity.referenceBid,
       entryAskAtFill: opportunity.entryAsk,
       stopBid: STRATEGY.hardStopBid,
@@ -1275,12 +1302,23 @@ class ArbitrageBot {
     for (const trade of this.state.paperTrades) {
       if (
         trade.finalized ||
-        trade.strategyVersion !== "lagging-venue-v1" ||
+        !ACTIVE_STRATEGY_VERSIONS.has(trade.strategyVersion) ||
         Number(trade.openMs) !== Number(window.openMs) ||
         nowMs >= Number(trade.closeMs)
       ) {
         continue;
       }
+      if (trade.pendingExit?.type === "stop_loss") {
+        delete trade.pendingExit;
+        trade.status = "open_position";
+        this._log(
+          "PAPER_STOP_DISABLED",
+          "The hard stop is disabled; the open paper position remains active until take-profit or official window settlement.",
+          { tradeId: trade.id, side: trade.side, venue: trade.venue },
+        );
+      }
+      trade.stopBid = null;
+      trade.hardStopBid = null;
       this._markPaperPosition(trade, nowMs);
       const venueKey = String(trade.venue).toLowerCase().includes("predict")
         ? "predict"

@@ -59,6 +59,7 @@ type Venue = {
 type Opportunity = {
   direction: string;
   side?: "UP" | "DOWN";
+  signalSide?: "UP" | "DOWN";
   entryVenue?: string;
   referenceVenue?: string;
   status: string;
@@ -73,8 +74,8 @@ type Opportunity = {
   entryAsk?: number;
   referenceBid?: number;
   referenceBidThreshold?: number;
-  minimumEntryAsk?: number;
-  maximumEntryAsk?: number;
+  laggingSignalAsk?: number;
+  maxLaggingSignalAsk?: number;
   elapsedSeconds?: number;
   entryAveragePrice?: number;
   entryCount?: number;
@@ -143,10 +144,11 @@ type BotState = {
     executionModel?: string;
     strategy?: {
       referenceBidThreshold: number;
-      minimumEntryAsk: number;
-      maximumEntryAsk: number;
+      maxLaggingSignalAsk: number;
+      entrySide?: string;
+      entryPriceRule?: string;
       shares: number;
-      hardStopBid: number;
+      hardStopBid: number | null;
       takeProfitBid: number;
       takeProfitCreditPerShare: number;
       maxEntrySeconds: number;
@@ -238,15 +240,16 @@ function opportunityView(
   const referenceThreshold = Number(
     item.referenceBidThreshold ?? strategy?.referenceBidThreshold ?? 0.8,
   );
-  const minimumAsk = Number(item.minimumEntryAsk ?? strategy?.minimumEntryAsk ?? 0.6);
-  const maximumAsk = Number(item.maximumEntryAsk ?? strategy?.maximumEntryAsk ?? 0.7);
+  const laggingAskThreshold = Number(
+    item.maxLaggingSignalAsk ?? strategy?.maxLaggingSignalAsk ?? 0.7,
+  );
   const hasBid = item.referenceBid != null && Number.isFinite(Number(item.referenceBid));
+  const hasLaggingAsk =
+    item.laggingSignalAsk != null && Number.isFinite(Number(item.laggingSignalAsk));
   const hasAsk = item.entryAsk != null && Number.isFinite(Number(item.entryAsk));
   const leaderPass = hasBid && Number(item.referenceBid) + 1e-9 >= referenceThreshold;
-  const askPass =
-    hasAsk &&
-    Number(item.entryAsk) + 1e-9 >= minimumAsk &&
-    Number(item.entryAsk) < maximumAsk - 1e-9;
+  const laggingPass =
+    hasLaggingAsk && Number(item.laggingSignalAsk) <= laggingAskThreshold + 1e-9;
 
   let label = "Waiting";
   let tone = "quiet";
@@ -278,20 +281,19 @@ function opportunityView(
           : "Leader best bid is unavailable.",
       );
     }
-    if (!askPass) {
+    if (!laggingPass) {
       unmet.push(
-        !hasAsk
-          ? "Entry best ask is unavailable."
-          : Number(item.entryAsk) < minimumAsk
-            ? `Entry ask ${dollars(item.entryAsk)} is below ${dollars(minimumAsk)}.`
-            : `Entry ask ${dollars(item.entryAsk)} must be below the ${dollars(maximumAsk)} cap.`,
+        hasLaggingAsk
+          ? `Lagging venue's ${item.signalSide || ""} ask ${dollars(item.laggingSignalAsk)} is above ${dollars(laggingAskThreshold)}.`
+          : "Lagging venue's signal-side ask is unavailable.",
       );
     }
+    if (!hasAsk) unmet.push("The opposite-outcome entry ask is unavailable.");
     reason = unmet.join(" ");
   } else if (item.status === "insufficient_depth") {
     label = "Depth short";
     tone = "warn";
-    reason = `Fewer than ${shares(strategy?.shares ?? 500)} shares are available below ${dollars(maximumAsk)}.`;
+    reason = `Fewer than ${shares(strategy?.shares ?? 500)} shares are available at any executable ask.`;
   } else if (item.status === "insufficient_capital") {
     label = "Capital short";
     tone = "warn";
@@ -308,11 +310,11 @@ function opportunityView(
     tone,
     reason,
     referenceThreshold,
-    minimumAsk,
-    maximumAsk,
+    laggingAskThreshold,
     leaderPass,
-    askPass,
+    laggingPass,
     hasBid,
+    hasLaggingAsk,
     hasAsk,
   };
 }
@@ -505,7 +507,7 @@ function App() {
           <div className="eyebrow">CROSS-VENUE PAPER SCANNER</div>
           <h1>BTC Cross-Venue Lag Signal</h1>
           <p>
-            Paper-only execution across the same outcome in both matched five-minute markets.
+            Paper-only: when one venue signals UP or DOWN, buy the opposite outcome on the other matched venue.
           </p>
         </div>
         <div className="window-clock">
@@ -537,10 +539,10 @@ function App() {
         <article className="stat-card stat-edge">
           <span className="stat-label">Entry conditions</span>
           <strong className="stat-value accent">
-            ≥{dollars(config?.strategy?.referenceBidThreshold, 2)} <small>leader bid</small>
+            ≥{dollars(config?.strategy?.referenceBidThreshold, 2)} <small>signal bid</small>
           </strong>
           <span className="stat-foot">
-            Buy ask {dollars(config?.strategy?.minimumEntryAsk, 2)}–&lt;{dollars(config?.strategy?.maximumEntryAsk, 2)}
+            Same-side lagging ask ≤ {dollars(config?.strategy?.maxLaggingSignalAsk, 2)} · buy opposite
           </span>
         </article>
         <article className="stat-card stat-leg">
@@ -551,9 +553,9 @@ function App() {
           </span>
         </article>
         <article className="stat-card stat-ready">
-          <span className="stat-label">Stop / entry cutoff</span>
+          <span className="stat-label">Stop-loss / entry cutoff</span>
           <strong className="stat-value">
-            ≤{dollars(config?.strategy?.hardStopBid, 2)} best bid / {config?.strategy?.maxEntrySeconds ?? 270}s
+            None / {config?.strategy?.maxEntrySeconds ?? 270}s
           </strong>
           <span className="stat-foot">
             {readyCount} ready · {opportunities.filter((item) => item.pendingExecution).length} pending · one re-entry/side
@@ -622,37 +624,39 @@ function App() {
                   </span>
                   <div>
                     <strong>{item.entryVenue || "—"}</strong>
-                    <small>Entry venue · {item.referenceVenue || "—"} leads</small>
+                    <small>
+                      Buy {item.side || "—"} · {item.referenceVenue || "—"} signals {item.signalSide || "—"}
+                    </small>
                   </div>
                 </div>
                 <span className={`status-pill ${view.tone}`}>{view.label}</span>
               </div>
               <div className="signal-gates">
                 <div className={`signal-gate ${priceTone(view.hasBid, view.leaderPass)}`}>
-                  <span>Leader best bid</span>
+                  <span>{item.signalSide || "Signal"} leader best bid</span>
                   <strong>
                     {dollars(item.referenceBid)}
                     <small> / ≥ {dollars(view.referenceThreshold)}</small>
                   </strong>
                   <em>{view.hasBid ? (view.leaderPass ? "PASS" : "BELOW") : "NO DATA"}</em>
                 </div>
-                <div className={`signal-gate ${priceTone(view.hasAsk, view.askPass)}`}>
-                  <span>Lagging best ask</span>
+                <div className={`signal-gate ${priceTone(view.hasLaggingAsk, view.laggingPass)}`}>
+                  <span>Lagging {item.signalSide || "signal-side"} ask</span>
                   <strong>
-                    {dollars(item.entryAsk)}
-                    <small> / {dollars(view.minimumAsk)}–&lt;{dollars(view.maximumAsk)}</small>
+                    {dollars(item.laggingSignalAsk)}
+                    <small> / ≤ {dollars(view.laggingAskThreshold)}</small>
                   </strong>
-                  <em>{view.hasAsk ? (view.askPass ? "PASS" : "OUTSIDE BAND") : "NO DATA"}</em>
+                  <em>{view.hasLaggingAsk ? (view.laggingPass ? "PASS" : "ABOVE") : "NO DATA"}</em>
                 </div>
                 <div className="signal-gate signal-size">
-                  <span>500-share entry</span>
-                  <strong>{item.entryCash != null ? dollars(item.entryCash) : "—"}</strong>
+                  <span>Opposite {item.side || "outcome"} best ask</span>
+                  <strong>{dollars(item.entryAsk)}</strong>
                   <em>
-                    {item.entryCash != null
-                      ? "ESTIMATED CASH"
+                    {view.hasAsk
+                      ? "ANY EXECUTABLE PRICE"
                       : item.status === "insufficient_depth"
                         ? "DEPTH SHORT"
-                        : "DEPTH CHECK AFTER PRICE"}
+                        : "NO DATA"}
                   </em>
                 </div>
               </div>
@@ -756,8 +760,8 @@ function App() {
             <h2>Execution and settlement</h2>
             <p>
               Open positions wait for the exact venue holding those shares to publish its own
-              resolved outcome. Take-profit and stop exits use delayed snapshots, visible depth,
-              and venue fees. The Coinbase reference is diagnostic only and never triggers or
+              resolved outcome unless the $0.99 take-profit fires first after its modeled delay.
+              There is no hard stop-loss. The Coinbase reference is diagnostic only and never triggers or
               settles a position.
             </p>
             <p>

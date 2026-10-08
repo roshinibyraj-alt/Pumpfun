@@ -170,12 +170,12 @@ function evaluateLaggingVenueEntry(options = {}) {
   const nowMs = Number(options.nowMs ?? Date.now());
   const shares = Number(options.shares ?? 500);
   const referenceBidThreshold = Number(options.referenceBidThreshold ?? 0.8);
-  const minimumEntryAsk = Number(options.minimumEntryAsk ?? 0.6);
-  const maximumEntryAsk = Number(options.maximumEntryAsk ?? 0.7);
+  const maxLaggingSignalAsk = Number(options.maxLaggingSignalAsk ?? 0.7);
   const maxEntrySeconds = Number(options.maxEntrySeconds ?? 270);
   const maxBookAgeMs = Number(options.maxBookAgeMs ?? DEFAULT_MAX_BOOK_AGE_MS);
   const maxBookSkewMs = finiteNumber(options.maxBookSkewMs);
   const referenceBook = options.referenceBook;
+  const laggingSignalBook = options.laggingSignalBook;
   const entryBook = options.entryBook;
   const blocked = (reason, extra = {}) => ({
     status: "blocked",
@@ -202,8 +202,17 @@ function evaluateLaggingVenueEntry(options = {}) {
   if (!entryFresh.ok) {
     return blocked(`Entry venue book: ${entryFresh.reason}`);
   }
+  const laggingSignalFresh = checkBookFresh(
+    laggingSignalBook,
+    nowMs,
+    maxBookAgeMs,
+  );
+  if (!laggingSignalFresh.ok) {
+    return blocked(`Lagging signal-side book: ${laggingSignalFresh.reason}`);
+  }
   const snapshotTimes = [
     finiteNumber(referenceBook?.receivedAt ?? referenceBook?.observedAt),
+    finiteNumber(laggingSignalBook?.receivedAt ?? laggingSignalBook?.observedAt),
     finiteNumber(entryBook?.receivedAt ?? entryBook?.observedAt),
   ];
   if (snapshotTimes.some((value) => value === null)) {
@@ -218,29 +227,42 @@ function evaluateLaggingVenueEntry(options = {}) {
   }
 
   const referenceBid = normalizeLevels(referenceBook?.bids, "bids")[0]?.price ?? null;
+  const laggingSignalAsk =
+    normalizeLevels(laggingSignalBook?.asks, "asks")[0]?.price ?? null;
   const entryAsk = normalizeLevels(entryBook?.asks, "asks")[0]?.price ?? null;
   if (referenceBid === null) return blocked("Reference venue has no executable best bid.");
+  if (laggingSignalAsk === null) {
+    return blocked("Lagging venue has no executable ask for the signal-side outcome.");
+  }
   if (entryAsk === null) return blocked("Entry venue has no executable best ask.");
   const signalObserved = true;
   const triggerMet =
     referenceBid + 1e-9 >= referenceBidThreshold &&
-    entryAsk + 1e-9 >= minimumEntryAsk &&
-    entryAsk < maximumEntryAsk - 1e-9;
+    laggingSignalAsk <= maxLaggingSignalAsk + 1e-9;
   const observed = {
     referenceBid,
+    laggingSignalAsk,
     entryAsk,
     snapshotSkewMs,
     signalObserved,
     triggerMet,
     referenceBidThreshold,
-    minimumEntryAsk,
-    maximumEntryAsk,
+    maxLaggingSignalAsk,
   };
   if (!triggerMet) {
+    const unmetRules = [];
+    if (referenceBid + 1e-9 < referenceBidThreshold) {
+      unmetRules.push(`reference best bid ≥ $${referenceBidThreshold.toFixed(2)}`);
+    }
+    if (laggingSignalAsk > maxLaggingSignalAsk + 1e-9) {
+      unmetRules.push(
+        `lagging signal-side ask ≤ $${maxLaggingSignalAsk.toFixed(2)}`,
+      );
+    }
     return {
       status: "below_threshold",
       eligible: false,
-      reason: `Waiting for reference best bid ≥ $${referenceBidThreshold.toFixed(2)} and entry best ask in [$${minimumEntryAsk.toFixed(2)}, $${maximumEntryAsk.toFixed(2)}).`,
+      reason: `Waiting for ${unmetRules.join(" and ")}.`,
       ...observed,
     };
   }
@@ -265,15 +287,12 @@ function evaluateLaggingVenueEntry(options = {}) {
     };
   }
 
-  const eligibleAsks = normalizeLevels(entryBook?.asks, "asks").filter(
-    (level) => level.price >= minimumEntryAsk && level.price < maximumEntryAsk,
-  );
-  const fill = walkAsks(eligibleAsks, shares, options.feeModel);
+  const fill = walkAsks(entryBook?.asks, shares, options.feeModel);
   if (!fill) {
     return {
       status: "insufficient_depth",
       eligible: false,
-      reason: `Fewer than ${shares} shares are executable below $${maximumEntryAsk.toFixed(2)} on the entry venue.`,
+      reason: `Fewer than ${shares} shares are executable at any ask price for the opposite outcome on the entry venue.`,
       elapsedSeconds,
       ...observed,
     };
@@ -291,11 +310,11 @@ function evaluateLaggingVenueEntry(options = {}) {
     };
   }
 
-  const bestAsk = eligibleAsks[0]?.price ?? null;
+  const bestAsk = normalizeLevels(entryBook?.asks, "asks")[0]?.price ?? null;
   return {
     status: "trigger",
     eligible: true,
-    reason: `Reference best bid reached $${referenceBid.toFixed(2)} while the other venue's same-side best ask is $${entryAsk.toFixed(2)}; paper-buying ${shares} shares on executable depth.`,
+    reason: `${options.signalSide || "Signal-side"} leader bid is $${referenceBid.toFixed(2)} and the other venue's signal-side ask is $${laggingSignalAsk.toFixed(2)}; paper-buying ${shares} shares of the opposite outcome at the executable ask of $${entryAsk.toFixed(2)}.`,
     shares,
     entryCash: fill.cash,
     notional: fill.notional,
