@@ -48,7 +48,7 @@ const MAX_LOGS = 150;
 const MAX_TRADES = 250;
 const DEFAULT_STARTING_PAPER_CAPITAL_USD = 10_000;
 const STRATEGY = Object.freeze({
-  referenceBidThreshold: 0.8,
+  referenceBidThreshold: 0.7,
   minimumEntryAsk: 0.6,
   maximumEntryAsk: 0.7,
   shares: 500,

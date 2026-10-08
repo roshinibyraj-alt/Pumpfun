@@ -239,7 +239,7 @@ function opportunityView(
   strategy?: NonNullable<BotState["config"]>["strategy"],
 ) {
   const referenceThreshold = Number(
-    item.referenceBidThreshold ?? strategy?.referenceBidThreshold ?? 0.8,
+    item.referenceBidThreshold ?? strategy?.referenceBidThreshold ?? 0.7,
   );
   const minimumAsk = Number(item.minimumEntryAsk ?? strategy?.minimumEntryAsk ?? 0.6);
   const maximumAsk = Number(item.maximumEntryAsk ?? strategy?.maximumEntryAsk ?? 0.7);

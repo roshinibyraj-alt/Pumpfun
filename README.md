@@ -6,7 +6,7 @@ This is a **paper-only** BTC 5-minute cross-venue scanner for Polymarket and Pre
 
 For each outcome (UP and DOWN), compare the same outcome on both venues:
 
-- A venue confirms the signal when its executable best bid is **$0.80 or higher**.
+- A venue confirms the signal when its executable best bid is **$0.70 or higher**.
 - The other venue is the lagging entry venue when its same-side best ask is **at least $0.60 and below $0.70**. The bot buys that same signalled outcome on the lagging venue.
 - Each entry is **500 shares**, sized from executable ask depth in that price band. If the full quantity is unavailable or the cost and modeled fees exceed available demo capital, no position is simulated.
 - New entries are not allowed at or after **270 seconds** into the five-minute window. A pending entry is canceled if modeled arrival would be at or after that cutoff.

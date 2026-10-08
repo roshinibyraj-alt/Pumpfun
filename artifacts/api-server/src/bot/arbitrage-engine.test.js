@@ -234,7 +234,7 @@ test("derives an exact aligned five-minute window from Predict's canonical slug"
   );
 });
 
-test("same-side entry requires a $0.80 signal bid and a $0.60–<$0.70 ask", () => {
+test("same-side entry requires a $0.70 signal bid and a $0.60–<$0.70 ask", () => {
   const botConfig = new ArbitrageBot().state.config.strategy;
   assert.equal(botConfig.type, "lagging-venue-single-side");
   assert.equal(botConfig.entrySide, "same_as_signal");
@@ -267,7 +267,7 @@ test("same-side entry requires a $0.80 signal bid and a $0.60–<$0.70 ask", () 
   assert.equal(result.entryCash, 316.25);
 });
 
-test("enforces the $0.60 minimum and exclusive $0.70 maximum entry ask", () => {
+test("enforces the $0.70 signal bid and $0.60–<$0.70 entry ask bounds", () => {
   const evaluate = (entryAsk, referenceBid) =>
     engine.evaluateLaggingVenueEntry({
       nowMs: 100_000,
@@ -281,9 +281,9 @@ test("enforces the $0.60 minimum and exclusive $0.70 maximum entry ask", () => {
     });
   assert.equal(evaluate(0.59, 0.99).eligible, false);
   assert.equal(evaluate(0.7, 0.99).eligible, false);
-  assert.equal(evaluate(0.6, 0.8).eligible, true);
-  assert.equal(evaluate(0.69, 0.8).eligible, true);
-  assert.equal(evaluate(0.6, 0.799).eligible, false);
+  assert.equal(evaluate(0.6, 0.7).eligible, true);
+  assert.equal(evaluate(0.69, 0.7).eligible, true);
+  assert.equal(evaluate(0.6, 0.699).eligible, false);
 });
 
 test("same-side entry requires 500 shares of visible depth and stops opening at 270 seconds", () => {
@@ -504,7 +504,7 @@ test("opens the signalled outcome only after delayed fresh snapshots, then canno
   trade.settlementMethod = "simulated_take_profit";
   trade.realizedPnl = 295;
   const clearedVenues = makeVenues(fillAt + 20);
-  clearedVenues.poly.up.bids[0].price = 0.79;
+  clearedVenues.poly.up.bids[0].price = 0.69;
   const clearedEntry = bot
     ._evaluate(window, clearedVenues.poly, clearedVenues.predict, fillAt + 20)
     .find(
