@@ -118,6 +118,49 @@ function walkAsks(asks, shares, feeModel) {
   };
 }
 
+function walkAsksForBudget(asks, budgetUsd, feeModel) {
+  let remainingBudget = Number(budgetUsd);
+  let shares = 0;
+  let notional = 0;
+  let fees = 0;
+  let worstPrice = null;
+  let levelsUsed = 0;
+  const fills = [];
+  if (!Number.isFinite(remainingBudget) || remainingBudget <= 0) return null;
+  for (const level of normalizeLevels(asks, "asks")) {
+    if (remainingBudget <= 1e-7) break;
+    const feePerShare = feeForModel(feeModel, 1, level.price);
+    const cashPerShare = level.price + feePerShare;
+    let quantity = Math.min(level.size, remainingBudget / cashPerShare);
+    quantity = Math.floor((quantity + 1e-10) * 1_000_000) / 1_000_000;
+    if (quantity <= 0) continue;
+    const levelNotional = quantity * level.price;
+    const levelFees = feeForModel(feeModel, quantity, level.price);
+    const levelCash = levelNotional + levelFees;
+    if (levelCash > remainingBudget + 1e-7) continue;
+    shares += quantity;
+    notional += levelNotional;
+    fees += levelFees;
+    remainingBudget = Math.max(0, remainingBudget - levelCash);
+    worstPrice = level.price;
+    levelsUsed += 1;
+    fills.push({ price: level.price, shares: quantity });
+  }
+  if (shares <= 0) return null;
+  return {
+    shares,
+    notional,
+    fees,
+    cash: notional + fees,
+    budgetUsd: Number(budgetUsd),
+    unusedBudgetUsd: Math.max(0, Number(budgetUsd) - notional - fees),
+    averagePrice: notional / shares,
+    worstPrice,
+    levelsUsed,
+    fills,
+  };
+}
+
 function walkBids(bids, shares, feeModel) {
   let remaining = Number(shares);
   let notional = 0;
@@ -168,7 +211,9 @@ function checkBookFresh(book, nowMs, maxBookAgeMs = DEFAULT_MAX_BOOK_AGE_MS) {
 
 function evaluateLaggingVenueEntry(options = {}) {
   const nowMs = Number(options.nowMs ?? Date.now());
-  const shares = Number(options.shares ?? 500);
+  const stakeUsd = finiteNumber(options.stakeUsd);
+  const fixedShares = finiteNumber(options.shares);
+  const shares = stakeUsd === null ? Number(fixedShares ?? 500) : null;
   const referenceBidThreshold = Number(options.referenceBidThreshold ?? 0.7);
   const minimumEntryAsk = Number(options.minimumEntryAsk ?? 0.6);
   const maximumEntryAsk = Number(options.maximumEntryAsk ?? 0.7);
@@ -186,8 +231,9 @@ function evaluateLaggingVenueEntry(options = {}) {
     ...extra,
   });
 
-  if (!Number.isFinite(shares) || shares <= 0) {
-    return blocked("Paper share quantity must be positive.");
+  if ((stakeUsd === null && (!Number.isFinite(shares) || shares <= 0)) ||
+      (stakeUsd !== null && stakeUsd <= 0)) {
+    return blocked("Paper stake or share quantity must be positive.");
   }
   if (options.referenceMarketMatched !== true || options.entryMarketMatched !== true) {
     return blocked(
@@ -279,24 +325,39 @@ function evaluateLaggingVenueEntry(options = {}) {
       level.price + 1e-9 >= minimumEntryAsk &&
       level.price < maximumEntryAsk - 1e-9,
   );
-  const fill = walkAsks(eligibleAsks, shares, options.feeModel);
-  if (!fill) {
+  const fill =
+    stakeUsd === null
+      ? walkAsks(eligibleAsks, shares, options.feeModel)
+      : walkAsksForBudget(eligibleAsks, stakeUsd, options.feeModel);
+  const targetStakeUsd = stakeUsd ?? fill?.cash ?? null;
+  if (
+    !fill ||
+    (stakeUsd !== null && fill.cash + 0.01 < stakeUsd)
+  ) {
     return {
       status: "insufficient_depth",
       eligible: false,
-      reason: `Fewer than ${shares} shares are executable in the entry ask band [$${minimumEntryAsk.toFixed(2)}, $${maximumEntryAsk.toFixed(2)}).`,
+      reason:
+        stakeUsd === null
+          ? `Fewer than ${shares} shares are executable in the entry ask band [$${minimumEntryAsk.toFixed(2)}, $${maximumEntryAsk.toFixed(2)}).`
+          : `Visible depth cannot execute the full $${stakeUsd.toFixed(2)} stake in the entry ask band [$${minimumEntryAsk.toFixed(2)}, $${maximumEntryAsk.toFixed(2)}).`,
       elapsedSeconds,
+      stakeUsd: targetStakeUsd,
       ...observed,
     };
   }
   const availableCash = finiteNumber(options.availableCashUsd);
-  if (availableCash !== null && fill.cash > availableCash + 1e-6) {
+  if (
+    availableCash !== null &&
+    (targetStakeUsd > availableCash + 1e-6 || fill.cash > availableCash + 1e-6)
+  ) {
     return {
       status: "insufficient_capital",
       eligible: false,
-      reason: `The $${fill.cash.toFixed(2)} paper entry exceeds available demo capital of $${availableCash.toFixed(2)}.`,
+      reason: `The next $${Number(targetStakeUsd).toFixed(2)} paper stake exceeds available demo capital of $${availableCash.toFixed(2)}.`,
       elapsedSeconds,
-      shares,
+      shares: fill.shares,
+      stakeUsd: targetStakeUsd,
       entryCash: fill.cash,
       ...observed,
     };
@@ -306,8 +367,15 @@ function evaluateLaggingVenueEntry(options = {}) {
   return {
     status: "trigger",
     eligible: true,
-    reason: `${options.signalSide || "Signal-side"} leader bid is $${referenceBid.toFixed(2)} and the other venue's same-side ask is $${entryAsk.toFixed(2)}; paper-buying ${shares} shares of the signalled outcome on executable depth.`,
-    shares,
+    reason:
+      stakeUsd === null
+        ? `${options.signalSide || "Signal-side"} leader bid is $${referenceBid.toFixed(2)} and the other venue's same-side ask is $${entryAsk.toFixed(2)}; paper-buying ${fill.shares} shares of the signalled outcome on executable depth.`
+        : `${options.signalSide || "Signal-side"} leader bid is $${referenceBid.toFixed(2)} and the other venue's same-side ask is $${entryAsk.toFixed(2)}; paper-buying ${fill.shares} shares with a $${fill.cash.toFixed(2)} paper stake.`,
+    shares: fill.shares,
+    stakeUsd: targetStakeUsd,
+    baseStakeUsd: options.baseStakeUsd ?? null,
+    martingaleLossStreak: options.martingaleLossStreak ?? null,
+    martingaleMultiplier: options.martingaleMultiplier ?? null,
     entryCash: fill.cash,
     notional: fill.notional,
     fees: fill.fees,
@@ -778,6 +846,7 @@ module.exports = {
   polymarketTakerFee,
   predictTakerFee,
   walkAsks,
+  walkAsksForBudget,
   walkBids,
   checkBookFresh,
   evaluateLaggingVenueEntry,

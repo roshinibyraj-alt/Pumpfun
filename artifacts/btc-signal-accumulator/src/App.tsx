@@ -76,6 +76,10 @@ type Opportunity = {
   referenceBidThreshold?: number;
   minimumEntryAsk?: number;
   maximumEntryAsk?: number;
+  stakeUsd?: number;
+  baseStakeUsd?: number;
+  martingaleLossStreak?: number;
+  martingaleMultiplier?: number;
   elapsedSeconds?: number;
   entryAveragePrice?: number;
   entryCount?: number;
@@ -84,7 +88,7 @@ type Opportunity = {
   legs?: Array<{
     venue: string;
     side: string;
-    shares: number;
+    shares: number | null;
     averagePrice: number;
     fees: number;
     cash: number;
@@ -100,6 +104,10 @@ type PaperTrade = {
   venue?: string;
   entryNumber?: number;
   shares: number;
+  stakeUsd?: number;
+  baseStakeUsd?: number;
+  martingaleLossStreak?: number;
+  martingaleMultiplier?: number;
   entryCash?: number;
   entryAveragePrice?: number;
   pairCash?: number;
@@ -148,12 +156,13 @@ type BotState = {
       maximumEntryAsk: number;
       entrySide?: string;
       entryPriceRule?: string;
-      shares: number;
+      baseStakeFraction: number;
+      martingaleMultiplier: number;
+      maxEntriesPerWindow: number;
       hardStopBid: number | null;
       takeProfitBid: number;
       takeProfitCreditPerShare: number;
       maxEntrySeconds: number;
-      maxReentriesPerSidePerWindow: number;
     };
   };
   window?: { slug: string; openMs: number; closeMs: number; secondsRemaining: number };
@@ -187,6 +196,11 @@ type BotState = {
     availableCapitalUsd: number;
     paperEquityUsd: number;
     feesPaid: number;
+    nextStakeUsd?: number;
+    baseStakeUsd?: number;
+    lossStreak?: number;
+    martingaleMultiplier?: number;
+    awaitingSettlementForSizing?: boolean;
   };
   events?: Array<{ ts: number; event: string; note: string }>;
 };
@@ -259,17 +273,23 @@ function opportunityView(
     tone = "warn";
     reason = "Price and depth qualified; both books are being checked again after modeled latency.";
   } else if (item.eligible) {
-    label = `Ready · entry ${Number(item.entryCount || 0) + 1}/2`;
+    label = `Ready · ${dollars(item.stakeUsd)} stake`;
     tone = "good";
     reason = "All entry gates pass; the paper entry is ready to queue.";
   } else if (item.openPosition) {
     label = "Position open";
     tone = "warn";
-    reason = "A position on this outcome is already open; the strategy will not add another until it exits.";
-  } else if (item.entryCount && Number(item.reentriesRemaining || 0) === 0) {
-    label = "Re-entry used";
+    reason = "A paper position is already open for this outcome.";
+  } else if (item.alreadyFiredThisWindow) {
+    label = "Window trade used";
     tone = "quiet";
-    reason = "The one re-entry allowed for this side and window has already been used.";
+    reason = "The strategy allows one trade total per five-minute window, with no re-entry.";
+  } else if (item.status === "insufficient_capital") {
+    label = "Stake exceeds bankroll";
+    tone = "warn";
+  } else if (item.reason?.includes("awaiting official settlement")) {
+    label = "Waiting for settlement";
+    tone = "warn";
   } else if (item.status === "below_threshold") {
     label = "Waiting on price";
     tone = "quiet";
@@ -294,10 +314,10 @@ function opportunityView(
   } else if (item.status === "insufficient_depth") {
     label = "Depth short";
     tone = "warn";
-    reason = `Fewer than ${shares(strategy?.shares ?? 500)} shares are available in the ${dollars(minimumAsk)}–<${dollars(maximumAsk)} entry band.`;
-  } else if (item.status === "insufficient_capital") {
-    label = "Capital short";
-    tone = "warn";
+    reason =
+      item.stakeUsd != null
+        ? `Visible depth cannot execute the full ${dollars(item.stakeUsd)} stake in the ${dollars(minimumAsk)}–<${dollars(maximumAsk)} entry band.`
+        : `Visible depth is insufficient in the ${dollars(minimumAsk)}–<${dollars(maximumAsk)} entry band.`;
   } else if (item.status === "cutoff") {
     label = "Entry cutoff";
     tone = "quiet";
@@ -547,10 +567,12 @@ function App() {
           </span>
         </article>
         <article className="stat-card stat-leg">
-          <span className="stat-label">Paper entry size</span>
-          <strong className="stat-value">{shares(config?.strategy?.shares)} <small>shares</small></strong>
+          <span className="stat-label">Next paper stake</span>
+          <strong className="stat-value">{dollars(stats?.nextStakeUsd)}</strong>
           <span className="stat-foot">
-            TP {dollars(config?.strategy?.takeProfitBid, 2)} → {dollars(config?.strategy?.takeProfitCreditPerShare, 2)}/share
+            {stats?.awaitingSettlementForSizing
+              ? "Awaiting official result · new entries paused"
+              : `${((config?.strategy?.baseStakeFraction ?? 0.01) * 100).toFixed(0)}% base ${dollars(stats?.baseStakeUsd)} · ${stats?.lossStreak ?? 0} losses · ×${config?.strategy?.martingaleMultiplier ?? 3} each loss · 1/window`}
           </span>
         </article>
         <article className="stat-card stat-ready">
@@ -559,7 +581,8 @@ function App() {
             None / {config?.strategy?.maxEntrySeconds ?? 270}s
           </strong>
           <span className="stat-foot">
-            {readyCount} ready · {opportunities.filter((item) => item.pendingExecution).length} pending · one re-entry/side
+            {readyCount} ready · {opportunities.filter((item) => item.pendingExecution).length} pending ·
+            {" "}TP {dollars(config?.strategy?.takeProfitBid, 2)} → {dollars(config?.strategy?.takeProfitCreditPerShare, 2)}/share
           </span>
         </article>
         <article className="stat-card stat-pnl">
@@ -650,14 +673,24 @@ function App() {
                   <em>{view.hasAsk ? (view.askPass ? "PASS" : "OUTSIDE BAND") : "NO DATA"}</em>
                 </div>
                 <div className="signal-gate signal-size">
-                  <span>500-share entry</span>
-                  <strong>{item.entryCash != null ? dollars(item.entryCash) : "—"}</strong>
+                  <span>
+                    Planned stake{item.shares != null ? ` · ${shares(item.shares)} shares` : ""}
+                  </span>
+                  <strong>
+                    {item.entryCash != null
+                      ? dollars(item.entryCash)
+                      : item.stakeUsd != null
+                        ? dollars(item.stakeUsd)
+                        : "—"}
+                  </strong>
                   <em>
                     {item.entryCash != null
-                      ? "ESTIMATED CASH"
+                      ? `${item.martingaleMultiplier ?? 1}× base · INCL. FEES`
                       : item.status === "insufficient_depth"
                         ? "DEPTH SHORT"
-                        : "DEPTH CHECK AFTER PRICE"}
+                        : item.status === "insufficient_capital"
+                          ? "CAPITAL TOO LOW"
+                          : "DEPTH CHECK AFTER PRICE"}
                   </em>
                 </div>
               </div>
@@ -698,8 +731,10 @@ function App() {
                     <small>
                       {trade.venue ? `${trade.venue} ${trade.side || ""} · ` : ""}
                       {shares(trade.shares)} shares · {dollars(trade.entryCash ?? trade.pairCash)} entry
+                      {trade.stakeUsd != null
+                        ? ` · ${dollars(trade.stakeUsd)} stake at ${trade.martingaleMultiplier ?? 1}× base`
+                        : ""}
                       {trade.stopBid != null ? ` · stop at ${dollars(trade.stopBid, 2)}` : ""}
-                      {trade.entryNumber ? ` · entry ${trade.entryNumber}/2` : ""}
                       {trade.simulatedLatencyMs != null
                         ? ` · ${Math.round(trade.simulatedLatencyMs)}ms modeled delay`
                         : ""}

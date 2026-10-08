@@ -236,8 +236,11 @@ test("derives an exact aligned five-minute window from Predict's canonical slug"
 
 test("same-side entry requires a $0.70 signal bid and a $0.60–<$0.70 ask", () => {
   const botConfig = new ArbitrageBot().state.config.strategy;
-  assert.equal(botConfig.type, "lagging-venue-single-side");
+  assert.equal(botConfig.type, "lagging-venue-martingale");
   assert.equal(botConfig.entrySide, "same_as_signal");
+  assert.equal(botConfig.baseStakeFraction, 0.01);
+  assert.equal(botConfig.martingaleMultiplier, 3);
+  assert.equal(botConfig.maxEntriesPerWindow, 1);
   assert.equal(botConfig.hardStopBid, null);
   const result = engine.evaluateLaggingVenueEntry({
     nowMs: 100_000,
@@ -265,6 +268,70 @@ test("same-side entry requires a $0.70 signal bid and a $0.60–<$0.70 ask", () 
   assert.equal(result.levelsUsed, 2);
   assert.equal(result.fees, 3.75);
   assert.equal(result.entryCash, 316.25);
+});
+
+test("cash stake sizing uses executable depth and includes entry fees", () => {
+  const result = engine.evaluateLaggingVenueEntry({
+    nowMs: 100_000,
+    windowOpenMs: 0,
+    referenceBook: strategyBook({ ask: 0.99, bid: 0.7 }),
+    entryBook: {
+      ...strategyBook({ ask: 0.6, bid: 0.59 }),
+      asks: [
+        { price: 0.6, size: 5 },
+        { price: 0.65, size: 50 },
+      ],
+    },
+    stakeUsd: 10,
+    baseStakeUsd: 10,
+    martingaleLossStreak: 0,
+    martingaleMultiplier: 1,
+    referenceMarketMatched: true,
+    entryMarketMatched: true,
+    feeModel: "predict",
+    availableCashUsd: 10,
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.stakeUsd, 10);
+  assert.ok(result.shares > 0);
+  assert.ok(result.entryCash <= 10);
+  assert.ok(result.entryCash >= 9.99);
+  assert.ok(result.fees > 0);
+  assert.equal(result.martingaleMultiplier, 1);
+
+  const insufficientDepth = engine.evaluateLaggingVenueEntry({
+    nowMs: 100_000,
+    windowOpenMs: 0,
+    referenceBook: strategyBook({ ask: 0.99, bid: 0.7 }),
+    entryBook: {
+      ...strategyBook({ ask: 0.6, bid: 0.59 }),
+      asks: [{ price: 0.6, size: 2 }],
+    },
+    stakeUsd: 10,
+    referenceMarketMatched: true,
+    entryMarketMatched: true,
+    feeModel: "predict",
+    availableCashUsd: 10,
+  });
+  assert.equal(insufficientDepth.eligible, false);
+  assert.equal(insufficientDepth.status, "insufficient_depth");
+
+  const insufficientCapital = engine.evaluateLaggingVenueEntry({
+    nowMs: 100_000,
+    windowOpenMs: 0,
+    referenceBook: strategyBook({ ask: 0.99, bid: 0.7 }),
+    entryBook: {
+      ...strategyBook({ ask: 0.6, bid: 0.59 }),
+      asks: [{ price: 0.6, size: 50 }],
+    },
+    stakeUsd: 10,
+    referenceMarketMatched: true,
+    entryMarketMatched: true,
+    feeModel: "predict",
+    availableCashUsd: 9.99,
+  });
+  assert.equal(insufficientCapital.eligible, false);
+  assert.equal(insufficientCapital.status, "insufficient_capital");
 });
 
 test("enforces the $0.70 signal bid and $0.60–<$0.70 entry ask bounds", () => {
@@ -368,58 +435,114 @@ test("same-side entry rejects stale books and unsafe cross-venue market matches"
   assert.match(unmatched.reason, /safely matched/);
 });
 
-test("enforces one re-entry per side only after the first position exits", () => {
+test("allows only one paper trade total in a window, including after an exit", () => {
   const bot = new ArbitrageBot();
   const window = { openMs: 0, closeMs: 300_000 };
   const poly = {
     market: { matchStatus: "matched", id: "poly", conditionId: "poly-condition" },
-    up: strategyBook({ ask: 0.99, bid: 0.97 }),
-    down: strategyBook({ ask: 0.5, bid: 0.49 }),
+    up: strategyBook({ ask: 0.99, bid: 0.8 }),
+    down: strategyBook({ ask: 0.6, bid: 0.59 }),
   };
   const predict = {
     market: { matchStatus: "matched", id: "predict", conditionId: "predict-condition" },
     up: strategyBook({ ask: 0.6, bid: 0.59 }),
-    down: strategyBook({ ask: 0.5, bid: 0.49 }),
+    down: strategyBook({ ask: 0.99, bid: 0.8 }),
   };
-  const direction = "BUY UP on Predict.fun · Polymarket confirms";
   const first = bot._evaluate(window, poly, predict, 100_000);
-  assert.equal(first.find((item) => item.direction === direction).eligible, true);
+  const up = first.find(
+    (item) =>
+      item.side === "UP" &&
+      item.entryVenue === "Predict.fun" &&
+      item.referenceVenue === "Polymarket",
+  );
+  const down = first.find(
+    (item) =>
+      item.side === "DOWN" &&
+      item.entryVenue === "Polymarket" &&
+      item.referenceVenue === "Predict.fun",
+  );
+  assert.equal(up.eligible, true);
+  assert.equal(down.eligible, true);
 
+  bot._schedulePaperEntries(window, [up, down], 100_000);
+  assert.equal(bot.pendingPaperEntries.size, 1);
+  assert.equal(down.eligible, false);
+  assert.equal(down.alreadyFiredThisWindow, true);
+  bot.pendingPaperEntries.clear();
   bot.state.paperTrades.push({
     id: "open-up",
-    strategyVersion: "lagging-venue-same-side-v3",
+    strategyVersion: "lagging-venue-martingale-v4",
     side: "UP",
     openMs: 0,
     finalized: false,
-    entryCash: 205,
+    entryCash: 10,
   });
-  assert.equal(
-    bot._evaluate(window, poly, predict, 100_000).find((item) => item.direction === direction)
-      .eligible,
-    false,
-  );
+  const whileOpen = bot._evaluate(window, poly, predict, 100_000);
+  assert.equal(whileOpen.every((item) => !item.eligible), true);
 
   bot.state.paperTrades[0].finalized = true;
   bot.state.paperTrades[0].settlementMethod = "simulated_take_profit";
-  assert.equal(
-    bot._evaluate(window, poly, predict, 100_000).find((item) => item.direction === direction)
-      .eligible,
-    true,
-  );
-  bot.state.paperTrades.push({
-    id: "reentry-up",
-    strategyVersion: "lagging-venue-same-side-v3",
-    side: "UP",
-    openMs: 0,
-    finalized: true,
-    settlementMethod: "simulated_take_profit",
-    pairCash: 205,
-  });
-  const afterReentry = bot._evaluate(window, poly, predict, 100_000);
-  assert.equal(afterReentry.find((item) => item.direction === direction).eligible, false);
-  assert.equal(afterReentry.find((item) => item.direction === direction).entryCount, 2);
+  bot.state.paperTrades[0].realizedPnl = 2;
+  const afterExit = bot._evaluate(window, poly, predict, 100_000);
+  assert.equal(afterExit.every((item) => !item.eligible), true);
+  assert.equal(afterExit.every((item) => item.entryCount === 1), true);
 });
 
+test("martingale triples the fixed base after losses and resets to one percent after a win", () => {
+  const bot = new ArbitrageBot();
+  const sizing = () => bot._martingaleSizing();
+  assert.equal(sizing().baseStakeUsd, 10);
+  assert.equal(sizing().nextStakeUsd, 10);
+
+  bot.state.paperTrades = [
+    { openMs: 1, finalized: true, realizedPnl: -10 },
+  ];
+  assert.equal(sizing().lossStreak, 1);
+  assert.equal(sizing().baseStakeUsd, 10);
+  assert.equal(sizing().nextStakeUsd, 30);
+
+  bot.state.paperTrades.push({ openMs: 2, finalized: true, realizedPnl: -30 });
+  assert.equal(sizing().lossStreak, 2);
+  assert.equal(sizing().nextStakeUsd, 90);
+
+  bot.state.paperTrades.push({ openMs: 3, finalized: true, realizedPnl: 40 });
+  assert.equal(sizing().lossStreak, 0);
+  assert.equal(sizing().bankrollUsd, 1000);
+  assert.equal(sizing().baseStakeUsd, 10);
+  assert.equal(sizing().nextStakeUsd, 10);
+
+  bot.state.paperTrades.push({ openMs: 4, finalized: true, realizedPnl: 100 });
+  assert.equal(sizing().bankrollUsd, 1100);
+  assert.equal(sizing().baseStakeUsd, 11);
+  assert.equal(sizing().nextStakeUsd, 11);
+});
+
+test("martingale sizing waits for an earlier window's official result", () => {
+  const bot = new ArbitrageBot();
+  const window = { openMs: 300_000, closeMs: 600_000 };
+  const poly = {
+    market: { matchStatus: "matched" },
+    up: strategyBook({ ask: 0.99, bid: 0.8 }),
+    down: strategyBook({ ask: 0.5, bid: 0.49 }),
+  };
+  const predict = {
+    market: { matchStatus: "matched" },
+    up: strategyBook({ ask: 0.6, bid: 0.59 }),
+    down: strategyBook({ ask: 0.5, bid: 0.49 }),
+  };
+  bot.state.paperTrades.push({
+    id: "awaiting-official-result",
+    openMs: 0,
+    closeMs: 300_000,
+    finalized: false,
+    entryCash: 10,
+  });
+  const opportunity = bot
+    ._evaluate(window, poly, predict, 400_000)
+    .find((item) => item.side === "UP" && item.entryVenue === "Predict.fun");
+  assert.equal(opportunity.eligible, false);
+  assert.match(opportunity.reason, /awaiting official settlement/);
+});
 test("a DOWN signal buys DOWN on the lagging venue", () => {
   const window = { openMs: 0, closeMs: 300_000 };
   const poly = {
@@ -489,11 +612,14 @@ test("opens the signalled outcome only after delayed fresh snapshots, then canno
   bot._processPendingPaperEntries(window, arrivalOpportunities, null, fillAt);
   assert.equal(bot.state.paperTrades.length, 1);
   const trade = bot.state.paperTrades[0];
-  assert.equal(trade.strategyVersion, "lagging-venue-same-side-v3");
+  assert.equal(trade.strategyVersion, "lagging-venue-martingale-v4");
   assert.equal(trade.venue, "Predict.fun");
   assert.equal(trade.signalSide, "UP");
   assert.equal(trade.side, "UP");
-  assert.equal(trade.shares, 500);
+  assert.ok(trade.shares > 0);
+  assert.equal(trade.stakeUsd, 10);
+  assert.ok(trade.entryCash <= 10);
+  assert.ok(trade.entryCash >= 9.99);
   assert.equal(trade.legs.length, 1);
   assert.equal(trade.entryAveragePrice, 0.6);
   assert.equal(trade.stopBid, null);
@@ -526,9 +652,9 @@ test("opens the signalled outcome only after delayed fresh snapshots, then canno
         item.entryVenue === "Predict.fun",
     );
   assert.equal(reentry.entryCount, 1);
-  assert.equal(reentry.eligible, true);
+  assert.equal(reentry.eligible, false);
   bot._schedulePaperEntries(window, [reentry], fillAt + 30);
-  assert.equal(bot.pendingPaperEntries.size, 1);
+  assert.equal(bot.pendingPaperEntries.size, 0);
 
   const lateBot = new ArbitrageBot({ paperBaseLatencyMs: 500 });
   const lateDetectedAt = 269_900;
@@ -557,7 +683,7 @@ test("TP credits $1 per share and falling below $0.45 does not trigger a stop-lo
   const window = { openMs: 0, closeMs: 300_000 };
   const makeTrade = (venue, side, feeModel, entryCash, entryAveragePrice) => ({
     id: `${venue}-${side}`,
-    strategyVersion: "lagging-venue-same-side-v3",
+    strategyVersion: "lagging-venue-martingale-v4",
     openMs: 0,
     closeMs: 300_000,
     side,
@@ -1174,7 +1300,7 @@ test("settles a pair leg-by-leg when the two venues resolve differently", () => 
   assert.equal(bothWin.realizedPnl, 12.5);
 });
 
-test("migrates old shared-benchmark results to pending without resetting demo capital", async () => {
+test("migrates old shared-benchmark results to pending without resetting a current ledger", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "arb-state-migration-"));
   const stateFile = path.join(directory, "arb-state.json");
   const logs = [];
@@ -1182,7 +1308,7 @@ test("migrates old shared-benchmark results to pending without resetting demo ca
     await fs.writeFile(
       stateFile,
       JSON.stringify({
-        version: 2,
+        version: 5,
         startingCapitalUsd: 10_000,
         realizedPnlTotal: 36.61,
         paperTrades: [
@@ -1223,8 +1349,51 @@ test("migrates old shared-benchmark results to pending without resetting demo ca
     assert.equal(bot.state.stats.availableCapitalUsd, 9_851.22);
     assert.ok(logs.some((entry) => entry.event === "OFFICIAL_SETTLEMENT_MIGRATION"));
     const migratedFile = JSON.parse(await fs.readFile(stateFile, "utf8"));
-    assert.equal(migratedFile.version, 4);
+    assert.equal(migratedFile.version, 5);
     assert.equal(migratedFile.settlementModel, "independent-venue-v1");
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("resets a pre-martingale paper ledger to the user-approved $1,000 bankroll", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "arb-ledger-reset-"));
+  const stateFile = path.join(directory, "arb-state.json");
+  try {
+    await fs.writeFile(
+      stateFile,
+      JSON.stringify({
+        version: 4,
+        startingCapitalUsd: 10_000,
+        realizedPnlTotal: -1113.15,
+        paperTrades: [
+          {
+            id: "old-paper-trade",
+            finalized: true,
+            realizedPnl: -1113.15,
+            openMs: 0,
+            closeMs: 300_000,
+          },
+        ],
+        events: [{ event: "OLD_EVENT", note: "old log" }],
+        activeSignalKeys: ["0:UP"],
+      }),
+    );
+    const bot = new ArbitrageBot({ stateFile, stdoutLogger: () => {} });
+    await bot._load();
+
+    assert.equal(bot.startingCapitalUsd, 1_000);
+    assert.equal(bot.realizedPnlTotal, 0);
+    assert.equal(bot.state.paperTrades.length, 0);
+    assert.equal(bot.state.stats.availableCapitalUsd, 1_000);
+    assert.deepEqual([...bot.activeSignalSides], []);
+    assert.equal(bot.state.events.length, 1);
+    assert.equal(bot.state.events[0].event, "PAPER_LEDGER_RESET");
+    const stored = JSON.parse(await fs.readFile(stateFile, "utf8"));
+    assert.equal(stored.version, 5);
+    assert.equal(stored.startingCapitalUsd, 1_000);
+    assert.deepEqual(stored.paperTrades, []);
+    assert.equal(stored.events[0].event, "PAPER_LEDGER_RESET");
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

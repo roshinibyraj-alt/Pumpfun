@@ -36,7 +36,8 @@ const SETTLEMENT_RETRY_MS = 15_000;
 const MAX_SETTLEMENT_WINDOWS_PER_TICK = 1;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SETTLEMENT_MODEL = "independent-venue-v1";
-const STRATEGY_VERSION = "lagging-venue-same-side-v3";
+const STRATEGY_VERSION = "lagging-venue-martingale-v4";
+const PAPER_LEDGER_VERSION = 5;
 const LEGACY_STRATEGY_VERSION = "lagging-venue-v1";
 const CONTRARIAN_STRATEGY_VERSION = "contrarian-lagging-venue-v2";
 const ACTIVE_STRATEGY_VERSIONS = new Set([
@@ -46,17 +47,18 @@ const ACTIVE_STRATEGY_VERSIONS = new Set([
 ]);
 const MAX_LOGS = 150;
 const MAX_TRADES = 250;
-const DEFAULT_STARTING_PAPER_CAPITAL_USD = 10_000;
+const DEFAULT_STARTING_PAPER_CAPITAL_USD = 1_000;
 const STRATEGY = Object.freeze({
   referenceBidThreshold: 0.7,
   minimumEntryAsk: 0.6,
   maximumEntryAsk: 0.7,
-  shares: 500,
+  baseStakeFraction: 0.01,
+  martingaleMultiplier: 3,
   hardStopBid: null,
   takeProfitBid: 0.99,
   takeProfitCreditPerShare: 1,
   maxEntrySeconds: 270,
-  maxEntriesPerSidePerWindow: 2,
+  maxEntriesPerWindow: 1,
 });
 
 const SIMULATED_EXIT_METHODS = new Set([
@@ -385,12 +387,11 @@ class ArbitrageBot {
         paperBaseLatencyMs: this.paperBaseLatencyMs,
         executionModel: "delayed_single_side_entry_and_exit_recheck",
         strategy: {
-          type: "lagging-venue-single-side",
+          type: "lagging-venue-martingale",
           entrySide: "same_as_signal",
           entryPriceRule: "ask_band",
           ...STRATEGY,
           entryCutoffSeconds: STRATEGY.maxEntrySeconds,
-          maxReentriesPerSidePerWindow: 1,
         },
       },
       window: null,
@@ -423,6 +424,11 @@ class ArbitrageBot {
         availableCapitalUsd: this.startingCapitalUsd,
         paperEquityUsd: this.startingCapitalUsd,
         feesPaid: 0,
+        nextStakeUsd: this.startingCapitalUsd * STRATEGY.baseStakeFraction,
+        baseStakeUsd: this.startingCapitalUsd * STRATEGY.baseStakeFraction,
+        lossStreak: 0,
+        martingaleMultiplier: 1,
+        awaitingSettlementForSizing: false,
       },
       events: [],
     };
@@ -440,6 +446,22 @@ class ArbitrageBot {
     try {
       const text = await fs.readFile(this.stateFile, "utf8");
       const stored = JSON.parse(text);
+      if (Number(stored.version || 0) < PAPER_LEDGER_VERSION) {
+        this.startingCapitalUsd = DEFAULT_STARTING_PAPER_CAPITAL_USD;
+        this.realizedPnlTotal = 0;
+        this.state.paperTrades = [];
+        this.state.events = [];
+        this.activeSignalSides.clear();
+        this.state.config.startingPaperCapitalUsd = this.startingCapitalUsd;
+        this._log(
+          "PAPER_LEDGER_RESET",
+          "Previous paper trades and events were cleared; the new martingale paper strategy starts with $1,000.",
+          { startingCapitalUsd: this.startingCapitalUsd, ledgerVersion: PAPER_LEDGER_VERSION },
+        );
+        this._recalculateStats();
+        await this._persist();
+        return;
+      }
       let migratedTrades = 0;
       let priorBenchmarkPnl = 0;
       if (Array.isArray(stored.paperTrades)) {
@@ -527,7 +549,7 @@ class ArbitrageBot {
   async _persist() {
     const data = JSON.stringify(
       {
-        version: 4,
+        version: PAPER_LEDGER_VERSION,
         settlementModel: SETTLEMENT_MODEL,
         startingCapitalUsd: this.startingCapitalUsd,
         realizedPnlTotal: this.realizedPnlTotal,
@@ -634,6 +656,7 @@ class ArbitrageBot {
     const trades = this.state.paperTrades;
     const settled = trades.filter((trade) => trade.finalized);
     const open = trades.filter((trade) => !trade.finalized);
+    const sizing = this._martingaleSizing();
     const capital = calculatePaperCapital({
       startingCapitalUsd: this.startingCapitalUsd,
       realizedPnlUsd: this.realizedPnlTotal,
@@ -653,6 +676,49 @@ class ArbitrageBot {
       availableCapitalUsd: capital.availableCapitalUsd,
       paperEquityUsd: capital.paperEquityUsd,
       feesPaid: trades.reduce((sum, trade) => sum + Number(trade.fees || 0), 0),
+      nextStakeUsd: sizing.nextStakeUsd,
+      baseStakeUsd: sizing.baseStakeUsd,
+      lossStreak: sizing.lossStreak,
+      martingaleMultiplier: sizing.multiplier,
+      awaitingSettlementForSizing: sizing.awaitingSettlement,
+    };
+  }
+
+  _martingaleSizing() {
+    let bankroll = Math.max(0, Number(this.startingCapitalUsd) || 0);
+    let baseStakeUsd = bankroll * STRATEGY.baseStakeFraction;
+    let lossStreak = 0;
+    const settledTrades = this.state.paperTrades
+      .filter(
+        (trade) =>
+          trade.finalized === true && finiteNumber(trade.realizedPnl) !== null,
+      )
+      .sort(
+        (left, right) =>
+          Number(left.openMs || 0) - Number(right.openMs || 0) ||
+          Number(left.finalizedAt || left.openedAt || 0) -
+            Number(right.finalizedAt || right.openedAt || 0),
+      );
+    for (const trade of settledTrades) {
+      const pnl = Number(trade.realizedPnl);
+      bankroll = Math.max(0, bankroll + pnl);
+      if (pnl > 1e-9) {
+        lossStreak = 0;
+        baseStakeUsd = bankroll * STRATEGY.baseStakeFraction;
+      } else if (pnl < -1e-9) {
+        lossStreak += 1;
+      }
+    }
+    const multiplier = STRATEGY.martingaleMultiplier ** lossStreak;
+    return {
+      bankrollUsd: bankroll,
+      baseStakeUsd,
+      lossStreak,
+      multiplier,
+      nextStakeUsd: baseStakeUsd * multiplier,
+      awaitingSettlement: this.state.paperTrades.some(
+        (trade) => trade.finalized !== true,
+      ),
     };
   }
 
@@ -859,7 +925,20 @@ class ArbitrageBot {
         feeModel: "predict",
       },
     };
-    let remainingCapital = Math.max(0, this._availablePaperCapital());
+    const availableCapital = Math.max(0, this._availablePaperCapital());
+    const sizing = this._martingaleSizing();
+    const windowTrades = this.state.paperTrades.filter(
+      (trade) => Number(trade.openMs) === Number(currentWindow.openMs),
+    );
+    const windowHasTrade = windowTrades.length > 0;
+    const windowHasPendingEntry = [...this.pendingPaperEntries.values()].some(
+      (pending) => pending.windowOpenMs === Number(currentWindow.openMs),
+    );
+    const previousSettlementPending = this.state.paperTrades.some(
+      (trade) =>
+        trade.finalized !== true &&
+        Number(trade.openMs) < Number(currentWindow.openMs),
+    );
     const results = [];
     for (const signalSide of ["UP", "DOWN"]) {
       const side = signalSide;
@@ -873,24 +952,19 @@ class ArbitrageBot {
         const entryMarketMatched = entry.state.market?.matchStatus === "matched";
         const referenceMarketMatched =
           reference.state.market?.matchStatus === "matched";
-        const sideTrades = this.state.paperTrades.filter(
+        const openPosition = windowTrades.some(
           (trade) =>
-            ACTIVE_STRATEGY_VERSIONS.has(trade.strategyVersion) &&
-            Number(trade.openMs) === Number(currentWindow.openMs) &&
+            !trade.finalized &&
             String(trade.side).toUpperCase() === side,
         );
-        const openPosition = sideTrades.some((trade) => !trade.finalized);
-        const entryCount = sideTrades.length;
-        const previousExitAllowsReentry =
-          entryCount === 0 ||
-          (entryCount === 1 &&
-            sideTrades[0].finalized === true &&
-            SIMULATED_EXIT_METHODS.has(sideTrades[0].settlementMethod));
         const evaluation = evaluateLaggingVenueEntry({
           nowMs,
           windowOpenMs: currentWindow.openMs,
           maxEntrySeconds: STRATEGY.maxEntrySeconds,
-          shares: STRATEGY.shares,
+          stakeUsd: sizing.nextStakeUsd,
+          baseStakeUsd: sizing.baseStakeUsd,
+          martingaleLossStreak: sizing.lossStreak,
+          martingaleMultiplier: sizing.multiplier,
           referenceBidThreshold: STRATEGY.referenceBidThreshold,
           minimumEntryAsk: STRATEGY.minimumEntryAsk,
           maximumEntryAsk: STRATEGY.maximumEntryAsk,
@@ -906,7 +980,7 @@ class ArbitrageBot {
             reference.state.market?.matchReason ||
             "Both exact venue markets must be matched to the same five-minute window.",
           feeModel: entry.feeModel,
-          availableCashUsd: remainingCapital,
+          availableCashUsd: availableCapital,
         });
         const direction = `BUY ${side} on ${entryVenue} · ${referenceVenue} confirms`;
         const signalKey = `${currentWindow.openMs}:${side}`;
@@ -918,7 +992,7 @@ class ArbitrageBot {
           conditionId: entry.state.market?.conditionId ?? null,
           marketTitle: entry.state.market?.title ?? null,
           feeModel: entry.feeModel,
-          shares: evaluation.shares ?? STRATEGY.shares,
+          shares: evaluation.shares ?? null,
           quoteObservedAt: finiteNumber(entryBook?.observedAt),
           quoteReceivedAt: finiteNumber(entryBook?.receivedAt),
           quoteAgeMs: finiteNumber(entryBook?.ageMs),
@@ -940,13 +1014,17 @@ class ArbitrageBot {
         const signalExecutable = evaluation.eligible === true;
         const eligible =
           signalExecutable &&
-          !openPosition &&
-          previousExitAllowsReentry &&
+          !windowHasTrade &&
+          !windowHasPendingEntry &&
+          !previousSettlementPending &&
           nowMs < Number(currentWindow.openMs) + STRATEGY.maxEntrySeconds * 1000;
         const reasons = [evaluation.reason];
-        if (openPosition) reasons.push(`A ${side} paper position is already open.`);
-        else if (!previousExitAllowsReentry) {
-          reasons.push("The one-re-entry-per-side limit has been reached.");
+        if (windowHasTrade) {
+          reasons.push("One trade has already been entered in this five-minute window; re-entry is disabled.");
+        } else if (windowHasPendingEntry) {
+          reasons.push("A paper entry is already queued for this five-minute window.");
+        } else if (previousSettlementPending) {
+          reasons.push("A prior paper result is still awaiting official settlement; martingale sizing is paused.");
         }
         const result = {
           ...evaluation,
@@ -961,12 +1039,9 @@ class ArbitrageBot {
           referenceQuoteObservedAt: finiteNumber(referenceBook?.observedAt),
           quoteReceivedAt: finiteNumber(entryBook?.receivedAt),
           quoteObservedAt: finiteNumber(entryBook?.observedAt),
-          entryCount,
-          reentriesRemaining: Math.max(
-            0,
-            STRATEGY.maxEntriesPerSidePerWindow - entryCount,
-          ),
-          alreadyFiredThisWindow: entryCount > 0,
+          entryCount: windowTrades.length,
+          reentriesRemaining: 0,
+          alreadyFiredThisWindow: windowHasTrade || windowHasPendingEntry,
           openPosition,
           signalExecutable,
           eligible,
@@ -974,7 +1049,6 @@ class ArbitrageBot {
           reason: reasons.join(" "),
           legs: [leg],
         };
-        if (eligible) remainingCapital = Math.max(0, remainingCapital - result.entryCash);
         results.push(result);
       }
     }
@@ -993,9 +1067,22 @@ class ArbitrageBot {
       opportunities.filter((item) => item.triggerMet).map((item) => item.side),
     );
     const scheduledSides = new Set();
+    let windowEntryAlreadyUsed =
+      this.state.paperTrades.some(
+        (trade) => Number(trade.openMs) === Number(window.openMs),
+      ) ||
+      [...this.pendingPaperEntries.values()].some(
+        (pending) => pending.windowOpenMs === Number(window.openMs),
+      );
     for (const opportunity of opportunities) {
       const key = opportunity.signalKey;
       const sideLatchKey = `${window.openMs}:${opportunity.side}`;
+      if (windowEntryAlreadyUsed && opportunity.eligible) {
+        opportunity.eligible = false;
+        opportunity.alreadyFiredThisWindow = true;
+        opportunity.reason = `${opportunity.reason} Only one trade total is allowed per five-minute window.`;
+        continue;
+      }
       if (
         !opportunity.eligible ||
         this.activeSignalSides.has(sideLatchKey) ||
@@ -1035,17 +1122,22 @@ class ArbitrageBot {
         ),
         signalEntryAsk: opportunity.entryAsk,
         signalReferenceBid: opportunity.referenceBid,
-        signalShares: STRATEGY.shares,
+        signalStakeUsd: opportunity.stakeUsd,
       });
       scheduledSides.add(opportunity.side);
+      windowEntryAlreadyUsed = true;
       this._log(
         "PAPER_ENTRY_QUEUED",
-        `${opportunity.direction} met the price rules; rechecking both venue books after ${simulatedArrivalAt - nowMs} ms of modeled arrival latency.`,
+        `${opportunity.direction} met the price rules for a $${Number(opportunity.stakeUsd).toFixed(2)} stake; rechecking both venue books after ${simulatedArrivalAt - nowMs} ms of modeled arrival latency.`,
         {
           side: opportunity.side,
           signalSide: opportunity.signalSide,
           entryVenue: opportunity.entryVenue,
           referenceVenue: opportunity.referenceVenue,
+          stakeUsd: opportunity.stakeUsd,
+          shares: opportunity.shares,
+          martingaleLossStreak: opportunity.martingaleLossStreak,
+          martingaleMultiplier: opportunity.martingaleMultiplier,
           simulatedArrivalAt,
           entryCutoffAt,
         },
@@ -1122,7 +1214,7 @@ class ArbitrageBot {
         this.retryAfterByKey.delete(key);
         this._log(
           "PAPER_POSITION_OPENED",
-          `${trade.side} paper position opened on ${trade.venue}: ${trade.shares} shares at an average of $${trade.entryAveragePrice.toFixed(4)} after ${simulatedLatencyMs} ms modeled latency. No order was sent.`,
+          `${trade.side} paper position opened on ${trade.venue}: $${trade.entryCash.toFixed(2)} stake bought ${trade.shares} shares at an average of $${trade.entryAveragePrice.toFixed(4)} after ${simulatedLatencyMs} ms modeled latency. No order was sent.`,
           {
             tradeId: trade.id,
             side: trade.side,
@@ -1172,19 +1264,13 @@ class ArbitrageBot {
         pendingExecution: true,
         simulatedArrivalAt: pending.simulatedArrivalAt,
         reason:
-          "Price signal found; waiting for fresh delayed snapshots from both venues before simulating the 500-share entry.",
+          `Price signal found; waiting for fresh delayed snapshots from both venues before simulating the $${Number(pending.signalStakeUsd).toFixed(2)} stake.`,
       };
     });
   }
 
   _createPaperPosition(opportunity, window, benchmark, execution = {}) {
     const leg = opportunity.legs[0];
-    const priorEntries = this.state.paperTrades.filter(
-      (trade) =>
-        ACTIVE_STRATEGY_VERSIONS.has(trade.strategyVersion) &&
-        Number(trade.openMs) === Number(window.openMs) &&
-        String(trade.side).toUpperCase() === opportunity.side,
-    ).length;
     const legRecord = {
       venue: leg.venue,
       side: leg.side,
@@ -1192,7 +1278,7 @@ class ArbitrageBot {
       marketSlug: leg.marketSlug,
       conditionId: leg.conditionId,
       marketTitle: leg.marketTitle,
-      shares: STRATEGY.shares,
+      shares: leg.shares,
       quoteObservedAt: leg.quoteObservedAt,
       quoteReceivedAt: leg.quoteReceivedAt,
       quoteAgeMs: leg.quoteAgeMs,
@@ -1209,9 +1295,9 @@ class ArbitrageBot {
       fills: leg.fills,
     };
     return {
-      id: `paper-${window.openMs}-${opportunity.side.toLowerCase()}-${priorEntries + 1}`,
+      id: `paper-${window.openMs}-${opportunity.side.toLowerCase()}-1`,
       strategyVersion: STRATEGY_VERSION,
-      entryNumber: priorEntries + 1,
+      entryNumber: 1,
       openedAt: execution.executedAt ?? Date.now(),
       signalDetectedAt: execution.detectedAt ?? null,
       simulatedLatencyMs: execution.simulatedLatencyMs ?? null,
@@ -1223,7 +1309,11 @@ class ArbitrageBot {
       signalSide: opportunity.signalSide,
       venue: opportunity.entryVenue,
       referenceVenue: opportunity.referenceVenue,
-      shares: STRATEGY.shares,
+      shares: leg.shares,
+      stakeUsd: opportunity.stakeUsd,
+      baseStakeUsd: opportunity.baseStakeUsd,
+      martingaleLossStreak: opportunity.martingaleLossStreak,
+      martingaleMultiplier: opportunity.martingaleMultiplier,
       legs: [legRecord],
       entryCash: leg.cash,
       entryAveragePrice: leg.averagePrice,
