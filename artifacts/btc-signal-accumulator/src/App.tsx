@@ -125,8 +125,18 @@ type PaperTrade = {
   provisionalOutcome?: string | null;
   provisionalPnl?: number | null;
   venueSettlements?: {
-    polymarket?: { status?: string; outcome?: string | null; reason?: string | null };
-    predict?: { status?: string; outcome?: string | null; reason?: string | null };
+    polymarket?: {
+      status?: string;
+      outcome?: string | null;
+      reason?: string | null;
+      decisionRule?: string;
+    };
+    predict?: {
+      status?: string;
+      outcome?: string | null;
+      reason?: string | null;
+      decisionRule?: string;
+    };
   } | null;
   simulatedLatencyMs?: number | null;
   executionPriceDriftPerShare?: number | null;
@@ -248,6 +258,16 @@ function statusLabel(status?: string) {
   return status.replaceAll("_", " ");
 }
 
+function settlementOutcomeLabel(
+  result?: { outcome?: string | null; status?: string; decisionRule?: string },
+) {
+  if (result?.outcome) return result.outcome;
+  if (result?.decisionRule?.includes("conservative_loss")) {
+    return "No complete close book · conservative loss";
+  }
+  return statusLabel(result?.status);
+}
+
 function opportunityView(
   item: Opportunity,
   strategy?: NonNullable<BotState["config"]>["strategy"],
@@ -287,7 +307,7 @@ function opportunityView(
   } else if (item.status === "insufficient_capital") {
     label = "Stake exceeds bankroll";
     tone = "warn";
-  } else if (item.reason?.includes("awaiting official settlement")) {
+  } else if (item.reason?.includes("CLOB close-price proxy settlement")) {
     label = "Waiting for settlement";
     tone = "warn";
   } else if (item.status === "below_threshold") {
@@ -742,7 +762,7 @@ function App() {
                         ? ` · cost drift ${trade.executionPriceDriftPerShare >= 0 ? "+" : ""}${dollars(trade.executionPriceDriftPerShare, 4)}/sh`
                         : ""}
                       {venueResults
-                        ? ` · Results: Poly ${venueResults.polymarket?.outcome || statusLabel(venueResults.polymarket?.status)}, Predict ${venueResults.predict?.outcome || statusLabel(venueResults.predict?.status)}`
+                        ? ` · ${trade.settlementMethod === "clob_close_price_proxy" ? "CLOB proxy" : "Venue results"}: Poly ${settlementOutcomeLabel(venueResults.polymarket)}, Predict ${settlementOutcomeLabel(venueResults.predict)}`
                         : ""}
                     </small>
                   </div>
@@ -752,6 +772,8 @@ function App() {
                         ? "TP · $1/share"
                         : trade.settlementMethod === "simulated_stop_loss"
                           ? "Hard stop"
+                          : trade.settlementMethod === "clob_close_price_proxy"
+                            ? "CLOB close proxy"
                           : trade.finalized
                             ? "Venue settled"
                             : statusLabel(trade.status)}

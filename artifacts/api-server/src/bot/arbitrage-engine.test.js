@@ -517,7 +517,7 @@ test("martingale triples the fixed base after losses and resets to one percent a
   assert.equal(sizing().nextStakeUsd, 11);
 });
 
-test("martingale sizing waits for an earlier window's official result", () => {
+test("martingale sizing waits for an earlier position's CLOB close proxy", () => {
   const bot = new ArbitrageBot();
   const window = { openMs: 300_000, closeMs: 600_000 };
   const poly = {
@@ -541,7 +541,7 @@ test("martingale sizing waits for an earlier window's official result", () => {
     ._evaluate(window, poly, predict, 400_000)
     .find((item) => item.side === "UP" && item.entryVenue === "Predict.fun");
   assert.equal(opportunity.eligible, false);
-  assert.match(opportunity.reason, /awaiting official settlement/);
+  assert.match(opportunity.reason, /awaiting CLOB close-price proxy settlement/);
 });
 test("a DOWN signal buys DOWN on the lagging venue", () => {
   const window = { openMs: 0, closeMs: 300_000 };
@@ -1300,6 +1300,233 @@ test("settles a pair leg-by-leg when the two venues resolve differently", () => 
   assert.equal(bothWin.realizedPnl, 12.5);
 });
 
+test("selects a final-three-second CLOB bid above $0.98 as the paper winner", () => {
+  const result = engine.resolveClobCloseOutcome({
+    finalThreeSeconds: {
+      UP: { bid: 0.981, observedAt: 298_500 },
+      DOWN: { bid: 0.97, observedAt: 299_000 },
+    },
+    lastInWindow: {
+      UP: { bid: 0.4, observedAt: 290_000 },
+      DOWN: { bid: 0.5, observedAt: 290_000 },
+    },
+  });
+  assert.equal(result.outcome, "UP");
+  assert.equal(result.source, "up_bid_above_0_98");
+  assert.equal(result.upQuoteSource, "final_three_seconds");
+});
+
+test("uses in-window bids, freshest tie-break, and conservative incomplete-book loss", () => {
+  const higherBid = engine.resolveClobCloseOutcome({
+    lastInWindow: {
+      UP: { bid: 0.62, observedAt: 297_000 },
+      DOWN: { bid: 0.61, observedAt: 299_000 },
+    },
+  });
+  assert.equal(higherBid.outcome, "UP");
+  assert.equal(higherBid.source, "higher_best_bid");
+  assert.equal(higherBid.upQuoteSource, "last_in_window");
+
+  const tie = engine.resolveClobCloseOutcome({
+    finalThreeSeconds: {
+      UP: { bid: 0.5, observedAt: 298_000 },
+      DOWN: { bid: 0.5, observedAt: 299_000 },
+    },
+  });
+  assert.equal(tie.outcome, "DOWN");
+  assert.equal(tie.source, "equal_bids_freshest_quote");
+
+  const oneSided = engine.resolveClobCloseOutcome({
+    lastInWindow: { UP: { bid: 0.38, observedAt: 299_900 } },
+  });
+  assert.equal(oneSided.outcome, null);
+  assert.equal(oneSided.source, "incomplete_close_book_conservative_loss");
+
+  const empty = engine.resolveClobCloseOutcome({});
+  assert.equal(empty.outcome, null);
+  assert.equal(empty.source, "no_valid_quotes_conservative_loss");
+});
+
+test("settles each paper leg using its own venue CLOB close-price comparison", () => {
+  const trade = {
+    openMs: 0,
+    closeMs: 300_000,
+    entryCash: 15,
+    legs: [
+      { venue: "Polymarket", side: "UP", shares: 10 },
+      { venue: "Predict.fun", side: "DOWN", shares: 10 },
+    ],
+  };
+  const settled = engine.updateTradeWithClobClosePriceProxy(
+    trade,
+    {
+      polymarket: {
+        finalThreeSeconds: {
+          UP: { bid: 0.99, observedAt: 299_000 },
+          DOWN: { bid: 0.01, observedAt: 299_000 },
+        },
+      },
+      predict: {
+        finalThreeSeconds: {
+          UP: { bid: 0.01, observedAt: 299_000 },
+          DOWN: { bid: 0.99, observedAt: 299_000 },
+        },
+      },
+    },
+    301_000,
+  );
+  assert.equal(settled.finalized, true);
+  assert.equal(settled.settlementMethod, "clob_close_price_proxy");
+  assert.equal(settled.settlementLabel, "CLOB_CLOSE_PRICE_PAPER_PROXY_NOT_OFFICIAL");
+  assert.equal(settled.venueSettlements.polymarket.outcome, "UP");
+  assert.equal(settled.venueSettlements.predict.outcome, "DOWN");
+  assert.equal(settled.finalPayout, 20);
+  assert.equal(settled.realizedPnl, 5);
+});
+
+test("settles legacy single-position rows that have no legs array", () => {
+  const settled = engine.updateTradeWithClobClosePriceProxy(
+    {
+      venue: "Predict.fun",
+      side: "UP",
+      shares: 10,
+      entryCash: 4,
+      closeMs: 300_000,
+      finalized: false,
+    },
+    {
+      predict: {
+        finalThreeSeconds: {
+          UP: { bid: 0.99, observedAt: 299_500 },
+          DOWN: { bid: 0.01, observedAt: 299_500 },
+        },
+      },
+    },
+    301_000,
+  );
+  assert.equal(settled.venueSettlements.predict.outcome, "UP");
+  assert.equal(settled.finalPayout, 10);
+  assert.equal(settled.realizedPnl, 6);
+});
+
+test("finalizes an old pending trade from its stored last mark and releases sizing", () => {
+  const logs = [];
+  const bot = new ArbitrageBot({ stdoutLogger: (line) => logs.push(JSON.parse(line)) });
+  const trade = {
+    id: "legacy-predict-up",
+    openMs: 0,
+    closeMs: 300_000,
+    venue: "Predict.fun",
+    side: "UP",
+    shares: 16.944795,
+    entryCash: 10.302435,
+    markPrice: 0.38,
+    markedAt: 299_938,
+    finalized: false,
+    status: "awaiting_official_venue_settlement",
+    venueSettlements: {
+      polymarket: { status: "resolved", outcome: "UP" },
+      predict: { status: "pending", reason: "ambiguous official result" },
+    },
+    legs: [{ venue: "Predict.fun", side: "UP", shares: 16.944795 }],
+  };
+  bot.state.paperTrades = [trade];
+
+  const settled = bot._processClobCloseSettlements(300_001);
+  bot._recalculateStats();
+
+  assert.equal(settled, 1);
+  assert.equal(trade.finalized, true);
+  assert.equal(trade.settlementMethod, "clob_close_price_proxy");
+  assert.equal(trade.venueSettlements.predict.outcome, null);
+  assert.equal(
+    trade.venueSettlements.predict.decisionRule,
+    "incomplete_close_book_conservative_loss",
+  );
+  assert.equal(trade.venueSettlements.predict.upQuoteSource, "persisted_last_position_mark_only");
+  assert.equal(trade.officialVenueSettlements.predict.status, "pending");
+  assert.ok(Math.abs(trade.realizedPnl + 10.302435) < 1e-9);
+  assert.equal(bot.state.stats.awaitingSettlementForSizing, false);
+  assert.ok(logs.some((entry) => entry.event === "PAPER_CLOB_CLOSE_PROXY_SETTLED"));
+});
+
+test("captures only fresh, exactly matched venue bids in the final three seconds", () => {
+  const bot = new ArbitrageBot({ stdoutLogger: () => {} });
+  const trade = {
+    openMs: 0,
+    closeMs: 300_000,
+    venue: "Polymarket",
+    side: "UP",
+    legs: [
+      {
+        venue: "Polymarket",
+        side: "UP",
+        conditionId: "poly-condition",
+        marketSlug: "btc-updown-5m-0",
+      },
+    ],
+  };
+  const venue = {
+    status: "ok",
+    market: {
+      matchStatus: "matched",
+      startMs: 0,
+      closeMs: 300_000,
+      conditionId: "poly-condition",
+      slug: "btc-updown-5m-0",
+    },
+    up: {
+      status: "ok",
+      observedAt: 299_400,
+      receivedAt: 299_500,
+      bids: [{ price: 0.985, size: 100 }],
+    },
+    down: {
+      status: "ok",
+      observedAt: 299_300,
+      receivedAt: 299_500,
+      bids: [{ price: 0.02, size: 100 }],
+    },
+  };
+
+  bot._captureClobCloseQuotes(
+    trade,
+    { polymarket: venue },
+    299_600,
+  );
+
+  assert.equal(
+    trade.clobCloseQuotesByVenue.polymarket.finalThreeSeconds.UP.bid,
+    0.985,
+  );
+  assert.equal(
+    trade.clobCloseQuotesByVenue.polymarket.finalThreeSeconds.DOWN.bid,
+    0.02,
+  );
+  assert.equal(
+    engine.resolveClobCloseOutcome(
+      trade.clobCloseQuotesByVenue.polymarket,
+    ).outcome,
+    "UP",
+  );
+
+  const staleTrade = { ...trade, clobCloseQuotesByVenue: undefined };
+  const staleVenue = {
+    ...venue,
+    up: { ...venue.up, observedAt: 290_000 },
+    down: { ...venue.down, observedAt: 290_000 },
+  };
+  bot._captureClobCloseQuotes(
+    staleTrade,
+    { polymarket: staleVenue },
+    299_600,
+  );
+  assert.deepEqual(staleTrade.clobCloseQuotesByVenue.polymarket, {
+    lastInWindow: {},
+    finalThreeSeconds: {},
+  });
+});
+
 test("migrates old shared-benchmark results to pending without resetting a current ledger", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "arb-state-migration-"));
   const stateFile = path.join(directory, "arb-state.json");
@@ -1343,14 +1570,14 @@ test("migrates old shared-benchmark results to pending without resetting a curre
     assert.equal(bot.startingCapitalUsd, 10_000);
     assert.equal(bot.realizedPnlTotal, 0);
     assert.equal(trade.finalized, false);
-    assert.equal(trade.status, "awaiting_official_venue_settlement");
+    assert.equal(trade.status, "awaiting_clob_close_price_proxy");
     assert.equal(trade.priorBenchmarkSettlement.pnl, 36.61);
     assert.equal(bot.state.stats.capitalCommitted, 148.78);
     assert.equal(bot.state.stats.availableCapitalUsd, 9_851.22);
-    assert.ok(logs.some((entry) => entry.event === "OFFICIAL_SETTLEMENT_MIGRATION"));
+    assert.ok(logs.some((entry) => entry.event === "CLOB_CLOSE_PROXY_MIGRATION"));
     const migratedFile = JSON.parse(await fs.readFile(stateFile, "utf8"));
     assert.equal(migratedFile.version, 5);
-    assert.equal(migratedFile.settlementModel, "independent-venue-v1");
+    assert.equal(migratedFile.settlementModel, "venue-clob-close-price-proxy-v1");
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

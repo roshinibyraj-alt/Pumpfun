@@ -2,6 +2,7 @@
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_BOOK_AGE_MS = 8000;
+const CLOB_CLOSE_WINNER_THRESHOLD = 0.98;
 
 function finiteNumber(value) {
   const number = Number(value);
@@ -805,6 +806,172 @@ function updateTradeWithOfficialVenueSettlement(
   };
 }
 
+function normalizeCloseQuote(quote, source) {
+  if (!quote || typeof quote !== "object") return null;
+  const rawBid = quote.bid ?? quote.price;
+  const bid =
+    rawBid === null || rawBid === undefined ? null : finiteNumber(rawBid);
+  if (bid === null || bid < 0 || bid > 1) return null;
+  const rawTimestamp = quote.observedAt ?? quote.receivedAt ?? quote.ts;
+  const observedAt =
+    rawTimestamp === null || rawTimestamp === undefined
+      ? null
+      : finiteNumber(rawTimestamp);
+  return { bid, observedAt, source: quote.source || source };
+}
+
+function resolveClobCloseOutcome(venueSnapshots = {}) {
+  const finalQuotes = venueSnapshots.finalThreeSeconds || {};
+  const lastQuotes = venueSnapshots.lastInWindow || {};
+  const chooseSideQuote = (side) =>
+    normalizeCloseQuote(finalQuotes[side], "final_three_seconds") ||
+    normalizeCloseQuote(lastQuotes[side], "last_in_window");
+  const up = chooseSideQuote("UP");
+  const down = chooseSideQuote("DOWN");
+  let outcome = null;
+  let source = "no_valid_quotes_conservative_loss";
+  const aboveThreshold = (quote) =>
+    quote && quote.bid > CLOB_CLOSE_WINNER_THRESHOLD;
+
+  if (aboveThreshold(up) && !aboveThreshold(down)) {
+    outcome = "UP";
+    source = "up_bid_above_0_98";
+  } else if (aboveThreshold(down) && !aboveThreshold(up)) {
+    outcome = "DOWN";
+    source = "down_bid_above_0_98";
+  } else if (up && down && up.bid !== down.bid) {
+    outcome = up.bid > down.bid ? "UP" : "DOWN";
+    source = "higher_best_bid";
+  } else if (up && !down) {
+    source = "incomplete_close_book_conservative_loss";
+  } else if (down && !up) {
+    source = "incomplete_close_book_conservative_loss";
+  } else if (up && down) {
+    const upTimestamp = up.observedAt ?? Number.NEGATIVE_INFINITY;
+    const downTimestamp = down.observedAt ?? Number.NEGATIVE_INFINITY;
+    outcome = downTimestamp > upTimestamp ? "DOWN" : "UP";
+    source =
+      upTimestamp === downTimestamp
+        ? "equal_bids_tie_break_up"
+        : "equal_bids_freshest_quote";
+  }
+
+  return {
+    outcome,
+    source,
+    threshold: CLOB_CLOSE_WINNER_THRESHOLD,
+    upBid: up?.bid ?? null,
+    downBid: down?.bid ?? null,
+    upQuoteAt: up?.observedAt ?? null,
+    downQuoteAt: down?.observedAt ?? null,
+    upQuoteSource: up?.source ?? null,
+    downQuoteSource: down?.source ?? null,
+  };
+}
+
+function updateTradeWithClobClosePriceProxy(
+  trade,
+  closeQuotesByVenue = {},
+  nowMs = Date.now(),
+) {
+  if (trade.finalized === true) return trade;
+  const closeMs = finiteNumber(trade.closeMs);
+  if (closeMs !== null && Number(nowMs) < closeMs) {
+    return {
+      ...trade,
+      finalized: false,
+      status: trade.status || "open_position",
+    };
+  }
+
+  const tradeVenue = venueKey(trade.venue);
+  const storedLegs = Array.isArray(trade.legs) ? trade.legs : [];
+  const legs =
+    storedLegs.length > 0
+      ? storedLegs
+      : tradeVenue && trade.side && trade.shares !== undefined
+        ? [trade]
+        : [];
+  const requiredVenues = new Set(
+    legs.map((leg) => venueKey(leg.venue)).filter(Boolean),
+  );
+  if (requiredVenues.size === 0 && tradeVenue) requiredVenues.add(tradeVenue);
+
+  const venueSettlements = {};
+  for (const key of requiredVenues) {
+    const result = resolveClobCloseOutcome(closeQuotesByVenue[key] || {});
+    venueSettlements[key] = {
+      status: "paper_proxy",
+      outcome: result.outcome,
+      source: "venue CLOB close-price paper proxy",
+      decisionRule: result.source,
+      threshold: result.threshold,
+      upBid: result.upBid,
+      downBid: result.downBid,
+      upQuoteAt: result.upQuoteAt,
+      downQuoteAt: result.downQuoteAt,
+      upQuoteSource: result.upQuoteSource,
+      downQuoteSource: result.downQuoteSource,
+    };
+  }
+
+  const legSettlements = legs.map((leg) => {
+    const key = venueKey(leg.venue);
+    const side = String(leg.side ?? "").toUpperCase();
+    const rawShares = leg.shares;
+    const shares =
+      rawShares === null || rawShares === undefined
+        ? null
+        : finiteNumber(rawShares);
+    const winningOutcome = venueSettlements[key]?.outcome ?? null;
+    const validLeg =
+      (side === "UP" || side === "DOWN") && shares !== null && shares >= 0;
+    return {
+      venue: leg.venue,
+      side,
+      winningOutcome,
+      shares,
+      payout: validLeg && side === winningOutcome ? shares : 0,
+      settlementSource: venueSettlements[key]?.source || "missing_venue_deterministic_up",
+    };
+  });
+  const finalPayout = legSettlements.reduce(
+    (sum, leg) => sum + (finiteNumber(leg.payout) ?? 0),
+    0,
+  );
+  const rawEntryCash = trade.entryCash ?? trade.pairCash;
+  const entryCash =
+    rawEntryCash === null || rawEntryCash === undefined
+      ? 0
+      : finiteNumber(rawEntryCash) ?? 0;
+  const finalOutcome =
+    [...requiredVenues]
+      .map((key) => {
+        const name = key === "polymarket" ? "Polymarket" : "Predict.fun";
+        return `${name} ${venueSettlements[key].outcome || "no complete CLOB close book"}`;
+      })
+      .join(" / ") || "No mapped venue";
+
+  return {
+    ...trade,
+    status: "finalized_clob_close_price_proxy",
+    finalized: true,
+    finalOutcome,
+    finalPayout,
+    realizedPnl: finalPayout - entryCash,
+    finalizedAt: Math.max(Number(nowMs), closeMs ?? 0),
+    settlementLabel: "CLOB_CLOSE_PRICE_PAPER_PROXY_NOT_OFFICIAL",
+    settlementMethod: "clob_close_price_proxy",
+    officialVenueSettlements:
+      trade.officialVenueSettlements ?? trade.venueSettlements ?? null,
+    venueSettlements,
+    legSettlements,
+    provisionalOutcome: null,
+    provisionalPayout: null,
+    provisionalPnl: null,
+  };
+}
+
 function calculatePaperCapital(options = {}) {
   const startingCapitalUsd = Math.max(
     0,
@@ -858,5 +1025,8 @@ module.exports = {
   getPredictResolvedOutcome,
   pairPayoutForOutcome,
   updateTradeWithOfficialVenueSettlement,
+  CLOB_CLOSE_WINNER_THRESHOLD,
+  resolveClobCloseOutcome,
+  updateTradeWithClobClosePriceProxy,
   calculatePaperCapital,
 };

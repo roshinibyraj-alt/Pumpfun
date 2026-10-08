@@ -16,6 +16,7 @@ const {
   normalizeLevels,
   toTimestampMs,
   updateTradeWithOfficialVenueSettlement,
+  updateTradeWithClobClosePriceProxy,
   walkBids,
   windowForTime,
   windowsMatch,
@@ -32,10 +33,11 @@ const MAX_EXECUTION_WAIT_MS = 3000;
 const RETRY_AFTER_MISSED_MS = 1000;
 const PREDICT_MARKET_CACHE_MS = 60_000;
 const POLYMARKET_MARKET_CACHE_MS = 60_000;
+const CLOB_CLOSE_SAMPLE_WINDOW_MS = 3_000;
 const SETTLEMENT_RETRY_MS = 15_000;
 const MAX_SETTLEMENT_WINDOWS_PER_TICK = 1;
 const HEARTBEAT_INTERVAL_MS = 30_000;
-const SETTLEMENT_MODEL = "independent-venue-v1";
+const SETTLEMENT_MODEL = "venue-clob-close-price-proxy-v1";
 const STRATEGY_VERSION = "lagging-venue-martingale-v4";
 const PAPER_LEDGER_VERSION = 5;
 const LEGACY_STRATEGY_VERSION = "lagging-venue-v1";
@@ -61,9 +63,11 @@ const STRATEGY = Object.freeze({
   maxEntriesPerWindow: 1,
 });
 
-const SIMULATED_EXIT_METHODS = new Set([
+const ALREADY_FINAL_SETTLEMENT_METHODS = new Set([
+  "official_venue_markets",
   "simulated_take_profit",
   "simulated_stop_loss",
+  "clob_close_price_proxy",
 ]);
 
 function parseJsonArray(value) {
@@ -392,12 +396,16 @@ class ArbitrageBot {
           entryPriceRule: "ask_band",
           ...STRATEGY,
           entryCutoffSeconds: STRATEGY.maxEntrySeconds,
+          settlementMethod: "venue CLOB close-price paper proxy; not official settlement",
+          closeSampleSeconds: CLOB_CLOSE_SAMPLE_WINDOW_MS / 1000,
+          closeWinnerBidThreshold: 0.98,
+          missingQuoteFallback: "use latest in-window bids; incomplete close books realize a conservative paper loss unless a side has a bid above $0.98",
         },
       },
       window: null,
       benchmark: {
         source: "Coinbase Exchange BTC-USD",
-        use: "diagnostic/provisional reference only; never used for official venue settlement or final P&L",
+        use: "diagnostic/provisional reference only; not used for entries, exits, or CLOB close-price paper P&L",
         status: "waiting",
       },
       venues: {
@@ -469,8 +477,7 @@ class ArbitrageBot {
         for (const trade of this.state.paperTrades) {
           if (
             trade.finalized === true &&
-            trade.settlementMethod !== "official_venue_markets" &&
-            !SIMULATED_EXIT_METHODS.has(trade.settlementMethod)
+            !ALREADY_FINAL_SETTLEMENT_METHODS.has(trade.settlementMethod)
           ) {
             priorBenchmarkPnl += finiteNumber(trade.realizedPnl) ?? 0;
             trade.priorBenchmarkSettlement ??= {
@@ -482,7 +489,7 @@ class ArbitrageBot {
             trade.finalized = false;
             trade.status =
               Number(trade.closeMs) <= Date.now()
-                ? "awaiting_official_venue_settlement"
+                ? "awaiting_clob_close_price_proxy"
                 : "open_provisional";
             trade.finalOutcome = null;
             trade.finalPayout = null;
@@ -491,17 +498,17 @@ class ArbitrageBot {
             trade.provisionalOutcome = null;
             trade.provisionalPayout = null;
             trade.provisionalPnl = null;
-            trade.settlementLabel = "OFFICIAL_VENUE_SETTLEMENT_PENDING";
+            trade.settlementLabel = "CLOB_CLOSE_PRICE_PAPER_PROXY_PENDING";
             migratedTrades += 1;
           } else if (
             trade.finalized !== true &&
             Number(trade.closeMs) <= Date.now()
           ) {
-            trade.status = "awaiting_official_venue_settlement";
+            trade.status = "awaiting_clob_close_price_proxy";
             trade.provisionalOutcome = null;
             trade.provisionalPayout = null;
             trade.provisionalPnl = null;
-            trade.settlementLabel = "OFFICIAL_VENUE_SETTLEMENT_PENDING";
+            trade.settlementLabel = "CLOB_CLOSE_PRICE_PAPER_PROXY_PENDING";
           } else if (trade.finalized !== true) {
             trade.provisionalOutcome = null;
             trade.provisionalPayout = null;
@@ -527,8 +534,8 @@ class ArbitrageBot {
         migratedTrades > 0;
       if (migratedTrades > 0) {
         this._log(
-          "OFFICIAL_SETTLEMENT_MIGRATION",
-          "Legacy shared-benchmark results were moved back to pending; open positions will be reconciled against the exact venue holding the shares.",
+          "CLOB_CLOSE_PROXY_MIGRATION",
+          "Legacy benchmark results were moved back to pending; expired rows will be finalized with the holding venue's CLOB close-price paper proxy.",
           {
             migratedTrades,
             priorBenchmarkPnl,
@@ -646,7 +653,7 @@ class ArbitrageBot {
         triggerMet: item.triggerMet ?? false,
       })),
       paperPositions: this.state.paperTrades.length,
-      pendingOfficialSettlements: this.state.paperTrades.filter(
+      pendingClobCloseSettlements: this.state.paperTrades.filter(
         (trade) => !trade.finalized && Number(trade.closeMs) <= Number(nowMs),
       ).length,
     });
@@ -822,11 +829,12 @@ class ArbitrageBot {
     this.state.venues.predict = predictResult;
     this.state.benchmark = currentBenchmark || {
       source: "Coinbase Exchange BTC-USD",
-      use: "diagnostic/provisional reference only; never used for official venue settlement or final P&L",
+      use: "diagnostic/provisional reference only; not used for entries, exits, or CLOB close-price paper P&L",
       status: "unavailable",
     };
 
     const evaluationAt = Date.now();
+    this._processClobCloseSettlements(evaluationAt);
     const evaluated = this._evaluate(
       currentWindow,
       polyResult,
@@ -854,24 +862,28 @@ class ArbitrageBot {
     for (const trade of this.state.paperTrades) {
       if (
         trade.finalized ||
-        Number(trade.openMs) !== Number(currentWindow.openMs) ||
-        Number(trade.closeMs) <= evaluationAt
+        Number(trade.openMs) !== Number(currentWindow.openMs)
       ) {
         continue;
       }
-      if (ACTIVE_STRATEGY_VERSIONS.has(trade.strategyVersion)) {
-        this._markPaperPosition(trade, evaluationAt);
-        continue;
-      }
-      const updated = updateTradeWithOfficialVenueSettlement(
+      this._captureClobCloseQuotes(
         trade,
-        currentBenchmark,
-        null,
+        { polymarket: polyResult, predict: predictResult },
         evaluationAt,
       );
-      Object.assign(trade, updated);
+      if (Number(trade.closeMs) <= evaluationAt) continue;
+      if (ACTIVE_STRATEGY_VERSIONS.has(trade.strategyVersion)) {
+        this._markPaperPosition(trade, evaluationAt);
+      } else {
+        const updated = updateTradeWithOfficialVenueSettlement(
+          trade,
+          currentBenchmark,
+          null,
+          evaluationAt,
+        );
+        Object.assign(trade, updated);
+      }
     }
-    const settlementResults = await this._processOfficialSettlements(evaluationAt);
     const rateLimitText = [
       polyResult.error,
       polyResult.up?.error,
@@ -881,7 +893,6 @@ class ArbitrageBot {
       predictResult.up?.error,
       predictResult.down?.error,
       currentBenchmark?.error,
-      ...settlementResults.map((item) => item.error),
     ]
       .filter(Boolean)
       .join(" ");
@@ -1024,7 +1035,7 @@ class ArbitrageBot {
         } else if (windowHasPendingEntry) {
           reasons.push("A paper entry is already queued for this five-minute window.");
         } else if (previousSettlementPending) {
-          reasons.push("A prior paper result is still awaiting official settlement; martingale sizing is paused.");
+          reasons.push("A prior paper result is still awaiting CLOB close-price proxy settlement; martingale sizing is paused.");
         }
         const result = {
           ...evaluation,
@@ -1328,7 +1339,7 @@ class ArbitrageBot {
       takeProfitCreditPerShare: STRATEGY.takeProfitCreditPerShare,
       status: "open_position",
       benchmarkSource: benchmark?.source || "Coinbase Exchange BTC-USD",
-      settlementLabel: "OFFICIAL_VENUE_SETTLEMENT_PENDING",
+      settlementLabel: "CLOB_CLOSE_PRICE_PAPER_PROXY_PENDING",
       settlementMethod: null,
       venueSettlements: null,
       legSettlements: null,
@@ -1376,6 +1387,94 @@ class ArbitrageBot {
     trade.provisionalPnl = trade.provisionalPayout - Number(trade.entryCash);
     trade.provisionalOutcome = null;
     if (!trade.pendingExit) trade.status = "open_position";
+  }
+
+  _captureClobCloseQuotes(trade, venueStates, nowMs) {
+    const openMs = finiteNumber(trade.openMs);
+    const closeMs = finiteNumber(trade.closeMs);
+    if (
+      openMs === null ||
+      closeMs === null ||
+      nowMs < openMs ||
+      nowMs >= closeMs
+    ) {
+      return;
+    }
+
+    const legs = Array.isArray(trade.legs) ? trade.legs : [];
+    const venueLegs = new Map();
+    for (const leg of legs) {
+      const key = venueKey(leg.venue);
+      if (key && !venueLegs.has(key)) venueLegs.set(key, leg);
+    }
+    if (venueLegs.size === 0) {
+      const key = venueKey(trade.venue);
+      if (key) venueLegs.set(key, trade);
+    }
+
+    for (const [key, leg] of venueLegs) {
+      const venueState = venueStates?.[key];
+      const market = venueState?.market;
+      if (
+        venueState?.status !== "ok" ||
+        market?.matchStatus !== "matched" ||
+        Number(market.startMs) !== openMs ||
+        Number(market.closeMs) !== closeMs
+      ) {
+        continue;
+      }
+      const expectedConditionId = String(leg.conditionId || "").toLowerCase();
+      const actualConditionId = String(market.conditionId || "").toLowerCase();
+      if (expectedConditionId && expectedConditionId !== actualConditionId) {
+        continue;
+      }
+      const expectedSlug = String(leg.marketSlug || "");
+      const actualSlug = String(market.slug || "");
+      if (expectedSlug && actualSlug && expectedSlug !== actualSlug) continue;
+
+      const venueQuotes =
+        (trade.clobCloseQuotesByVenue ||= {})[key] ||= {
+          lastInWindow: {},
+          finalThreeSeconds: {},
+        };
+      for (const side of ["UP", "DOWN"]) {
+        const quote = venueState[side.toLowerCase()];
+        if (quote?.status !== "ok") continue;
+        const bestBid = normalizeLevels(quote.bids, "bids")[0]?.price;
+        const observedAt =
+          finiteNumber(quote.observedAt) ?? finiteNumber(quote.receivedAt);
+        const receivedAt = finiteNumber(quote.receivedAt);
+        if (
+          bestBid === undefined ||
+          bestBid < 0 ||
+          bestBid > 1 ||
+          observedAt === null ||
+          receivedAt === null ||
+          observedAt < openMs ||
+          observedAt >= closeMs ||
+          observedAt > nowMs + 1000 ||
+          nowMs - observedAt > this.maxBookAgeMs
+        ) {
+          continue;
+        }
+        const snapshot = {
+          bid: bestBid,
+          observedAt,
+          receivedAt,
+          source: "live_clob_book",
+        };
+        const updateIfNewer = (bucket) => {
+          const previous = bucket[side];
+          if (!previous || observedAt >= Number(previous.observedAt)) {
+            bucket[side] = snapshot;
+          }
+        };
+        updateIfNewer(venueQuotes.lastInWindow);
+        if (nowMs >= closeMs - CLOB_CLOSE_SAMPLE_WINDOW_MS) {
+          updateIfNewer(venueQuotes.finalThreeSeconds);
+        }
+      }
+    }
   }
 
   _processPaperPositionExits(window, nowMs) {
@@ -1552,6 +1651,83 @@ class ArbitrageBot {
     );
   }
 
+  _processClobCloseSettlements(nowMs) {
+    let settledCount = 0;
+    for (const trade of this.state.paperTrades) {
+      if (trade.finalized || Number(trade.closeMs) > Number(nowMs)) continue;
+
+      const closeQuotesByVenue = trade.clobCloseQuotesByVenue || {};
+      const heldVenue = venueKey(trade.venue);
+      const heldSide = String(trade.side || "").toUpperCase();
+      const markPrice =
+        trade.markPrice === null || trade.markPrice === undefined
+          ? null
+          : finiteNumber(trade.markPrice);
+      const markedAt =
+        trade.markedAt === null || trade.markedAt === undefined
+          ? null
+          : finiteNumber(trade.markedAt);
+      if (
+        heldVenue &&
+        (heldSide === "UP" || heldSide === "DOWN") &&
+        markPrice !== null &&
+        markPrice >= 0 &&
+        markPrice <= 1
+      ) {
+        const venueQuotes = (closeQuotesByVenue[heldVenue] ||= {
+          lastInWindow: {},
+          finalThreeSeconds: {},
+        });
+        venueQuotes.lastInWindow ||= {};
+        venueQuotes.finalThreeSeconds ||= {};
+        if (
+          !venueQuotes.finalThreeSeconds?.[heldSide] &&
+          !venueQuotes.lastInWindow?.[heldSide]
+        ) {
+          const fallback = {
+            bid: markPrice,
+            observedAt: markedAt,
+            source: "persisted_last_position_mark_only",
+          };
+          venueQuotes.lastInWindow[heldSide] = fallback;
+          if (
+            markedAt !== null &&
+            markedAt >= Number(trade.closeMs) - CLOB_CLOSE_SAMPLE_WINDOW_MS &&
+            markedAt < Number(trade.closeMs)
+          ) {
+            venueQuotes.finalThreeSeconds[heldSide] = fallback;
+          }
+        }
+      }
+      trade.clobCloseQuotesByVenue = closeQuotesByVenue;
+
+      const updated = updateTradeWithClobClosePriceProxy(
+        trade,
+        closeQuotesByVenue,
+        nowMs,
+      );
+      Object.assign(trade, updated);
+      if (!updated.finalized) continue;
+      this.realizedPnlTotal += finiteNumber(updated.realizedPnl) ?? 0;
+      settledCount += 1;
+      this._log(
+        "PAPER_CLOB_CLOSE_PROXY_SETTLED",
+        `Expired paper position settled using its venue CLOB close-price proxy, not the official venue result: ${updated.finalOutcome}.`,
+        {
+          tradeId: trade.id,
+          settlementMethod: updated.settlementMethod,
+          finalOutcome: updated.finalOutcome,
+          finalPayout: updated.finalPayout,
+          realizedPnl: updated.realizedPnl,
+          venueSettlements: updated.venueSettlements,
+        },
+      );
+    }
+    return settledCount;
+  }
+
+  // Kept as a legacy helper for old ledger diagnostics and tests. The live
+  // paper loop does not call it; it uses CLOB close-price proxy settlement.
   async _processOfficialSettlements(nowMs) {
     const groups = new Map();
     for (const trade of this.state.paperTrades) {
@@ -2305,7 +2481,7 @@ class ArbitrageBot {
     });
     const result = {
       source: "Coinbase Exchange BTC-USD",
-      use: "diagnostic/provisional reference only; never used for official venue settlement or final P&L",
+      use: "diagnostic/provisional reference only; not used for entries, exits, or CLOB close-price paper P&L",
       status: "unavailable",
       openMs: window.openMs,
       closeMs: window.closeMs,
