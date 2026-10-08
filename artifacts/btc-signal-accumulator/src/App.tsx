@@ -74,8 +74,8 @@ type Opportunity = {
   entryAsk?: number;
   referenceBid?: number;
   referenceBidThreshold?: number;
-  laggingSignalAsk?: number;
-  maxLaggingSignalAsk?: number;
+  minimumEntryAsk?: number;
+  maximumEntryAsk?: number;
   elapsedSeconds?: number;
   entryAveragePrice?: number;
   entryCount?: number;
@@ -144,7 +144,8 @@ type BotState = {
     executionModel?: string;
     strategy?: {
       referenceBidThreshold: number;
-      maxLaggingSignalAsk: number;
+      minimumEntryAsk: number;
+      maximumEntryAsk: number;
       entrySide?: string;
       entryPriceRule?: string;
       shares: number;
@@ -240,16 +241,15 @@ function opportunityView(
   const referenceThreshold = Number(
     item.referenceBidThreshold ?? strategy?.referenceBidThreshold ?? 0.8,
   );
-  const laggingAskThreshold = Number(
-    item.maxLaggingSignalAsk ?? strategy?.maxLaggingSignalAsk ?? 0.7,
-  );
+  const minimumAsk = Number(item.minimumEntryAsk ?? strategy?.minimumEntryAsk ?? 0.6);
+  const maximumAsk = Number(item.maximumEntryAsk ?? strategy?.maximumEntryAsk ?? 0.7);
   const hasBid = item.referenceBid != null && Number.isFinite(Number(item.referenceBid));
-  const hasLaggingAsk =
-    item.laggingSignalAsk != null && Number.isFinite(Number(item.laggingSignalAsk));
   const hasAsk = item.entryAsk != null && Number.isFinite(Number(item.entryAsk));
   const leaderPass = hasBid && Number(item.referenceBid) + 1e-9 >= referenceThreshold;
-  const laggingPass =
-    hasLaggingAsk && Number(item.laggingSignalAsk) <= laggingAskThreshold + 1e-9;
+  const askPass =
+    hasAsk &&
+    Number(item.entryAsk) + 1e-9 >= minimumAsk &&
+    Number(item.entryAsk) < maximumAsk - 1e-9;
 
   let label = "Waiting";
   let tone = "quiet";
@@ -281,19 +281,20 @@ function opportunityView(
           : "Leader best bid is unavailable.",
       );
     }
-    if (!laggingPass) {
+    if (!askPass) {
       unmet.push(
-        hasLaggingAsk
-          ? `Lagging venue's ${item.signalSide || ""} ask ${dollars(item.laggingSignalAsk)} is above ${dollars(laggingAskThreshold)}.`
-          : "Lagging venue's signal-side ask is unavailable.",
+        !hasAsk
+          ? "Entry best ask is unavailable."
+          : Number(item.entryAsk) < minimumAsk
+            ? `Entry ask ${dollars(item.entryAsk)} is below ${dollars(minimumAsk)}.`
+            : `Entry ask ${dollars(item.entryAsk)} must be below ${dollars(maximumAsk)}.`,
       );
     }
-    if (!hasAsk) unmet.push("The opposite-outcome entry ask is unavailable.");
     reason = unmet.join(" ");
   } else if (item.status === "insufficient_depth") {
     label = "Depth short";
     tone = "warn";
-    reason = `Fewer than ${shares(strategy?.shares ?? 500)} shares are available at any executable ask.`;
+    reason = `Fewer than ${shares(strategy?.shares ?? 500)} shares are available in the ${dollars(minimumAsk)}–<${dollars(maximumAsk)} entry band.`;
   } else if (item.status === "insufficient_capital") {
     label = "Capital short";
     tone = "warn";
@@ -310,11 +311,11 @@ function opportunityView(
     tone,
     reason,
     referenceThreshold,
-    laggingAskThreshold,
+    minimumAsk,
+    maximumAsk,
     leaderPass,
-    laggingPass,
+    askPass,
     hasBid,
-    hasLaggingAsk,
     hasAsk,
   };
 }
@@ -507,7 +508,7 @@ function App() {
           <div className="eyebrow">CROSS-VENUE PAPER SCANNER</div>
           <h1>BTC Cross-Venue Lag Signal</h1>
           <p>
-            Paper-only: when one venue signals UP or DOWN, buy the opposite outcome on the other matched venue.
+            Paper-only: when one venue signals UP or DOWN, buy that same outcome on the other matched venue.
           </p>
         </div>
         <div className="window-clock">
@@ -542,7 +543,7 @@ function App() {
             ≥{dollars(config?.strategy?.referenceBidThreshold, 2)} <small>signal bid</small>
           </strong>
           <span className="stat-foot">
-            Same-side lagging ask ≤ {dollars(config?.strategy?.maxLaggingSignalAsk, 2)} · buy opposite
+            Same-side entry ask {dollars(config?.strategy?.minimumEntryAsk, 2)}–&lt;{dollars(config?.strategy?.maximumEntryAsk, 2)} · buy signal side
           </span>
         </article>
         <article className="stat-card stat-leg">
@@ -625,7 +626,7 @@ function App() {
                   <div>
                     <strong>{item.entryVenue || "—"}</strong>
                     <small>
-                      Buy {item.side || "—"} · {item.referenceVenue || "—"} signals {item.signalSide || "—"}
+                      Buy {item.side || "—"} · {item.referenceVenue || "—"} confirms same side
                     </small>
                   </div>
                 </div>
@@ -640,23 +641,23 @@ function App() {
                   </strong>
                   <em>{view.hasBid ? (view.leaderPass ? "PASS" : "BELOW") : "NO DATA"}</em>
                 </div>
-                <div className={`signal-gate ${priceTone(view.hasLaggingAsk, view.laggingPass)}`}>
-                  <span>Lagging {item.signalSide || "signal-side"} ask</span>
+                <div className={`signal-gate ${priceTone(view.hasAsk, view.askPass)}`}>
+                  <span>{item.side || "Signal-side"} entry ask</span>
                   <strong>
-                    {dollars(item.laggingSignalAsk)}
-                    <small> / ≤ {dollars(view.laggingAskThreshold)}</small>
+                    {dollars(item.entryAsk)}
+                    <small> / {dollars(view.minimumAsk)}–&lt;{dollars(view.maximumAsk)}</small>
                   </strong>
-                  <em>{view.hasLaggingAsk ? (view.laggingPass ? "PASS" : "ABOVE") : "NO DATA"}</em>
+                  <em>{view.hasAsk ? (view.askPass ? "PASS" : "OUTSIDE BAND") : "NO DATA"}</em>
                 </div>
                 <div className="signal-gate signal-size">
-                  <span>Opposite {item.side || "outcome"} best ask</span>
-                  <strong>{dollars(item.entryAsk)}</strong>
+                  <span>500-share entry</span>
+                  <strong>{item.entryCash != null ? dollars(item.entryCash) : "—"}</strong>
                   <em>
-                    {view.hasAsk
-                      ? "ANY EXECUTABLE PRICE"
+                    {item.entryCash != null
+                      ? "ESTIMATED CASH"
                       : item.status === "insufficient_depth"
                         ? "DEPTH SHORT"
-                        : "NO DATA"}
+                        : "DEPTH CHECK AFTER PRICE"}
                   </em>
                 </div>
               </div>

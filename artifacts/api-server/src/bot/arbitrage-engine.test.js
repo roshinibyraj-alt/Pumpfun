@@ -234,17 +234,20 @@ test("derives an exact aligned five-minute window from Predict's canonical slug"
   );
 });
 
-test("contrarian entry requires a $0.80 signal bid and buys any executable opposite-outcome ask", () => {
+test("same-side entry requires a $0.80 signal bid and a $0.60–<$0.70 ask", () => {
+  const botConfig = new ArbitrageBot().state.config.strategy;
+  assert.equal(botConfig.type, "lagging-venue-single-side");
+  assert.equal(botConfig.entrySide, "same_as_signal");
+  assert.equal(botConfig.hardStopBid, null);
   const result = engine.evaluateLaggingVenueEntry({
     nowMs: 100_000,
     windowOpenMs: 0,
     referenceBook: strategyBook({ ask: 0.99, bid: 0.8 }),
-    laggingSignalBook: strategyBook({ ask: 0.3, bid: 0.29 }),
     entryBook: {
-      ...strategyBook({ ask: 0.2, bid: 0.19 }),
+      ...strategyBook({ ask: 0.6, bid: 0.59 }),
       asks: [
-        { price: 0.2, size: 250 },
-        { price: 0.24, size: 250 },
+        { price: 0.6, size: 250 },
+        { price: 0.65, size: 250 },
       ],
     },
     signalSide: "UP",
@@ -255,42 +258,37 @@ test("contrarian entry requires a $0.80 signal bid and buys any executable oppos
   });
   assert.equal(result.eligible, true);
   assert.equal(result.triggerMet, true);
-  assert.equal(result.laggingSignalAsk, 0.3);
+  assert.equal(result.entryAsk, 0.6);
   assert.equal(result.shares, 500);
-  assert.equal(result.bestAsk, 0.2);
-  assert.equal(result.averagePrice, 0.22);
+  assert.equal(result.bestAsk, 0.6);
+  assert.equal(result.averagePrice, 0.625);
   assert.equal(result.levelsUsed, 2);
-  assert.equal(result.fees, 2.2);
-  assert.equal(result.entryCash, 112.2);
+  assert.equal(result.fees, 3.75);
+  assert.equal(result.entryCash, 316.25);
 });
 
-test("uses a $0.70 lagging signal-side ask cap without a purchased-outcome price band", () => {
-  const evaluate = (entryAsk, referenceBid, laggingSignalAsk = 0.3) =>
+test("enforces the $0.60 minimum and exclusive $0.70 maximum entry ask", () => {
+  const evaluate = (entryAsk, referenceBid) =>
     engine.evaluateLaggingVenueEntry({
       nowMs: 100_000,
       windowOpenMs: 0,
       referenceBook: strategyBook({ ask: 0.99, bid: referenceBid }),
-      laggingSignalBook: strategyBook({
-        ask: laggingSignalAsk,
-        bid: Math.max(0.01, laggingSignalAsk - 0.01),
-      }),
       entryBook: strategyBook({ ask: entryAsk, bid: Math.max(0.01, entryAsk - 0.01) }),
       referenceMarketMatched: true,
       entryMarketMatched: true,
       feeModel: "polymarket",
       availableCashUsd: 10_000,
     });
-  assert.equal(evaluate(0.02, 0.99).eligible, true);
-  assert.equal(evaluate(0.99, 0.8).eligible, true);
+  assert.equal(evaluate(0.59, 0.99).eligible, false);
+  assert.equal(evaluate(0.7, 0.99).eligible, false);
+  assert.equal(evaluate(0.6, 0.8).eligible, true);
+  assert.equal(evaluate(0.69, 0.8).eligible, true);
   assert.equal(evaluate(0.6, 0.799).eligible, false);
-  assert.equal(evaluate(0.6, 0.99, 0.7).eligible, true);
-  assert.equal(evaluate(0.6, 0.99, 0.71).eligible, false);
 });
 
-test("contrarian entry requires 500 shares of visible depth and stops opening at 270 seconds", () => {
+test("same-side entry requires 500 shares of visible depth and stops opening at 270 seconds", () => {
   const shared = {
     referenceBook: strategyBook({ ask: 0.99, bid: 0.8 }),
-    laggingSignalBook: strategyBook({ ask: 0.3, bid: 0.29 }),
     referenceMarketMatched: true,
     entryMarketMatched: true,
     feeModel: "predict",
@@ -299,7 +297,7 @@ test("contrarian entry requires 500 shares of visible depth and stops opening at
   const shallow = engine.evaluateLaggingVenueEntry({
     ...shared,
     nowMs: 100_000,
-    entryBook: strategyBook({ ask: 0.35, bid: 0.34, size: 499 }),
+    entryBook: strategyBook({ ask: 0.65, bid: 0.64, size: 499 }),
     availableCashUsd: 10_000,
   });
   assert.equal(shallow.eligible, false);
@@ -309,8 +307,7 @@ test("contrarian entry requires 500 shares of visible depth and stops opening at
     ...shared,
     nowMs: 270_000,
     referenceBook: strategyBook({ ask: 0.99, bid: 0.8, observedAt: 270_000 }),
-    laggingSignalBook: strategyBook({ ask: 0.3, bid: 0.29, observedAt: 270_000 }),
-    entryBook: strategyBook({ ask: 0.35, bid: 0.34, observedAt: 270_000 }),
+    entryBook: strategyBook({ ask: 0.65, bid: 0.64, observedAt: 270_000 }),
     availableCashUsd: 10_000,
   });
   assert.equal(exactlyAtCutoff.triggerMet, true);
@@ -320,7 +317,7 @@ test("contrarian entry requires 500 shares of visible depth and stops opening at
   const noCapital = engine.evaluateLaggingVenueEntry({
     ...shared,
     nowMs: 100_000,
-    entryBook: strategyBook({ ask: 0.35, bid: 0.34 }),
+    entryBook: strategyBook({ ask: 0.65, bid: 0.64 }),
     availableCashUsd: 0,
   });
   assert.equal(noCapital.triggerMet, true);
@@ -328,14 +325,13 @@ test("contrarian entry requires 500 shares of visible depth and stops opening at
   assert.equal(noCapital.status, "insufficient_capital");
 });
 
-test("contrarian entry rejects stale books and unsafe cross-venue market matches", () => {
+test("same-side entry rejects stale books and unsafe cross-venue market matches", () => {
   const freshReference = strategyBook({ ask: 0.99, bid: 0.8 });
-  const freshEntry = strategyBook({ ask: 0.35, bid: 0.34 });
+  const freshEntry = strategyBook({ ask: 0.65, bid: 0.64 });
   const stale = engine.evaluateLaggingVenueEntry({
     nowMs: 100_000,
     windowOpenMs: 0,
     referenceBook: { ...freshReference, observedAt: 90_000, receivedAt: 90_000 },
-    laggingSignalBook: { ...strategyBook({ ask: 0.3, bid: 0.29 }), observedAt: 90_000, receivedAt: 90_000 },
     entryBook: freshEntry,
     referenceMarketMatched: true,
     entryMarketMatched: true,
@@ -345,25 +341,23 @@ test("contrarian entry rejects stale books and unsafe cross-venue market matches
   assert.equal(stale.eligible, false);
   assert.match(stale.reason, /stale/);
 
-  const staleLaggingSignal = engine.evaluateLaggingVenueEntry({
+  const staleEntry = engine.evaluateLaggingVenueEntry({
     nowMs: 100_000,
     windowOpenMs: 0,
     referenceBook: freshReference,
-    laggingSignalBook: { ...strategyBook({ ask: 0.3, bid: 0.29 }), observedAt: 90_000, receivedAt: 90_000 },
-    entryBook: freshEntry,
+    entryBook: { ...freshEntry, observedAt: 90_000, receivedAt: 90_000 },
     referenceMarketMatched: true,
     entryMarketMatched: true,
     feeModel: "polymarket",
     availableCashUsd: 10_000,
   });
-  assert.equal(staleLaggingSignal.eligible, false);
-  assert.match(staleLaggingSignal.reason, /Lagging signal-side book.*stale/);
+  assert.equal(staleEntry.eligible, false);
+  assert.match(staleEntry.reason, /Entry venue book.*stale/);
 
   const unmatched = engine.evaluateLaggingVenueEntry({
     nowMs: 100_000,
     windowOpenMs: 0,
     referenceBook: freshReference,
-    laggingSignalBook: strategyBook({ ask: 0.3, bid: 0.29 }),
     entryBook: freshEntry,
     referenceMarketMatched: true,
     entryMarketMatched: false,
@@ -387,14 +381,14 @@ test("enforces one re-entry per side only after the first position exits", () =>
     up: strategyBook({ ask: 0.6, bid: 0.59 }),
     down: strategyBook({ ask: 0.5, bid: 0.49 }),
   };
-  const direction = "BUY DOWN (opposite of UP) on Predict.fun · Polymarket signals";
+  const direction = "BUY UP on Predict.fun · Polymarket confirms";
   const first = bot._evaluate(window, poly, predict, 100_000);
   assert.equal(first.find((item) => item.direction === direction).eligible, true);
 
   bot.state.paperTrades.push({
-    id: "open-down",
-    strategyVersion: "contrarian-lagging-venue-v2",
-    side: "DOWN",
+    id: "open-up",
+    strategyVersion: "lagging-venue-same-side-v3",
+    side: "UP",
     openMs: 0,
     finalized: false,
     entryCash: 205,
@@ -406,7 +400,7 @@ test("enforces one re-entry per side only after the first position exits", () =>
   );
 
   bot.state.paperTrades[0].finalized = true;
-  bot.state.paperTrades[0].settlementMethod = "simulated_stop_loss";
+  bot.state.paperTrades[0].settlementMethod = "simulated_take_profit";
   assert.equal(
     bot._evaluate(window, poly, predict, 100_000).find((item) => item.direction === direction)
       .eligible,
@@ -414,8 +408,8 @@ test("enforces one re-entry per side only after the first position exits", () =>
   );
   bot.state.paperTrades.push({
     id: "reentry-up",
-    strategyVersion: "contrarian-lagging-venue-v2",
-    side: "DOWN",
+    strategyVersion: "lagging-venue-same-side-v3",
+    side: "UP",
     openMs: 0,
     finalized: true,
     settlementMethod: "simulated_take_profit",
@@ -426,7 +420,7 @@ test("enforces one re-entry per side only after the first position exits", () =>
   assert.equal(afterReentry.find((item) => item.direction === direction).entryCount, 2);
 });
 
-test("a DOWN signal buys UP on the lagging venue", () => {
+test("a DOWN signal buys DOWN on the lagging venue", () => {
   const window = { openMs: 0, closeMs: 300_000 };
   const poly = {
     market: { matchStatus: "matched", id: "poly", conditionId: "poly-condition" },
@@ -435,25 +429,25 @@ test("a DOWN signal buys UP on the lagging venue", () => {
   };
   const predict = {
     market: { matchStatus: "matched", id: "predict", conditionId: "predict-condition" },
-    up: strategyBook({ ask: 0.3, bid: 0.29 }),
-    down: strategyBook({ ask: 0.7, bid: 0.69 }),
+    up: strategyBook({ ask: 0.4, bid: 0.39 }),
+    down: strategyBook({ ask: 0.6, bid: 0.59 }),
   };
   const opportunity = new ArbitrageBot()
     ._evaluate(window, poly, predict, 100_000)
     .find(
       (item) =>
         item.signalSide === "DOWN" &&
-        item.side === "UP" &&
+        item.side === "DOWN" &&
         item.entryVenue === "Predict.fun",
     );
 
   assert.equal(opportunity.eligible, true);
   assert.equal(opportunity.signalSide, "DOWN");
-  assert.equal(opportunity.side, "UP");
-  assert.equal(opportunity.entryAsk, 0.3);
+  assert.equal(opportunity.side, "DOWN");
+  assert.equal(opportunity.entryAsk, 0.6);
 });
 
-test("opens the opposite outcome only after delayed fresh snapshots, then cannot fill after 270 seconds", () => {
+test("opens the signalled outcome only after delayed fresh snapshots, then cannot fill after 270 seconds", () => {
   const window = { openMs: 0, closeMs: 300_000 };
   const makeVenues = (observedAt) => ({
     poly: {
@@ -464,7 +458,7 @@ test("opens the opposite outcome only after delayed fresh snapshots, then cannot
     predict: {
       market: { matchStatus: "matched", id: "predict", conditionId: "predict-condition" },
       up: strategyBook({ ask: 0.6, bid: 0.59, observedAt }),
-      down: strategyBook({ ask: 0.4, bid: 0.39, observedAt }),
+      down: strategyBook({ ask: 0.5, bid: 0.49, observedAt }),
     },
   });
   const bot = new ArbitrageBot({ paperBaseLatencyMs: 100 });
@@ -474,12 +468,12 @@ test("opens the opposite outcome only after delayed fresh snapshots, then cannot
   const upSignalEntry = initial.find(
     (item) =>
       item.signalSide === "UP" &&
-      item.side === "DOWN" &&
+      item.side === "UP" &&
       item.entryVenue === "Predict.fun",
   );
   assert.equal(upSignalEntry.eligible, true);
   bot._schedulePaperEntries(window, [upSignalEntry], detectedAt);
-  const pending = bot.pendingPaperEntries.get(`${window.openMs}:DOWN`);
+  const pending = bot.pendingPaperEntries.get(`${window.openMs}:UP`);
   assert.ok(pending);
   bot._schedulePaperEntries(window, [upSignalEntry], detectedAt + 20);
   assert.equal(bot.pendingPaperEntries.size, 1);
@@ -495,13 +489,13 @@ test("opens the opposite outcome only after delayed fresh snapshots, then cannot
   bot._processPendingPaperEntries(window, arrivalOpportunities, null, fillAt);
   assert.equal(bot.state.paperTrades.length, 1);
   const trade = bot.state.paperTrades[0];
-  assert.equal(trade.strategyVersion, "contrarian-lagging-venue-v2");
+  assert.equal(trade.strategyVersion, "lagging-venue-same-side-v3");
   assert.equal(trade.venue, "Predict.fun");
   assert.equal(trade.signalSide, "UP");
-  assert.equal(trade.side, "DOWN");
+  assert.equal(trade.side, "UP");
   assert.equal(trade.shares, 500);
   assert.equal(trade.legs.length, 1);
-  assert.equal(trade.entryAveragePrice, 0.4);
+  assert.equal(trade.entryAveragePrice, 0.6);
   assert.equal(trade.stopBid, null);
   assert.equal(trade.hardStopBid, null);
   bot._schedulePaperEntries(window, [upSignalEntry], fillAt + 10);
@@ -516,7 +510,7 @@ test("opens the opposite outcome only after delayed fresh snapshots, then cannot
     .find(
       (item) =>
         item.signalSide === "UP" &&
-        item.side === "DOWN" &&
+        item.side === "UP" &&
         item.entryVenue === "Predict.fun",
     );
   assert.equal(clearedEntry.triggerMet, false);
@@ -528,7 +522,7 @@ test("opens the opposite outcome only after delayed fresh snapshots, then cannot
     .find(
       (item) =>
         item.signalSide === "UP" &&
-        item.side === "DOWN" &&
+        item.side === "UP" &&
         item.entryVenue === "Predict.fun",
     );
   assert.equal(reentry.entryCount, 1);
@@ -544,7 +538,7 @@ test("opens the opposite outcome only after delayed fresh snapshots, then cannot
     .find(
       (item) =>
         item.signalSide === "UP" &&
-        item.side === "DOWN" &&
+        item.side === "UP" &&
         item.entryVenue === "Predict.fun",
     );
   assert.equal(lateOpportunity.eligible, true);
@@ -563,7 +557,7 @@ test("TP credits $1 per share and falling below $0.45 does not trigger a stop-lo
   const window = { openMs: 0, closeMs: 300_000 };
   const makeTrade = (venue, side, feeModel, entryCash, entryAveragePrice) => ({
     id: `${venue}-${side}`,
-    strategyVersion: "contrarian-lagging-venue-v2",
+    strategyVersion: "lagging-venue-same-side-v3",
     openMs: 0,
     closeMs: 300_000,
     side,
