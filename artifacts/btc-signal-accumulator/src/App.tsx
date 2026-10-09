@@ -72,6 +72,8 @@ type Opportunity = {
   shares?: number;
   entryCash?: number;
   entryAsk?: number;
+  signalEntryAsk?: number;
+  signalEntryQuoteReceivedAt?: number | null;
   referenceBid?: number;
   referenceBidThreshold?: number;
   minimumEntryAsk?: number;
@@ -278,12 +280,13 @@ function opportunityView(
   const minimumAsk = Number(item.minimumEntryAsk ?? strategy?.minimumEntryAsk ?? 0.6);
   const maximumAsk = Number(item.maximumEntryAsk ?? strategy?.maximumEntryAsk ?? 0.7);
   const hasBid = item.referenceBid != null && Number.isFinite(Number(item.referenceBid));
-  const hasAsk = item.entryAsk != null && Number.isFinite(Number(item.entryAsk));
+  const signalAsk = item.signalEntryAsk !== undefined ? item.signalEntryAsk : item.entryAsk;
+  const hasAsk = signalAsk != null && Number.isFinite(Number(signalAsk));
   const leaderPass = hasBid && Number(item.referenceBid) + 1e-9 >= referenceThreshold;
   const askPass =
     hasAsk &&
-    Number(item.entryAsk) + 1e-9 >= minimumAsk &&
-    Number(item.entryAsk) < maximumAsk - 1e-9;
+    Number(signalAsk) + 1e-9 >= minimumAsk &&
+    Number(signalAsk) < maximumAsk - 1e-9;
 
   let label = "Waiting";
   let tone = "quiet";
@@ -291,7 +294,7 @@ function opportunityView(
   if (item.pendingExecution) {
     label = "Latency recheck";
     tone = "warn";
-    reason = "Price and depth qualified; both books are being checked again after modeled latency.";
+    reason = "Price and depth qualified; the reference, signal-side, and purchased-outcome books are being checked again after modeled latency.";
   } else if (item.eligible) {
     label = `Ready · ${dollars(item.stakeUsd)} stake`;
     tone = "good";
@@ -324,10 +327,10 @@ function opportunityView(
     if (!askPass) {
       unmet.push(
         !hasAsk
-          ? "Entry best ask is unavailable."
-          : Number(item.entryAsk) < minimumAsk
-            ? `Entry ask ${dollars(item.entryAsk)} is below ${dollars(minimumAsk)}.`
-            : `Entry ask ${dollars(item.entryAsk)} must be below ${dollars(maximumAsk)}.`,
+          ? "Same-signal ask on the entry venue is unavailable."
+          : Number(signalAsk) < minimumAsk
+            ? `Same-signal ask ${dollars(signalAsk)} is below ${dollars(minimumAsk)}.`
+            : `Same-signal ask ${dollars(signalAsk)} must be below ${dollars(maximumAsk)}.`,
       );
     }
     reason = unmet.join(" ");
@@ -336,8 +339,8 @@ function opportunityView(
     tone = "warn";
     reason =
       item.stakeUsd != null
-        ? `Visible depth cannot execute the full ${dollars(item.stakeUsd)} stake in the ${dollars(minimumAsk)}–<${dollars(maximumAsk)} entry band.`
-        : `Visible depth is insufficient in the ${dollars(minimumAsk)}–<${dollars(maximumAsk)} entry band.`;
+        ? `Visible opposite-outcome asks cannot execute the full ${dollars(item.stakeUsd)} stake.`
+        : "Visible opposite-outcome ask depth is insufficient.";
   } else if (item.status === "cutoff") {
     label = "Entry cutoff";
     tone = "quiet";
@@ -548,7 +551,7 @@ function App() {
           <div className="eyebrow">CROSS-VENUE PAPER SCANNER</div>
           <h1>BTC Cross-Venue Lag Signal</h1>
           <p>
-            Paper-only: when one venue signals UP or DOWN, buy that same outcome on the other matched venue.
+            Paper-only: when one venue signals UP or DOWN, buy the opposite outcome on the other matched venue.
           </p>
         </div>
         <div className="window-clock">
@@ -583,7 +586,7 @@ function App() {
             ≥{dollars(config?.strategy?.referenceBidThreshold, 2)} <small>signal bid</small>
           </strong>
           <span className="stat-foot">
-            Same-side entry ask {dollars(config?.strategy?.minimumEntryAsk, 2)}–&lt;{dollars(config?.strategy?.maximumEntryAsk, 2)} · buy signal side
+            Signal-side ask {dollars(config?.strategy?.minimumEntryAsk, 2)}–&lt;{dollars(config?.strategy?.maximumEntryAsk, 2)} · buy opposite outcome at its actual ask
           </span>
         </article>
         <article className="stat-card stat-leg">
@@ -592,7 +595,7 @@ function App() {
           <span className="stat-foot">
             {stats?.awaitingSettlementForSizing
               ? "Awaiting official result · new entries paused"
-              : `${((config?.strategy?.baseStakeFraction ?? 0.01) * 100).toFixed(0)}% base ${dollars(stats?.baseStakeUsd)} · ${stats?.lossStreak ?? 0} losses · ×${config?.strategy?.martingaleMultiplier ?? 3} each loss · 1/window`}
+              : `${((config?.strategy?.baseStakeFraction ?? 0.01) * 100).toFixed(0)}% base ${dollars(stats?.baseStakeUsd)} · ${stats?.lossStreak ?? 0} losses · ×${config?.strategy?.martingaleMultiplier ?? 1.5} each loss · 1/window`}
           </span>
         </article>
         <article className="stat-card stat-ready">
@@ -669,7 +672,7 @@ function App() {
                   <div>
                     <strong>{item.entryVenue || "—"}</strong>
                     <small>
-                      Buy {item.side || "—"} · {item.referenceVenue || "—"} confirms same side
+                      Buy {item.side || "—"} · opposite {item.signalSide || "signal"} · {item.referenceVenue || "—"} confirms
                     </small>
                   </div>
                 </div>
@@ -685,16 +688,16 @@ function App() {
                   <em>{view.hasBid ? (view.leaderPass ? "PASS" : "BELOW") : "NO DATA"}</em>
                 </div>
                 <div className={`signal-gate ${priceTone(view.hasAsk, view.askPass)}`}>
-                  <span>{item.side || "Signal-side"} entry ask</span>
+                  <span>{item.signalSide || "Signal-side"} signal ask</span>
                   <strong>
-                    {dollars(item.entryAsk)}
+                    {dollars(item.signalEntryAsk)}
                     <small> / {dollars(view.minimumAsk)}–&lt;{dollars(view.maximumAsk)}</small>
                   </strong>
                   <em>{view.hasAsk ? (view.askPass ? "PASS" : "OUTSIDE BAND") : "NO DATA"}</em>
                 </div>
                 <div className="signal-gate signal-size">
                   <span>
-                    Planned stake{item.shares != null ? ` · ${shares(item.shares)} shares` : ""}
+                    Planned stake{item.shares != null ? ` · ${shares(item.shares)} shares` : ""}{item.entryAsk != null ? ` · ${item.side || "opposite"} ask ${dollars(item.entryAsk)}` : ""}
                   </span>
                   <strong>
                     {item.entryCash != null

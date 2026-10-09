@@ -223,174 +223,77 @@ function evaluateLaggingVenueEntry(options = {}) {
   const maxBookSkewMs = finiteNumber(options.maxBookSkewMs);
   const referenceBook = options.referenceBook;
   const entryBook = options.entryBook;
+  const signalEntryBook = options.signalEntryBook || entryBook;
+  const signalSide = String(options.signalSide || "UP").toUpperCase();
+  const entrySide = String(options.entrySide || signalSide).toUpperCase();
   const blocked = (reason, extra = {}) => ({
-    status: "blocked",
-    eligible: false,
-    triggerMet: false,
-    signalObserved: false,
-    reason,
-    ...extra,
+    status: "blocked", eligible: false, triggerMet: false, signalObserved: false,
+    reason, ...extra,
   });
-
-  if ((stakeUsd === null && (!Number.isFinite(shares) || shares <= 0)) ||
-      (stakeUsd !== null && stakeUsd <= 0)) {
+  if ((stakeUsd === null && (!Number.isFinite(shares) || shares <= 0)) || (stakeUsd !== null && stakeUsd <= 0)) {
     return blocked("Paper stake or share quantity must be positive.");
   }
   if (options.referenceMarketMatched !== true || options.entryMarketMatched !== true) {
-    return blocked(
-      options.matchReason || "Both venue markets must be safely matched to the same window.",
-    );
+    return blocked(options.matchReason || "Both venue markets must be safely matched to the same window.");
   }
   const referenceFresh = checkBookFresh(referenceBook, nowMs, maxBookAgeMs);
-  if (!referenceFresh.ok) {
-    return blocked(`Reference venue book: ${referenceFresh.reason}`);
-  }
+  if (!referenceFresh.ok) return blocked("Reference venue book: " + referenceFresh.reason);
+  const signalEntryFresh = checkBookFresh(signalEntryBook, nowMs, maxBookAgeMs);
+  if (!signalEntryFresh.ok) return blocked("Entry venue book for signal side: " + signalEntryFresh.reason);
   const entryFresh = checkBookFresh(entryBook, nowMs, maxBookAgeMs);
-  if (!entryFresh.ok) {
-    return blocked(`Entry venue book: ${entryFresh.reason}`);
-  }
+  if (!entryFresh.ok) return blocked("Opposite-outcome entry venue book: " + entryFresh.reason);
   const snapshotTimes = [
     finiteNumber(referenceBook?.receivedAt ?? referenceBook?.observedAt),
+    finiteNumber(signalEntryBook?.receivedAt ?? signalEntryBook?.observedAt),
     finiteNumber(entryBook?.receivedAt ?? entryBook?.observedAt),
   ];
-  if (snapshotTimes.some((value) => value === null)) {
-    return blocked("A venue book timestamp is missing.");
-  }
+  if (snapshotTimes.some(value => value === null)) return blocked("A venue book timestamp is missing.");
   const snapshotSkewMs = Math.max(...snapshotTimes) - Math.min(...snapshotTimes);
   if (maxBookSkewMs !== null && snapshotSkewMs > maxBookSkewMs) {
-    return blocked(
-      `Venue book snapshots are ${Math.round(snapshotSkewMs)} ms apart; the limit is ${Math.round(maxBookSkewMs)} ms.`,
-      { snapshotSkewMs },
-    );
+    return blocked("Venue book snapshots are " + Math.round(snapshotSkewMs) + " ms apart; the limit is " + Math.round(maxBookSkewMs) + " ms.", { snapshotSkewMs });
   }
-
   const referenceBid = normalizeLevels(referenceBook?.bids, "bids")[0]?.price ?? null;
+  const signalEntryAsk = normalizeLevels(signalEntryBook?.asks, "asks")[0]?.price ?? null;
   const entryAsk = normalizeLevels(entryBook?.asks, "asks")[0]?.price ?? null;
   if (referenceBid === null) return blocked("Reference venue has no executable best bid.");
-  if (entryAsk === null) return blocked("Entry venue has no executable best ask.");
-  const signalObserved = true;
-  const triggerMet =
-    referenceBid + 1e-9 >= referenceBidThreshold &&
-    entryAsk + 1e-9 >= minimumEntryAsk &&
-    entryAsk < maximumEntryAsk - 1e-9;
-  const observed = {
-    referenceBid,
-    entryAsk,
-    snapshotSkewMs,
-    signalObserved,
-    triggerMet,
-    referenceBidThreshold,
-    minimumEntryAsk,
-    maximumEntryAsk,
-  };
+  if (signalEntryAsk === null) return blocked("Signal-side entry venue has no executable best ask.");
+  if (entryAsk === null) return blocked("Opposite-outcome entry venue has no executable best ask.");
+  const triggerMet = referenceBid + 1e-9 >= referenceBidThreshold && signalEntryAsk + 1e-9 >= minimumEntryAsk && signalEntryAsk < maximumEntryAsk - 1e-9;
+  const observed = { referenceBid, entryAsk, signalEntryAsk, signalSide, entrySide, snapshotSkewMs, signalObserved: true, triggerMet, referenceBidThreshold, minimumEntryAsk, maximumEntryAsk };
   if (!triggerMet) {
     const unmetRules = [];
-    if (referenceBid + 1e-9 < referenceBidThreshold) {
-      unmetRules.push(`reference best bid ≥ $${referenceBidThreshold.toFixed(2)}`);
-    }
-    if (entryAsk + 1e-9 < minimumEntryAsk) {
-      unmetRules.push(`entry best ask ≥ $${minimumEntryAsk.toFixed(2)}`);
-    } else if (entryAsk >= maximumEntryAsk - 1e-9) {
-      unmetRules.push(`entry best ask < $${maximumEntryAsk.toFixed(2)}`);
-    }
-    return {
-      status: "below_threshold",
-      eligible: false,
-      reason: `Waiting for ${unmetRules.join(" and ")}.`,
-      ...observed,
-    };
+    if (referenceBid + 1e-9 < referenceBidThreshold) unmetRules.push("reference best bid >= $" + referenceBidThreshold.toFixed(2));
+    if (signalEntryAsk + 1e-9 < minimumEntryAsk) unmetRules.push("same-signal outcome ask >= $" + minimumEntryAsk.toFixed(2));
+    else if (signalEntryAsk >= maximumEntryAsk - 1e-9) unmetRules.push("same-signal outcome ask < $" + maximumEntryAsk.toFixed(2));
+    return { status: "below_threshold", eligible: false, reason: "Waiting for " + unmetRules.join(" and ") + ".", ...observed };
   }
-
   const windowOpenMs = finiteNumber(options.windowOpenMs);
-  if (windowOpenMs === null || nowMs < windowOpenMs) {
-    return {
-      status: "blocked",
-      eligible: false,
-      reason: "The matching five-minute window has not started.",
-      ...observed,
-    };
-  }
+  if (windowOpenMs === null || nowMs < windowOpenMs) return { status: "blocked", eligible: false, reason: "The matching five-minute window has not started.", ...observed };
   const elapsedSeconds = (nowMs - windowOpenMs) / 1000;
-  if (elapsedSeconds >= maxEntrySeconds) {
-    return {
-      status: "cutoff",
-      eligible: false,
-      reason: `No new entries after ${maxEntrySeconds} seconds of the window.`,
-      elapsedSeconds,
-      ...observed,
-    };
-  }
-
-  const eligibleAsks = normalizeLevels(entryBook?.asks, "asks").filter(
-    (level) =>
-      level.price + 1e-9 >= minimumEntryAsk &&
-      level.price < maximumEntryAsk - 1e-9,
-  );
-  const fill =
-    stakeUsd === null
-      ? walkAsks(eligibleAsks, shares, options.feeModel)
-      : walkAsksForBudget(eligibleAsks, stakeUsd, options.feeModel);
+  if (elapsedSeconds >= maxEntrySeconds) return { status: "cutoff", eligible: false, reason: "No new entries after " + maxEntrySeconds + " seconds of the window.", elapsedSeconds, ...observed };
+  // The ask band confirms the original signal only. The purchased opposite outcome uses its actual visible asks without a price floor or cap.
+  const executableAsks = normalizeLevels(entryBook?.asks, "asks");
+  const fill = stakeUsd === null ? walkAsks(executableAsks, shares, options.feeModel) : walkAsksForBudget(executableAsks, stakeUsd, options.feeModel);
   const targetStakeUsd = stakeUsd ?? fill?.cash ?? null;
-  if (
-    !fill ||
-    (stakeUsd !== null && fill.cash + 0.01 < stakeUsd)
-  ) {
-    return {
-      status: "insufficient_depth",
-      eligible: false,
-      reason:
-        stakeUsd === null
-          ? `Fewer than ${shares} shares are executable in the entry ask band [$${minimumEntryAsk.toFixed(2)}, $${maximumEntryAsk.toFixed(2)}).`
-          : `Visible depth cannot execute the full $${stakeUsd.toFixed(2)} stake in the entry ask band [$${minimumEntryAsk.toFixed(2)}, $${maximumEntryAsk.toFixed(2)}).`,
-      elapsedSeconds,
-      stakeUsd: targetStakeUsd,
-      ...observed,
-    };
+  if (!fill || (stakeUsd !== null && fill.cash + 0.01 < stakeUsd)) {
+    return { status: "insufficient_depth", eligible: false, reason: stakeUsd === null ? "Fewer than " + shares + " opposite-outcome shares are executable from visible asks." : "Visible opposite-outcome ask depth cannot execute the full $" + stakeUsd.toFixed(2) + " stake.", elapsedSeconds, stakeUsd: targetStakeUsd, ...observed };
   }
   const availableCash = finiteNumber(options.availableCashUsd);
-  if (
-    availableCash !== null &&
-    (targetStakeUsd > availableCash + 1e-6 || fill.cash > availableCash + 1e-6)
-  ) {
-    return {
-      status: "insufficient_capital",
-      eligible: false,
-      reason: `The next $${Number(targetStakeUsd).toFixed(2)} paper stake exceeds available demo capital of $${availableCash.toFixed(2)}.`,
-      elapsedSeconds,
-      shares: fill.shares,
-      stakeUsd: targetStakeUsd,
-      entryCash: fill.cash,
-      ...observed,
-    };
+  if (availableCash !== null && (targetStakeUsd > availableCash + 1e-6 || fill.cash > availableCash + 1e-6)) {
+    return { status: "insufficient_capital", eligible: false, reason: "The next $" + Number(targetStakeUsd).toFixed(2) + " paper stake exceeds available demo capital of $" + availableCash.toFixed(2) + ".", elapsedSeconds, shares: fill.shares, stakeUsd: targetStakeUsd, entryCash: fill.cash, ...observed };
   }
-
-  const bestAsk = eligibleAsks[0]?.price ?? null;
+  const bestAsk = executableAsks[0]?.price ?? null;
   return {
-    status: "trigger",
-    eligible: true,
-    reason:
-      stakeUsd === null
-        ? `${options.signalSide || "Signal-side"} leader bid is $${referenceBid.toFixed(2)} and the other venue's same-side ask is $${entryAsk.toFixed(2)}; paper-buying ${fill.shares} shares of the signalled outcome on executable depth.`
-        : `${options.signalSide || "Signal-side"} leader bid is $${referenceBid.toFixed(2)} and the other venue's same-side ask is $${entryAsk.toFixed(2)}; paper-buying ${fill.shares} shares with a $${fill.cash.toFixed(2)} paper stake.`,
-    shares: fill.shares,
-    stakeUsd: targetStakeUsd,
-    baseStakeUsd: options.baseStakeUsd ?? null,
-    martingaleLossStreak: options.martingaleLossStreak ?? null,
-    martingaleMultiplier: options.martingaleMultiplier ?? null,
-    entryCash: fill.cash,
-    notional: fill.notional,
-    fees: fill.fees,
-    averagePrice: fill.averagePrice,
-    bestAsk,
-    worstFillPrice: fill.worstPrice,
+    status: "trigger", eligible: true,
+    reason: signalSide + " signal confirmed by a $" + referenceBid.toFixed(2) + " reference bid and a $" + signalEntryAsk.toFixed(2) + " same-signal ask; paper-buying the opposite " + entrySide + " outcome at its actual visible asks.",
+    shares: fill.shares, stakeUsd: targetStakeUsd, baseStakeUsd: options.baseStakeUsd ?? null,
+    martingaleLossStreak: options.martingaleLossStreak ?? null, martingaleMultiplier: options.martingaleMultiplier ?? null,
+    entryCash: fill.cash, notional: fill.notional, fees: fill.fees, averagePrice: fill.averagePrice,
+    bestAsk, worstFillPrice: fill.worstPrice,
     depthSlippagePerShare: bestAsk === null ? null : Math.max(0, fill.averagePrice - bestAsk),
-    levelsUsed: fill.levelsUsed,
-    fills: fill.fills,
-    elapsedSeconds,
-    ...observed,
+    levelsUsed: fill.levelsUsed, fills: fill.fills, elapsedSeconds, ...observed,
   };
 }
-
 function normalizedOutcomeName(outcome) {
   if (typeof outcome === "string") return outcome.trim().toUpperCase();
   return String(outcome?.name ?? outcome?.title ?? outcome?.label ?? "")

@@ -38,24 +38,27 @@ const SETTLEMENT_RETRY_MS = 15_000;
 const MAX_SETTLEMENT_WINDOWS_PER_TICK = 1;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const SETTLEMENT_MODEL = "venue-clob-close-price-proxy-v1";
-const STRATEGY_VERSION = "lagging-venue-martingale-v4";
+const STRATEGY_VERSION = "lagging-venue-martingale-v5";
 const PAPER_LEDGER_VERSION = 5;
 const LEGACY_STRATEGY_VERSION = "lagging-venue-v1";
 const CONTRARIAN_STRATEGY_VERSION = "contrarian-lagging-venue-v2";
 const ACTIVE_STRATEGY_VERSIONS = new Set([
   LEGACY_STRATEGY_VERSION,
   CONTRARIAN_STRATEGY_VERSION,
+  "lagging-venue-martingale-v4",
   STRATEGY_VERSION,
 ]);
 const MAX_LOGS = 150;
 const MAX_TRADES = 250;
 const DEFAULT_STARTING_PAPER_CAPITAL_USD = 1_000;
 const STRATEGY = Object.freeze({
+  entrySide: "opposite_of_signal",
+  entryPriceRule: "opposite_outcome_marketable_asks_no_cap",
   referenceBidThreshold: 0.7,
   minimumEntryAsk: 0.6,
   maximumEntryAsk: 0.7,
   baseStakeFraction: 0.01,
-  martingaleMultiplier: 3,
+  martingaleMultiplier: 1.5,
   hardStopBid: null,
   takeProfitBid: 0.99,
   takeProfitCreditPerShare: 1,
@@ -392,8 +395,6 @@ class ArbitrageBot {
         executionModel: "delayed_single_side_entry_and_exit_recheck",
         strategy: {
           type: "lagging-venue-martingale",
-          entrySide: "same_as_signal",
-          entryPriceRule: "ask_band",
           ...STRATEGY,
           entryCutoffSeconds: STRATEGY.maxEntrySeconds,
           settlementMethod: "venue CLOB close-price paper proxy; not official settlement",
@@ -952,14 +953,17 @@ class ArbitrageBot {
     );
     const results = [];
     for (const signalSide of ["UP", "DOWN"]) {
-      const side = signalSide;
+      const side = STRATEGY.entrySide === "opposite_of_signal"
+        ? signalSide === "UP" ? "DOWN" : "UP"
+        : signalSide;
       for (const entryVenue of ["Polymarket", "Predict.fun"]) {
         const referenceVenue =
           entryVenue === "Polymarket" ? "Predict.fun" : "Polymarket";
         const entry = venueData[entryVenue];
         const reference = venueData[referenceVenue];
+        const signalEntryBook = entry.state[signalSide.toLowerCase()];
         const entryBook = entry.state[side.toLowerCase()];
-        const referenceBook = reference.state[side.toLowerCase()];
+        const referenceBook = reference.state[signalSide.toLowerCase()];
         const entryMarketMatched = entry.state.market?.matchStatus === "matched";
         const referenceMarketMatched =
           reference.state.market?.matchStatus === "matched";
@@ -982,8 +986,10 @@ class ArbitrageBot {
           maxBookAgeMs: this.maxBookAgeMs,
           maxBookSkewMs: MAX_BOOK_SKEW_MS,
           referenceBook,
+          signalEntryBook,
           entryBook,
           signalSide,
+          entrySide: side,
           referenceMarketMatched,
           entryMarketMatched,
           matchReason:
@@ -993,8 +999,8 @@ class ArbitrageBot {
           feeModel: entry.feeModel,
           availableCashUsd: availableCapital,
         });
-        const direction = `BUY ${side} on ${entryVenue} · ${referenceVenue} confirms`;
-        const signalKey = `${currentWindow.openMs}:${side}`;
+        const direction = `BUY ${side} opposite ${signalSide} signal on ${entryVenue} · ${referenceVenue} confirms`;
+        const signalKey = `${currentWindow.openMs}:${signalSide}`;
         const leg = {
           venue: entryVenue,
           side,
@@ -1022,6 +1028,7 @@ class ArbitrageBot {
           0,
           finiteNumber(referenceBook?.requestLatencyMs) ?? 0,
         );
+        const signalEntryQuoteReceivedAt = finiteNumber(signalEntryBook?.receivedAt);
         const signalExecutable = evaluation.eligible === true;
         const eligible =
           signalExecutable &&
@@ -1048,6 +1055,7 @@ class ArbitrageBot {
           referenceRequestLatencyMs,
           referenceQuoteReceivedAt: finiteNumber(referenceBook?.receivedAt),
           referenceQuoteObservedAt: finiteNumber(referenceBook?.observedAt),
+          signalEntryQuoteReceivedAt,
           quoteReceivedAt: finiteNumber(entryBook?.receivedAt),
           quoteObservedAt: finiteNumber(entryBook?.observedAt),
           entryCount: windowTrades.length,
@@ -1072,10 +1080,10 @@ class ArbitrageBot {
       [...this.activeSignalSides].filter((key) => key.startsWith(sameWindowPrefix)),
     );
     const observedSides = new Set(
-      opportunities.filter((item) => item.signalObserved).map((item) => item.side),
+      opportunities.filter((item) => item.signalObserved).map((item) => item.signalSide || item.side),
     );
     const triggeredSides = new Set(
-      opportunities.filter((item) => item.triggerMet).map((item) => item.side),
+      opportunities.filter((item) => item.triggerMet).map((item) => item.signalSide || item.side),
     );
     const scheduledSides = new Set();
     let windowEntryAlreadyUsed =
@@ -1087,7 +1095,8 @@ class ArbitrageBot {
       );
     for (const opportunity of opportunities) {
       const key = opportunity.signalKey;
-      const sideLatchKey = `${window.openMs}:${opportunity.side}`;
+      const signalSide = opportunity.signalSide || opportunity.side;
+      const sideLatchKey = `${window.openMs}:${signalSide}`;
       if (windowEntryAlreadyUsed && opportunity.eligible) {
         opportunity.eligible = false;
         opportunity.alreadyFiredThisWindow = true;
@@ -1097,7 +1106,7 @@ class ArbitrageBot {
       if (
         !opportunity.eligible ||
         this.activeSignalSides.has(sideLatchKey) ||
-        scheduledSides.has(opportunity.side) ||
+        scheduledSides.has(signalSide) ||
         this.pendingPaperEntries.has(key) ||
         Number(this.retryAfterByKey.get(key) || 0) > nowMs
       ) {
@@ -1131,15 +1140,15 @@ class ArbitrageBot {
           simulatedArrivalAt + MAX_EXECUTION_WAIT_MS,
           entryCutoffAt,
         ),
-        signalEntryAsk: opportunity.entryAsk,
+        signalEntryAsk: opportunity.signalEntryAsk,
         signalReferenceBid: opportunity.referenceBid,
         signalStakeUsd: opportunity.stakeUsd,
       });
-      scheduledSides.add(opportunity.side);
+      scheduledSides.add(signalSide);
       windowEntryAlreadyUsed = true;
       this._log(
         "PAPER_ENTRY_QUEUED",
-        `${opportunity.direction} met the price rules for a $${Number(opportunity.stakeUsd).toFixed(2)} stake; rechecking both venue books after ${simulatedArrivalAt - nowMs} ms of modeled arrival latency.`,
+        `${opportunity.direction} met the price rules for a $${Number(opportunity.stakeUsd).toFixed(2)} stake; rechecking the reference, signal-side, and purchased-outcome books after ${simulatedArrivalAt - nowMs} ms of modeled arrival latency.`,
         {
           side: opportunity.side,
           signalSide: opportunity.signalSide,
@@ -1193,7 +1202,9 @@ class ArbitrageBot {
         finiteNumber(opportunity?.quoteReceivedAt) !== null &&
         finiteNumber(opportunity?.quoteReceivedAt) >= pending.simulatedArrivalAt &&
         finiteNumber(opportunity?.referenceQuoteReceivedAt) !== null &&
-        finiteNumber(opportunity?.referenceQuoteReceivedAt) >= pending.simulatedArrivalAt;
+        finiteNumber(opportunity?.referenceQuoteReceivedAt) >= pending.simulatedArrivalAt &&
+        finiteNumber(opportunity?.signalEntryQuoteReceivedAt) !== null &&
+        finiteNumber(opportunity?.signalEntryQuoteReceivedAt) >= pending.simulatedArrivalAt;
       if (!snapshotsReady) {
         if (nowMs <= pending.expiresAt) continue;
         this.pendingPaperEntries.delete(key);

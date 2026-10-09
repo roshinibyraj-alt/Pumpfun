@@ -6,11 +6,11 @@ This is a **paper-only** BTC 5-minute cross-venue scanner for Polymarket and Pre
 
 For each outcome (UP and DOWN), compare the same outcome on both venues:
 
-- A venue confirms the signal when its executable best bid is **$0.70 or higher**.
-- The other venue is the lagging entry venue when its same-side best ask is **at least $0.60 and below $0.70**. The bot buys that same signalled outcome on the lagging venue.
+- A venue confirms the signal when its executable best bid for UP or DOWN is **$0.70 or higher**.
+- The other venue is the lagging venue when its ask for that **same signal outcome** is **at least $0.60 and below $0.70**. The bot then paper-buys the **opposite outcome** on the lagging venue, using its actual visible asks with **no entry-price floor or cap**. The $0.60–<$0.70 band gates the signal, not the opposite-outcome purchase.
 - The starting demo bankroll is **$1,000**. The base stake is **1% of the bankroll** (initially $10); shares are sized from executable ask depth, and the stake budget includes entry fees.
-- After each settled loss, the next stake is **3× the fixed base for that losing streak**: for a $10 base, $10 → $30 → $90. After a win, the loss multiplier resets and the base is recalculated as 1% of the updated bankroll. Break-even results leave the sequence unchanged.
-- Only **one trade total per five-minute window** is allowed, across both outcomes and venues. There is no re-entry. A prior expired position is finalized by the local CLOB close-price paper proxy before the next window is evaluated, so a venue's delayed official resolution cannot hold up the next martingale step. A stake that exceeds available demo capital, or cannot be filled from visible depth within the ask band, is skipped rather than reduced or overdrawn.
+- After each settled loss, the next stake is **1.5× the fixed base for each consecutive loss**: for a $10 base, $10 → $15 → $22.50. After a win, the loss multiplier resets and the base is recalculated as 1% of the updated bankroll. Break-even results leave the sequence unchanged.
+- Only **one trade total per five-minute window** is allowed, across both outcomes and venues. There is no re-entry. A prior expired position is finalized by the local CLOB close-price paper proxy before the next window is evaluated, so a venue's delayed official resolution cannot hold up the next martingale step. A stake that exceeds available demo capital, or cannot be filled from visible depth at the opposite outcome’s actual asks, is skipped rather than reduced or overdrawn.
 - New entries are not allowed at or after **270 seconds** into the five-minute window. A pending entry is canceled if modeled arrival would be at or after that cutoff.
 - There is **no hard stop-loss**. An unclosed position is finalized at its holding venue's window close using the paper CLOB close-price proxy below.
 - Take profit triggers when the holding venue's best bid is **$0.99 or higher**. The paper model closes at exactly **$1.00 per share**, as requested.
@@ -20,7 +20,7 @@ The signal is a paper model, not guaranteed or risk-free arbitrage. Venue prices
 ## Polling and simulated fills
 
 - The scanner targets a **500 ms start-to-start read cycle** with no overlapping scans. Polymarket and Predict.fun books are read concurrently; the dashboard reports the target interval and recent cycle time.
-- A signal is not filled at detection time. The bot waits for a modeled **500 ms base delay plus measured market-data request latency**, then requires fresh snapshots and rechecks the leader bid, same-side entry ask, and executable depth for the full scheduled stake within the ask band.
+- A signal is not filled at detection time. The bot waits for a modeled **500 ms base delay plus measured market-data request latency**, then requires fresh snapshots and rechecks the leader bid, the signal-side ask-band trigger, the opposite-outcome ask, and executable depth for the full scheduled stake.
 - If the signal disappears, a book is stale, the market match is unsafe, or the full stake is unavailable, the attempt is logged as missed and no position is recorded.
 - Paper take-profit exits also wait through modeled latency and are rechecked at arrival. This model cannot reproduce queue position, hidden liquidity, exchange acknowledgements, or actual fills.
 - HTTP 429 responses trigger an exponential pause (up to 30 seconds) instead of repeated requests.

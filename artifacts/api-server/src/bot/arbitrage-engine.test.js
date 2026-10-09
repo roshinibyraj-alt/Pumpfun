@@ -234,42 +234,55 @@ test("derives an exact aligned five-minute window from Predict's canonical slug"
   );
 });
 
-test("same-side entry requires a $0.70 signal bid and a $0.60–<$0.70 ask", () => {
+test("opposite-side entry is triggered by same-signal quotes and buys the other outcome at any ask", () => {
   const botConfig = new ArbitrageBot().state.config.strategy;
   assert.equal(botConfig.type, "lagging-venue-martingale");
-  assert.equal(botConfig.entrySide, "same_as_signal");
+  assert.equal(botConfig.entrySide, "opposite_of_signal");
+  assert.equal(botConfig.entryPriceRule, "opposite_outcome_marketable_asks_no_cap");
   assert.equal(botConfig.baseStakeFraction, 0.01);
-  assert.equal(botConfig.martingaleMultiplier, 3);
+  assert.equal(botConfig.martingaleMultiplier, 1.5);
   assert.equal(botConfig.maxEntriesPerWindow, 1);
   assert.equal(botConfig.hardStopBid, null);
+  const signalEntryBook = {
+    ...strategyBook({ ask: 0.6, bid: 0.59 }),
+    asks: [{ price: 0.6, size: 250 }, { price: 0.65, size: 250 }],
+  };
+  const entryBook = {
+    ...strategyBook({ ask: 0.3, bid: 0.29 }),
+    asks: [{ price: 0.3, size: 250 }, { price: 0.35, size: 250 }],
+  };
   const result = engine.evaluateLaggingVenueEntry({
-    nowMs: 100_000,
-    windowOpenMs: 0,
+    nowMs: 100_000, windowOpenMs: 0,
     referenceBook: strategyBook({ ask: 0.99, bid: 0.8 }),
-    entryBook: {
-      ...strategyBook({ ask: 0.6, bid: 0.59 }),
-      asks: [
-        { price: 0.6, size: 250 },
-        { price: 0.65, size: 250 },
-      ],
-    },
-    signalSide: "UP",
-    referenceMarketMatched: true,
-    entryMarketMatched: true,
-    feeModel: "predict",
-    availableCashUsd: 10_000,
+    signalEntryBook, entryBook, signalSide: "UP", entrySide: "DOWN",
+    referenceMarketMatched: true, entryMarketMatched: true,
+    feeModel: "predict", availableCashUsd: 10_000,
   });
   assert.equal(result.eligible, true);
   assert.equal(result.triggerMet, true);
-  assert.equal(result.entryAsk, 0.6);
+  assert.equal(result.signalEntryAsk, 0.6);
+  assert.equal(result.entryAsk, 0.3);
+  assert.equal(result.entrySide, "DOWN");
   assert.equal(result.shares, 500);
-  assert.equal(result.bestAsk, 0.6);
-  assert.equal(result.averagePrice, 0.625);
+  assert.equal(result.bestAsk, 0.3);
+  assert.equal(result.averagePrice, 0.325);
   assert.equal(result.levelsUsed, 2);
-  assert.equal(result.fees, 3.75);
-  assert.equal(result.entryCash, 316.25);
+  assert.equal(result.fees, 3.25);
+  assert.equal(result.entryCash, 165.75);
+  const noEntryPriceCap = engine.evaluateLaggingVenueEntry({
+    nowMs: 100_000, windowOpenMs: 0,
+    referenceBook: strategyBook({ ask: 0.99, bid: 0.8 }),
+    signalEntryBook,
+    entryBook: strategyBook({ ask: 0.95, bid: 0.94, size: 500 }),
+    signalSide: "UP", entrySide: "DOWN",
+    referenceMarketMatched: true, entryMarketMatched: true,
+    feeModel: "predict", availableCashUsd: 1_000,
+  });
+  assert.equal(noEntryPriceCap.eligible, true);
+  assert.equal(noEntryPriceCap.signalEntryAsk, 0.6);
+  assert.equal(noEntryPriceCap.entryAsk, 0.95);
+  assert.equal(noEntryPriceCap.bestAsk, 0.95);
 });
-
 test("cash stake sizing uses executable depth and includes entry fees", () => {
   const result = engine.evaluateLaggingVenueEntry({
     nowMs: 100_000,
@@ -353,7 +366,7 @@ test("enforces the $0.70 signal bid and $0.60–<$0.70 entry ask bounds", () => 
   assert.equal(evaluate(0.6, 0.699).eligible, false);
 });
 
-test("same-side entry requires 500 shares of visible depth and stops opening at 270 seconds", () => {
+test("signal gate and opposite-side depth are required before the 270-second cutoff", () => {
   const shared = {
     referenceBook: strategyBook({ ask: 0.99, bid: 0.8 }),
     referenceMarketMatched: true,
@@ -392,7 +405,7 @@ test("same-side entry requires 500 shares of visible depth and stops opening at 
   assert.equal(noCapital.status, "insufficient_capital");
 });
 
-test("same-side entry rejects stale books and unsafe cross-venue market matches", () => {
+test("opposite-side entry rejects stale books and unsafe cross-venue market matches", () => {
   const freshReference = strategyBook({ ask: 0.99, bid: 0.8 });
   const freshEntry = strategyBook({ ask: 0.65, bid: 0.64 });
   const stale = engine.evaluateLaggingVenueEntry({
@@ -451,13 +464,15 @@ test("allows only one paper trade total in a window, including after an exit", (
   const first = bot._evaluate(window, poly, predict, 100_000);
   const up = first.find(
     (item) =>
-      item.side === "UP" &&
+      item.signalSide === "UP" &&
+      item.side === "DOWN" &&
       item.entryVenue === "Predict.fun" &&
       item.referenceVenue === "Polymarket",
   );
   const down = first.find(
     (item) =>
-      item.side === "DOWN" &&
+      item.signalSide === "DOWN" &&
+      item.side === "UP" &&
       item.entryVenue === "Polymarket" &&
       item.referenceVenue === "Predict.fun",
   );
@@ -488,7 +503,7 @@ test("allows only one paper trade total in a window, including after an exit", (
   assert.equal(afterExit.every((item) => item.entryCount === 1), true);
 });
 
-test("martingale triples the fixed base after losses and resets to one percent after a win", () => {
+test("martingale grows the fixed base by 1.5x per loss and resets after a win", () => {
   const bot = new ArbitrageBot();
   const sizing = () => bot._martingaleSizing();
   assert.equal(sizing().baseStakeUsd, 10);
@@ -499,13 +514,13 @@ test("martingale triples the fixed base after losses and resets to one percent a
   ];
   assert.equal(sizing().lossStreak, 1);
   assert.equal(sizing().baseStakeUsd, 10);
-  assert.equal(sizing().nextStakeUsd, 30);
+  assert.equal(sizing().nextStakeUsd, 15);
 
-  bot.state.paperTrades.push({ openMs: 2, finalized: true, realizedPnl: -30 });
+  bot.state.paperTrades.push({ openMs: 2, finalized: true, realizedPnl: -15 });
   assert.equal(sizing().lossStreak, 2);
-  assert.equal(sizing().nextStakeUsd, 90);
+  assert.equal(sizing().nextStakeUsd, 22.5);
 
-  bot.state.paperTrades.push({ openMs: 3, finalized: true, realizedPnl: 40 });
+  bot.state.paperTrades.push({ openMs: 3, finalized: true, realizedPnl: 25 });
   assert.equal(sizing().lossStreak, 0);
   assert.equal(sizing().bankrollUsd, 1000);
   assert.equal(sizing().baseStakeUsd, 10);
@@ -543,7 +558,7 @@ test("martingale sizing waits for an earlier position's CLOB close proxy", () =>
   assert.equal(opportunity.eligible, false);
   assert.match(opportunity.reason, /awaiting CLOB close-price proxy settlement/);
 });
-test("a DOWN signal buys DOWN on the lagging venue", () => {
+test("a DOWN signal buys UP on the lagging venue", () => {
   const window = { openMs: 0, closeMs: 300_000 };
   const poly = {
     market: { matchStatus: "matched", id: "poly", conditionId: "poly-condition" },
@@ -560,17 +575,18 @@ test("a DOWN signal buys DOWN on the lagging venue", () => {
     .find(
       (item) =>
         item.signalSide === "DOWN" &&
-        item.side === "DOWN" &&
+        item.side === "UP" &&
         item.entryVenue === "Predict.fun",
     );
 
   assert.equal(opportunity.eligible, true);
   assert.equal(opportunity.signalSide, "DOWN");
-  assert.equal(opportunity.side, "DOWN");
-  assert.equal(opportunity.entryAsk, 0.6);
+  assert.equal(opportunity.side, "UP");
+  assert.equal(opportunity.signalEntryAsk, 0.6);
+  assert.equal(opportunity.entryAsk, 0.4);
 });
 
-test("opens the signalled outcome only after delayed fresh snapshots, then cannot fill after 270 seconds", () => {
+test("opens the opposite outcome only after delayed fresh snapshots, then respects the 270-second cutoff", () => {
   const window = { openMs: 0, closeMs: 300_000 };
   const makeVenues = (observedAt) => ({
     poly: {
@@ -591,7 +607,7 @@ test("opens the signalled outcome only after delayed fresh snapshots, then canno
   const upSignalEntry = initial.find(
     (item) =>
       item.signalSide === "UP" &&
-      item.side === "UP" &&
+      item.side === "DOWN" &&
       item.entryVenue === "Predict.fun",
   );
   assert.equal(upSignalEntry.eligible, true);
@@ -612,16 +628,18 @@ test("opens the signalled outcome only after delayed fresh snapshots, then canno
   bot._processPendingPaperEntries(window, arrivalOpportunities, null, fillAt);
   assert.equal(bot.state.paperTrades.length, 1);
   const trade = bot.state.paperTrades[0];
-  assert.equal(trade.strategyVersion, "lagging-venue-martingale-v4");
+  assert.equal(trade.strategyVersion, "lagging-venue-martingale-v5");
   assert.equal(trade.venue, "Predict.fun");
   assert.equal(trade.signalSide, "UP");
-  assert.equal(trade.side, "UP");
+  assert.equal(trade.side, "DOWN");
   assert.ok(trade.shares > 0);
   assert.equal(trade.stakeUsd, 10);
   assert.ok(trade.entryCash <= 10);
   assert.ok(trade.entryCash >= 9.99);
   assert.equal(trade.legs.length, 1);
-  assert.equal(trade.entryAveragePrice, 0.6);
+  assert.equal(trade.entryAveragePrice, 0.5);
+  assert.equal(trade.triggerEntryAsk, 0.6);
+  assert.equal(trade.entryAskAtFill, 0.5);
   assert.equal(trade.stopBid, null);
   assert.equal(trade.hardStopBid, null);
   bot._schedulePaperEntries(window, [upSignalEntry], fillAt + 10);
@@ -636,7 +654,7 @@ test("opens the signalled outcome only after delayed fresh snapshots, then canno
     .find(
       (item) =>
         item.signalSide === "UP" &&
-        item.side === "UP" &&
+        item.side === "DOWN" &&
         item.entryVenue === "Predict.fun",
     );
   assert.equal(clearedEntry.triggerMet, false);
@@ -648,7 +666,7 @@ test("opens the signalled outcome only after delayed fresh snapshots, then canno
     .find(
       (item) =>
         item.signalSide === "UP" &&
-        item.side === "UP" &&
+        item.side === "DOWN" &&
         item.entryVenue === "Predict.fun",
     );
   assert.equal(reentry.entryCount, 1);
@@ -664,7 +682,7 @@ test("opens the signalled outcome only after delayed fresh snapshots, then canno
     .find(
       (item) =>
         item.signalSide === "UP" &&
-        item.side === "UP" &&
+        item.side === "DOWN" &&
         item.entryVenue === "Predict.fun",
     );
   assert.equal(lateOpportunity.eligible, true);
