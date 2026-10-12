@@ -13,7 +13,7 @@
 </head>
 <body><main class="wrap">
   <header class="top"><div><strong>COURT EDGE</strong><div class="muted" style="font-size:11px;margin-top:4px">Match-state paper strategy</div></div><span class="tag">DEMO · NO LIVE ORDERS</span></header>
-  <section class="hero"><h1>Tennis Paper Bot</h1><p>Automatically matches API-Tennis to Polymarket during the opening 0–0 game, then locks the player with a best ask above $0.60 as the favorite. The paper strategy buys 250 shares when the favorite is broken, adds another 250 if the opponent holds, and exits all shares when the favorite breaks back. Entry cut-off: 4–3 or 3–4. Later trades compound recycled proceeds. Paper mode only.</p></section>
+  <section class="hero"><h1>Tennis Paper Bot</h1><p>Automatically matches API-Tennis to Polymarket during the opening 0–0 game. Above a $0.70 first-scan ask, the bot uses favorite mode; from $0.37–$0.66, it buys whichever player was broken. Entries remain fixed at 250 shares per tranche. After the position player breaks back, half the shares are sold; after they hold serve, the rest are sold. Proceeds are not compounded. Paper mode only.</p></section>
   <section class="card bankroll-card">
     <div class="row"><div><h2>Shared demo bankroll</h2><div class="muted">Every match draws from the same $10,000 paper pool.</div></div><span class="tag">PAPER ONLY</span></div>
     <div class="capital-grid">

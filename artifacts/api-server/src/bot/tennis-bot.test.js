@@ -199,7 +199,7 @@ test("auto-arms a live match for the Polymarket favorite above the ask threshold
   assert.equal(bot.state.markets[0].selectionMode, "automatic_favorite");
   assert.equal(bot.state.markets[0].favoriteAskAtArm, 0.78);
   assert.equal(bot.state.markets[0].tokenId, "grabher-token");
-  assert.equal(bot.state.markets[0].strategyVersion, "breakback-compound-v1");
+  assert.equal(bot.state.markets[0].strategyVersion, "breakback-staged-flat-v2");
   assert.equal(bot.state.discovery.autoArmed, 1);
   assert.equal(bot.state.mode, "PAPER");
 });
@@ -269,7 +269,7 @@ test("buys on favorite break, adds on opponent hold, and sells after break-back 
   const market = {
     id: "entry-test", slug: "entry-test", title: "Entry test", player: "Liam Draxl",
     opponent: "Omar Jasika", tokenId: "selected-token", entries: 0,
-    strategyVersion: "breakback-compound-v1", selectionMode: "automatic_favorite",
+    strategyVersion: "breakback-staged-flat-v2", selectionMode: "automatic_favorite",
     positions: {}, currentSet: 1,
   };
   const score = (set, playerGames, opponentGames, server) => ({
@@ -290,18 +290,19 @@ test("buys on favorite break, adds on opponent hold, and sells after break-back 
   assert.equal(market.breakCycle.stage, "await_opponent_hold");
   await run(score(1, 2, 4, "First Player"));
   assert.equal(market.position.shares, 500);
-  assert.equal(market.breakCycle.stage, "await_favorite_breakback");
+  assert.equal(market.breakCycle.stage, "await_player_breakback");
+  await run(score(1, 2, 4, "Second Player"));
   await run(score(1, 3, 4, "Second Player"));
-  assert.equal(market.position.shares, 500);
-  await run(score(2, 0, 0, "First Player"));
-  await run(score(2, 1, 0, "Second Player"));
-  await run(score(2, 2, 0, "First Player"));
+  assert.equal(market.position.shares, 250);
+  assert.equal(bot.state.trades.filter((trade) => trade.status === "closed").length, 1);
+  await run(score(1, 3, 4, "First Player"));
+  await run(score(1, 4, 4, "First Player"));
   assert.equal(market.positions[1], undefined);
   assert.equal(market.breakCycle, null);
   assert.equal(bot.state.trades.filter((trade) => trade.status === "closed").length, 2);
   assert.equal(bot.snapshot().bankroll.availableCapital, 9990);
   assert.equal(bot.snapshot().bankroll.realizedPnl, -10);
-  assert.equal(market.compoundBudget, 240);
+  assert.equal(bot.snapshot().bankroll.realizedPnl, -10);
 });
 
 test("neutral first-scan mode buys whichever player was broken", async () => {
@@ -326,7 +327,7 @@ test("neutral first-scan mode buys whichever player was broken", async () => {
     outcomes: ["Player One", "Player Two"],
     tokenIds: ["player-one-token", "player-two-token"],
     tokenId: "player-one-token", entries: 0, positions: {}, lastObservedGames: {},
-    strategyVersion: "breakback-compound-v1", selectionMode: "automatic_any_break",
+    strategyVersion: "breakback-staged-flat-v2", selectionMode: "automatic_any_break",
   };
   const score = (one, two, server) => ({
     event_first_player: "Player One",
@@ -348,14 +349,13 @@ test("neutral first-scan mode buys whichever player was broken", async () => {
   });
 });
 
-test("compounds prior exit proceeds into larger equal tranches", () => {
+test("keeps fixed 250-share tranches regardless of prior proceeds", () => {
   const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-compound-test.json" });
   const market = { id: "compound", title: "Compound match", player: "Player A", positions: {}, entries: 0, compoundBudget: 300 };
   const cycle = { entrySet: 1, stage: "await_opponent_hold", trancheShares: null };
   assert.equal(bot.openBreakTranche(market, { price: 0.5, size: 1000 }, cycle), true);
-  assert.equal(cycle.trancheShares, 300);
-  assert.equal(market.position.shares, 300);
-  assert.equal(market.compoundBudget, null);
+  assert.equal(cycle.trancheShares, 250);
+  assert.equal(market.position.shares, 250);
 });
 
 test("waits for official Polymarket resolution before finalizing an open position", async () => {

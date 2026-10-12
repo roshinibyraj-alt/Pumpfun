@@ -14,7 +14,7 @@ const NEUTRAL_ASK_MAX = 0.66;
 const STAKE_USD = 500;
 const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
-const BREAKBACK_STRATEGY_VERSION = "breakback-compound-v1";
+const BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
 const BASE_TRANCHE_SHARES = 250;
 
 function openingGame(match) {
@@ -264,8 +264,8 @@ class TennisPaperBot {
   }
 
   capitalSummary() {
-    const closedTrades = this.state.trades.filter((trade) => trade.status === "closed");
-    const realizedPnl = closedTrades.reduce((total, trade) => total + Number(trade.pnl || 0), 0);
+    const realizedPnl = this.state.trades.reduce((total, trade) =>
+      total + Number(trade.realizedPnl ?? (trade.status === "closed" ? trade.pnl : 0) ?? 0), 0);
     let allocatedCapital = 0;
     let positionValue = 0;
     let unrealizedPnl = 0;
@@ -294,8 +294,8 @@ class TennisPaperBot {
 
   marketAccounting(market) {
     const trades = this.state.trades.filter((trade) => trade.marketId === market.id);
-    const realizedPnl = trades.filter((trade) => trade.status === "closed")
-      .reduce((total, trade) => total + Number(trade.pnl || 0), 0);
+    const realizedPnl = trades.reduce((total, trade) =>
+      total + Number(trade.realizedPnl ?? (trade.status === "closed" ? trade.pnl : 0) ?? 0), 0);
     let allocatedCapital = 0;
     let positionValue = 0;
     let unrealizedPnl = 0;
@@ -328,10 +328,17 @@ class TennisPaperBot {
       const saved = JSON.parse(await fs.readFile(this.file, "utf8"));
       if (saved?.app === this.state.app) this.state = { ...this.state, ...saved };
     } catch {}
+    for (const market of this.state.markets || []) {
+      if (market.strategyVersion === "breakback-compound-v1") {
+        if (market.breakCycle?.stage === "await_favorite_breakback") {
+          market.breakCycle.stage = "await_player_breakback";
+        }
+        market.strategyVersion = BREAKBACK_STRATEGY_VERSION;
+      }
+    }
     if (!Number.isFinite(Number(this.state.bankroll?.availableCapital))) {
-      const realized = this.state.trades
-        .filter((trade) => trade.status === "closed")
-        .reduce((total, trade) => total + Number(trade.pnl || 0), 0);
+      const realized = this.state.trades.reduce((total, trade) =>
+        total + Number(trade.realizedPnl ?? (trade.status === "closed" ? trade.pnl : 0) ?? 0), 0);
       const openStake = this.state.markets.reduce((total, market) =>
         total + Object.values(market.positions || {}).reduce((sum, position) => sum + Number(position.stake || 0), 0), 0);
       this.state.bankroll = {
@@ -519,7 +526,7 @@ class TennisPaperBot {
         (nameMatches(market.player, first) && nameMatches(market.opponent, second)) ||
         (nameMatches(market.player, second) && nameMatches(market.opponent, first)));
       if (existing) {
-        if (existing.selectionMode === "automatic_favorite" &&
+        if (["automatic_favorite", "automatic_any_break"].includes(existing.selectionMode) &&
             existing.strategyVersion !== BREAKBACK_STRATEGY_VERSION &&
             !Object.keys(existing.positions || {}).length) {
           existing.strategyVersion = BREAKBACK_STRATEGY_VERSION;
@@ -684,8 +691,11 @@ class TennisPaperBot {
     const previous = market.lastObservedGames[setNumber];
     market.position = market.positions?.[market.breakCycle?.entrySet] || null;
     if (market.breakCycle?.exitTriggeredAt) {
-      this.trySweepExit(market, market.positions?.[market.breakCycle.entrySet], market.breakCycle.entrySet);
-      if (!market.breakCycle || market.breakCycle.exitTriggeredAt) {
+      const pending = market.breakCycle;
+      this.trySweepExit(market, market.positions?.[pending.entrySet], pending.entrySet,
+        pending.pendingExitReason, pending.pendingExitShares);
+      market.lastObservedGames[setNumber] = currentObservation;
+      if (!market.breakCycle || pending.exitTriggeredAt) {
         if (!market.activePlayer && market.selectionMode === "automatic_any_break" &&
             !nameMatches(selectedPlayer, basePlayer)) {
           market.currentPointScore = market.currentPointScore
@@ -709,8 +719,8 @@ class TennisPaperBot {
             serverSelected: !currentObservation.serverSelected,
           };
         }
-        return;
       }
+      return;
     }
     if (!previous || market.strategyVersion !== BREAKBACK_STRATEGY_VERSION ||
         !["automatic_favorite", "automatic_any_break"].includes(market.selectionMode)) {
@@ -725,12 +735,25 @@ class TennisPaperBot {
 
     const cycle = market.breakCycle;
     let swapObservation = false;
-    if (gameAdvanced && cycle && setNumber <= cycle.entrySet + 1 &&
+    if (gameAdvanced && cycle?.stage === "await_player_breakback" && setNumber <= cycle.entrySet + 1 &&
         !previous.serverSelected && selectedWonGame) {
       const position = market.positions?.[cycle.entrySet];
       if (position && bid) {
         cycle.exitTriggeredAt = Date.now();
-        this.trySweepExit(market, position, cycle.entrySet, `the broken player broke back in set ${setNumber}`);
+        cycle.pendingExitShares = position.shares / 2;
+        cycle.pendingExitAction = "half";
+        cycle.pendingExitReason = `the broken player broke back in set ${setNumber}`;
+        this.trySweepExit(market, position, cycle.entrySet, `the broken player broke back in set ${setNumber}`, cycle.pendingExitShares);
+      }
+    } else if (gameAdvanced && cycle?.stage === "await_position_hold" &&
+        setNumber <= cycle.entrySet + 1 && previous.serverSelected && selectedWonGame) {
+      const position = market.positions?.[cycle.entrySet];
+      if (position && bid) {
+        cycle.exitTriggeredAt = Date.now();
+        cycle.pendingExitShares = position.shares;
+        cycle.pendingExitAction = "remaining";
+        cycle.pendingExitReason = `the position player held serve in set ${setNumber}`;
+        this.trySweepExit(market, position, cycle.entrySet, cycle.pendingExitReason, cycle.pendingExitShares);
       }
     } else if (gameAdvanced && !cycle && entryGameAllowed(selectedGames, opponentGames)) {
       const anyBreakMode = market.selectionMode === "automatic_any_break";
@@ -785,7 +808,7 @@ class TennisPaperBot {
         !previous.serverSelected && opponentWonGame &&
         setNumber <= cycle.entrySet + 1 && entryGameAllowed(selectedGames, opponentGames)) {
       if (this.openBreakTranche(market, ask, cycle)) {
-        cycle.stage = "await_favorite_breakback";
+        cycle.stage = "await_player_breakback";
         this.log(`${market.title}: opponent held serve; added the second paper tranche.`);
       }
     }
@@ -797,11 +820,12 @@ class TennisPaperBot {
     market.position = market.positions?.[market.breakCycle?.entrySet] || null;
   }
 
-  trySweepExit(market, position, setNumber, reason = "favorite broke back") {
+  trySweepExit(market, position, setNumber, reason = "break-back exit", requestedShares = position?.shares) {
     if (!position || !market.bidDepth?.length) return false;
     const bestBid = market.bidDepth[0].price;
     const minPrice = Math.max(0.01, bestBid - 0.99);
-    let remaining = Number(position.shares);
+    const sellShares = Math.min(Number(position.shares), Number(requestedShares));
+    let remaining = sellShares;
     let proceeds = 0;
     for (const level of market.bidDepth) {
       if (level.price < minPrice || remaining <= 1e-8) break;
@@ -813,18 +837,63 @@ class TennisPaperBot {
       market.exitStatus = `Waiting for enough bid depth to sweep ${remaining.toFixed(2)} remaining shares (0.99 slippage limit).`;
       return false;
     }
-    const vwap = proceeds / Number(position.shares);
-    const totalProceeds = this.finalizePosition(market, position, vwap, reason, setNumber);
-    market.compoundBudget = totalProceeds;
-    market.breakCycle = null;
-    market.position = null;
+    const vwap = proceeds / sellShares;
+    const pnl = this.realizePositionShares(market, position, sellShares, vwap, reason);
     market.exitStatus = null;
-    if (market.selectionMode === "automatic_any_break") {
-      market.activePlayer = null;
-      market.tokenId = market.baseTokenId || market.tokenIds?.[0] || market.tokenId;
+    const cycle = market.breakCycle;
+    if (position.shares <= 1e-8) {
+      delete market.positions[setNumber];
+      market.breakCycle = null;
+      market.position = null;
+      if (market.selectionMode === "automatic_any_break") {
+        market.activePlayer = null;
+        market.tokenId = market.baseTokenId || market.tokenIds?.[0] || market.tokenId;
+      }
+    } else if (cycle?.pendingExitAction === "half") {
+      cycle.stage = "await_position_hold";
+      cycle.exitTriggeredAt = null;
+      cycle.pendingExitShares = null;
+      cycle.pendingExitAction = null;
     }
-    this.log(`${market.title}: swept all shares across bid depth at $${vwap.toFixed(3)} VWAP; recycled $${totalProceeds.toFixed(2)}.`);
+    this.log(`${market.title}: sold ${sellShares.toFixed(2)} shares at $${vwap.toFixed(3)} VWAP; realized P&L $${pnl.toFixed(2)}.`);
     return true;
+  }
+
+  realizePositionShares(market, position, shares, exitPrice, reason) {
+    let remaining = shares, costBasis = 0;
+    position.tranches ||= [{ tradeId: position.tradeId, shares: position.shares, stake: position.stake }];
+    for (const tranche of position.tranches) {
+      if (remaining <= 1e-8) break;
+      const sold = Math.min(remaining, Number(tranche.shares));
+      if (sold <= 0) continue;
+      const basis = Number(tranche.stake) * sold / Number(tranche.shares);
+      tranche.shares -= sold;
+      tranche.stake -= basis;
+      remaining -= sold;
+      costBasis += basis;
+      const trade = this.state.trades.find((item) => item.id === tranche.tradeId);
+      if (trade) {
+        trade.realizedPnl = Number(trade.realizedPnl || 0) + sold * exitPrice - basis;
+        trade.pnl = trade.realizedPnl;
+        trade.remainingShares = tranche.shares;
+        trade.exitPrice = exitPrice;
+        trade.exitHistory ||= [];
+        trade.exitHistory.push({ at: Date.now(), shares: sold, price: exitPrice, reason });
+        if (tranche.shares <= 1e-8) {
+          trade.status = "closed";
+          trade.closedAt = Date.now();
+        }
+      }
+    }
+    if (remaining > 1e-8 && !position.tranches.length) {
+      costBasis = Number(position.stake) * shares / Number(position.shares);
+    }
+    const proceeds = shares * exitPrice;
+    position.shares -= shares;
+    position.stake -= costBasis;
+    position.entryPrice = position.shares > 1e-8 ? position.stake / position.shares : 0;
+    this.state.bankroll.availableCapital = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL) + proceeds;
+    return proceeds - costBasis;
   }
 
   openBreakTranche(market, ask, cycle) {
@@ -833,9 +902,7 @@ class TennisPaperBot {
       return false;
     }
     if (cycle.trancheShares == null) {
-      cycle.trancheShares = market.compoundBudget > 0
-        ? market.compoundBudget / (2 * ask.price)
-        : BASE_TRANCHE_SHARES;
+      cycle.trancheShares = BASE_TRANCHE_SHARES;
     }
     const availableCapital = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL);
     const shares = Math.min(cycle.trancheShares, ask.size, availableCapital / ask.price);
@@ -843,7 +910,6 @@ class TennisPaperBot {
       market.error = "Insufficient demo capital or ask depth for break-back paper entry.";
       return false;
     }
-    if (market.compoundBudget > 0) market.compoundBudget = null;
     const stake = shares * ask.price;
     const position = market.positions?.[cycle.entrySet] || {
       openedAt: Date.now(),
@@ -867,6 +933,8 @@ class TennisPaperBot {
       openedAt: Date.now(),
       status: "open",
       pnl: 0,
+      realizedPnl: 0,
+      remainingShares: shares,
       setNumber: cycle.entrySet,
     };
     position.tranches.push({ tradeId, entryPrice: ask.price, shares, stake });
@@ -940,7 +1008,9 @@ class TennisPaperBot {
         status: "closed",
         closedAt: Date.now(),
         exitPrice,
-        pnl: trancheProceeds - Number(tranche.stake),
+        pnl: Number(trade.realizedPnl || 0) + trancheProceeds - Number(tranche.stake),
+        realizedPnl: Number(trade.realizedPnl || 0) + trancheProceeds - Number(tranche.stake),
+        remainingShares: 0,
         exitReason: reason,
       });
     }
