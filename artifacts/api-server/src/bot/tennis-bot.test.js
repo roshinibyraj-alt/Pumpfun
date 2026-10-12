@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot, openingGame, entryGameAllowed } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot, openingGame, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -84,6 +84,67 @@ test("entries include 4-3 and 3-4, but stop beyond either score", () => {
   assert.equal(entryGameAllowed(3, 4), true);
   assert.equal(entryGameAllowed(4, 4), false);
   assert.equal(entryGameAllowed(5, 3), false);
+});
+
+test("recognizes completed tennis status without treating live sets as complete", () => {
+  assert.equal(matchIsComplete({ event_status: "Finished" }), true);
+  assert.equal(matchIsComplete({ event_status: "Retired" }), true);
+  assert.equal(matchIsComplete({ event_status: "Set 2" }), false);
+});
+
+test("sweeps every share through bid depth using the 0.99 slippage limit", () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-sweep-test.json" });
+  bot.state.bankroll.availableCapital = 9950;
+  const trade = { id: "sweep-trade", status: "open", shares: 100, stake: 50 };
+  bot.state.trades.push(trade);
+  const position = { shares: 100, stake: 50, entryPrice: 0.5, tranches: [{ tradeId: trade.id, shares: 100, stake: 50 }] };
+  const market = {
+    id: "sweep", positions: { 1: position }, currentSet: 1,
+    bidDepth: [{ price: 0.6, size: 50 }, { price: 0.5, size: 50 }],
+    breakCycle: { entrySet: 1 },
+  };
+  assert.equal(bot.trySweepExit(market, position, 1), true);
+  assert.equal(trade.exitPrice, 0.55);
+  assert.ok(Math.abs(trade.pnl - 5) < 1e-9);
+  assert.equal(bot.state.bankroll.availableCapital, 10005);
+  assert.equal(market.positions[1], undefined);
+});
+
+test("updates open unrealized P&L from the latest CLOB best bid", () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-mark-test.json" });
+  bot.state.bankroll.availableCapital = 9950;
+  bot.state.markets = [{
+    id: "marked", bestBid: { price: 0.4 },
+    positions: { 1: { shares: 100, stake: 50, entryPrice: 0.5 } },
+  }];
+  const state = bot.snapshot();
+  assert.equal(state.bankroll.unrealizedPnl, -10);
+  assert.equal(state.markets[0].accounting.unrealizedPnl, -10);
+});
+
+test("aligns live point score to the selected player and opponent labels", async () => {
+  const bot = new TennisPaperBot({
+    apiKey: "test",
+    file: "/tmp/tennis-score-alignment-test.json",
+    fetch: async () => ({ ok: true, json: async () => ({ asks: [{ price: "0.6", size: "20" }], bids: [{ price: "0.5", size: "20" }] }) }),
+  });
+  const market = { id: "score", player: "Second Player", opponent: "First Player", tokenId: "selected", positions: {} };
+  await bot.processMarket(market, [{
+    event_first_player: "First Player", event_second_player: "Second Player",
+    event_game_result: "15 - 30", event_status: "Set 1", event_serve: "Second Player",
+    scores: [{ score_set: 1, score_first: 0, score_second: 0 }],
+  }]);
+  assert.deepEqual(market.currentPointScore, { player: 30, opponent: 15 });
+  assert.equal(market.currentScore, "30–15");
+});
+
+test("keeps an exit pending rather than inventing fills when bid depth is short", () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-partial-sweep-test.json" });
+  const position = { shares: 100, stake: 50, entryPrice: 0.5 };
+  const market = { positions: { 1: position }, bidDepth: [{ price: 0.6, size: 40 }] };
+  assert.equal(bot.trySweepExit(market, position, 1), false);
+  assert.equal(market.positions[1], position);
+  assert.match(market.exitStatus, /60\.00 remaining/);
 });
 
 test("auto-arms a live match for the Polymarket favorite above the ask threshold", async () => {

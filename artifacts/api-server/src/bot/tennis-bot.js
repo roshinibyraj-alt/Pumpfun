@@ -117,6 +117,10 @@ function tennisScoreSnapshot(match, selectedIsFirst, currentSet) {
   };
 }
 
+function matchIsComplete(match) {
+  return /finished|complete|ended|retired|walkover|cancelled|abandoned/i.test(String(match?.event_status || ""));
+}
+
 function hasZeroThirty(event, selectedIsFirst) {
   const score = matchScore(event);
   if (!score) return false;
@@ -571,6 +575,8 @@ class TennisPaperBot {
           this.log(`${market.title}: ${market.error}`, "error");
         }
       }));
+      this.state.markets = this.state.markets.filter((market) =>
+        !(market.completedAt && !Object.keys(market.positions || {}).length));
       this.state.updatedAt = Date.now();
       await this.persist();
     } catch (error) {
@@ -588,12 +594,31 @@ class TennisPaperBot {
     });
     if (!match) {
       market.scoreStatus = market.currentScore ? "not_live_checking_settlement" : "not_live_or_unmatched";
+      if (Object.keys(market.positions || {}).length) {
+        const bookResponse = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(market.tokenId)}`, { signal: AbortSignal.timeout(5000) });
+        if (bookResponse.ok) {
+          const book = await bookResponse.json();
+          market.bestBid = (book.bids || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+            .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => b.price - a.price)[0] || null;
+          market.bidDepth = (book.bids || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+            .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => b.price - a.price);
+          market.lastBookAt = Date.now();
+        }
+      }
       await this.checkOfficialSettlement(market);
       return;
     }
     const selectedIsFirst = nameMatches(match.event_first_player, market.player);
     market.scoreStatus = "live";
-    market.currentScore = match.event_game_result || null;
+    const pointScore = matchScore(match);
+    market.currentPointScore = pointScore ? {
+      player: pointScore[selectedIsFirst ? 0 : 1],
+      opponent: pointScore[selectedIsFirst ? 1 : 0],
+    } : null;
+    market.currentScore = pointScore
+      ? `${pointScore[selectedIsFirst ? 0 : 1]}–${pointScore[selectedIsFirst ? 1 : 0]}`
+      : null;
+    if (matchIsComplete(match)) market.completedAt = Date.now();
     market.currentServer = match.event_serve || null;
     market.feedEventKey = String(match.event_key || "");
     const setNumber = Math.max(1, Number(String(match.event_status || "").match(/set\s*(\d+)/i)?.[1] || 1));
@@ -614,6 +639,13 @@ class TennisPaperBot {
       .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => b.price - a.price)[0];
     market.bestAsk = ask || null;
     market.bestBid = bid || null;
+    market.bidDepth = (book.bids || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+      .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => b.price - a.price);
+    market.lastBookAt = Date.now();
+    if (matchIsComplete(match)) {
+      await this.checkOfficialSettlement(market);
+      return;
+    }
     market.lastScoreAt = Date.now();
     market.lastObservedGames ||= {};
     const currentObservation = {
@@ -624,6 +656,10 @@ class TennisPaperBot {
     const previous = market.lastObservedGames[setNumber];
     market.lastObservedGames[setNumber] = currentObservation;
     market.position = market.positions?.[market.breakCycle?.entrySet] || null;
+    if (market.breakCycle?.exitTriggeredAt) {
+      this.trySweepExit(market, market.positions?.[market.breakCycle.entrySet], market.breakCycle.entrySet);
+      if (!market.breakCycle || market.breakCycle.exitTriggeredAt) return;
+    }
     if (!previous || market.strategyVersion !== BREAKBACK_STRATEGY_VERSION ||
         market.selectionMode !== "automatic_favorite") return;
 
@@ -637,11 +673,8 @@ class TennisPaperBot {
         !previous.serverSelected && selectedWonGame) {
       const position = market.positions?.[cycle.entrySet];
       if (position && bid) {
-        const proceeds = this.finalizePosition(market, position, bid.price, "favorite broke back", cycle.entrySet);
-        market.compoundBudget = proceeds;
-        market.breakCycle = null;
-        market.position = null;
-        this.log(`${market.title}: favorite broke back in set ${setNumber}; sold all shares and recycled $${proceeds.toFixed(2)} into later entries.`);
+        cycle.exitTriggeredAt = Date.now();
+        this.trySweepExit(market, position, cycle.entrySet, `favorite broke back in set ${setNumber}`);
       }
     } else if (!cycle && previous.serverSelected && opponentWonGame &&
         entryGameAllowed(selectedGames, opponentGames)) {
@@ -661,6 +694,32 @@ class TennisPaperBot {
       }
     }
     market.position = market.positions?.[market.breakCycle?.entrySet] || null;
+  }
+
+  trySweepExit(market, position, setNumber, reason = "favorite broke back") {
+    if (!position || !market.bidDepth?.length) return false;
+    const bestBid = market.bidDepth[0].price;
+    const minPrice = Math.max(0.01, bestBid - 0.99);
+    let remaining = Number(position.shares);
+    let proceeds = 0;
+    for (const level of market.bidDepth) {
+      if (level.price < minPrice || remaining <= 1e-8) break;
+      const filled = Math.min(remaining, Number(level.size));
+      proceeds += filled * level.price;
+      remaining -= filled;
+    }
+    if (remaining > 1e-8) {
+      market.exitStatus = `Waiting for enough bid depth to sweep ${remaining.toFixed(2)} remaining shares (0.99 slippage limit).`;
+      return false;
+    }
+    const vwap = proceeds / Number(position.shares);
+    const totalProceeds = this.finalizePosition(market, position, vwap, reason, setNumber);
+    market.compoundBudget = totalProceeds;
+    market.breakCycle = null;
+    market.position = null;
+    market.exitStatus = null;
+    this.log(`${market.title}: swept all shares across bid depth at $${vwap.toFixed(3)} VWAP; recycled $${totalProceeds.toFixed(2)}.`);
+    return true;
   }
 
   openBreakTranche(market, ask, cycle) {
@@ -788,7 +847,7 @@ class TennisPaperBot {
   }
 
   async checkOfficialSettlement(market) {
-    if (!Object.keys(market.positions || {}).length || Date.now() - Number(market.lastOfficialCheckAt || 0) < 30000) return;
+    if (Date.now() - Number(market.lastOfficialCheckAt || 0) < 30000) return;
     market.lastOfficialCheckAt = Date.now();
     try {
       const response = await this.fetch(`${GAMMA}/events?slug=${encodeURIComponent(market.slug)}`, { signal: AbortSignal.timeout(5000) });
@@ -796,6 +855,8 @@ class TennisPaperBot {
       const event = (await response.json())?.[0];
       const resolvedMarket = (event?.markets || []).find((item) => String(item.id) === market.marketId);
       if (!resolvedMarket || !(resolvedMarket.closed === true || resolvedMarket.closed === "true")) return;
+      market.completedAt ||= Date.now();
+      if (!Object.keys(market.positions || {}).length) return;
       const outcomes = listValue(resolvedMarket.outcomes).map(String);
       const prices = listValue(resolvedMarket.outcomePrices).map(Number);
       const chosen = outcomes.findIndex((outcome) => nameMatches(outcome, market.player));
@@ -813,4 +874,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot, openingGame, entryGameAllowed };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot, openingGame, entryGameAllowed, matchIsComplete };
