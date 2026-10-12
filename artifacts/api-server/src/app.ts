@@ -32,6 +32,15 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
 
+app.get("/", (_req, res, next) => {
+  res.sendFile(
+    path.resolve(process.cwd(), "artifacts/api-server/public/tennis.html"),
+    (error) => {
+      if (error) next(error);
+    },
+  );
+});
+
 const webDistPath = path.resolve(
   process.cwd(),
   "../btc-signal-accumulator/dist/public",

@@ -1,10 +1,10 @@
 import { Router, type IRouter } from "express";
-import botRouter from "./bot";
 import healthRouter from "./health";
+import tennisRouter from "./tennis";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
-router.use(botRouter);
+router.use(tennisRouter);
 
 export default router;
