@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot, openingGame, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, openingGame, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -62,13 +62,23 @@ test("maps only the active Polymarket match-winner market with both exact player
   assert.equal(marketForPlayers({ ...event, closed: true }, "L. Draxl", "O. Jasika"), null);
 });
 
-test("favorite selection requires an ask strictly above 0.60 and chooses the higher ask", () => {
-  assert.equal(chooseFavorite([{ bestAsk: { price: 0.6, size: 100 } }]), null);
+test("favorite selection requires an ask strictly above 0.70 and chooses the higher ask", () => {
+  assert.equal(chooseFavorite([{ bestAsk: { price: 0.7, size: 100 } }]), null);
   assert.equal(chooseFavorite([
-    { bestAsk: { price: 0.62, size: 10 } },
+    { bestAsk: { price: 0.72, size: 10 } },
     { bestAsk: { price: 0.81, size: 5 } },
   ]).index, 1);
   assert.equal(chooseFavorite([{ bestAsk: { price: 0.75, size: 0 } }]), null);
+});
+
+test("first-scan odds choose favorite, neutral any-break, or no-trade bands", () => {
+  assert.deepEqual(classifyFirstScan([{ bestAsk: { price: 0.73, size: 10 } }]), {
+    selectionMode: "automatic_favorite", index: 0, ask: 0.73,
+  });
+  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.37, size: 10 } }]).selectionMode, "automatic_any_break");
+  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.66, size: 10 } }]).selectionMode, "automatic_any_break");
+  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.67, size: 10 } }]), null);
+  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.7, size: 10 } }]), null);
 });
 
 test("only auto-selects favorites while the opening game is still at 0-0", () => {
@@ -169,7 +179,7 @@ test("auto-arms a live match for the Polymarket favorite above the ask threshold
     fetch: async (url) => {
       const request = String(url);
       if (request.includes("/public-search")) return { ok: true, json: async () => ({ events: [event] }) };
-      if (request.includes("grabher-token")) return { ok: true, json: async () => ({ asks: [{ price: "0.68", size: "100" }], bids: [{ price: "0.65", size: "100" }] }) };
+      if (request.includes("grabher-token")) return { ok: true, json: async () => ({ asks: [{ price: "0.78", size: "100" }], bids: [{ price: "0.75", size: "100" }] }) };
       if (request.includes("chiesa-token")) return { ok: true, json: async () => ({ asks: [{ price: "0.34", size: "100" }], bids: [{ price: "0.31", size: "100" }] }) };
       throw new Error(`Unexpected test request: ${request}`);
     },
@@ -187,7 +197,7 @@ test("auto-arms a live match for the Polymarket favorite above the ask threshold
   assert.equal(bot.state.markets[0].player, "Julia Grabher");
   assert.equal(bot.state.markets[0].opponent, "Deborah Chiesa");
   assert.equal(bot.state.markets[0].selectionMode, "automatic_favorite");
-  assert.equal(bot.state.markets[0].favoriteAskAtArm, 0.68);
+  assert.equal(bot.state.markets[0].favoriteAskAtArm, 0.78);
   assert.equal(bot.state.markets[0].tokenId, "grabher-token");
   assert.equal(bot.state.markets[0].strategyVersion, "breakback-compound-v1");
   assert.equal(bot.state.discovery.autoArmed, 1);
@@ -292,6 +302,50 @@ test("buys on favorite break, adds on opponent hold, and sells after break-back 
   assert.equal(bot.snapshot().bankroll.availableCapital, 9990);
   assert.equal(bot.snapshot().bankroll.realizedPnl, -10);
   assert.equal(market.compoundBudget, 240);
+});
+
+test("neutral first-scan mode buys whichever player was broken", async () => {
+  const bot = new TennisPaperBot({
+    apiKey: "test",
+    file: "/tmp/tennis-neutral-break-test.json",
+    fetch: async (url) => {
+      const request = String(url);
+      const playerTwoBook = request.includes("player-two-token");
+      return {
+        ok: true,
+        json: async () => ({
+          asks: [{ price: playerTwoBook ? "0.45" : "0.54", size: "1000" }],
+          bids: [{ price: playerTwoBook ? "0.43" : "0.52", size: "1000" }],
+        }),
+      };
+    },
+  });
+  const market = {
+    id: "neutral-break", slug: "neutral-break", title: "Neutral break test",
+    player: "Player One", opponent: "Player Two",
+    outcomes: ["Player One", "Player Two"],
+    tokenIds: ["player-one-token", "player-two-token"],
+    tokenId: "player-one-token", entries: 0, positions: {}, lastObservedGames: {},
+    strategyVersion: "breakback-compound-v1", selectionMode: "automatic_any_break",
+  };
+  const score = (one, two, server) => ({
+    event_first_player: "Player One",
+    event_second_player: "Player Two",
+    event_serve: server,
+    event_game_result: "15 - 15",
+    event_status: "Set 1",
+    scores: [{ score_set: 1, score_first: one, score_second: two }],
+  });
+  await bot.processMarket(market, [score(2, 2, "Second Player")]);
+  await bot.processMarket(market, [score(3, 2, "First Player")]);
+  assert.equal(market.activePlayer, "Player Two");
+  assert.equal(market.tokenId, "player-two-token");
+  assert.equal(market.position.shares, 250);
+  assert.equal(bot.state.trades.at(-1).player, "Player Two");
+  assert.equal(bot.state.trades.at(-1).entryPrice, 0.45);
+  assert.deepEqual(market.lastObservedGames[1], {
+    playerGames: 2, opponentGames: 3, serverSelected: false,
+  });
 });
 
 test("compounds prior exit proceeds into larger equal tranches", () => {

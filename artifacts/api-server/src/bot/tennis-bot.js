@@ -8,7 +8,9 @@ const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
 const POLL_MS = 5000;
 const DISCOVERY_CACHE_MS = 30000;
-const FAVORITE_ASK_THRESHOLD = 0.6;
+const FAVORITE_ASK_THRESHOLD = 0.7;
+const NEUTRAL_ASK_MIN = 0.37;
+const NEUTRAL_ASK_MAX = 0.66;
 const STAKE_USD = 500;
 const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
@@ -172,7 +174,21 @@ function chooseFavorite(books, threshold = FAVORITE_ASK_THRESHOLD) {
   return eligible[0] || null;
 }
 
-function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk }) {
+function classifyFirstScan(books) {
+  const favorite = chooseFavorite(books);
+  if (favorite) return { selectionMode: "automatic_favorite", index: favorite.index, ask: favorite.bestAsk.price };
+  const neutral = books
+    .map((book, index) => ({ ...book, index }))
+    .find((book) => book.bestAsk &&
+      Number(book.bestAsk.price) >= NEUTRAL_ASK_MIN &&
+      Number(book.bestAsk.price) <= NEUTRAL_ASK_MAX &&
+      Number(book.bestAsk.size) > 0);
+  return neutral
+    ? { selectionMode: "automatic_any_break", index: neutral.index, ask: neutral.bestAsk.price }
+    : null;
+}
+
+function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk, selectionMode = "automatic_favorite" }) {
   const selectedIndex = mapped.outcomes.findIndex((outcome) => nameMatches(outcome, player));
   return {
     id: `${slug}:${Date.now()}`,
@@ -181,13 +197,15 @@ function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk }) {
     polymarketUrl: polyUrl,
     player,
     outcomes: mapped.outcomes,
+    tokenIds: mapped.ids,
     opponent: mapped.outcomes[selectedIndex === 0 ? 1 : 0],
     tokenId: mapped.ids[selectedIndex],
+    baseTokenId: mapped.ids[selectedIndex],
     marketId: String(mapped.market.id || ""),
     status: "armed",
-    selectionMode: "automatic_favorite",
+    selectionMode,
     strategyVersion: BREAKBACK_STRATEGY_VERSION,
-    favoriteAskAtArm: Number(favoriteAsk),
+    favoriteAskAtArm: favoriteAsk == null ? null : Number(favoriteAsk),
     scoreStatus: "live",
     currentScore: null,
     currentServer: null,
@@ -517,28 +535,31 @@ class TennisPaperBot {
         const slug = String(event.slug || "");
         if (!slug || this.state.markets.some((market) => market.slug === slug)) continue;
         const books = await Promise.all(mapped.ids.map((id) => this.readBook(id)));
-        const favorite = chooseFavorite(books);
-        if (!favorite) {
-          this.state.discovery.lastMessage = `${event.title}: no player ask is above $${FAVORITE_ASK_THRESHOLD.toFixed(2)}.`;
+        const firstScanMode = classifyFirstScan(books);
+        if (!firstScanMode) {
+          this.state.discovery.lastMessage = `${event.title}: first-scan asks do not meet either entry band (> $${FAVORITE_ASK_THRESHOLD.toFixed(2)} or $${NEUTRAL_ASK_MIN.toFixed(2)}–$${NEUTRAL_ASK_MAX.toFixed(2)}).`;
           continue;
         }
-        const player = mapped.outcomes[favorite.index];
+        const player = mapped.outcomes[firstScanMode.index];
         const item = marketDefaults({
           slug,
           event,
           polyUrl: `https://polymarket.com/event/${slug}`,
           mapped,
           player,
-          favoriteAsk: favorite.bestAsk.price,
+          favoriteAsk: firstScanMode.selectionMode === "automatic_favorite" ? firstScanMode.ask : null,
+          selectionMode: firstScanMode.selectionMode,
         });
-        item.bestAsk = favorite.bestAsk;
-        item.bestBid = favorite.bestBid;
+        item.bestAsk = books[firstScanMode.index].bestAsk;
+        item.bestBid = books[firstScanMode.index].bestBid;
         item.currentServer = live.event_serve || null;
         item.currentScore = live.event_game_result || null;
         item.feedEventKey = String(live.event_key || "");
         this.state.markets.unshift(item);
         this.state.discovery.autoArmed += 1;
-        this.log(`Auto-added live match ${item.title}; selected ${player} as favorite at ask $${Number(favorite.bestAsk.price).toFixed(3)} (paper only).`);
+        this.log(firstScanMode.selectionMode === "automatic_favorite"
+          ? `Auto-added live match ${item.title}; selected ${player} as favorite at first-scan ask $${Number(firstScanMode.ask).toFixed(3)} (paper only).`
+          : `Auto-added live match ${item.title}; first-scan ask was in the neutral $${NEUTRAL_ASK_MIN.toFixed(2)}–$${NEUTRAL_ASK_MAX.toFixed(2)} band; any player's break can trigger buying the broken player (paper only).`);
       } catch (error) {
         this.state.discovery.lastMessage = String(error?.message || error).slice(0, 160);
       }
@@ -547,7 +568,7 @@ class TennisPaperBot {
     if (!this.state.discovery.lastMessage) {
       this.state.discovery.lastMessage = this.state.discovery.autoArmed
         ? `${this.state.discovery.autoArmed} live match(es) automatically armed.`
-        : "Waiting for a newly started match in its opening game with a player ask above $0.60.";
+        : `Waiting for newly started matches: first-scan favorite ask > $${FAVORITE_ASK_THRESHOLD.toFixed(2)} or neutral ask $${NEUTRAL_ASK_MIN.toFixed(2)}–$${NEUTRAL_ASK_MAX.toFixed(2)}.`;
     }
   }
 
@@ -588,9 +609,11 @@ class TennisPaperBot {
   }
 
   async processMarket(market, matches) {
+    const basePlayer = market.player;
+    const baseOpponent = market.opponent;
     const match = matches.find((item) => {
-      return (nameMatches(item.event_first_player, market.player) && nameMatches(item.event_second_player, market.opponent)) ||
-        (nameMatches(item.event_second_player, market.player) && nameMatches(item.event_first_player, market.opponent));
+      return (nameMatches(item.event_first_player, basePlayer) && nameMatches(item.event_second_player, baseOpponent)) ||
+        (nameMatches(item.event_second_player, basePlayer) && nameMatches(item.event_first_player, baseOpponent));
     });
     if (!match) {
       market.scoreStatus = market.currentScore ? "not_live_checking_settlement" : "not_live_or_unmatched";
@@ -608,7 +631,9 @@ class TennisPaperBot {
       await this.checkOfficialSettlement(market);
       return;
     }
-    const selectedIsFirst = nameMatches(match.event_first_player, market.player);
+    const selectedPlayer = market.activePlayer || basePlayer;
+    const selectedOpponent = nameMatches(selectedPlayer, basePlayer) ? baseOpponent : basePlayer;
+    const selectedIsFirst = nameMatches(match.event_first_player, selectedPlayer);
     market.scoreStatus = "live";
     const pointScore = matchScore(match);
     market.currentPointScore = pointScore ? {
@@ -630,6 +655,9 @@ class TennisPaperBot {
     const setScore = Array.isArray(match.scores) ? match.scores.find((item) => Number(item.score_set) === setNumber) : null;
     const selectedGames = Number(setScore?.[selectedIsFirst ? "score_first" : "score_second"] || 0);
     const opponentGames = Number(setScore?.[selectedIsFirst ? "score_second" : "score_first"] || 0);
+    const firstScanBooks = market.selectionMode === "automatic_any_break" && !market.activePlayer && Array.isArray(market.tokenIds)
+      ? await Promise.all(market.tokenIds.map((id) => this.readBook(id)))
+      : null;
     const bookResponse = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(market.tokenId)}`, { signal: AbortSignal.timeout(5000) });
     if (!bookResponse.ok) throw new Error(`Polymarket order book HTTP ${bookResponse.status}`);
     const book = await bookResponse.json();
@@ -654,38 +682,106 @@ class TennisPaperBot {
       serverSelected: match.event_serve === (selectedIsFirst ? "First Player" : "Second Player"),
     };
     const previous = market.lastObservedGames[setNumber];
-    market.lastObservedGames[setNumber] = currentObservation;
     market.position = market.positions?.[market.breakCycle?.entrySet] || null;
     if (market.breakCycle?.exitTriggeredAt) {
       this.trySweepExit(market, market.positions?.[market.breakCycle.entrySet], market.breakCycle.entrySet);
-      if (!market.breakCycle || market.breakCycle.exitTriggeredAt) return;
+      if (!market.breakCycle || market.breakCycle.exitTriggeredAt) {
+        if (!market.activePlayer && market.selectionMode === "automatic_any_break" &&
+            !nameMatches(selectedPlayer, basePlayer)) {
+          market.currentPointScore = market.currentPointScore
+            ? { player: market.currentPointScore.opponent, opponent: market.currentPointScore.player }
+            : null;
+          market.currentScore = market.currentPointScore
+            ? `${market.currentPointScore.player}–${market.currentPointScore.opponent}`
+            : null;
+          market.setsWon = market.setsWon
+            ? { player: market.setsWon.opponent, opponent: market.setsWon.player }
+            : null;
+          market.currentSetGames = market.currentSetGames
+            ? { player: market.currentSetGames.opponent, opponent: market.currentSetGames.player }
+            : null;
+          market.perSetScore = (market.perSetScore || []).map((score) => ({
+            ...score, playerGames: score.opponentGames, opponentGames: score.playerGames,
+          }));
+          market.lastObservedGames[setNumber] = {
+            playerGames: opponentGames,
+            opponentGames: selectedGames,
+            serverSelected: !currentObservation.serverSelected,
+          };
+        }
+        return;
+      }
     }
     if (!previous || market.strategyVersion !== BREAKBACK_STRATEGY_VERSION ||
-        market.selectionMode !== "automatic_favorite") return;
+        !["automatic_favorite", "automatic_any_break"].includes(market.selectionMode)) {
+      market.lastObservedGames[setNumber] = currentObservation;
+      return;
+    }
 
     const gamesAdvanced = selectedGames + opponentGames - previous.playerGames - previous.opponentGames;
     const selectedWonGame = selectedGames > previous.playerGames && opponentGames === previous.opponentGames;
     const opponentWonGame = opponentGames > previous.opponentGames && selectedGames === previous.playerGames;
-    if (gamesAdvanced !== 1 || (!selectedWonGame && !opponentWonGame)) return;
+    const gameAdvanced = gamesAdvanced === 1 && (selectedWonGame || opponentWonGame);
 
     const cycle = market.breakCycle;
-    if (cycle && setNumber <= cycle.entrySet + 1 &&
+    let swapObservation = false;
+    if (gameAdvanced && cycle && setNumber <= cycle.entrySet + 1 &&
         !previous.serverSelected && selectedWonGame) {
       const position = market.positions?.[cycle.entrySet];
       if (position && bid) {
         cycle.exitTriggeredAt = Date.now();
-        this.trySweepExit(market, position, cycle.entrySet, `favorite broke back in set ${setNumber}`);
+        this.trySweepExit(market, position, cycle.entrySet, `the broken player broke back in set ${setNumber}`);
       }
-    } else if (!cycle && previous.serverSelected && opponentWonGame &&
-        entryGameAllowed(selectedGames, opponentGames)) {
-      const nextCycle = { entrySet: setNumber, stage: "await_opponent_hold", trancheShares: null };
-      market.breakCycle = nextCycle;
-      if (this.openBreakTranche(market, ask, nextCycle)) {
-        this.log(`${market.title}: favorite was broken at ${selectedGames}–${opponentGames}; bought the first 250-share paper tranche.`);
-      } else {
-        market.breakCycle = null;
+    } else if (gameAdvanced && !cycle && entryGameAllowed(selectedGames, opponentGames)) {
+      const anyBreakMode = market.selectionMode === "automatic_any_break";
+      const playerWasBroken = anyBreakMode
+        ? (previous.serverSelected && opponentWonGame) || (!previous.serverSelected && selectedWonGame)
+        : previous.serverSelected && opponentWonGame;
+      if (playerWasBroken) {
+        const brokenPlayer = anyBreakMode && !previous.serverSelected ? selectedOpponent : selectedPlayer;
+        const brokenIndex = (market.outcomes || []).findIndex((name) => nameMatches(name, brokenPlayer));
+        const brokenBook = anyBreakMode && brokenIndex >= 0 ? firstScanBooks?.[brokenIndex] : null;
+        const entryAsk = brokenBook?.bestAsk || ask;
+        if (anyBreakMode && brokenIndex >= 0) {
+          market.activePlayer = brokenPlayer;
+          market.tokenId = market.tokenIds?.[brokenIndex] || market.tokenId;
+          swapObservation = !nameMatches(brokenPlayer, selectedPlayer);
+          if (swapObservation) {
+            market.currentPointScore = market.currentPointScore
+              ? { player: market.currentPointScore.opponent, opponent: market.currentPointScore.player }
+              : null;
+            market.currentScore = market.currentPointScore
+              ? `${market.currentPointScore.player}–${market.currentPointScore.opponent}`
+              : null;
+            market.setsWon = market.setsWon
+              ? { player: market.setsWon.opponent, opponent: market.setsWon.player }
+              : null;
+            market.currentSetGames = market.currentSetGames
+              ? { player: market.currentSetGames.opponent, opponent: market.currentSetGames.player }
+              : null;
+            market.perSetScore = (market.perSetScore || []).map((score) => ({
+              ...score, playerGames: score.opponentGames, opponentGames: score.playerGames,
+            }));
+          }
+        }
+        const nextCycle = { entrySet: setNumber, stage: "await_opponent_hold", trancheShares: null };
+        market.breakCycle = nextCycle;
+        if (this.openBreakTranche(market, entryAsk, nextCycle)) {
+          if (brokenBook) {
+            market.bestAsk = entryAsk;
+            market.bestBid = brokenBook.bestBid;
+            market.bidDepth = brokenBook.bestBid ? [brokenBook.bestBid] : [];
+          }
+          this.log(`${market.title}: ${brokenPlayer} was broken at ${swapObservation ? opponentGames : selectedGames}–${swapObservation ? selectedGames : opponentGames}; bought the first 250-share paper tranche.`);
+        } else {
+          market.breakCycle = null;
+          if (anyBreakMode) {
+            market.activePlayer = null;
+            market.tokenId = market.baseTokenId || market.tokenIds?.[0] || market.tokenId;
+          }
+        }
       }
-    } else if (cycle && cycle.stage === "await_opponent_hold" &&
+    } else if (gameAdvanced && cycle && cycle.stage === "await_opponent_hold" &&
         !previous.serverSelected && opponentWonGame &&
         setNumber <= cycle.entrySet + 1 && entryGameAllowed(selectedGames, opponentGames)) {
       if (this.openBreakTranche(market, ask, cycle)) {
@@ -693,6 +789,11 @@ class TennisPaperBot {
         this.log(`${market.title}: opponent held serve; added the second paper tranche.`);
       }
     }
+    market.lastObservedGames[setNumber] = swapObservation ? {
+      playerGames: opponentGames,
+      opponentGames: selectedGames,
+      serverSelected: !currentObservation.serverSelected,
+    } : currentObservation;
     market.position = market.positions?.[market.breakCycle?.entrySet] || null;
   }
 
@@ -718,6 +819,10 @@ class TennisPaperBot {
     market.breakCycle = null;
     market.position = null;
     market.exitStatus = null;
+    if (market.selectionMode === "automatic_any_break") {
+      market.activePlayer = null;
+      market.tokenId = market.baseTokenId || market.tokenIds?.[0] || market.tokenId;
+    }
     this.log(`${market.title}: swept all shares across bid depth at $${vwap.toFixed(3)} VWAP; recycled $${totalProceeds.toFixed(2)}.`);
     return true;
   }
@@ -754,8 +859,8 @@ class TennisPaperBot {
       id: tradeId,
       marketId: market.id,
       market: market.title,
-      player: market.player,
-      side: market.player,
+      player: market.activePlayer || market.player,
+      side: market.activePlayer || market.player,
       entryPrice: ask.price,
       shares,
       stake,
@@ -874,4 +979,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot, openingGame, entryGameAllowed, matchIsComplete };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, openingGame, entryGameAllowed, matchIsComplete };
