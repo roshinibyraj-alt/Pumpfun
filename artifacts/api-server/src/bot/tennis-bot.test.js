@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -28,6 +28,74 @@ test("matches API-Tennis live events against both Polymarket participants", () =
   assert.equal(findLiveMatch([event], "Julia Grabher", "Deborah Chiesa"), event);
   assert.equal(findLiveMatch([event], "Deborah Chiesa", "Julia Grabher"), event);
   assert.equal(findLiveMatch([event], "Julia Grabher", "Other Player"), null);
+});
+
+test("maps only the active Polymarket match-winner market with both exact players", () => {
+  const event = {
+    title: "L. Draxl vs O. Jasika",
+    active: true,
+    closed: false,
+    markets: [
+      { question: "Completed Match: L. Draxl vs O. Jasika", outcomes: '["Yes","No"]', clobTokenIds: '["y","n"]' },
+      { question: "L. Draxl vs O. Jasika", active: true, closed: false, outcomes: '["Liam Draxl","Omar Jasika"]', clobTokenIds: '["up","down"]' },
+    ],
+  };
+  assert.equal(marketForPlayers(event, "L. Draxl", "O. Jasika").ids[0], "up");
+  assert.equal(marketForPlayers(event, "L. Draxl", "Other Player"), null);
+  assert.equal(marketForPlayers({ ...event, closed: true }, "L. Draxl", "O. Jasika"), null);
+});
+
+test("favorite selection requires an ask strictly above 0.60 and chooses the higher ask", () => {
+  assert.equal(chooseFavorite([{ bestAsk: { price: 0.6, size: 100 } }]), null);
+  assert.equal(chooseFavorite([
+    { bestAsk: { price: 0.62, size: 10 } },
+    { bestAsk: { price: 0.81, size: 5 } },
+  ]).index, 1);
+  assert.equal(chooseFavorite([{ bestAsk: { price: 0.75, size: 0 } }]), null);
+});
+
+test("auto-arms a live match for the Polymarket favorite above the ask threshold", async () => {
+  const event = {
+    title: "Court event: Julia Grabher vs Deborah Chiesa",
+    slug: "wta-grabher-chiesa-live",
+    id: "event-1",
+    active: true,
+    closed: false,
+    markets: [{
+      id: "winner-market",
+      question: "Court event: Julia Grabher vs Deborah Chiesa",
+      active: true,
+      closed: false,
+      outcomes: '["Julia Grabher","Deborah Chiesa"]',
+      clobTokenIds: '["grabher-token","chiesa-token"]',
+    }],
+  };
+  const bot = new TennisPaperBot({
+    apiKey: "test",
+    file: "/tmp/tennis-auto-discovery-test.json",
+    fetch: async (url) => {
+      const request = String(url);
+      if (request.includes("/public-search")) return { ok: true, json: async () => ({ events: [event] }) };
+      if (request.includes("grabher-token")) return { ok: true, json: async () => ({ asks: [{ price: "0.68", size: "100" }], bids: [{ price: "0.65", size: "100" }] }) };
+      if (request.includes("chiesa-token")) return { ok: true, json: async () => ({ asks: [{ price: "0.34", size: "100" }], bids: [{ price: "0.31", size: "100" }] }) };
+      throw new Error(`Unexpected test request: ${request}`);
+    },
+  });
+  await bot.discoverLiveMarkets([{
+    event_first_player: "J. Grabher",
+    event_second_player: "D. Chiesa",
+    event_game_result: "0 - 0",
+    event_serve: "First Player",
+    event_key: "live-1",
+  }]);
+  assert.equal(bot.state.markets.length, 1);
+  assert.equal(bot.state.markets[0].player, "Julia Grabher");
+  assert.equal(bot.state.markets[0].opponent, "Deborah Chiesa");
+  assert.equal(bot.state.markets[0].selectionMode, "automatic_favorite");
+  assert.equal(bot.state.markets[0].favoriteAskAtArm, 0.68);
+  assert.equal(bot.state.markets[0].tokenId, "grabher-token");
+  assert.equal(bot.state.discovery.autoArmed, 1);
+  assert.equal(bot.state.mode, "PAPER");
 });
 
 test("allows same rules in Set 3 with set 2 eligibility unchanged", () => {

@@ -7,6 +7,8 @@ const API_TENNIS = "https://api.api-tennis.com/tennis/";
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
 const POLL_MS = 5000;
+const DISCOVERY_CACHE_MS = 30000;
+const FAVORITE_ASK_THRESHOLD = 0.6;
 const STAKE_USD = 500;
 const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
@@ -95,6 +97,63 @@ function marketWinnerTokens(event, selectedPlayer) {
   return null;
 }
 
+function marketForPlayers(event, playerOne, playerTwo) {
+  if (!event || event.active === false || event.closed === true || event.closed === "true") return null;
+  const eventTitle = String(event.title || event.question || "").trim().toLowerCase();
+  if (!eventTitle) return null;
+  for (const market of event.markets || []) {
+    const question = String(market.question || "").trim().toLowerCase();
+    if (question !== eventTitle || market.active === false || market.closed === true || market.closed === "true") continue;
+    const outcomes = listValue(market.outcomes).map(String);
+    const ids = listValue(market.clobTokenIds).map(String);
+    if (outcomes.length !== 2 || ids.length !== 2) continue;
+    if (outcomes.some((label) => /^(yes|no|completed|cancelled|draw)$/i.test(label.trim()))) continue;
+    const oneIndex = outcomes.findIndex((label) => nameMatches(label, playerOne));
+    const twoIndex = outcomes.findIndex((label) => nameMatches(label, playerTwo));
+    if (oneIndex < 0 || twoIndex < 0 || oneIndex === twoIndex) continue;
+    return { market, outcomes, ids };
+  }
+  return null;
+}
+
+function chooseFavorite(books, threshold = FAVORITE_ASK_THRESHOLD) {
+  const eligible = books
+    .map((book, index) => ({ ...book, index }))
+    .filter((book) => book.bestAsk && Number(book.bestAsk.price) > threshold && Number(book.bestAsk.size) > 0)
+    .sort((a, b) => Number(b.bestAsk.price) - Number(a.bestAsk.price));
+  return eligible[0] || null;
+}
+
+function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk }) {
+  const selectedIndex = mapped.outcomes.findIndex((outcome) => nameMatches(outcome, player));
+  return {
+    id: `${slug}:${Date.now()}`,
+    slug,
+    title: event.title || event.question || slug,
+    polymarketUrl: polyUrl,
+    player,
+    outcomes: mapped.outcomes,
+    opponent: mapped.outcomes[selectedIndex === 0 ? 1 : 0],
+    tokenId: mapped.ids[selectedIndex],
+    marketId: String(mapped.market.id || ""),
+    status: "armed",
+    selectionMode: "automatic_favorite",
+    favoriteAskAtArm: Number(favoriteAsk),
+    scoreStatus: "live",
+    currentScore: null,
+    currentServer: null,
+    position: null,
+    positions: {},
+    entries: 0,
+    setBankrolls: { 1: STAKE_USD, 2: STAKE_USD, 3: STAKE_USD },
+    firstSetPosition: null,
+    firstSetClosed: false,
+    lastGameCounts: {},
+    createdAt: Date.now(),
+    error: null,
+  };
+}
+
 class TennisPaperBot {
   constructor(options = {}) {
     this.fetch = options.fetch || globalThis.fetch;
@@ -107,6 +166,7 @@ class TennisPaperBot {
       running: false,
       updatedAt: Date.now(),
       feed: { status: this.apiKey ? "connecting" : "missing_key", liveMatches: 0, lastUpdate: null, error: null },
+      discovery: { status: this.apiKey ? "waiting" : "missing_key", lastScanAt: null, candidates: 0, autoArmed: 0, lastMessage: null },
       bankroll: { startingCapital: STARTING_CAPITAL, availableCapital: STARTING_CAPITAL },
       markets: [],
       trades: [],
@@ -243,28 +303,11 @@ class TennisPaperBot {
     const matchingOutcome = mapped.outcomes.findIndex((outcome) => nameMatches(outcome, player));
     if (matchingOutcome < 0) throw new Error("Selected player does not match either Polymarket outcome.");
     const item = {
-      id: `${slug}:${Date.now()}`,
-      slug,
-      title: event.title || event.question || slug,
-      polymarketUrl: polyUrl.href,
-      player,
-      outcomes: mapped.outcomes,
-      opponent: mapped.outcomes[matchingOutcome === 0 ? 1 : 0],
-      tokenId: mapped.ids[matchingOutcome],
-      marketId: String(mapped.market.id || ""),
+      ...marketDefaults({ slug, event, polyUrl: polyUrl.href, mapped, player, favoriteAsk: null }),
       status: "armed",
       scoreStatus: "waiting",
-      currentScore: null,
-      currentServer: null,
-      position: null,
-      positions: {},
-      entries: 0,
-      setBankrolls: { 1: STAKE_USD, 2: STAKE_USD, 3: STAKE_USD },
-      firstSetPosition: null,
-      firstSetClosed: false,
-      lastGameCounts: {},
-      createdAt: Date.now(),
-      error: null,
+      selectionMode: "manual_confirmation",
+      favoriteAskAtArm: null,
     };
     this.state.markets.unshift(item);
     this.log(`Armed ${item.title} for ${player}; PAPER ONLY.`);
@@ -350,6 +393,96 @@ class TennisPaperBot {
     return Array.isArray(payload.result) ? payload.result : [];
   }
 
+  async searchPolymarketEvent(playerOne, playerTwo) {
+    const key = [normalizeName(playerOne), normalizeName(playerTwo)].sort().join(":");
+    const cached = this.discoveryCache?.get(key);
+    if (cached && Date.now() - cached.at < DISCOVERY_CACHE_MS) return cached.event;
+    const surname = (name) => String(name || "").trim().split(/\s+/).filter(Boolean).at(-1) || "";
+    const query = `${surname(playerOne)} ${surname(playerTwo)}`.trim();
+    const url = new URL(`${GAMMA}/public-search`);
+    url.searchParams.set("q", query);
+    url.searchParams.set("events_status", "active");
+    url.searchParams.set("limit_per_type", "10");
+    const response = await this.fetch(url, { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error(`Polymarket event search HTTP ${response.status}`);
+    const payload = await response.json();
+    const event = (payload.events || []).find((candidate) => marketForPlayers(candidate, playerOne, playerTwo)) || null;
+    this.discoveryCache ||= new Map();
+    this.discoveryCache.set(key, { at: Date.now(), event });
+    return event;
+  }
+
+  async readBook(tokenId) {
+    const response = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(tokenId)}`, { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error(`Polymarket order book HTTP ${response.status}`);
+    const book = await response.json();
+    const levels = (items, descending) => (items || [])
+      .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+      .filter((level) => level.price > 0 && level.size > 0)
+      .sort((a, b) => descending ? b.price - a.price : a.price - b.price);
+    return { bestBid: levels(book.bids, true)[0] || null, bestAsk: levels(book.asks, false)[0] || null };
+  }
+
+  async discoverLiveMarkets(matches) {
+    this.state.discovery = {
+      status: "scanning",
+      lastScanAt: Date.now(),
+      candidates: matches.length,
+      autoArmed: 0,
+      lastMessage: null,
+    };
+    if (!matches.length) {
+      this.state.discovery.status = "no_live_matches";
+      this.state.discovery.lastMessage = "No live API-Tennis matches to match against Polymarket.";
+      return;
+    }
+    for (const live of matches.slice(0, 20)) {
+      const first = String(live.event_first_player || "").trim();
+      const second = String(live.event_second_player || "").trim();
+      if (!first || !second || this.state.markets.some((market) =>
+        (nameMatches(market.player, first) && nameMatches(market.opponent, second)) ||
+        (nameMatches(market.player, second) && nameMatches(market.opponent, first)))) continue;
+      try {
+        const event = await this.searchPolymarketEvent(first, second);
+        const mapped = marketForPlayers(event, first, second);
+        if (!event || !mapped) continue;
+        const slug = String(event.slug || "");
+        if (!slug || this.state.markets.some((market) => market.slug === slug)) continue;
+        const books = await Promise.all(mapped.ids.map((id) => this.readBook(id)));
+        const favorite = chooseFavorite(books);
+        if (!favorite) {
+          this.state.discovery.lastMessage = `${event.title}: no player ask is above $${FAVORITE_ASK_THRESHOLD.toFixed(2)}.`;
+          continue;
+        }
+        const player = mapped.outcomes[favorite.index];
+        const item = marketDefaults({
+          slug,
+          event,
+          polyUrl: `https://polymarket.com/event/${slug}`,
+          mapped,
+          player,
+          favoriteAsk: favorite.bestAsk.price,
+        });
+        item.bestAsk = favorite.bestAsk;
+        item.bestBid = favorite.bestBid;
+        item.currentServer = live.event_serve || null;
+        item.currentScore = live.event_game_result || null;
+        item.feedEventKey = String(live.event_key || "");
+        this.state.markets.unshift(item);
+        this.state.discovery.autoArmed += 1;
+        this.log(`Auto-added live match ${item.title}; selected ${player} as favorite at ask $${Number(favorite.bestAsk.price).toFixed(3)} (paper only).`);
+      } catch (error) {
+        this.state.discovery.lastMessage = String(error?.message || error).slice(0, 160);
+      }
+    }
+    this.state.discovery.status = this.state.discovery.autoArmed ? "matches_armed" : "scanned";
+    if (!this.state.discovery.lastMessage) {
+      this.state.discovery.lastMessage = this.state.discovery.autoArmed
+        ? `${this.state.discovery.autoArmed} live match(es) automatically armed.`
+        : "No eligible live Polymarket match with a player ask above $0.60.";
+    }
+  }
+
   async removeMarket(id) {
     const market = this.state.markets.find((item) => item.id === id);
     if (market && Object.keys(market.positions || {}).length) {
@@ -365,6 +498,7 @@ class TennisPaperBot {
     try {
       const matches = await this.fetchLiveMatches();
       this.state.feed = { status: "connected", liveMatches: matches.length, lastUpdate: Date.now(), error: null };
+      await this.discoverLiveMarkets(matches);
       await Promise.all(this.state.markets.map(async (market) => {
         try {
           await this.processMarket(market, matches);
@@ -514,4 +648,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite };
