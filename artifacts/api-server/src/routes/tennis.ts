@@ -35,8 +35,12 @@ router.post("/tennis/markets", async (req, res) => {
   }
 });
 router.delete("/tennis/markets/:id", async (req, res) => {
-  await bot.removeMarket(String(req.params.id));
-  res.json(bot.snapshot());
+  try {
+    await bot.removeMarket(String(req.params.id));
+    res.json(bot.snapshot());
+  } catch (error) {
+    res.status(400).json({ error: String((error as Error)?.message || error) });
+  }
 });
 router.post("/tennis/stop", (_req, res) => {
   bot.stop();

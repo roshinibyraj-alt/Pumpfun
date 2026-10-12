@@ -8,6 +8,7 @@ const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
 const POLL_MS = 5000;
 const STAKE_USD = 500;
+const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
 
 function parseUrl(value, host) {
@@ -106,6 +107,7 @@ class TennisPaperBot {
       running: false,
       updatedAt: Date.now(),
       feed: { status: this.apiKey ? "connecting" : "missing_key", liveMatches: 0, lastUpdate: null, error: null },
+      bankroll: { startingCapital: STARTING_CAPITAL, availableCapital: STARTING_CAPITAL },
       markets: [],
       trades: [],
       events: [],
@@ -121,7 +123,67 @@ class TennisPaperBot {
   }
 
   snapshot() {
-    return JSON.parse(JSON.stringify(this.state));
+    const snapshot = JSON.parse(JSON.stringify(this.state));
+    snapshot.bankroll = this.capitalSummary();
+    snapshot.markets = snapshot.markets.map((market) => ({
+      ...market,
+      accounting: this.marketAccounting(market),
+    }));
+    return snapshot;
+  }
+
+  capitalSummary() {
+    const closedTrades = this.state.trades.filter((trade) => trade.status === "closed");
+    const realizedPnl = closedTrades.reduce((total, trade) => total + Number(trade.pnl || 0), 0);
+    let allocatedCapital = 0;
+    let positionValue = 0;
+    let unrealizedPnl = 0;
+    for (const market of this.state.markets) {
+      for (const position of Object.values(market.positions || {})) {
+        const mark = Number(market.bestBid?.price ?? position.entryPrice);
+        const marketValue = position.shares * mark;
+        allocatedCapital += Number(position.stake || 0);
+        positionValue += marketValue;
+        unrealizedPnl += marketValue - Number(position.stake || 0);
+      }
+    }
+    const availableCapital = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL);
+    const currentCapital = availableCapital + positionValue;
+    return {
+      startingCapital: STARTING_CAPITAL,
+      availableCapital,
+      allocatedCapital,
+      positionValue,
+      realizedPnl,
+      unrealizedPnl,
+      totalPnl: currentCapital - STARTING_CAPITAL,
+      currentCapital,
+    };
+  }
+
+  marketAccounting(market) {
+    const trades = this.state.trades.filter((trade) => trade.marketId === market.id);
+    const realizedPnl = trades.filter((trade) => trade.status === "closed")
+      .reduce((total, trade) => total + Number(trade.pnl || 0), 0);
+    let allocatedCapital = 0;
+    let positionValue = 0;
+    let unrealizedPnl = 0;
+    for (const position of Object.values(market.positions || {})) {
+      const mark = Number(market.bestBid?.price ?? position.entryPrice);
+      const value = position.shares * mark;
+      allocatedCapital += Number(position.stake || 0);
+      positionValue += value;
+      unrealizedPnl += value - Number(position.stake || 0);
+    }
+    return {
+      allocatedCapital,
+      positionValue,
+      realizedPnl,
+      unrealizedPnl,
+      totalPnl: realizedPnl + unrealizedPnl,
+      openPositions: Object.keys(market.positions || {}).length,
+      trades,
+    };
   }
 
   async persist() {
@@ -135,6 +197,22 @@ class TennisPaperBot {
       const saved = JSON.parse(await fs.readFile(this.file, "utf8"));
       if (saved?.app === this.state.app) this.state = { ...this.state, ...saved };
     } catch {}
+    if (!Number.isFinite(Number(this.state.bankroll?.availableCapital))) {
+      const realized = this.state.trades
+        .filter((trade) => trade.status === "closed")
+        .reduce((total, trade) => total + Number(trade.pnl || 0), 0);
+      const openStake = this.state.markets.reduce((total, market) =>
+        total + Object.values(market.positions || {}).reduce((sum, position) => sum + Number(position.stake || 0), 0), 0);
+      this.state.bankroll = {
+        startingCapital: STARTING_CAPITAL,
+        availableCapital: Math.max(0, STARTING_CAPITAL + realized - openStake),
+      };
+    } else {
+      this.state.bankroll = {
+        startingCapital: STARTING_CAPITAL,
+        availableCapital: Math.max(0, Number(this.state.bankroll.availableCapital)),
+      };
+    }
     this.state.running = true;
     this.log(this.apiKey ? "Tennis score polling started in paper-only mode." : "Set API_TENNIS_KEY to enable score polling.", this.apiKey ? "info" : "warn");
     this.timer = setInterval(() => void this.tick(), POLL_MS);
@@ -273,6 +351,10 @@ class TennisPaperBot {
   }
 
   async removeMarket(id) {
+    const market = this.state.markets.find((item) => item.id === id);
+    if (market && Object.keys(market.positions || {}).length) {
+      throw new Error("This match still has an open paper position. Wait for it to close before removing it.");
+    }
     this.state.markets = this.state.markets.filter((item) => item.id !== id);
     await this.persist();
   }
@@ -358,14 +440,15 @@ class TennisPaperBot {
       market.error = "No executable ask depth for paper entry.";
       return;
     }
-    const bankroll = Number(market.setBankrolls?.[setNumber] || STAKE_USD);
-    const shares = Math.min(bankroll / ask.price, ask.size);
+    const availableCapital = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL);
+    const stakeBudget = Math.min(STAKE_USD, availableCapital);
+    const shares = Math.min(stakeBudget / ask.price, ask.size);
     if (shares <= 0) return;
     const position = { openedAt: Date.now(), entryPrice: ask.price, shares, stake: shares * ask.price, entryScore: market.currentScore, setNumber, entryGames: selectedGames, tradeId: `${market.id}:${market.entries + 1}` };
     market.positions ||= {};
     market.positions[setNumber] = position;
     market.position = position;
-    market.setBankrolls[setNumber] = Math.max(0, bankroll - position.stake);
+    this.state.bankroll.availableCapital = Math.max(0, availableCapital - position.stake);
     market.entries += 1;
     if (setNumber === 1 && !market.firstSetPosition) market.firstSetPosition = { ...position };
     this.state.trades.unshift({ id: position.tradeId, marketId: market.id, market: market.title, player: market.player, side: market.player, entryPrice: ask.price, shares, stake: position.stake, openedAt: Date.now(), status: "open", pnl: 0, setNumber });
@@ -396,11 +479,11 @@ class TennisPaperBot {
   finalizePosition(market, position, exitPrice, reason, setNumber) {
     const proceeds = position.shares * exitPrice;
     const pnl = proceeds - position.stake;
+    this.state.bankroll.availableCapital = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL) + proceeds;
     const trade = this.state.trades.find((item) => item.id === position.tradeId);
     if (trade) Object.assign(trade, { status: "closed", closedAt: Date.now(), exitPrice, pnl, exitReason: reason });
     market.positions ||= {};
     delete market.positions[setNumber];
-    market.setBankrolls[setNumber] = Math.max(0, market.setBankrolls[setNumber] || 0) + proceeds;
     market.position = market.positions?.[market.currentSet] || market.positions?.[1] || null;
     this.log(`${market.title}: paper exit at $${exitPrice.toFixed(3)}, P&L $${pnl.toFixed(2)}.`);
   }

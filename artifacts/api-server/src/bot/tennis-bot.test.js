@@ -55,8 +55,32 @@ test("paper fill respects visible ask depth and recycles net proceeds after exit
   assert.equal(market.position.stake, 350);
   bot.closePaperPosition(market, { price: 0.6 }, "test exit", 1);
   assert.equal(bot.state.trades[0].pnl, 70);
-  assert.equal(market.setBankrolls[1], 570);
+  assert.equal(bot.state.bankroll.availableCapital, 10070);
   assert.equal(market.position, null);
+});
+
+test("all match cards draw from one $10,000 bankroll and return proceeds to it", () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-bot-test.json" });
+  const first = { id: "first", title: "First", player: "Player A", entries: 0, positions: {}, setBankrolls: { 1: 500 } };
+  const second = { id: "second", title: "Second", player: "Player B", entries: 0, positions: {}, setBankrolls: { 1: 500 } };
+  bot.state.markets = [first, second];
+  bot.openPaperPosition(first, { price: 0.5, size: 1000 }, 1, 0);
+  bot.openPaperPosition(second, { price: 0.4, size: 1000 }, 1, 0);
+  assert.equal(bot.state.bankroll.availableCapital, 9100);
+  assert.equal(bot.snapshot().bankroll.allocatedCapital, 900);
+  bot.closePaperPosition(first, { price: 0.6 }, "test exit", 1);
+  const summary = bot.snapshot().bankroll;
+  assert.equal(summary.availableCapital, 9700);
+  assert.equal(summary.realizedPnl, 100);
+  assert.equal(summary.currentCapital, 10100);
+  assert.equal(bot.snapshot().markets[0].accounting.totalPnl, 100);
+});
+
+test("cannot remove a match while a paper position is open", async () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-bot-test.json" });
+  bot.state.markets = [{ id: "open-market", positions: { 1: { stake: 50 } } }];
+  await assert.rejects(bot.removeMarket("open-market"), /open paper position/);
+  assert.equal(bot.state.markets.length, 1);
 });
 
 test("enters only on the selected server's 0-30 while game scores are level", async () => {
