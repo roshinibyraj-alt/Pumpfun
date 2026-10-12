@@ -43,6 +43,13 @@ function nameMatches(left, right) {
     (aSurname && aSurname === bSurname && initialsMatch)));
 }
 
+function findLiveMatch(matches, playerOne, playerTwo) {
+  return matches.find((match) =>
+    (nameMatches(match.event_first_player, playerOne) && nameMatches(match.event_second_player, playerTwo)) ||
+    (nameMatches(match.event_second_player, playerOne) && nameMatches(match.event_first_player, playerTwo))
+  ) || null;
+}
+
 function listValue(value) {
   if (Array.isArray(value)) return value;
   try {
@@ -199,10 +206,66 @@ class TennisPaperBot {
       const ids = listValue(market.clobTokenIds);
       return outcomes.length === 2 && ids.length === 2 &&
         !outcomes.some((label) => /^(yes|no|completed|cancelled|draw)$/i.test(String(label).trim()))
-        ? { market, outcomes: outcomes.map(String) } : null;
+        ? { market, outcomes: outcomes.map(String), ids: ids.map(String) } : null;
     }).find(Boolean);
     if (!candidate) throw new Error("No two-player match-winner market found; refusing unsafe outcome mapping.");
-    return { title: event.title || event.question || slug, players: candidate.outcomes, slug };
+    const scoreFeed = await this.previewScoreFeed(candidate.outcomes);
+    const clobBooks = await Promise.all(candidate.ids.map(async (tokenId, index) => {
+      try {
+        const bookResponse = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(tokenId)}`, { signal: AbortSignal.timeout(5000) });
+        if (!bookResponse.ok) return { player: candidate.outcomes[index], status: `http_${bookResponse.status}`, bestBid: null, bestAsk: null };
+        const book = await bookResponse.json();
+        const bestBid = (book.bids || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+          .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => b.price - a.price)[0] || null;
+        const bestAsk = (book.asks || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+          .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => a.price - b.price)[0] || null;
+        return { player: candidate.outcomes[index], status: "loaded", bestBid, bestAsk };
+      } catch {
+        return { player: candidate.outcomes[index], status: "unavailable", bestBid: null, bestAsk: null };
+      }
+    }));
+    return {
+      title: event.title || event.question || slug,
+      players: candidate.outcomes,
+      slug,
+      marketId: String(candidate.market.id || ""),
+      scoreFeed,
+      clobBooks,
+    };
+  }
+
+  async previewScoreFeed(players) {
+    if (!this.apiKey) return { status: "missing_key", message: "API_TENNIS_KEY is not configured." };
+    try {
+      const matches = await this.fetchLiveMatches();
+      this.state.feed = { status: "connected", liveMatches: matches.length, lastUpdate: Date.now(), error: null };
+      const match = findLiveMatch(matches, players[0], players[1]);
+      if (!match) return { status: "not_live", message: "No matching event in the current API-Tennis live feed." };
+      return {
+        status: "live_match_found",
+        players: [match.event_first_player, match.event_second_player],
+        score: match.event_game_result || null,
+        server: match.event_serve || null,
+        eventStatus: match.event_status || null,
+        scores: Array.isArray(match.scores) ? match.scores : [],
+      };
+    } catch (error) {
+      const message = String(error?.message || error).slice(0, 160);
+      this.state.feed = { ...this.state.feed, status: "error", error: message };
+      return { status: "error", message };
+    }
+  }
+
+  async fetchLiveMatches() {
+    if (!this.apiKey) throw new Error("API_TENNIS_KEY is not configured.");
+    const url = new URL(API_TENNIS);
+    url.searchParams.set("method", "get_livescore");
+    url.searchParams.set("APIkey", this.apiKey);
+    const response = await this.fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(`API-Tennis HTTP ${response.status}`);
+    const payload = await response.json();
+    if (payload.success !== 1) throw new Error(payload.error || "API-Tennis rejected the request.");
+    return Array.isArray(payload.result) ? payload.result : [];
   }
 
   async removeMarket(id) {
@@ -214,14 +277,7 @@ class TennisPaperBot {
     if (this.busy || !this.apiKey || !this.state.running) return;
     this.busy = true;
     try {
-      const url = new URL(API_TENNIS);
-      url.searchParams.set("method", "get_livescore");
-      url.searchParams.set("APIkey", this.apiKey);
-      const response = await this.fetch(url, { signal: AbortSignal.timeout(8000) });
-      if (!response.ok) throw new Error(`API-Tennis HTTP ${response.status}`);
-      const payload = await response.json();
-      if (payload.success !== 1) throw new Error(payload.error || "API-Tennis rejected the request.");
-      const matches = Array.isArray(payload.result) ? payload.result : [];
+      const matches = await this.fetchLiveMatches();
       this.state.feed = { status: "connected", liveMatches: matches.length, lastUpdate: Date.now(), error: null };
       await Promise.all(this.state.markets.map(async (market) => {
         try {
@@ -371,4 +427,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, parseUrl };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, parseUrl };

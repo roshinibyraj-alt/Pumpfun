@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, parseUrl } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, parseUrl } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -21,6 +21,13 @@ test("matches API-Tennis abbreviated player names to market outcome names", () =
   assert.equal(nameMatches("L. Draxl", "Liam Draxl"), true);
   assert.equal(nameMatches("O. Jasika", "Omar Jasika"), true);
   assert.equal(nameMatches("L. Draxl", "O. Jasika"), false);
+});
+
+test("matches API-Tennis live events against both Polymarket participants", () => {
+  const event = { event_first_player: "J. Grabher", event_second_player: "Deborah Chiesa" };
+  assert.equal(findLiveMatch([event], "Julia Grabher", "Deborah Chiesa"), event);
+  assert.equal(findLiveMatch([event], "Deborah Chiesa", "Julia Grabher"), event);
+  assert.equal(findLiveMatch([event], "Julia Grabher", "Other Player"), null);
 });
 
 test("accepts Polymarket URLs and rejects unrelated hosts", () => {
