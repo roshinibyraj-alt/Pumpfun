@@ -1,6 +1,7 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import router from "./routes";
 import { logger } from "./lib/logger";
@@ -33,8 +34,16 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/api", router);
 
 app.get("/", (_req, res, next) => {
-  res.sendFile(
+  const dashboardPath = [
+    path.resolve(process.cwd(), "public/tennis.html"),
     path.resolve(process.cwd(), "artifacts/api-server/public/tennis.html"),
+  ].find(existsSync);
+  if (!dashboardPath) {
+    next();
+    return;
+  }
+  res.sendFile(
+    dashboardPath,
     (error) => {
       if (error) next(error);
     },
