@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, parseUrl } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -21,6 +21,12 @@ test("matches API-Tennis abbreviated player names to market outcome names", () =
   assert.equal(nameMatches("L. Draxl", "Liam Draxl"), true);
   assert.equal(nameMatches("O. Jasika", "Omar Jasika"), true);
   assert.equal(nameMatches("L. Draxl", "O. Jasika"), false);
+});
+
+test("accepts Bet365 Australia links while rejecting unrelated hosts", () => {
+  assert.equal(parseUrl("https://www.bet365.com.au/#/IP/EV151397850995C13", "bet365.com")?.hostname, "www.bet365.com.au");
+  assert.equal(parseUrl("https://bet365.com.au/match", "bet365.com")?.hostname, "bet365.com.au");
+  assert.equal(parseUrl("https://notbet365.com.attacker.example/match", "bet365.com"), null);
 });
 
 test("paper fill respects visible ask depth and recycles net proceeds after exit", () => {

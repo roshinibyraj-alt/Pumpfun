@@ -13,7 +13,10 @@ const MAX_LOGS = 200;
 function parseUrl(value, host) {
   try {
     const url = new URL(String(value));
-    if (url.protocol !== "https:" || (url.hostname !== host && !url.hostname.endsWith(`.${host}`))) return null;
+    const standardHost = url.hostname === host || url.hostname.endsWith(`.${host}`);
+    const bet365Australia = host === "bet365.com" &&
+      (url.hostname === "bet365.com.au" || url.hostname.endsWith(".bet365.com.au"));
+    if (url.protocol !== "https:" || (!standardHost && !bet365Australia)) return null;
     return url;
   } catch {
     return null;
@@ -372,4 +375,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, parseUrl };
