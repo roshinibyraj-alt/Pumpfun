@@ -73,6 +73,31 @@ function matchScore(event) {
   return [Number(match[1]), Number(match[2])];
 }
 
+function tennisScoreSnapshot(match, selectedIsFirst, currentSet) {
+  const sets = (Array.isArray(match?.scores) ? match.scores : []).map((score) => ({
+    set: Number(score.score_set),
+    playerGames: Number(score[selectedIsFirst ? "score_first" : "score_second"] || 0),
+    opponentGames: Number(score[selectedIsFirst ? "score_second" : "score_first"] || 0),
+  })).filter((score) => Number.isInteger(score.set) && score.set > 0);
+  const isComplete = ({ playerGames, opponentGames }) => {
+    const high = Math.max(playerGames, opponentGames);
+    const low = Math.min(playerGames, opponentGames);
+    return (high >= 6 && high - low >= 2) || (high === 7 && low === 6);
+  };
+  const completedSets = sets.filter((score) => score.set < currentSet || isComplete(score));
+  const current = sets.find((score) => score.set === currentSet) || null;
+  return {
+    setsWon: {
+      player: completedSets.filter((score) => score.playerGames > score.opponentGames).length,
+      opponent: completedSets.filter((score) => score.opponentGames > score.playerGames).length,
+    },
+    currentSetGames: current
+      ? { player: current.playerGames, opponent: current.opponentGames }
+      : null,
+    perSet: sets.map(({ set, playerGames, opponentGames }) => ({ set, playerGames, opponentGames })),
+  };
+}
+
 function hasZeroThirty(event, selectedIsFirst) {
   const score = matchScore(event);
   if (!score) return false;
@@ -539,6 +564,10 @@ class TennisPaperBot {
     market.feedEventKey = String(match.event_key || "");
     const setNumber = Math.max(1, Number(String(match.event_status || "").match(/set\s*(\d+)/i)?.[1] || 1));
     market.currentSet = setNumber;
+    const scoreSnapshot = tennisScoreSnapshot(match, selectedIsFirst, setNumber);
+    market.setsWon = scoreSnapshot.setsWon;
+    market.currentSetGames = scoreSnapshot.currentSetGames;
+    market.perSetScore = scoreSnapshot.perSet;
     const serverMatches = match.event_serve === (selectedIsFirst ? "First Player" : "Second Player");
     const setScore = Array.isArray(match.scores) ? match.scores.find((item) => Number(item.score_set) === setNumber) : null;
     const selectedGames = Number(setScore?.[selectedIsFirst ? "score_first" : "score_second"] || 0);
@@ -653,4 +682,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot };

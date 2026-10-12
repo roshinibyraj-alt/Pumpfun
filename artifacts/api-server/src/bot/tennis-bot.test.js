@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -15,6 +15,23 @@ test("does not trigger on malformed or different point scores", () => {
   assert.equal(matchScore({ event_game_result: "deuce" }), null);
   assert.equal(hasZeroThirty({ event_game_result: "15 - 30" }, true), false);
   assert.equal(hasZeroThirty({ event_game_result: "0 - 30" }, false), false);
+});
+
+test("orients set tally and current games around the selected player", () => {
+  const score = tennisScoreSnapshot({
+    scores: [
+      { score_set: "1", score_first: "6", score_second: "4" },
+      { score_set: "2", score_first: "2", score_second: "3" },
+    ],
+  }, false, 2);
+  assert.deepEqual(score, {
+    setsWon: { player: 0, opponent: 1 },
+    currentSetGames: { player: 3, opponent: 2 },
+    perSet: [
+      { set: 1, playerGames: 4, opponentGames: 6 },
+      { set: 2, playerGames: 3, opponentGames: 2 },
+    ],
+  });
 });
 
 test("matches API-Tennis abbreviated player names to market outcome names", () => {
