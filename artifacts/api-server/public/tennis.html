@@ -15,11 +15,10 @@
     <form id="add" class="card fields">
       <h2>Add a match</h2>
       <label>Polymarket match URL<input name="polymarketUrl" type="url" placeholder="https://polymarket.com/event/..." required></label>
-      <label>Bet365 match URL<input name="bet365Url" type="url" placeholder="https://www.bet365.com.au/..." required></label>
       <label>Choose player to trade<select name="player" id="player" required disabled><option value="">Load a Polymarket match first</option></select></label>
       <button type="button" id="loadPlayers" class="secondary">Load match players</button>
-      <div class="checks"><label><input name="confirmPolymarket" type="checkbox" required> Confirm Polymarket match</label><label><input name="confirmBet365" type="checkbox" required> Confirm Bet365 match</label></div>
-      <div class="notice">Bet365 links are confirmation/reference only; score data comes from API-Tennis. Paper fills are estimates from visible Polymarket depth.</div>
+      <div class="checks"><label><input name="confirmPolymarket" type="checkbox" required> Confirm Polymarket match</label></div>
+      <div class="notice">API-Tennis supplies live score and server data; the bot matches its player names against the selected Polymarket outcomes. Paper fills use visible Polymarket order-book depth.</div>
       <button>Add confirmed match</button><div id="formError" class="error"></div>
     </form>
     <section class="card"><div class="row"><h2>Feed & bankroll</h2><span id="feedStatus" class="pill">Connecting</span></div><div id="feed" class="muted">Waiting for first score poll…</div><div class="item"><strong>$500</strong><div class="muted">Initial paper stake per set; matches run independently.</div></div><div class="muted">5-second polling · score source timestamp shown per match.</div></section>
@@ -38,6 +37,6 @@ $("#events").innerHTML=s.events?.length?s.events.slice(0,10).map(e=>`<div class=
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 async function removeMatch(id){await fetch("/api/tennis/markets/"+id,{method:"DELETE"});refresh()}
 $("#loadPlayers").onclick=async()=>{const poly=$("#add [name=polymarketUrl]").value;$("#formError").textContent="";try{const r=await fetch("/api/tennis/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({polymarketUrl:poly})});const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not load players");$("#player").innerHTML='<option value="">Choose a player</option>'+d.players.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join("");$("#player").disabled=false}catch(err){$("#formError").textContent=err.message}};
-$("#add").addEventListener("submit",async e=>{e.preventDefault();$("#formError").textContent="";const f=new FormData(e.currentTarget);const body=Object.fromEntries(f.entries());body.confirmPolymarket=f.has("confirmPolymarket");body.confirmBet365=f.has("confirmBet365");try{const r=await fetch("/api/tennis/markets",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not add match");e.currentTarget.reset();$("#player").disabled=true;$("#player").innerHTML='<option value="">Load a Polymarket match first</option>';refresh()}catch(err){$("#formError").textContent=err.message}});
+$("#add").addEventListener("submit",async e=>{e.preventDefault();$("#formError").textContent="";const f=new FormData(e.currentTarget);const body=Object.fromEntries(f.entries());body.confirmPolymarket=f.has("confirmPolymarket");try{const r=await fetch("/api/tennis/markets",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not add match");e.currentTarget.reset();$("#player").disabled=true;$("#player").innerHTML='<option value="">Load a Polymarket match first</option>';refresh()}catch(err){$("#formError").textContent=err.message}});
 $("#refresh").onclick=refresh;refresh();setInterval(refresh,5000);
 </script></body></html>

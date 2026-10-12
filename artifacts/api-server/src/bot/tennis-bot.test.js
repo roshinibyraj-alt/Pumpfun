@@ -23,10 +23,9 @@ test("matches API-Tennis abbreviated player names to market outcome names", () =
   assert.equal(nameMatches("L. Draxl", "O. Jasika"), false);
 });
 
-test("accepts Bet365 Australia links while rejecting unrelated hosts", () => {
-  assert.equal(parseUrl("https://www.bet365.com.au/#/IP/EV151397850995C13", "bet365.com")?.hostname, "www.bet365.com.au");
-  assert.equal(parseUrl("https://bet365.com.au/match", "bet365.com")?.hostname, "bet365.com.au");
-  assert.equal(parseUrl("https://notbet365.com.attacker.example/match", "bet365.com"), null);
+test("accepts Polymarket URLs and rejects unrelated hosts", () => {
+  assert.equal(parseUrl("https://polymarket.com/event/tennis", "polymarket.com")?.hostname, "polymarket.com");
+  assert.equal(parseUrl("https://fakepolymarket.com.attacker.example/event/tennis", "polymarket.com"), null);
 });
 
 test("paper fill respects visible ask depth and recycles net proceeds after exit", () => {

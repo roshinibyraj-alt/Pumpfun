@@ -14,9 +14,7 @@ function parseUrl(value, host) {
   try {
     const url = new URL(String(value));
     const standardHost = url.hostname === host || url.hostname.endsWith(`.${host}`);
-    const bet365Australia = host === "bet365.com" &&
-      (url.hostname === "bet365.com.au" || url.hostname.endsWith(".bet365.com.au"));
-    if (url.protocol !== "https:" || (!standardHost && !bet365Australia)) return null;
+    if (url.protocol !== "https:" || !standardHost) return null;
     return url;
   } catch {
     return null;
@@ -141,10 +139,9 @@ class TennisPaperBot {
 
   async addMarket(input) {
     const polyUrl = parseUrl(input.polymarketUrl, "polymarket.com");
-    const bet365Url = parseUrl(input.bet365Url, "bet365.com");
     const player = String(input.player || "").trim();
-    if (!polyUrl || !bet365Url || !player) throw new Error("Enter valid Polymarket and Bet365 URLs and choose the player.");
-    if (input.confirmPolymarket !== true || input.confirmBet365 !== true) throw new Error("Confirm both market links before arming the paper strategy.");
+    if (!polyUrl || !player) throw new Error("Enter a valid Polymarket URL and choose the player.");
+    if (input.confirmPolymarket !== true) throw new Error("Confirm the Polymarket match before arming the paper strategy.");
     const slug = slugFromPolymarket(polyUrl);
     if (!slug) throw new Error("Could not read a Polymarket market slug from that URL.");
     if (this.state.markets.some((item) => item.slug === slug)) throw new Error("That market is already on the dashboard.");
@@ -161,7 +158,6 @@ class TennisPaperBot {
       slug,
       title: event.title || event.question || slug,
       polymarketUrl: polyUrl.href,
-      bet365Url: bet365Url.href,
       player,
       outcomes: mapped.outcomes,
       opponent: mapped.outcomes[matchingOutcome === 0 ? 1 : 0],
