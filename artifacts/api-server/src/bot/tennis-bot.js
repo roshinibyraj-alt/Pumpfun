@@ -174,6 +174,7 @@ class TennisPaperBot {
     };
     this.timer = null;
     this.busy = false;
+    this.discoveryCursor = 0;
   }
 
   log(message, level = "info") {
@@ -436,7 +437,11 @@ class TennisPaperBot {
       this.state.discovery.lastMessage = "No live API-Tennis matches to match against Polymarket.";
       return;
     }
-    for (const live of matches.slice(0, 20)) {
+    const scanCount = Math.min(20, matches.length);
+    const startIndex = this.discoveryCursor % matches.length;
+    const scanBatch = [...matches.slice(startIndex), ...matches.slice(0, startIndex)].slice(0, scanCount);
+    this.discoveryCursor = (startIndex + scanCount) % matches.length;
+    for (const live of scanBatch) {
       const first = String(live.event_first_player || "").trim();
       const second = String(live.event_second_player || "").trim();
       if (!first || !second || this.state.markets.some((market) =>
