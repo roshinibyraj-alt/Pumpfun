@@ -6,7 +6,7 @@ const path = require("node:path");
 const API_TENNIS = "https://api.api-tennis.com/tennis/";
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
-const POLL_MS = 5000;
+const POLL_MS = 1000;
 const DISCOVERY_CACHE_MS = 30000;
 const FAVORITE_ASK_THRESHOLD = 0.7;
 const NEUTRAL_ASK_MIN = 0.37;
@@ -14,6 +14,8 @@ const NEUTRAL_ASK_MAX = 0.66;
 const STAKE_USD = 500;
 const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
+const SERVE_POINT_STRATEGY_VERSION = "serve-point-accumulator-v1";
+const SERVE_POINT_SHARES = 10;
 const BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
 const BASE_TRANCHE_SHARES = 250;
 
@@ -192,7 +194,7 @@ function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk, sel
     marketId: String(mapped.market.id || ""),
     status: "armed",
     selectionMode,
-    strategyVersion: BREAKBACK_STRATEGY_VERSION,
+    strategyVersion: SERVE_POINT_STRATEGY_VERSION,
     favoriteAskAtArm: favoriteAsk == null ? null : Number(favoriteAsk),
     scoreStatus: "live",
     currentScore: null,
@@ -241,6 +243,24 @@ class TennisPaperBot {
     console.info(`[tennis-paper] ${message}`);
   }
 
+  migrateServePointMarket(market) {
+    for (const [key, position] of Object.entries(market.positions || {})) {
+      position.player ||= market.activePlayer || market.player;
+      position.tokenId ||= market.tokenId || market.tokenIds?.[0] || null;
+      position.kind = "accumulated";
+      position.entryPrice = Number(position.shares) > 0
+        ? Number(position.stake || 0) / Number(position.shares)
+        : Number(position.entryPrice || 0);
+      market.positions[key] = position;
+    }
+    market.strategyVersion = SERVE_POINT_STRATEGY_VERSION;
+    market.selectionMode = "automatic_serve_points";
+    market.activePlayer = null;
+    market.breakCycle = null;
+    market.activeServeGame = null;
+    market.lastObservedGames = {};
+  }
+
   snapshot() {
     const snapshot = JSON.parse(JSON.stringify(this.state));
     snapshot.bankroll = this.capitalSummary();
@@ -259,7 +279,7 @@ class TennisPaperBot {
     let unrealizedPnl = 0;
     for (const market of this.state.markets) {
       for (const position of Object.values(market.positions || {})) {
-        const mark = Number(market.bestBid?.price ?? position.entryPrice);
+        const mark = Number(position.bestBid?.price ?? market.booksByToken?.[position.tokenId]?.bestBid?.price ?? market.bestBid?.price ?? position.entryPrice);
         const marketValue = position.shares * mark;
         allocatedCapital += Number(position.stake || 0);
         positionValue += marketValue;
@@ -288,7 +308,7 @@ class TennisPaperBot {
     let positionValue = 0;
     let unrealizedPnl = 0;
     for (const position of Object.values(market.positions || {})) {
-      const mark = Number(market.bestBid?.price ?? position.entryPrice);
+      const mark = Number(position.bestBid?.price ?? market.booksByToken?.[position.tokenId]?.bestBid?.price ?? market.bestBid?.price ?? position.entryPrice);
       const value = position.shares * mark;
       allocatedCapital += Number(position.stake || 0);
       positionValue += value;
@@ -317,12 +337,7 @@ class TennisPaperBot {
       if (saved?.app === this.state.app) this.state = { ...this.state, ...saved };
     } catch {}
     for (const market of this.state.markets || []) {
-      if (market.strategyVersion === "breakback-compound-v1") {
-        if (market.breakCycle?.stage === "await_favorite_breakback") {
-          market.breakCycle.stage = "await_player_breakback";
-        }
-        market.strategyVersion = BREAKBACK_STRATEGY_VERSION;
-      }
+      if (market.strategyVersion !== SERVE_POINT_STRATEGY_VERSION) this.migrateServePointMarket(market);
     }
     if (!Number.isFinite(Number(this.state.bankroll?.availableCapital))) {
       const realized = this.state.trades.reduce((total, trade) =>
@@ -486,7 +501,9 @@ class TennisPaperBot {
       .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
       .filter((level) => level.price > 0 && level.size > 0)
       .sort((a, b) => descending ? b.price - a.price : a.price - b.price);
-    return { bestBid: levels(book.bids, true)[0] || null, bestAsk: levels(book.asks, false)[0] || null };
+    const bidDepth = levels(book.bids, true);
+    const askDepth = levels(book.asks, false);
+    return { bestBid: bidDepth[0] || null, bestAsk: askDepth[0] || null, bidDepth, askDepth };
   }
 
   async discoverLiveMarkets(matches) {
@@ -514,12 +531,9 @@ class TennisPaperBot {
         (nameMatches(market.player, first) && nameMatches(market.opponent, second)) ||
         (nameMatches(market.player, second) && nameMatches(market.opponent, first)));
       if (existing) {
-        if (["automatic_favorite", "automatic_any_break"].includes(existing.selectionMode) &&
-            existing.strategyVersion !== BREAKBACK_STRATEGY_VERSION &&
-            !Object.keys(existing.positions || {}).length) {
-          existing.strategyVersion = BREAKBACK_STRATEGY_VERSION;
-          existing.lastObservedGames = {};
-          this.log(`${existing.title}: adopted the current strategy while live.`);
+        if (existing.strategyVersion !== SERVE_POINT_STRATEGY_VERSION) {
+          this.migrateServePointMarket(existing);
+          this.log(`${existing.title}: switched to serve-point accumulation while live.`);
         }
         continue;
       }
@@ -529,32 +543,22 @@ class TennisPaperBot {
         if (!event || !mapped) continue;
         const slug = String(event.slug || "");
         if (!slug || this.state.markets.some((market) => market.slug === slug)) continue;
-        const books = await Promise.all(mapped.ids.map((id) => this.readBook(id)));
-        const firstScanMode = classifyFirstScan(books);
-        if (!firstScanMode) {
-          this.state.discovery.lastMessage = `${event.title}: first-scan asks do not meet either entry band (> $${FAVORITE_ASK_THRESHOLD.toFixed(2)} or $${NEUTRAL_ASK_MIN.toFixed(2)}–$${NEUTRAL_ASK_MAX.toFixed(2)}).`;
-          continue;
-        }
-        const player = mapped.outcomes[firstScanMode.index];
+        const player = mapped.outcomes[0];
         const item = marketDefaults({
           slug,
           event,
           polyUrl: `https://polymarket.com/event/${slug}`,
           mapped,
           player,
-          favoriteAsk: firstScanMode.selectionMode === "automatic_favorite" ? firstScanMode.ask : null,
-          selectionMode: firstScanMode.selectionMode,
+          favoriteAsk: null,
+          selectionMode: "automatic_serve_points",
         });
-        item.bestAsk = books[firstScanMode.index].bestAsk;
-        item.bestBid = books[firstScanMode.index].bestBid;
         item.currentServer = live.event_serve || null;
         item.currentScore = live.event_game_result || null;
         item.feedEventKey = String(live.event_key || "");
         this.state.markets.unshift(item);
         this.state.discovery.autoArmed += 1;
-        this.log(firstScanMode.selectionMode === "automatic_favorite"
-          ? `Auto-added live match ${item.title}; selected ${player} as favorite at first-scan ask $${Number(firstScanMode.ask).toFixed(3)} (paper only).`
-          : `Auto-added live match ${item.title}; first-scan ask was in the neutral $${NEUTRAL_ASK_MIN.toFixed(2)}–$${NEUTRAL_ASK_MAX.toFixed(2)} band; any player's break can trigger buying the broken player (paper only).`);
+        this.log(`Auto-added live match ${item.title}; both players can trigger serve-point paper entries (paper only).`);
       } catch (error) {
         this.state.discovery.lastMessage = String(error?.message || error).slice(0, 160);
       }
@@ -563,7 +567,7 @@ class TennisPaperBot {
     if (!this.state.discovery.lastMessage) {
       this.state.discovery.lastMessage = this.state.discovery.autoArmed
         ? `${this.state.discovery.autoArmed} live match(es) automatically armed.`
-        : `Scanning live matches at any score: favorite ask > $${FAVORITE_ASK_THRESHOLD.toFixed(2)} or neutral ask $${NEUTRAL_ASK_MIN.toFixed(2)}–$${NEUTRAL_ASK_MAX.toFixed(2)}.`;
+        : "Scanning live matches at any score; both players are eligible whenever they serve.";
     }
   }
 
@@ -650,26 +654,31 @@ class TennisPaperBot {
     const setScore = Array.isArray(match.scores) ? match.scores.find((item) => Number(item.score_set) === setNumber) : null;
     const selectedGames = Number(setScore?.[selectedIsFirst ? "score_first" : "score_second"] || 0);
     const opponentGames = Number(setScore?.[selectedIsFirst ? "score_second" : "score_first"] || 0);
-    const firstScanBooks = market.selectionMode === "automatic_any_break" && !market.activePlayer && Array.isArray(market.tokenIds)
-      ? await Promise.all(market.tokenIds.map((id) => this.readBook(id)))
-      : null;
-    const bookResponse = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(market.tokenId)}`, { signal: AbortSignal.timeout(5000) });
-    if (!bookResponse.ok) throw new Error(`Polymarket order book HTTP ${bookResponse.status}`);
-    const book = await bookResponse.json();
-    const ask = (book.asks || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
-      .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => a.price - b.price)[0];
-    const bid = (book.bids || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
-      .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => b.price - a.price)[0];
-    market.bestAsk = ask || null;
-    market.bestBid = bid || null;
-    market.bidDepth = (book.bids || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
-      .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => b.price - a.price);
+    const tokenIds = market.tokenIds?.length ? market.tokenIds : [market.tokenId];
+    const books = await Promise.all(tokenIds.map((tokenId) => this.readBook(tokenId)));
+    market.booksByToken = Object.fromEntries(tokenIds.map((tokenId, index) => [tokenId, books[index]]));
+    const selectedBook = market.booksByToken[market.tokenId] || books[0];
+    market.bestAsk = selectedBook?.bestAsk || null;
+    market.bestBid = selectedBook?.bestBid || null;
+    market.bidDepth = selectedBook?.bidDepth || [];
     market.lastBookAt = Date.now();
+    const ask = selectedBook?.bestAsk || null;
+    const bid = selectedBook?.bestBid || null;
+    const firstScanBooks = books;
+    for (const position of Object.values(market.positions || {})) {
+      const positionBook = market.booksByToken[position.tokenId];
+      if (positionBook) position.bestBid = positionBook.bestBid;
+    }
     if (matchIsComplete(match)) {
       await this.checkOfficialSettlement(market);
       return;
     }
     market.lastScoreAt = Date.now();
+    if (market.strategyVersion === SERVE_POINT_STRATEGY_VERSION) {
+      await this.processServePointMarket(market, match, selectedIsFirst, setNumber,
+        selectedGames, opponentGames, pointScore);
+      return;
+    }
     market.lastObservedGames ||= {};
     const currentObservation = {
       playerGames: selectedGames,
@@ -806,6 +815,170 @@ class TennisPaperBot {
       serverSelected: !currentObservation.serverSelected,
     } : currentObservation;
     market.position = market.positions?.[market.breakCycle?.entrySet] || null;
+  }
+
+  async processServePointMarket(market, match, selectedIsFirst, setNumber,
+    selectedGames, opponentGames, pointScore) {
+    const serverIsFirst = match.event_serve === "First Player";
+    const serverIsSecond = match.event_serve === "Second Player";
+    if (!serverIsFirst && !serverIsSecond) {
+      market.strategyStatus = "Waiting for API-Tennis server state";
+      return;
+    }
+    const server = serverIsFirst ? match.event_first_player : match.event_second_player;
+    const player = nameMatches(server, market.player) ? market.player : market.opponent;
+    const tokenIndex = (market.outcomes || []).findIndex((name) => nameMatches(name, player));
+    const tokenId = market.tokenIds?.[tokenIndex] || market.tokenId;
+    const book = market.booksByToken?.[tokenId];
+    const serverPoints = pointScore?.[serverIsFirst ? 0 : 1];
+    const returnPoints = pointScore?.[serverIsFirst ? 1 : 0];
+    const gameKey = `${setNumber}:${selectedGames}:${opponentGames}:${normalizeName(server)}`;
+    let active = market.activeServeGame;
+    if (active && active.key !== gameKey) {
+      let serverWon = false;
+      if (active.setNumber === setNumber) {
+        const serverGamesNow = active.serverIsFirst ? selectedGames : opponentGames;
+        const serverGamesAtStart = active.serverIsFirst ? active.startSelectedGames : active.startOpponentGames;
+        serverWon = serverGamesNow > serverGamesAtStart;
+      }
+      if (active.position?.shares > 0) {
+        if (!serverWon || !this.tryServeGameExit(market, active.position)) {
+          this.moveServeGameToAccumulator(market, active);
+        }
+      }
+      active = null;
+    }
+    if (!active) {
+      active = market.activeServeGame = {
+        key: gameKey,
+        setNumber,
+        server,
+        serverIsFirst: nameMatches(server, market.player),
+        startSelectedGames: selectedGames,
+        startOpponentGames: opponentGames,
+        position: null,
+        boughtAt15: false,
+        boughtAt30: false,
+      };
+    }
+    if (active.server !== server) return;
+    if (serverPoints === 0 && returnPoints === 15 && !active.boughtAt15) {
+      active.boughtAt15 = true;
+      this.openServePointShares(market, active, tokenId, book, "0-15");
+    } else if (serverPoints === 0 && returnPoints === 30 && !active.boughtAt30) {
+      active.boughtAt30 = true;
+      this.openServePointShares(market, active, tokenId, book, "0-30");
+    }
+    for (const [key, position] of Object.entries(market.positions || {})) {
+      if (position.kind === "serve_game") continue;
+      const positionBook = market.booksByToken?.[position.tokenId];
+      const bid = positionBook?.bestBid?.price;
+      if (Number.isFinite(bid) && bid >= Number(position.entryPrice) + 0.10) {
+        this.tryAccumulatedExit(market, key, position, positionBook);
+      }
+    }
+    market.position = active.position || Object.values(market.positions || {})[0] || null;
+    market.strategyStatus = `${server} serving · buys at 0-15 and 0-30`;
+  }
+
+  openServePointShares(market, active, tokenId, book, stage) {
+    if (!book?.askDepth?.length) {
+      this.log(`${market.title}: skipped ${active.server} ${stage} entry; no ask depth is available.`);
+      return false;
+    }
+    let remaining = SERVE_POINT_SHARES;
+    let stake = 0;
+    for (const level of book.askDepth) {
+      const shares = Math.min(remaining, Number(level.size));
+      stake += shares * Number(level.price);
+      remaining -= shares;
+      if (remaining <= 1e-8) break;
+    }
+    if (remaining > 1e-8) {
+      this.log(`${market.title}: skipped ${active.server} ${stage} entry; insufficient visible ask depth for 10 shares.`);
+      return false;
+    }
+    const available = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL);
+    if (available < stake) {
+      this.log(`${market.title}: skipped ${active.server} ${stage} entry; insufficient demo capital.`);
+      return false;
+    }
+    const entryPrice = stake / SERVE_POINT_SHARES;
+    const key = `serve:${active.key}`;
+    const position = active.position || {
+      kind: "serve_game", player: active.server, tokenId, setNumber: active.setNumber,
+      shares: 0, stake: 0, tranches: [], openedAt: Date.now(), bestBid: book.bestBid,
+    };
+    const tradeId = `${market.id}:serve:${active.key}:${stage}:${Date.now()}`;
+    const trade = {
+      id: tradeId, marketId: market.id, market: market.title, player: active.server,
+      side: active.server, stage, entryPrice, shares: SERVE_POINT_SHARES,
+      stake, openedAt: Date.now(), status: "open", pnl: 0, realizedPnl: 0,
+      remainingShares: SERVE_POINT_SHARES, setNumber: active.setNumber,
+    };
+    position.tranches.push({ tradeId, entryPrice, shares: SERVE_POINT_SHARES, stake });
+    position.shares += SERVE_POINT_SHARES;
+    position.stake += stake;
+    position.entryPrice = position.stake / position.shares;
+    position.tokenId = tokenId;
+    active.position = position;
+    market.positions ||= {};
+    market.positions[key] = position;
+    market.entries = Number(market.entries || 0) + 1;
+    this.state.bankroll.availableCapital = available - stake;
+    this.state.trades.unshift(trade);
+    this.log(`${market.title}: bought ${SERVE_POINT_SHARES} ${active.server} shares at ${stage}, average $${entryPrice.toFixed(3)} for $${stake.toFixed(2)}.`);
+    return true;
+  }
+
+  tryServeGameExit(market, position) {
+    const book = market.booksByToken?.[position.tokenId];
+    if (!this.sellPositionFromBook(market, position, book, "serve game won")) return false;
+    delete market.positions[`serve:${market.activeServeGame?.key}`];
+    if (market.activeServeGame) market.activeServeGame.position = null;
+    return true;
+  }
+
+  tryAccumulatedExit(market, key, position, book) {
+    if (!this.sellPositionFromBook(market, position, book, "accumulated position reached +$0.10")) return false;
+    delete market.positions[key];
+    return true;
+  }
+
+  sellPositionFromBook(market, position, book, reason) {
+    if (!position || !book?.bidDepth?.length) return false;
+    let remaining = Number(position.shares);
+    let proceeds = 0;
+    for (const level of book.bidDepth) {
+      if (remaining <= 1e-8) break;
+      const sold = Math.min(remaining, Number(level.size));
+      proceeds += sold * Number(level.price);
+      remaining -= sold;
+    }
+    if (remaining > 1e-8) return false;
+    const shares = Number(position.shares);
+    const exitPrice = proceeds / shares;
+    const pnl = this.realizePositionShares(market, position, shares, exitPrice, reason);
+    this.log(`${market.title}: sold ${shares.toFixed(2)} ${position.player} shares at $${exitPrice.toFixed(3)} VWAP; realized P&L $${pnl.toFixed(2)} (${reason}).`);
+    return true;
+  }
+
+  moveServeGameToAccumulator(market, active) {
+    const source = active.position;
+    const sourceKey = `serve:${active.key}`;
+    if (!source) return;
+    const key = `accumulated:${normalizeName(source.player)}`;
+    const target = market.positions[key] || {
+      kind: "accumulated", player: source.player, tokenId: source.tokenId,
+      shares: 0, stake: 0, tranches: [], openedAt: source.openedAt,
+    };
+    target.shares += source.shares;
+    target.stake += source.stake;
+    target.entryPrice = target.stake / target.shares;
+    target.tranches.push(...source.tranches);
+    market.positions[key] = target;
+    delete market.positions[sourceKey];
+    this.log(`${market.title}: ${source.player}'s ${source.shares.toFixed(2)} shares moved to their accumulated bucket at $${target.entryPrice.toFixed(3)} average.`);
   }
 
   trySweepExit(market, position, setNumber, reason = "break-back exit", requestedShares = position?.shares) {
@@ -1004,7 +1177,7 @@ class TennisPaperBot {
     }
     market.positions ||= {};
     delete market.positions[setNumber];
-    market.position = market.positions?.[market.currentSet] || market.positions?.[1] || null;
+    market.position = Object.values(market.positions || {})[0] || null;
     this.log(`${market.title}: paper exit at $${exitPrice.toFixed(3)}, P&L $${pnl.toFixed(2)}.`);
     return proceeds;
   }
@@ -1022,13 +1195,12 @@ class TennisPaperBot {
       if (!Object.keys(market.positions || {}).length) return;
       const outcomes = listValue(resolvedMarket.outcomes).map(String);
       const prices = listValue(resolvedMarket.outcomePrices).map(Number);
-      const chosen = outcomes.findIndex((outcome) => nameMatches(outcome, market.player));
-      if (chosen < 0 || !Number.isFinite(prices[chosen])) return;
-      const payout = prices[chosen] >= 0.99 ? 1 : prices[chosen] <= 0.01 ? 0 : null;
-      if (payout === null) return;
-      for (const [setKey, position] of Object.entries(market.positions)) {
-        const setNumber = Number(setKey);
-        this.finalizePosition(market, position, payout, "official Polymarket outcome", setNumber);
+      for (const [key, position] of Object.entries(market.positions)) {
+        const chosen = outcomes.findIndex((outcome) => nameMatches(outcome, position.player || market.player));
+        if (chosen < 0 || !Number.isFinite(prices[chosen])) continue;
+        const payout = prices[chosen] >= 0.99 ? 1 : prices[chosen] <= 0.01 ? 0 : null;
+        if (payout === null) continue;
+        this.finalizePosition(market, position, payout, "official Polymarket outcome", key);
       }
       market.scoreStatus = "officially_resolved";
     } catch (error) {

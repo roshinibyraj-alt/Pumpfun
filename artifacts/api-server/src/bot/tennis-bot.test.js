@@ -192,17 +192,77 @@ test("auto-arms a match already in progress for the Polymarket favorite", async 
   assert.equal(bot.state.markets.length, 1);
   assert.equal(bot.state.markets[0].player, "Julia Grabher");
   assert.equal(bot.state.markets[0].opponent, "Deborah Chiesa");
-  assert.equal(bot.state.markets[0].selectionMode, "automatic_favorite");
-  assert.equal(bot.state.markets[0].favoriteAskAtArm, 0.78);
+  assert.equal(bot.state.markets[0].selectionMode, "automatic_serve_points");
+  assert.equal(bot.state.markets[0].favoriteAskAtArm, null);
   assert.equal(bot.state.markets[0].tokenId, "grabher-token");
-  assert.equal(bot.state.markets[0].strategyVersion, "breakback-staged-flat-v2");
+  assert.equal(bot.state.markets[0].strategyVersion, "serve-point-accumulator-v1");
   assert.equal(bot.state.discovery.autoArmed, 1);
   assert.equal(bot.state.mode, "PAPER");
   await bot.processMarket(bot.state.markets[0], [liveMatch]);
   assert.equal(bot.state.markets[0].position, null);
-  assert.deepEqual(bot.state.markets[0].lastObservedGames[2], {
-    playerGames: 3, opponentGames: 2, serverSelected: true,
+  assert.equal(bot.state.markets[0].activeServeGame.server, "J. Grabher");
+  assert.equal(bot.state.markets[0].activeServeGame.position, null);
+});
+
+function servePointFixture(bids = { one: "0.60", two: "0.40" }) {
+  const bot = new TennisPaperBot({
+    apiKey: "test",
+    file: "/tmp/tennis-serve-point-test.json",
+    fetch: async (url) => {
+      const token = new URL(String(url)).searchParams.get("token_id");
+      const one = token === "one-token";
+      const bid = Number(one ? bids.one : bids.two);
+      return { ok: true, json: async () => ({
+        asks: [{ price: String(bid + 0.02), size: "1000" }],
+        bids: [{ price: String(bid), size: "1000" }],
+      }) };
+    },
   });
+  const market = {
+    id: "serve-point", title: "Serve point test", player: "Player One", opponent: "Player Two",
+    outcomes: ["Player One", "Player Two"], tokenIds: ["one-token", "two-token"],
+    tokenId: "one-token", strategyVersion: "serve-point-accumulator-v1",
+    selectionMode: "automatic_serve_points", entries: 0, positions: {},
+  };
+  const score = (one, two, server, points = "0 - 0") => ({
+    event_first_player: "Player One", event_second_player: "Player Two",
+    event_serve: server, event_game_result: points, event_status: "Set 1",
+    scores: [{ score_set: 1, score_first: one, score_second: two }],
+  });
+  return { bot, market, score, run: (event) => bot.processMarket(market, [event]) };
+}
+
+test("buys 10 shares at server 0-15 and 10 more at 0-30, then exits when that player holds", async () => {
+  const { bot, market, score, run } = servePointFixture();
+  await run(score(2, 2, "First Player"));
+  await run(score(2, 2, "First Player", "0 - 15"));
+  await run(score(2, 2, "First Player", "0 - 30"));
+  assert.equal(market.activeServeGame.position.shares, 20);
+  assert.deepEqual(bot.state.trades.map((trade) => trade.stage), ["0-30", "0-15"]);
+  await run(score(3, 2, "Second Player"));
+  assert.equal(Object.keys(market.positions).length, 0);
+  assert.equal(bot.state.trades.every((trade) => trade.status === "closed"), true);
+  assert.ok(Math.abs(bot.state.bankroll.availableCapital - 9999.6) < 1e-8);
+});
+
+test("accumulates shares after a lost serve game and exits only at average entry plus $0.10", async () => {
+  const fixture = servePointFixture({ one: "0.60", two: "0.40" });
+  const { bot, market, score, run } = fixture;
+  await run(score(2, 2, "Second Player"));
+  await run(score(2, 2, "Second Player", "15 - 0"));
+  await run(score(2, 2, "Second Player", "30 - 0"));
+  await run(score(3, 2, "First Player"));
+  const bucket = market.positions["accumulated:playertwo"];
+  assert.equal(bucket.shares, 20);
+  assert.ok(Math.abs(bucket.entryPrice - 0.42) < 1e-8);
+  assert.equal(bot.state.trades.every((trade) => trade.status === "open"), true);
+  fixture.bot.fetch = async () => ({ ok: true, json: async () => ({
+    asks: [{ price: "0.65", size: "1000" }],
+    bids: [{ price: "0.53", size: "1000" }],
+  }) });
+  await run(score(3, 2, "First Player", "0 - 15"));
+  assert.equal(market.positions["accumulated:playertwo"], undefined);
+  assert.equal(bot.state.trades.filter((trade) => trade.status === "closed").length, 2);
 });
 
 test("allows same rules in Set 3 with set 2 eligibility unchanged", () => {
