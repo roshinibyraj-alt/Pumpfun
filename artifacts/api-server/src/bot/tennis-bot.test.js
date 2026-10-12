@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, openingGame, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -81,14 +81,6 @@ test("first-scan odds choose favorite, neutral any-break, or no-trade bands", ()
   assert.equal(classifyFirstScan([{ bestAsk: { price: 0.7, size: 10 } }]), null);
 });
 
-test("only auto-selects favorites while the opening game is still at 0-0", () => {
-  const opening = { event_status: "Set 1", scores: [{ score_set: 1, score_first: 0, score_second: 0 }] };
-  assert.equal(openingGame(opening), true);
-  assert.equal(openingGame({ ...opening, scores: [{ score_set: 1, score_first: 1, score_second: 0 }] }), false);
-  assert.equal(openingGame({ ...opening, event_status: "Set 2" }), false);
-  assert.equal(openingGame({ event_status: "Set 1", scores: [] }), false);
-});
-
 test("entries include 4-3 and 3-4, but stop beyond either score", () => {
   assert.equal(entryGameAllowed(4, 3), true);
   assert.equal(entryGameAllowed(3, 4), true);
@@ -157,7 +149,7 @@ test("keeps an exit pending rather than inventing fills when bid depth is short"
   assert.match(market.exitStatus, /60\.00 remaining/);
 });
 
-test("auto-arms a live match for the Polymarket favorite above the ask threshold", async () => {
+test("auto-arms a match already in progress for the Polymarket favorite", async () => {
   const event = {
     title: "Court event: Julia Grabher vs Deborah Chiesa",
     slug: "wta-grabher-chiesa-live",
@@ -184,15 +176,19 @@ test("auto-arms a live match for the Polymarket favorite above the ask threshold
       throw new Error(`Unexpected test request: ${request}`);
     },
   });
-  await bot.discoverLiveMarkets([{
+  const liveMatch = {
     event_first_player: "J. Grabher",
     event_second_player: "D. Chiesa",
-    event_game_result: "0 - 0",
+    event_game_result: "15 - 30",
     event_serve: "First Player",
     event_key: "live-1",
-    event_status: "Set 1",
-    scores: [{ score_set: 1, score_first: 0, score_second: 0 }],
-  }]);
+    event_status: "Set 2",
+    scores: [
+      { score_set: 1, score_first: 4, score_second: 6 },
+      { score_set: 2, score_first: 3, score_second: 2 },
+    ],
+  };
+  await bot.discoverLiveMarkets([liveMatch]);
   assert.equal(bot.state.markets.length, 1);
   assert.equal(bot.state.markets[0].player, "Julia Grabher");
   assert.equal(bot.state.markets[0].opponent, "Deborah Chiesa");
@@ -202,6 +198,11 @@ test("auto-arms a live match for the Polymarket favorite above the ask threshold
   assert.equal(bot.state.markets[0].strategyVersion, "breakback-staged-flat-v2");
   assert.equal(bot.state.discovery.autoArmed, 1);
   assert.equal(bot.state.mode, "PAPER");
+  await bot.processMarket(bot.state.markets[0], [liveMatch]);
+  assert.equal(bot.state.markets[0].position, null);
+  assert.deepEqual(bot.state.markets[0].lastObservedGames[2], {
+    playerGames: 3, opponentGames: 2, serverSelected: true,
+  });
 });
 
 test("allows same rules in Set 3 with set 2 eligibility unchanged", () => {

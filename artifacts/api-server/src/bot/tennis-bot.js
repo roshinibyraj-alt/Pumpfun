@@ -17,18 +17,6 @@ const MAX_LOGS = 200;
 const BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
 const BASE_TRANCHE_SHARES = 250;
 
-function openingGame(match) {
-  const setNumber = Number(String(match?.event_status || "").match(/set\s*(\d+)/i)?.[1] || 1);
-  const firstSet = Array.isArray(match?.scores)
-    ? match.scores.find((score) => Number(score.score_set) === 1)
-    : null;
-  return setNumber === 1 && Boolean(firstSet) &&
-    Number.isFinite(Number(firstSet.score_first)) &&
-    Number.isFinite(Number(firstSet.score_second)) &&
-    Number(firstSet?.score_first || 0) === 0 &&
-    Number(firstSet?.score_second || 0) === 0;
-}
-
 function entryGameAllowed(playerGames, opponentGames) {
   return (playerGames <= 4 && opponentGames <= 3) ||
     (playerGames <= 3 && opponentGames <= 4);
@@ -521,7 +509,7 @@ class TennisPaperBot {
     for (const live of scanBatch) {
       const first = String(live.event_first_player || "").trim();
       const second = String(live.event_second_player || "").trim();
-      if (!first || !second || !openingGame(live)) continue;
+      if (!first || !second) continue;
       const existing = this.state.markets.find((market) =>
         (nameMatches(market.player, first) && nameMatches(market.opponent, second)) ||
         (nameMatches(market.player, second) && nameMatches(market.opponent, first)));
@@ -531,7 +519,7 @@ class TennisPaperBot {
             !Object.keys(existing.positions || {}).length) {
           existing.strategyVersion = BREAKBACK_STRATEGY_VERSION;
           existing.lastObservedGames = {};
-          this.log(`${existing.title}: adopted break-back strategy during its opening game.`);
+          this.log(`${existing.title}: adopted the current strategy while live.`);
         }
         continue;
       }
@@ -575,7 +563,7 @@ class TennisPaperBot {
     if (!this.state.discovery.lastMessage) {
       this.state.discovery.lastMessage = this.state.discovery.autoArmed
         ? `${this.state.discovery.autoArmed} live match(es) automatically armed.`
-        : `Waiting for newly started matches: first-scan favorite ask > $${FAVORITE_ASK_THRESHOLD.toFixed(2)} or neutral ask $${NEUTRAL_ASK_MIN.toFixed(2)}–$${NEUTRAL_ASK_MAX.toFixed(2)}.`;
+        : `Scanning live matches at any score: favorite ask > $${FAVORITE_ASK_THRESHOLD.toFixed(2)} or neutral ask $${NEUTRAL_ASK_MIN.toFixed(2)}–$${NEUTRAL_ASK_MAX.toFixed(2)}.`;
     }
   }
 
@@ -1049,4 +1037,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, openingGame, entryGameAllowed, matchIsComplete };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete };
