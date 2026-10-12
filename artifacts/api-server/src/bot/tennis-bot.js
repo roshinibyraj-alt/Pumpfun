@@ -50,6 +50,10 @@ function findLiveMatch(matches, playerOne, playerTwo) {
   ) || null;
 }
 
+function mayTradeSet(setNumber, firstSetLost) {
+  return setNumber === 1 || (setNumber === 2 && firstSetLost) || setNumber === 3;
+}
+
 function listValue(value) {
   if (Array.isArray(value)) return value;
   try {
@@ -177,7 +181,7 @@ class TennisPaperBot {
       position: null,
       positions: {},
       entries: 0,
-      setBankrolls: { 1: STAKE_USD, 2: STAKE_USD },
+      setBankrolls: { 1: STAKE_USD, 2: STAKE_USD, 3: STAKE_USD },
       firstSetPosition: null,
       firstSetClosed: false,
       lastGameCounts: {},
@@ -322,8 +326,8 @@ class TennisPaperBot {
     const firstSetSelected = Number(firstSet?.[selectedIsFirst ? "score_first" : "score_second"] || 0);
     const firstSetOpponent = Number(firstSet?.[selectedIsFirst ? "score_second" : "score_first"] || 0);
     const firstSetLost = setNumber >= 2 && firstSetOpponent > firstSetSelected;
-    const canTradeSet = setNumber === 1 || (setNumber === 2 && firstSetLost);
-    const entryTrigger = canTradeSet && selectedGames === opponentGames &&
+    const canTrade = mayTradeSet(setNumber, firstSetLost);
+    const entryTrigger = canTrade && selectedGames === opponentGames &&
       serverMatches && hasZeroThirty(match, selectedIsFirst);
     const bookResponse = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(market.tokenId)}`, { signal: AbortSignal.timeout(5000) });
     if (!bookResponse.ok) throw new Error(`Polymarket order book HTTP ${bookResponse.status}`);
@@ -341,7 +345,7 @@ class TennisPaperBot {
       this.closePaperPosition(market, bid, "serve-game-win + opponent 0-30", setNumber);
     }
     const firstPosition = market.positions?.[1];
-    if (setNumber >= 2 && firstPosition && selectedGames === opponentGames &&
+    if (setNumber === 2 && firstPosition && selectedGames === opponentGames &&
         bid && bid.price >= firstPosition.entryPrice + 0.15) {
       this.closePaperPosition(market, bid, "second-set comeback; first-set position +$0.15", 1);
       market.firstSetClosed = true;
@@ -427,4 +431,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, parseUrl };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl };
