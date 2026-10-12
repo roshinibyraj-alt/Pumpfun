@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot, openingGame, entryGameAllowed } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -71,6 +71,21 @@ test("favorite selection requires an ask strictly above 0.60 and chooses the hig
   assert.equal(chooseFavorite([{ bestAsk: { price: 0.75, size: 0 } }]), null);
 });
 
+test("only auto-selects favorites while the opening game is still at 0-0", () => {
+  const opening = { event_status: "Set 1", scores: [{ score_set: 1, score_first: 0, score_second: 0 }] };
+  assert.equal(openingGame(opening), true);
+  assert.equal(openingGame({ ...opening, scores: [{ score_set: 1, score_first: 1, score_second: 0 }] }), false);
+  assert.equal(openingGame({ ...opening, event_status: "Set 2" }), false);
+  assert.equal(openingGame({ event_status: "Set 1", scores: [] }), false);
+});
+
+test("entries include 4-3 and 3-4, but stop beyond either score", () => {
+  assert.equal(entryGameAllowed(4, 3), true);
+  assert.equal(entryGameAllowed(3, 4), true);
+  assert.equal(entryGameAllowed(4, 4), false);
+  assert.equal(entryGameAllowed(5, 3), false);
+});
+
 test("auto-arms a live match for the Polymarket favorite above the ask threshold", async () => {
   const event = {
     title: "Court event: Julia Grabher vs Deborah Chiesa",
@@ -104,6 +119,8 @@ test("auto-arms a live match for the Polymarket favorite above the ask threshold
     event_game_result: "0 - 0",
     event_serve: "First Player",
     event_key: "live-1",
+    event_status: "Set 1",
+    scores: [{ score_set: 1, score_first: 0, score_second: 0 }],
   }]);
   assert.equal(bot.state.markets.length, 1);
   assert.equal(bot.state.markets[0].player, "Julia Grabher");
@@ -111,6 +128,7 @@ test("auto-arms a live match for the Polymarket favorite above the ask threshold
   assert.equal(bot.state.markets[0].selectionMode, "automatic_favorite");
   assert.equal(bot.state.markets[0].favoriteAskAtArm, 0.68);
   assert.equal(bot.state.markets[0].tokenId, "grabher-token");
+  assert.equal(bot.state.markets[0].strategyVersion, "breakback-compound-v1");
   assert.equal(bot.state.discovery.autoArmed, 1);
   assert.equal(bot.state.mode, "PAPER");
 });
@@ -168,7 +186,7 @@ test("cannot remove a match while a paper position is open", async () => {
   assert.equal(bot.state.markets.length, 1);
 });
 
-test("enters only on the selected server's 0-30 while game scores are level", async () => {
+test("buys on favorite break, adds on opponent hold, and sells after break-back next set", async () => {
   const bot = new TennisPaperBot({
     apiKey: "test",
     file: "/tmp/tennis-bot-test.json",
@@ -180,21 +198,49 @@ test("enters only on the selected server's 0-30 while game scores are level", as
   const market = {
     id: "entry-test", slug: "entry-test", title: "Entry test", player: "Liam Draxl",
     opponent: "Omar Jasika", tokenId: "selected-token", entries: 0,
-    setBankrolls: { 1: 500, 2: 500 }, positions: {}, currentSet: 1,
+    strategyVersion: "breakback-compound-v1", selectionMode: "automatic_favorite",
+    positions: {}, currentSet: 1,
   };
-  const score = { event_first_player: "L. Draxl", event_second_player: "O. Jasika", event_serve: "First Player", event_game_result: "0 - 30", event_status: "Set 1", scores: [{ score_set: 1, score_first: 2, score_second: 2 }] };
-  await bot.processMarket(market, [score]);
-  assert.equal(market.position.entryPrice, 0.5);
-  assert.equal(market.position.stake, 500);
-  assert.equal(market.position.shares, 1000);
+  const score = (set, playerGames, opponentGames, server) => ({
+    event_first_player: "L. Draxl",
+    event_second_player: "O. Jasika",
+    event_serve: server,
+    event_game_result: "15 - 15",
+    event_status: `Set ${set}`,
+    scores: [
+      { score_set: 1, score_first: set === 1 ? playerGames : 2, score_second: set === 1 ? opponentGames : 6 },
+      ...(set === 2 ? [{ score_set: 2, score_first: playerGames, score_second: opponentGames }] : []),
+    ],
+  });
+  const run = async (event) => bot.processMarket(market, [event]);
+  await run(score(1, 2, 2, "First Player"));
+  await run(score(1, 2, 3, "Second Player"));
+  assert.equal(market.position.shares, 250);
+  assert.equal(market.breakCycle.stage, "await_opponent_hold");
+  await run(score(1, 2, 4, "First Player"));
+  assert.equal(market.position.shares, 500);
+  assert.equal(market.breakCycle.stage, "await_favorite_breakback");
+  await run(score(1, 3, 4, "Second Player"));
+  assert.equal(market.position.shares, 500);
+  await run(score(2, 0, 0, "First Player"));
+  await run(score(2, 1, 0, "Second Player"));
+  await run(score(2, 2, 0, "First Player"));
+  assert.equal(market.positions[1], undefined);
+  assert.equal(market.breakCycle, null);
+  assert.equal(bot.state.trades.filter((trade) => trade.status === "closed").length, 2);
+  assert.equal(bot.snapshot().bankroll.availableCapital, 9990);
+  assert.equal(bot.snapshot().bankroll.realizedPnl, -10);
+  assert.equal(market.compoundBudget, 240);
+});
 
-  market.position = null;
-  market.positions = {};
-  market.setBankrolls[1] = 500;
-  market.entries = 0;
-  await bot.processMarket(market, [{ ...score, scores: [{ score_set: 1, score_first: 3, score_second: 2 }] }]);
-  assert.equal(market.position, null);
-  assert.equal(market.entries, 0);
+test("compounds prior exit proceeds into larger equal tranches", () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-compound-test.json" });
+  const market = { id: "compound", title: "Compound match", player: "Player A", positions: {}, entries: 0, compoundBudget: 300 };
+  const cycle = { entrySet: 1, stage: "await_opponent_hold", trancheShares: null };
+  assert.equal(bot.openBreakTranche(market, { price: 0.5, size: 1000 }, cycle), true);
+  assert.equal(cycle.trancheShares, 300);
+  assert.equal(market.position.shares, 300);
+  assert.equal(market.compoundBudget, null);
 });
 
 test("waits for official Polymarket resolution before finalizing an open position", async () => {

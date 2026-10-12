@@ -12,6 +12,25 @@ const FAVORITE_ASK_THRESHOLD = 0.6;
 const STAKE_USD = 500;
 const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
+const BREAKBACK_STRATEGY_VERSION = "breakback-compound-v1";
+const BASE_TRANCHE_SHARES = 250;
+
+function openingGame(match) {
+  const setNumber = Number(String(match?.event_status || "").match(/set\s*(\d+)/i)?.[1] || 1);
+  const firstSet = Array.isArray(match?.scores)
+    ? match.scores.find((score) => Number(score.score_set) === 1)
+    : null;
+  return setNumber === 1 && Boolean(firstSet) &&
+    Number.isFinite(Number(firstSet.score_first)) &&
+    Number.isFinite(Number(firstSet.score_second)) &&
+    Number(firstSet?.score_first || 0) === 0 &&
+    Number(firstSet?.score_second || 0) === 0;
+}
+
+function entryGameAllowed(playerGames, opponentGames) {
+  return (playerGames <= 4 && opponentGames <= 3) ||
+    (playerGames <= 3 && opponentGames <= 4);
+}
 
 function parseUrl(value, host) {
   try {
@@ -163,6 +182,7 @@ function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk }) {
     marketId: String(mapped.market.id || ""),
     status: "armed",
     selectionMode: "automatic_favorite",
+    strategyVersion: BREAKBACK_STRATEGY_VERSION,
     favoriteAskAtArm: Number(favoriteAsk),
     scoreStatus: "live",
     currentScore: null,
@@ -174,6 +194,9 @@ function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk }) {
     firstSetPosition: null,
     firstSetClosed: false,
     lastGameCounts: {},
+    lastObservedGames: {},
+    breakCycle: null,
+    compoundBudget: null,
     createdAt: Date.now(),
     error: null,
   };
@@ -469,9 +492,20 @@ class TennisPaperBot {
     for (const live of scanBatch) {
       const first = String(live.event_first_player || "").trim();
       const second = String(live.event_second_player || "").trim();
-      if (!first || !second || this.state.markets.some((market) =>
+      if (!first || !second || !openingGame(live)) continue;
+      const existing = this.state.markets.find((market) =>
         (nameMatches(market.player, first) && nameMatches(market.opponent, second)) ||
-        (nameMatches(market.player, second) && nameMatches(market.opponent, first)))) continue;
+        (nameMatches(market.player, second) && nameMatches(market.opponent, first)));
+      if (existing) {
+        if (existing.selectionMode === "automatic_favorite" &&
+            existing.strategyVersion !== BREAKBACK_STRATEGY_VERSION &&
+            !Object.keys(existing.positions || {}).length) {
+          existing.strategyVersion = BREAKBACK_STRATEGY_VERSION;
+          existing.lastObservedGames = {};
+          this.log(`${existing.title}: adopted break-back strategy during its opening game.`);
+        }
+        continue;
+      }
       try {
         const event = await this.searchPolymarketEvent(first, second);
         const mapped = marketForPlayers(event, first, second);
@@ -509,7 +543,7 @@ class TennisPaperBot {
     if (!this.state.discovery.lastMessage) {
       this.state.discovery.lastMessage = this.state.discovery.autoArmed
         ? `${this.state.discovery.autoArmed} live match(es) automatically armed.`
-        : "No eligible live Polymarket match with a player ask above $0.60.";
+        : "Waiting for a newly started match in its opening game with a player ask above $0.60.";
     }
   }
 
@@ -568,17 +602,9 @@ class TennisPaperBot {
     market.setsWon = scoreSnapshot.setsWon;
     market.currentSetGames = scoreSnapshot.currentSetGames;
     market.perSetScore = scoreSnapshot.perSet;
-    const serverMatches = match.event_serve === (selectedIsFirst ? "First Player" : "Second Player");
     const setScore = Array.isArray(match.scores) ? match.scores.find((item) => Number(item.score_set) === setNumber) : null;
     const selectedGames = Number(setScore?.[selectedIsFirst ? "score_first" : "score_second"] || 0);
     const opponentGames = Number(setScore?.[selectedIsFirst ? "score_second" : "score_first"] || 0);
-    const firstSet = Array.isArray(match.scores) ? match.scores.find((item) => Number(item.score_set) === 1) : null;
-    const firstSetSelected = Number(firstSet?.[selectedIsFirst ? "score_first" : "score_second"] || 0);
-    const firstSetOpponent = Number(firstSet?.[selectedIsFirst ? "score_second" : "score_first"] || 0);
-    const firstSetLost = setNumber >= 2 && firstSetOpponent > firstSetSelected;
-    const canTrade = mayTradeSet(setNumber, firstSetLost);
-    const entryTrigger = canTrade && selectedGames === opponentGames &&
-      serverMatches && hasZeroThirty(match, selectedIsFirst);
     const bookResponse = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(market.tokenId)}`, { signal: AbortSignal.timeout(5000) });
     if (!bookResponse.ok) throw new Error(`Polymarket order book HTTP ${bookResponse.status}`);
     const book = await bookResponse.json();
@@ -589,18 +615,108 @@ class TennisPaperBot {
     market.bestAsk = ask || null;
     market.bestBid = bid || null;
     market.lastScoreAt = Date.now();
-    const activePosition = market.positions?.[setNumber] || null;
-    if (entryTrigger && !activePosition) this.openPaperPosition(market, ask, setNumber, selectedGames);
-    if (activePosition && this.shouldExitAfterBothEvents(market, match, selectedIsFirst, setNumber)) {
-      this.closePaperPosition(market, bid, "serve-game-win + opponent 0-30", setNumber);
+    market.lastObservedGames ||= {};
+    const currentObservation = {
+      playerGames: selectedGames,
+      opponentGames,
+      serverSelected: match.event_serve === (selectedIsFirst ? "First Player" : "Second Player"),
+    };
+    const previous = market.lastObservedGames[setNumber];
+    market.lastObservedGames[setNumber] = currentObservation;
+    market.position = market.positions?.[market.breakCycle?.entrySet] || null;
+    if (!previous || market.strategyVersion !== BREAKBACK_STRATEGY_VERSION ||
+        market.selectionMode !== "automatic_favorite") return;
+
+    const gamesAdvanced = selectedGames + opponentGames - previous.playerGames - previous.opponentGames;
+    const selectedWonGame = selectedGames > previous.playerGames && opponentGames === previous.opponentGames;
+    const opponentWonGame = opponentGames > previous.opponentGames && selectedGames === previous.playerGames;
+    if (gamesAdvanced !== 1 || (!selectedWonGame && !opponentWonGame)) return;
+
+    const cycle = market.breakCycle;
+    if (cycle && setNumber <= cycle.entrySet + 1 &&
+        !previous.serverSelected && selectedWonGame) {
+      const position = market.positions?.[cycle.entrySet];
+      if (position && bid) {
+        const proceeds = this.finalizePosition(market, position, bid.price, "favorite broke back", cycle.entrySet);
+        market.compoundBudget = proceeds;
+        market.breakCycle = null;
+        market.position = null;
+        this.log(`${market.title}: favorite broke back in set ${setNumber}; sold all shares and recycled $${proceeds.toFixed(2)} into later entries.`);
+      }
+    } else if (!cycle && previous.serverSelected && opponentWonGame &&
+        entryGameAllowed(selectedGames, opponentGames)) {
+      const nextCycle = { entrySet: setNumber, stage: "await_opponent_hold", trancheShares: null };
+      market.breakCycle = nextCycle;
+      if (this.openBreakTranche(market, ask, nextCycle)) {
+        this.log(`${market.title}: favorite was broken at ${selectedGames}–${opponentGames}; bought the first 250-share paper tranche.`);
+      } else {
+        market.breakCycle = null;
+      }
+    } else if (cycle && cycle.stage === "await_opponent_hold" &&
+        !previous.serverSelected && opponentWonGame &&
+        setNumber <= cycle.entrySet + 1 && entryGameAllowed(selectedGames, opponentGames)) {
+      if (this.openBreakTranche(market, ask, cycle)) {
+        cycle.stage = "await_favorite_breakback";
+        this.log(`${market.title}: opponent held serve; added the second paper tranche.`);
+      }
     }
-    const firstPosition = market.positions?.[1];
-    if (setNumber === 2 && firstPosition && selectedGames === opponentGames &&
-        bid && bid.price >= firstPosition.entryPrice + 0.15) {
-      this.closePaperPosition(market, bid, "second-set comeback; first-set position +$0.15", 1);
-      market.firstSetClosed = true;
+    market.position = market.positions?.[market.breakCycle?.entrySet] || null;
+  }
+
+  openBreakTranche(market, ask, cycle) {
+    if (!ask || ask.price <= 0 || ask.price >= 1 || ask.size <= 0) {
+      market.error = "No executable ask depth for break-back paper entry.";
+      return false;
     }
-    market.position = market.positions?.[setNumber] || market.positions?.[1] || null;
+    if (cycle.trancheShares == null) {
+      cycle.trancheShares = market.compoundBudget > 0
+        ? market.compoundBudget / (2 * ask.price)
+        : BASE_TRANCHE_SHARES;
+    }
+    const availableCapital = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL);
+    const shares = Math.min(cycle.trancheShares, ask.size, availableCapital / ask.price);
+    if (shares <= 0) {
+      market.error = "Insufficient demo capital or ask depth for break-back paper entry.";
+      return false;
+    }
+    if (market.compoundBudget > 0) market.compoundBudget = null;
+    const stake = shares * ask.price;
+    const position = market.positions?.[cycle.entrySet] || {
+      openedAt: Date.now(),
+      entryPrice: 0,
+      shares: 0,
+      stake: 0,
+      setNumber: cycle.entrySet,
+      tradeIds: [],
+      tranches: [],
+    };
+    const tradeId = `${market.id}:breakback:${cycle.entrySet}:${position.tranches.length + 1}:${Date.now()}`;
+    const trade = {
+      id: tradeId,
+      marketId: market.id,
+      market: market.title,
+      player: market.player,
+      side: market.player,
+      entryPrice: ask.price,
+      shares,
+      stake,
+      openedAt: Date.now(),
+      status: "open",
+      pnl: 0,
+      setNumber: cycle.entrySet,
+    };
+    position.tranches.push({ tradeId, entryPrice: ask.price, shares, stake });
+    position.tradeIds.push(tradeId);
+    position.shares += shares;
+    position.stake += stake;
+    position.entryPrice = position.stake / position.shares;
+    market.positions ||= {};
+    market.positions[cycle.entrySet] = position;
+    market.position = position;
+    this.state.bankroll.availableCapital = Math.max(0, availableCapital - stake);
+    market.entries = Number(market.entries || 0) + 1;
+    this.state.trades.unshift(trade);
+    return true;
   }
 
   openPaperPosition(market, ask, setNumber, selectedGames) {
@@ -648,12 +764,27 @@ class TennisPaperBot {
     const proceeds = position.shares * exitPrice;
     const pnl = proceeds - position.stake;
     this.state.bankroll.availableCapital = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL) + proceeds;
-    const trade = this.state.trades.find((item) => item.id === position.tradeId);
-    if (trade) Object.assign(trade, { status: "closed", closedAt: Date.now(), exitPrice, pnl, exitReason: reason });
+    const tranches = position.tranches?.length ? position.tranches : [{
+      tradeId: position.tradeId,
+      shares: position.shares,
+      stake: position.stake,
+    }];
+    for (const tranche of tranches) {
+      const trancheProceeds = Number(tranche.shares) * exitPrice;
+      const trade = this.state.trades.find((item) => item.id === tranche.tradeId);
+      if (trade) Object.assign(trade, {
+        status: "closed",
+        closedAt: Date.now(),
+        exitPrice,
+        pnl: trancheProceeds - Number(tranche.stake),
+        exitReason: reason,
+      });
+    }
     market.positions ||= {};
     delete market.positions[setNumber];
     market.position = market.positions?.[market.currentSet] || market.positions?.[1] || null;
     this.log(`${market.title}: paper exit at $${exitPrice.toFixed(3)}, P&L $${pnl.toFixed(2)}.`);
+    return proceeds;
   }
 
   async checkOfficialSettlement(market) {
@@ -682,4 +813,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, tennisScoreSnapshot, openingGame, entryGameAllowed };
