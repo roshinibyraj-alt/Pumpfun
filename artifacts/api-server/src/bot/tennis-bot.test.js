@@ -47,6 +47,21 @@ test("matches API-Tennis live events against both Polymarket participants", () =
   assert.equal(findLiveMatch([event], "Julia Grabher", "Other Player"), null);
 });
 
+test("surfaces API-Tennis authentication details instead of an opaque numeric error", async () => {
+  const bot = new TennisPaperBot({
+    apiKey: "test-key",
+    file: "/tmp/tennis-api-error-test.json",
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({
+        error: "1",
+        result: [{ msg: "Wrong login credentials", cod: 1004 }],
+      }),
+    }),
+  });
+  await assert.rejects(bot.fetchLiveMatches(), /Wrong login credentials \(API-Tennis code 1004\)/);
+});
+
 test("maps only the active Polymarket match-winner market with both exact players", () => {
   const event = {
     title: "L. Draxl vs O. Jasika",

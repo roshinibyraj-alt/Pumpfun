@@ -473,7 +473,16 @@ class TennisPaperBot {
     const response = await this.fetch(url, { signal: AbortSignal.timeout(8000) });
     if (!response.ok) throw new Error(`API-Tennis HTTP ${response.status}`);
     const payload = await response.json();
-    if (payload.success !== 1) throw new Error(payload.error || "API-Tennis rejected the request.");
+    if (payload.success !== 1) {
+      const details = Array.isArray(payload.result) ? payload.result : payload.result ? [payload.result] : [];
+      const providerMessage = details.map((item) => {
+        const message = item?.msg || item?.message;
+        const code = item?.cod || item?.code;
+        return message ? `${message}${code ? ` (API-Tennis code ${code})` : ""}` : "";
+      }).filter(Boolean).join("; ");
+      const error = payload.error && String(payload.error) !== "1" ? String(payload.error) : "";
+      throw new Error(providerMessage || error || "API-Tennis rejected the request.");
+    }
     return Array.isArray(payload.result) ? payload.result : [];
   }
 
