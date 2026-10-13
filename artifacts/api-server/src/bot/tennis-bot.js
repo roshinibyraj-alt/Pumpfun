@@ -16,6 +16,8 @@ const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
 const SERVE_POINT_STRATEGY_VERSION = "serve-point-accumulator-v1";
 const SERVE_POINT_SHARES = 10;
+const BOOK_404_BASE_COOLDOWN_MS = 60_000;
+const BOOK_404_MAX_COOLDOWN_MS = 15 * 60_000;
 const BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
 const BASE_TRANCHE_SHARES = 250;
 
@@ -235,6 +237,7 @@ class TennisPaperBot {
     this.timer = null;
     this.busy = false;
     this.discoveryCursor = 0;
+    this.book404Backoff = new Map();
   }
 
   log(message, level = "info") {
@@ -494,8 +497,28 @@ class TennisPaperBot {
   }
 
   async readBook(tokenId) {
+    const previousFailure = this.book404Backoff.get(tokenId);
+    if (previousFailure && Date.now() < previousFailure.retryAt) {
+      const deferred = new Error("Polymarket order book HTTP 404; retry deferred.");
+      deferred.code = "CLOB_BOOK_RETRY_DEFERRED";
+      deferred.retryAt = previousFailure.retryAt;
+      throw deferred;
+    }
     const response = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(tokenId)}`, { signal: AbortSignal.timeout(5000) });
-    if (!response.ok) throw new Error(`Polymarket order book HTTP ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`Polymarket order book HTTP ${response.status}`);
+      if (response.status === 404) {
+        const failures = (previousFailure?.failures || 0) + 1;
+        const cooldown = Math.min(BOOK_404_MAX_COOLDOWN_MS,
+          BOOK_404_BASE_COOLDOWN_MS * 2 ** Math.min(failures - 1, 8));
+        const retryAt = Date.now() + cooldown;
+        this.book404Backoff.set(tokenId, { failures, retryAt });
+        error.code = "CLOB_BOOK_NOT_FOUND";
+        error.retryAt = retryAt;
+      }
+      throw error;
+    }
+    this.book404Backoff.delete(tokenId);
     const book = await response.json();
     const levels = (items, descending) => (items || [])
       .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
@@ -504,6 +527,35 @@ class TennisPaperBot {
     const bidDepth = levels(book.bids, true);
     const askDepth = levels(book.asks, false);
     return { bestBid: bidDepth[0] || null, bestAsk: askDepth[0] || null, bidDepth, askDepth };
+  }
+
+  async readBooks(tokenIds) {
+    const coolingToken = tokenIds.find((tokenId) =>
+      Number(this.book404Backoff.get(tokenId)?.retryAt || 0) > Date.now());
+    if (coolingToken) {
+      const deferred = new Error("Polymarket order book HTTP 404; retry deferred.");
+      deferred.code = "CLOB_BOOK_RETRY_DEFERRED";
+      deferred.retryAt = this.book404Backoff.get(coolingToken).retryAt;
+      throw deferred;
+    }
+    return Promise.all(tokenIds.map((tokenId) => this.readBook(tokenId)));
+  }
+
+  noteBookUnavailable(market, error) {
+    if (!["CLOB_BOOK_NOT_FOUND", "CLOB_BOOK_RETRY_DEFERRED"].includes(error?.code)) return false;
+    market.bookStatus = "unavailable";
+    market.bookError = error.message;
+    market.bookRetryAt = error.retryAt || null;
+    if (error.code === "CLOB_BOOK_NOT_FOUND") {
+      this.log(`${market.title}: ${error.message}; pausing this market's entries and retrying after backoff.`, "error");
+    }
+    return true;
+  }
+
+  clearBookUnavailable(market) {
+    delete market.bookStatus;
+    delete market.bookError;
+    delete market.bookRetryAt;
   }
 
   async discoverLiveMarkets(matches) {
@@ -617,14 +669,19 @@ class TennisPaperBot {
     if (!match) {
       market.scoreStatus = market.currentScore ? "not_live_checking_settlement" : "not_live_or_unmatched";
       if (Object.keys(market.positions || {}).length) {
-        const bookResponse = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(market.tokenId)}`, { signal: AbortSignal.timeout(5000) });
-        if (bookResponse.ok) {
-          const book = await bookResponse.json();
-          market.bestBid = (book.bids || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
-            .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => b.price - a.price)[0] || null;
-          market.bidDepth = (book.bids || []).map((level) => ({ price: Number(level.price), size: Number(level.size) }))
-            .filter((level) => level.price > 0 && level.size > 0).sort((a, b) => b.price - a.price);
+        const tokenIds = [...new Set(Object.values(market.positions).map((position) => position.tokenId).filter(Boolean))];
+        try {
+          const books = await this.readBooks(tokenIds);
+          market.booksByToken = Object.fromEntries(tokenIds.map((tokenId, index) => [tokenId, books[index]]));
+          for (const position of Object.values(market.positions)) {
+            position.bestBid = market.booksByToken[position.tokenId]?.bestBid || null;
+          }
+          market.bestBid = books[0]?.bestBid || null;
+          market.bidDepth = books[0]?.bidDepth || [];
           market.lastBookAt = Date.now();
+          this.clearBookUnavailable(market);
+        } catch (error) {
+          if (!this.noteBookUnavailable(market, error)) throw error;
         }
       }
       await this.checkOfficialSettlement(market);
@@ -655,7 +712,15 @@ class TennisPaperBot {
     const selectedGames = Number(setScore?.[selectedIsFirst ? "score_first" : "score_second"] || 0);
     const opponentGames = Number(setScore?.[selectedIsFirst ? "score_second" : "score_first"] || 0);
     const tokenIds = market.tokenIds?.length ? market.tokenIds : [market.tokenId];
-    const books = await Promise.all(tokenIds.map((tokenId) => this.readBook(tokenId)));
+    let books;
+    try {
+      books = await this.readBooks(tokenIds);
+    } catch (error) {
+      if (!this.noteBookUnavailable(market, error)) throw error;
+      await this.checkOfficialSettlement(market);
+      return;
+    }
+    this.clearBookUnavailable(market);
     market.booksByToken = Object.fromEntries(tokenIds.map((tokenId, index) => [tokenId, books[index]]));
     const selectedBook = market.booksByToken[market.tokenId] || books[0];
     market.bestAsk = selectedBook?.bestAsk || null;
