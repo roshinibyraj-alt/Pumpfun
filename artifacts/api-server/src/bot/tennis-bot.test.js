@@ -149,6 +149,41 @@ test("keeps an exit pending rather than inventing fills when bid depth is short"
   assert.match(market.exitStatus, /60\.00 remaining/);
 });
 
+test("backs off a missing CLOB book per token and suppresses repeated 404 logs", async () => {
+  const requests = new Map();
+  let missing = true;
+  const bot = new TennisPaperBot({
+    apiKey: "test",
+    file: "/tmp/tennis-book-404-backoff-test.json",
+    fetch: async (url) => {
+      const token = new URL(String(url)).searchParams.get("token_id");
+      requests.set(token, (requests.get(token) || 0) + 1);
+      if (token === "missing" && missing) return { ok: false, status: 404 };
+      return { ok: true, json: async () => ({ asks: [{ price: "0.5", size: "10" }], bids: [{ price: "0.4", size: "10" }] }) };
+    },
+  });
+  const market = { title: "Unavailable market" };
+  for (let i = 0; i < 2; i += 1) {
+    try {
+      await bot.readBooks(["missing", "other"]);
+    } catch (error) {
+      assert.equal(bot.noteBookUnavailable(market, error), true);
+    }
+  }
+  assert.equal(requests.get("missing"), 1);
+  assert.equal(requests.get("other"), 1);
+  assert.equal(bot.state.events.length, 1);
+
+  await bot.readBooks(["healthy"]);
+  assert.equal(requests.get("healthy"), 1);
+
+  bot.book404Backoff.set("missing", { failures: 1, retryAt: Date.now() - 1 });
+  missing = false;
+  await bot.readBooks(["missing"]);
+  assert.equal(requests.get("missing"), 2);
+  assert.equal(bot.book404Backoff.has("missing"), false);
+});
+
 test("auto-arms a match already in progress for the Polymarket favorite", async () => {
   const event = {
     title: "Court event: Julia Grabher vs Deborah Chiesa",
