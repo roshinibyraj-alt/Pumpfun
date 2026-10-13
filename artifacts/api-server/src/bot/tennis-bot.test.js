@@ -62,6 +62,30 @@ test("surfaces API-Tennis authentication details instead of an opaque numeric er
   await assert.rejects(bot.fetchLiveMatches(), /Wrong login credentials \(API-Tennis code 1004\)/);
 });
 
+test("backs off for an hour after API-Tennis daily quota is exceeded", async () => {
+  let requests = 0;
+  const bot = new TennisPaperBot({
+    apiKey: "test-key",
+    file: "/tmp/tennis-api-quota-test.json",
+    fetch: async () => {
+      requests++;
+      return {
+        ok: true,
+        json: async () => ({
+          error: "1",
+          result: [{ msg: "Daily API call limit exceeded. Please upgrade your plan.", cod: 1007 }],
+        }),
+      };
+    },
+  });
+  bot.state.running = true;
+  await bot.tick();
+  assert.match(bot.state.feed.error, /Daily API call limit exceeded/);
+  assert.equal(bot.state.feed.retryAt, bot.apiRetryAt);
+  await bot.tick();
+  assert.equal(requests, 1);
+});
+
 test("maps only the active Polymarket match-winner market with both exact players", () => {
   const event = {
     title: "L. Draxl vs O. Jasika",

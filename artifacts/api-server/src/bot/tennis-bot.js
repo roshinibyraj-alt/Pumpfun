@@ -7,6 +7,7 @@ const API_TENNIS = "https://api.api-tennis.com/tennis/";
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
 const POLL_MS = 5000;
+const API_TENNIS_LIMIT_RETRY_MS = 60 * 60 * 1000;
 const DISCOVERY_CACHE_MS = 30000;
 const FAVORITE_ASK_THRESHOLD = 0.7;
 const NEUTRAL_ASK_MIN = 0.37;
@@ -222,6 +223,7 @@ class TennisPaperBot {
     this.file = options.file || process.env.TENNIS_STATE_PATH ||
       path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.cwd(), "data", "tennis-state.json");
     this.apiKey = options.apiKey ?? process.env.API_TENNIS_KEY ?? "";
+    this.apiRetryAt = 0;
     this.state = {
       app: "Polymarket Tennis Paper Bot",
       mode: "PAPER",
@@ -642,7 +644,7 @@ class TennisPaperBot {
   }
 
   async tick() {
-    if (this.busy || !this.apiKey || !this.state.running) return;
+    if (this.busy || !this.apiKey || !this.state.running || Date.now() < this.apiRetryAt) return;
     this.busy = true;
     try {
       const matches = await this.fetchLiveMatches();
@@ -661,7 +663,15 @@ class TennisPaperBot {
       this.state.updatedAt = Date.now();
       await this.persist();
     } catch (error) {
-      this.state.feed = { ...this.state.feed, status: "error", error: String(error?.message || error).slice(0, 200) };
+      const message = String(error?.message || error).slice(0, 200);
+      const quotaExceeded = message.includes("API-Tennis code 1007");
+      this.apiRetryAt = quotaExceeded ? Date.now() + API_TENNIS_LIMIT_RETRY_MS : 0;
+      this.state.feed = {
+        ...this.state.feed,
+        status: "error",
+        error: message,
+        retryAt: quotaExceeded ? this.apiRetryAt : null,
+      };
       this.log(`Score-feed error: ${this.state.feed.error}`, "error");
     } finally {
       this.busy = false;
