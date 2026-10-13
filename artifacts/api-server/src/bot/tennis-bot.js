@@ -7,6 +7,7 @@ const API_TENNIS = "https://api.api-tennis.com/tennis/";
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
 const POLL_MS = 5000;
+const IDLE_POLL_MS = 60_000;
 const API_TENNIS_LIMIT_RETRY_MS = 60 * 60 * 1000;
 const DISCOVERY_CACHE_MS = 30000;
 const FAVORITE_ASK_THRESHOLD = 0.7;
@@ -65,6 +66,19 @@ function findLiveMatch(matches, playerOne, playerTwo) {
     (nameMatches(match.event_first_player, playerOne) && nameMatches(match.event_second_player, playerTwo)) ||
     (nameMatches(match.event_second_player, playerOne) && nameMatches(match.event_first_player, playerTwo))
   ) || null;
+}
+
+function countTrackedLiveMatches(markets, matches) {
+  return markets.filter((market) =>
+    !market.completedAt && matches.some((match) =>
+      (nameMatches(match.event_first_player, market.player) && nameMatches(match.event_second_player, market.opponent)) ||
+      (nameMatches(match.event_second_player, market.player) && nameMatches(match.event_first_player, market.opponent))
+    )
+  ).length;
+}
+
+function scorePollInterval(activeTrackedMatches) {
+  return activeTrackedMatches > 0 ? POLL_MS : IDLE_POLL_MS;
 }
 
 function mayTradeSet(setNumber, firstSetLost) {
@@ -224,6 +238,10 @@ class TennisPaperBot {
       path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.cwd(), "data", "tennis-state.json");
     this.apiKey = options.apiKey ?? process.env.API_TENNIS_KEY ?? "";
     this.apiRetryAt = 0;
+    this.setTimer = options.setTimeout || setTimeout;
+    this.clearTimer = options.clearTimeout || clearTimeout;
+    this.schedulerActive = false;
+    this.activeTrackedMatches = 0;
     this.state = {
       app: "Polymarket Tennis Paper Bot",
       mode: "PAPER",
@@ -361,12 +379,22 @@ class TennisPaperBot {
     }
     this.state.running = true;
     this.log(this.apiKey ? "Tennis score polling started in paper-only mode." : "Set API_TENNIS_KEY to enable score polling.", this.apiKey ? "info" : "warn");
-    this.timer = setInterval(() => void this.tick(), POLL_MS);
-    void this.tick();
+    this.schedulerActive = true;
+    this.scheduleNextTick(0);
+  }
+
+  scheduleNextTick(delayMs) {
+    if (!this.schedulerActive || !this.state.running) return;
+    if (this.timer) this.clearTimer(this.timer);
+    this.timer = this.setTimer(() => {
+      this.timer = null;
+      void this.tick();
+    }, delayMs);
   }
 
   stop() {
-    if (this.timer) clearInterval(this.timer);
+    this.schedulerActive = false;
+    if (this.timer) this.clearTimer(this.timer);
     this.timer = null;
     this.state.running = false;
     void this.persist();
@@ -644,7 +672,11 @@ class TennisPaperBot {
   }
 
   async tick() {
-    if (this.busy || !this.apiKey || !this.state.running || Date.now() < this.apiRetryAt) return;
+    if (this.busy || !this.apiKey || !this.state.running) return;
+    if (Date.now() < this.apiRetryAt) {
+      this.scheduleNextTick(this.apiRetryAt - Date.now());
+      return;
+    }
     this.busy = true;
     try {
       const matches = await this.fetchLiveMatches();
@@ -660,6 +692,9 @@ class TennisPaperBot {
       }));
       this.state.markets = this.state.markets.filter((market) =>
         !(market.completedAt && !Object.keys(market.positions || {}).length));
+      this.activeTrackedMatches = countTrackedLiveMatches(this.state.markets, matches);
+      this.state.feed.activeTrackedMatches = this.activeTrackedMatches;
+      this.state.feed.pollIntervalMs = scorePollInterval(this.activeTrackedMatches);
       this.state.updatedAt = Date.now();
       await this.persist();
     } catch (error) {
@@ -675,6 +710,12 @@ class TennisPaperBot {
       this.log(`Score-feed error: ${this.state.feed.error}`, "error");
     } finally {
       this.busy = false;
+      if (this.schedulerActive && this.state.running) {
+        const delay = Date.now() < this.apiRetryAt
+          ? this.apiRetryAt - Date.now()
+          : scorePollInterval(this.activeTrackedMatches);
+        this.scheduleNextTick(delay);
+      }
     }
   }
 
@@ -1293,4 +1334,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, countTrackedLiveMatches, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete };

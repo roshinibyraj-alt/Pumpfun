@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, countTrackedLiveMatches, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -45,6 +45,36 @@ test("matches API-Tennis live events against both Polymarket participants", () =
   assert.equal(findLiveMatch([event], "Julia Grabher", "Deborah Chiesa"), event);
   assert.equal(findLiveMatch([event], "Deborah Chiesa", "Julia Grabher"), event);
   assert.equal(findLiveMatch([event], "Julia Grabher", "Other Player"), null);
+});
+
+test("uses one-minute polling when no tracked market is live and five seconds when one is live", async () => {
+  const delays = [];
+  const liveEvent = { event_first_player: "Julia Grabher", event_second_player: "Deborah Chiesa" };
+  const bot = new TennisPaperBot({
+    apiKey: "test-key",
+    file: "/tmp/tennis-adaptive-poll-test.json",
+    setTimeout: (_callback, delay) => {
+      delays.push(delay);
+      return delays.length;
+    },
+    clearTimeout: () => {},
+  });
+  bot.state.running = true;
+  bot.schedulerActive = true;
+  bot.fetchLiveMatches = async () => [];
+  bot.discoverLiveMarkets = async () => {};
+  await bot.tick();
+  assert.equal(bot.state.feed.pollIntervalMs, 60_000);
+  assert.equal(delays.at(-1), 60_000);
+
+  bot.state.markets = [{ player: "Julia Grabher", opponent: "Deborah Chiesa", positions: {} }];
+  bot.fetchLiveMatches = async () => [liveEvent];
+  await bot.tick();
+  assert.equal(countTrackedLiveMatches(bot.state.markets, [liveEvent]), 1);
+  assert.equal(scorePollInterval(bot.activeTrackedMatches), 5_000);
+  assert.equal(bot.state.feed.pollIntervalMs, 5_000);
+  assert.equal(delays.at(-1), 5_000);
+  bot.stop();
 });
 
 test("surfaces API-Tennis authentication details instead of an opaque numeric error", async () => {
