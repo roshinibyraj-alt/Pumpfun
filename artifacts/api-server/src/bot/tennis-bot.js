@@ -1027,21 +1027,27 @@ class TennisPaperBot {
   }
 
   openServePointShares(market, active, tokenId, book, stage) {
-    if (!book?.askDepth?.length) {
-      this.log(`${market.title}: skipped ${active.server} ${stage} entry; no ask depth is available.`);
+    const bestAsk = Number(book?.bestAsk?.price ?? book?.askDepth?.[0]?.price);
+    if (!Number.isFinite(bestAsk) || bestAsk <= 0 || bestAsk > 1) {
+      this.log(`${market.title}: skipped ${active.server} ${stage} entry; no valid best ask is available to calculate the 1,000% paper-fill ceiling.`);
       return false;
     }
+    const fillCeiling = Math.min(1, bestAsk * 11);
     let remaining = SERVE_POINT_SHARES;
     let stake = 0;
+    let visibleShares = 0;
     for (const level of book.askDepth) {
+      if (Number(level.price) > fillCeiling) break;
       const shares = Math.min(remaining, Number(level.size));
       stake += shares * Number(level.price);
+      visibleShares += shares;
       remaining -= shares;
       if (remaining <= 1e-8) break;
     }
-    if (remaining > 1e-8) {
-      this.log(`${market.title}: skipped ${active.server} ${stage} entry; insufficient visible ask depth for 10 shares.`);
-      return false;
+    const simulatedShares = Math.max(0, remaining);
+    if (simulatedShares > 1e-8) {
+      stake += simulatedShares * fillCeiling;
+      remaining = 0;
     }
     const available = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL);
     if (available < stake) {
@@ -1060,6 +1066,9 @@ class TennisPaperBot {
       side: active.server, stage, entryPrice, shares: SERVE_POINT_SHARES,
       stake, openedAt: Date.now(), status: "open", pnl: 0, realizedPnl: 0,
       remainingShares: SERVE_POINT_SHARES, setNumber: active.setNumber,
+      fillModel: simulatedShares > 1e-8 ? "visible_book_plus_simulated_shortfall" : "visible_book",
+      visibleShares, simulatedShares,
+      simulatedPrice: simulatedShares > 1e-8 ? fillCeiling : null,
     };
     position.tranches.push({ tradeId, entryPrice, shares: SERVE_POINT_SHARES, stake });
     position.shares += SERVE_POINT_SHARES;
@@ -1072,7 +1081,10 @@ class TennisPaperBot {
     market.entries = Number(market.entries || 0) + 1;
     this.state.bankroll.availableCapital = available - stake;
     this.state.trades.unshift(trade);
-    this.log(`${market.title}: bought ${SERVE_POINT_SHARES} ${active.server} shares at ${stage}, average $${entryPrice.toFixed(3)} for $${stake.toFixed(2)}.`);
+    const fillNote = simulatedShares > 1e-8
+      ? `; ${simulatedShares.toFixed(2)} shortfall shares paper-filled at $${fillCeiling.toFixed(3)} (1,000% ceiling)`
+      : "";
+    this.log(`${market.title}: bought ${SERVE_POINT_SHARES} ${active.server} shares at ${stage}, average $${entryPrice.toFixed(3)} for $${stake.toFixed(2)}${fillNote}.`);
     return true;
   }
 

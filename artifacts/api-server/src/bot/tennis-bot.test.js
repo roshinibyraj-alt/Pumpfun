@@ -600,3 +600,28 @@ test("continues CLOB maintenance during API-Tennis quota backoff without stale-s
   assert.equal(scheduledDelay, 5_000);
   bot.stop();
 });
+
+test("fills shallow-book serve entries with a clearly marked paper shortfall up to the 1000% ceiling", () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-shallow-ask-test.json" });
+  const market = {
+    id: "shallow", title: "Shallow book match", player: "Player A", opponent: "Player B",
+    tokenId: "token-a", positions: {}, entries: 0,
+  };
+  const active = { key: "1:2:2:playera", server: "Player A", setNumber: 1, position: null };
+  const book = {
+    bestAsk: { price: 0.1, size: 4 },
+    askDepth: [{ price: 0.1, size: 4 }, { price: 0.2, size: 3 }],
+    bestBid: { price: 0.08, size: 100 },
+  };
+
+  assert.equal(bot.openServePointShares(market, active, "token-a", book, "0-15"), true);
+  const trade = bot.state.trades[0];
+  assert.equal(trade.shares, 10);
+  assert.equal(trade.visibleShares, 7);
+  assert.equal(trade.simulatedShares, 3);
+  assert.equal(trade.simulatedPrice, 1);
+  assert.equal(trade.fillModel, "visible_book_plus_simulated_shortfall");
+  assert.equal(trade.stake, 4);
+  assert.equal(trade.entryPrice, 0.4);
+  assert.match(bot.state.events[0].message, /3\.00 shortfall shares paper-filled at \$1\.000/);
+});
