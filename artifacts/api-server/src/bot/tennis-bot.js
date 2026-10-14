@@ -18,6 +18,7 @@ const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
 const SERVE_POINT_STRATEGY_VERSION = "serve-point-accumulator-v1";
 const SERVE_POINT_SHARES = 10;
+const FINAL_TAKE_PROFIT = 0.99;
 const BOOK_404_BASE_COOLDOWN_MS = 60_000;
 const BOOK_404_MAX_COOLDOWN_MS = 15 * 60_000;
 const BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
@@ -238,6 +239,7 @@ class TennisPaperBot {
       path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.cwd(), "data", "tennis-state.json");
     this.apiKey = options.apiKey ?? process.env.API_TENNIS_KEY ?? "";
     this.apiRetryAt = 0;
+    this.scoreFeedUnavailable = !this.apiKey;
     this.setTimer = options.setTimeout || setTimeout;
     this.clearTimer = options.clearTimeout || clearTimeout;
     this.schedulerActive = false;
@@ -672,16 +674,34 @@ class TennisPaperBot {
   }
 
   async tick() {
-    if (this.busy || !this.apiKey || !this.state.running) return;
-    if (Date.now() < this.apiRetryAt) {
-      this.scheduleNextTick(this.apiRetryAt - Date.now());
-      return;
-    }
+    if (this.busy || !this.state.running) return;
     this.busy = true;
     try {
-      const matches = await this.fetchLiveMatches();
-      this.state.feed = { status: "connected", liveMatches: matches.length, lastUpdate: Date.now(), error: null };
-      await this.discoverLiveMarkets(matches);
+      let matches = [];
+      if (!this.apiKey) {
+        this.scoreFeedUnavailable = true;
+        this.state.feed = { ...this.state.feed, status: "missing_key", error: "API_TENNIS_KEY is not configured." };
+      } else if (Date.now() < this.apiRetryAt) {
+        this.scoreFeedUnavailable = true;
+      } else if (Date.now() >= this.apiRetryAt) {
+        try {
+          matches = await this.fetchLiveMatches();
+          this.apiRetryAt = 0;
+          this.scoreFeedUnavailable = false;
+          this.state.feed = { status: "connected", liveMatches: matches.length, lastUpdate: Date.now(), error: null };
+          await this.discoverLiveMarkets(matches);
+        } catch (error) {
+          const message = String(error?.message || error).slice(0, 200);
+          const quotaExceeded = message.includes("API-Tennis code 1007");
+          this.apiRetryAt = quotaExceeded ? Date.now() + API_TENNIS_LIMIT_RETRY_MS : 0;
+          this.scoreFeedUnavailable = true;
+          this.state.feed = {
+            ...this.state.feed, status: "error", error: message,
+            retryAt: quotaExceeded ? this.apiRetryAt : null,
+          };
+          this.log(`Score-feed error: ${message}`, "error");
+        }
+      }
       await Promise.all(this.state.markets.map(async (market) => {
         try {
           await this.processMarket(market, matches);
@@ -699,20 +719,18 @@ class TennisPaperBot {
       await this.persist();
     } catch (error) {
       const message = String(error?.message || error).slice(0, 200);
-      const quotaExceeded = message.includes("API-Tennis code 1007");
-      this.apiRetryAt = quotaExceeded ? Date.now() + API_TENNIS_LIMIT_RETRY_MS : 0;
       this.state.feed = {
         ...this.state.feed,
         status: "error",
         error: message,
-        retryAt: quotaExceeded ? this.apiRetryAt : null,
       };
-      this.log(`Score-feed error: ${this.state.feed.error}`, "error");
+      this.log(`Tennis bot tick error: ${this.state.feed.error}`, "error");
     } finally {
       this.busy = false;
       if (this.schedulerActive && this.state.running) {
-        const delay = Date.now() < this.apiRetryAt
-          ? this.apiRetryAt - Date.now()
+        const hasPositions = this.state.markets.some((market) => Object.keys(market.positions || {}).length > 0);
+        const delay = this.scoreFeedUnavailable
+          ? hasPositions ? 5_000 : 60_000
           : scorePollInterval(this.activeTrackedMatches);
         this.scheduleNextTick(delay);
       }
@@ -740,6 +758,7 @@ class TennisPaperBot {
           market.bidDepth = books[0]?.bidDepth || [];
           market.lastBookAt = Date.now();
           this.clearBookUnavailable(market);
+          this.tryFinalTakeProfitExits(market);
         } catch (error) {
           if (!this.noteBookUnavailable(market, error)) throw error;
         }
@@ -794,6 +813,7 @@ class TennisPaperBot {
       const positionBook = market.booksByToken[position.tokenId];
       if (positionBook) position.bestBid = positionBook.bestBid;
     }
+    this.tryFinalTakeProfitExits(market);
     if (matchIsComplete(match)) {
       await this.checkOfficialSettlement(market);
       return;
@@ -1070,17 +1090,39 @@ class TennisPaperBot {
     return true;
   }
 
-  sellPositionFromBook(market, position, book, reason) {
+  tryFinalTakeProfitExits(market) {
+    let closed = 0;
+    market.positions ||= {};
+    for (const [key, position] of Object.entries(market.positions)) {
+      const book = market.booksByToken?.[position.tokenId];
+      if (Number(book?.bestBid?.price) < FINAL_TAKE_PROFIT) continue;
+      if (!this.sellPositionFromBook(market, position, book, "final $0.99 take-profit", FINAL_TAKE_PROFIT)) continue;
+      delete market.positions[key];
+      if (market.activeServeGame?.position === position) market.activeServeGame.position = null;
+      if (market.position === position) market.position = null;
+      closed += 1;
+    }
+    market.position = Object.values(market.positions)[0] || null;
+    return closed;
+  }
+
+  sellPositionFromBook(market, position, book, reason, minPrice = 0) {
     if (!position || !book?.bidDepth?.length) return false;
     let remaining = Number(position.shares);
     let proceeds = 0;
     for (const level of book.bidDepth) {
       if (remaining <= 1e-8) break;
+      if (Number(level.price) < minPrice) break;
       const sold = Math.min(remaining, Number(level.size));
       proceeds += sold * Number(level.price);
       remaining -= sold;
     }
-    if (remaining > 1e-8) return false;
+    if (remaining > 1e-8) {
+      if (minPrice >= FINAL_TAKE_PROFIT) {
+        market.exitStatus = `Waiting for enough bid depth at or above $${FINAL_TAKE_PROFIT.toFixed(2)} to close the position.`;
+      }
+      return false;
+    }
     const shares = Number(position.shares);
     const exitPrice = proceeds / shares;
     const pnl = this.realizePositionShares(market, position, shares, exitPrice, reason);

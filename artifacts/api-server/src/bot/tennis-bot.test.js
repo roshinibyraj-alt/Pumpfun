@@ -544,3 +544,59 @@ test("waits for official Polymarket resolution before finalizing an open positio
   assert.equal(bot.state.trades[0].exitPrice, 1);
   assert.equal(bot.state.trades[0].pnl, 50);
 });
+
+test("a final take-profit sells only when full depth is available at $0.99 or better", () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-final-tp-test.json" });
+  bot.state.bankroll.availableCapital = 95;
+  bot.state.trades = [{
+    id: "tp-trade", status: "open", pnl: 0, realizedPnl: 0,
+    remainingShares: 10,
+  }];
+  const position = {
+    tradeId: "tp-trade", tokenId: "token", player: "Player A",
+    shares: 10, stake: 5,
+    tranches: [{ tradeId: "tp-trade", shares: 10, stake: 5 }],
+  };
+  const market = {
+    positions: { accumulated: position },
+    booksByToken: { token: {
+      bestBid: { price: 0.99 },
+      bidDepth: [{ price: 0.99, size: 10 }],
+    } },
+  };
+  assert.equal(bot.tryFinalTakeProfitExits(market), 1);
+  assert.equal(Object.keys(market.positions).length, 0);
+  assert.equal(bot.state.trades[0].status, "closed");
+  assert.equal(bot.state.trades[0].exitPrice, 0.99);
+  assert.equal(bot.state.bankroll.availableCapital, 104.9);
+
+  const stillOpen = {
+    positions: { accumulated: { ...position, shares: 11, stake: 5.5,
+      tranches: [{ tradeId: "tp-trade", shares: 11, stake: 5.5 }] } },
+    booksByToken: { token: {
+      bestBid: { price: 0.99 },
+      bidDepth: [{ price: 0.99, size: 10 }],
+    } },
+  };
+  assert.equal(bot.tryFinalTakeProfitExits(stillOpen), 0);
+  assert.equal(stillOpen.positions.accumulated.shares, 11);
+});
+
+test("continues CLOB maintenance during API-Tennis quota backoff without stale-score entries", async () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-quota-maintenance-test.json" });
+  const tokenPosition = { tokenId: "token", shares: 10, stake: 5 };
+  bot.state.running = true;
+  bot.schedulerActive = true;
+  bot.apiRetryAt = Date.now() + 60_000;
+  bot.state.markets = [{ positions: { accumulated: tokenPosition } }];
+  bot.persist = async () => {};
+  let processedMatches = null;
+  let scheduledDelay = null;
+  bot.fetchLiveMatches = async () => { throw new Error("must not poll score feed during quota backoff"); };
+  bot.processMarket = async (_market, matches) => { processedMatches = matches; };
+  bot.scheduleNextTick = (delay) => { scheduledDelay = delay; };
+  await bot.tick();
+  assert.deepEqual(processedMatches, []);
+  assert.equal(scheduledDelay, 5_000);
+  bot.stop();
+});
