@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, countTrackedLiveMatches, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
+const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, countTrackedLiveMatches, countActiveMarkets, countMarketsWithOpenPositions, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {
   const event = { event_game_result: "0 - 30" };
@@ -47,7 +47,7 @@ test("matches API-Tennis live events against both Polymarket participants", () =
   assert.equal(findLiveMatch([event], "Julia Grabher", "Other Player"), null);
 });
 
-test("uses one-minute polling when no tracked market is live and five seconds when one is live", async () => {
+test("uses one-minute polling when no tracked market is live and two seconds when one is live", async () => {
   const delays = [];
   const liveEvent = { event_first_player: "Julia Grabher", event_second_player: "Deborah Chiesa" };
   const bot = new TennisPaperBot({
@@ -71,9 +71,9 @@ test("uses one-minute polling when no tracked market is live and five seconds wh
   bot.fetchLiveMatches = async () => [liveEvent];
   await bot.tick();
   assert.equal(countTrackedLiveMatches(bot.state.markets, [liveEvent]), 1);
-  assert.equal(scorePollInterval(bot.activeTrackedMatches), 5_000);
-  assert.equal(bot.state.feed.pollIntervalMs, 5_000);
-  assert.equal(delays.at(-1), 5_000);
+  assert.equal(scorePollInterval(bot.activeTrackedMatches), 2_000);
+  assert.equal(bot.state.feed.pollIntervalMs, 2_000);
+  assert.equal(delays.at(-1), 2_000);
   bot.stop();
 });
 
@@ -624,4 +624,66 @@ test("fills shallow-book serve entries with a clearly marked paper shortfall up 
   assert.equal(trade.stake, 4);
   assert.equal(trade.entryPrice, 0.4);
   assert.match(bot.state.events[0].message, /3\.00 shortfall shares paper-filled at \$1\.000/);
+});
+
+
+test("caps tradeable matches at five for manual and automatic arming", async () => {
+  const bot = new TennisPaperBot({
+    apiKey: "test-key",
+    file: "/tmp/tennis-five-match-limit-test.json",
+    fetch: async () => { throw new Error("manual add must be blocked before lookup"); },
+  });
+  bot.state.markets = Array.from({ length: 5 }, (_, index) => ({
+    id: `active-${index}`, player: `Player ${index}`, opponent: `Opponent ${index}`, positions: {},
+  }));
+  assert.equal(countActiveMarkets(bot.state.markets), 5);
+  assert.equal(bot.snapshot().limits.maxActiveMatches, 5);
+  assert.equal(bot.snapshot().limits.activeMatches, 5);
+  await assert.rejects(
+    bot.addMarket({ polymarketUrl: "https://polymarket.com/event/sixth-match", player: "Player 6", confirmPolymarket: true }),
+    /maximum of 5 active matches/,
+  );
+
+  let searchCount = 0;
+  bot.searchPolymarketEvent = async () => { searchCount += 1; return null; };
+  await bot.discoverLiveMarkets([{
+    event_first_player: "Julia Grabher",
+    event_second_player: "Deborah Chiesa",
+  }]);
+  assert.equal(bot.state.markets.length, 5);
+  assert.equal(searchCount, 0);
+  assert.match(bot.state.discovery.lastMessage, /Maximum of 5 active matches/);
+});
+
+test("completed markets free capacity unless they still hold a position", () => {
+  assert.equal(countActiveMarkets([
+    { completedAt: Date.now(), positions: {} },
+    { completedAt: Date.now(), positions: { 1: { shares: 10 } } },
+    { positions: {} },
+  ]), 2);
+});
+
+test("does not open a sixth match position and resumes when a slot frees", () => {
+  const bot = new TennisPaperBot({ file: "/tmp/tennis-position-cap-test.json" });
+  const occupied = Array.from({ length: 5 }, (_, index) => ({
+    id: `occupied-${index}`, entries: 0, positions: { 1: { shares: 10 } },
+  }));
+  const candidate = { id: "candidate", title: "Candidate", entries: 0, positions: {} };
+  bot.state.markets = [...occupied, candidate];
+  assert.equal(countMarketsWithOpenPositions(bot.state.markets), 5);
+  bot.openPaperPosition(candidate, { price: 0.5, size: 1000 }, 1, 2);
+  assert.equal(candidate.entries, 0);
+  assert.equal(candidate.positions[1], undefined);
+
+  const excess = { id: "excess", positions: { 1: { shares: 10 } } };
+  bot.state.markets.push(excess);
+  bot.openPaperPosition(occupied[0], { price: 0.5, size: 1000 }, 2, 3);
+  assert.equal(occupied[0].entries, 0);
+  assert.equal(occupied[0].positions[2], undefined);
+
+  bot.state.markets.splice(bot.state.markets.indexOf(excess), 1);
+  occupied[0].positions = {};
+  bot.openPaperPosition(candidate, { price: 0.5, size: 1000 }, 1, 2);
+  assert.equal(candidate.entries, 1);
+  assert.ok(candidate.positions[1]);
 });

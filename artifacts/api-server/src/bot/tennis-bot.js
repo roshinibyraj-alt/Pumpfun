@@ -6,8 +6,9 @@ const path = require("node:path");
 const API_TENNIS = "https://api.api-tennis.com/tennis/";
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
-const POLL_MS = 5000;
+const POLL_MS = 2000;
 const IDLE_POLL_MS = 60_000;
+const MAX_ACTIVE_MATCHES = 5;
 const API_TENNIS_LIMIT_RETRY_MS = 60 * 60 * 1000;
 const DISCOVERY_CACHE_MS = 30000;
 const FAVORITE_ASK_THRESHOLD = 0.7;
@@ -76,6 +77,23 @@ function countTrackedLiveMatches(markets, matches) {
       (nameMatches(match.event_second_player, market.player) && nameMatches(match.event_first_player, market.opponent))
     )
   ).length;
+}
+
+function countActiveMarkets(markets) {
+  return markets.filter((market) =>
+    !market.completedAt || Object.keys(market.positions || {}).length > 0
+  ).length;
+}
+
+function countMarketsWithOpenPositions(markets) {
+  return markets.filter((market) => Object.keys(market.positions || {}).length > 0).length;
+}
+
+function mayOpenPositionForMarket(market, markets) {
+  const openMatches = countMarketsWithOpenPositions(markets);
+  const thisMarketAlreadyOpen = Object.keys(market.positions || {}).length > 0;
+  if (openMatches > MAX_ACTIVE_MATCHES) return false;
+  return thisMarketAlreadyOpen || openMatches < MAX_ACTIVE_MATCHES;
 }
 
 function scorePollInterval(activeTrackedMatches) {
@@ -289,6 +307,7 @@ class TennisPaperBot {
   snapshot() {
     const snapshot = JSON.parse(JSON.stringify(this.state));
     snapshot.bankroll = this.capitalSummary();
+    snapshot.limits = { activeMatches: countActiveMarkets(this.state.markets), maxActiveMatches: MAX_ACTIVE_MATCHES };
     snapshot.markets = snapshot.markets.map((market) => ({
       ...market,
       accounting: this.marketAccounting(market),
@@ -403,6 +422,7 @@ class TennisPaperBot {
   }
 
   async addMarket(input) {
+    this.assertMarketCapacity();
     const polyUrl = parseUrl(input.polymarketUrl, "polymarket.com");
     const player = String(input.player || "").trim();
     if (!polyUrl || !player) throw new Error("Enter a valid Polymarket URL and choose the player.");
@@ -425,10 +445,17 @@ class TennisPaperBot {
       selectionMode: "manual_confirmation",
       favoriteAskAtArm: null,
     };
+    this.assertMarketCapacity();
     this.state.markets.unshift(item);
     this.log(`Armed ${item.title} for ${player}; PAPER ONLY.`);
     await this.persist();
     return item;
+  }
+
+  assertMarketCapacity() {
+    if (countActiveMarkets(this.state.markets) >= MAX_ACTIVE_MATCHES) {
+      throw new Error(`The maximum of ${MAX_ACTIVE_MATCHES} active matches is already reached. Close or complete a match before adding another.`);
+    }
   }
 
   async previewMarket(input) {
@@ -630,6 +657,10 @@ class TennisPaperBot {
         }
         continue;
       }
+      if (countActiveMarkets(this.state.markets) >= MAX_ACTIVE_MATCHES) {
+        this.state.discovery.lastMessage = `Maximum of ${MAX_ACTIVE_MATCHES} active matches reached; waiting for a match to complete.`;
+        break;
+      }
       try {
         const event = await this.searchPolymarketEvent(first, second);
         const mapped = marketForPlayers(event, first, second);
@@ -637,6 +668,10 @@ class TennisPaperBot {
         const slug = String(event.slug || "");
         if (!slug || this.state.markets.some((market) => market.slug === slug)) continue;
         const player = mapped.outcomes[0];
+        if (countActiveMarkets(this.state.markets) >= MAX_ACTIVE_MATCHES) {
+          this.state.discovery.lastMessage = `Maximum of ${MAX_ACTIVE_MATCHES} active matches reached; waiting for a match to complete.`;
+          break;
+        }
         const item = marketDefaults({
           slug,
           event,
@@ -1027,6 +1062,10 @@ class TennisPaperBot {
   }
 
   openServePointShares(market, active, tokenId, book, stage) {
+    if (!mayOpenPositionForMarket(market, this.state.markets)) {
+      this.log(`${market.title}: skipped ${active.server} ${stage} entry; five matches already have open positions.`);
+      return false;
+    }
     const bestAsk = Number(book?.bestAsk?.price ?? book?.askDepth?.[0]?.price);
     if (!Number.isFinite(bestAsk) || bestAsk <= 0 || bestAsk > 1) {
       this.log(`${market.title}: skipped ${active.server} ${stage} entry; no valid best ask is available to calculate the 1,000% paper-fill ceiling.`);
@@ -1292,6 +1331,10 @@ class TennisPaperBot {
   }
 
   openPaperPosition(market, ask, setNumber, selectedGames) {
+    if (!mayOpenPositionForMarket(market, this.state.markets)) {
+      this.log(`${market.title}: skipped entry; five matches already have open positions.`);
+      return;
+    }
     if (!ask || ask.price >= 1 || ask.size <= 0) {
       market.error = "No executable ask depth for paper entry.";
       return;
@@ -1388,4 +1431,4 @@ class TennisPaperBot {
   }
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, countTrackedLiveMatches, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, countTrackedLiveMatches, countActiveMarkets, countMarketsWithOpenPositions, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete };
