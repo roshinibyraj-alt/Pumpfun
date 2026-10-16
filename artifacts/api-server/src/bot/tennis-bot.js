@@ -50,6 +50,17 @@ function normalizeName(value) {
   return String(value || "").toLowerCase().replace(/[^a-z]/g, "");
 }
 
+function displayText(value) {
+  const text = String(value ?? "").trim();
+  return text && !["undefined", "null"].includes(text.toLowerCase()) ? text : null;
+}
+
+function positionMark(market, position) {
+  const book = market.booksByToken?.[position.tokenId];
+  return Number(position.bestBid?.price ?? book?.bestBid?.price ?? book?.bestAsk?.price ?? position.entryPrice);
+}
+
+
 function nameMatches(left, right) {
   const aParts = String(left || "").trim().split(/\s+/).filter(Boolean);
   const bParts = String(right || "").trim().split(/\s+/).filter(Boolean);
@@ -307,11 +318,29 @@ class TennisPaperBot {
   snapshot() {
     const snapshot = JSON.parse(JSON.stringify(this.state));
     snapshot.bankroll = this.capitalSummary();
-    snapshot.limits = { activeMatches: countActiveMarkets(this.state.markets), maxActiveMatches: MAX_ACTIVE_MATCHES };
-    snapshot.markets = snapshot.markets.map((market) => ({
-      ...market,
-      accounting: this.marketAccounting(market),
-    }));
+    snapshot.limits = {
+      activeMatches: countActiveMarkets(this.state.markets),
+      maxActiveMatches: MAX_ACTIVE_MATCHES,
+    };
+    snapshot.markets = snapshot.markets.map((market) => {
+      const accounting = this.marketAccounting(market);
+      return {
+        ...market,
+        title: displayText(market.title) ||
+          [displayText(market.player), displayText(market.opponent)].filter(Boolean).join(" vs ") ||
+          displayText(market.slug) || "Tennis match",
+        player: displayText(market.player),
+        opponent: displayText(market.opponent),
+        activePlayer: displayText(market.activePlayer),
+        currentServer: displayText(market.currentServer),
+        positions: Object.fromEntries(Object.entries(market.positions || {}).map(([key, position]) =>
+          [key, { ...position, player: displayText(position.player) }])),
+        accounting: {
+          ...accounting,
+          trades: accounting.trades.map((trade) => ({ ...trade, player: displayText(trade.player) })),
+        },
+      };
+    });
     return snapshot;
   }
 
@@ -323,7 +352,7 @@ class TennisPaperBot {
     let unrealizedPnl = 0;
     for (const market of this.state.markets) {
       for (const position of Object.values(market.positions || {})) {
-        const mark = Number(position.bestBid?.price ?? market.booksByToken?.[position.tokenId]?.bestBid?.price ?? market.bestBid?.price ?? position.entryPrice);
+        const mark = positionMark(market, position);
         const marketValue = position.shares * mark;
         allocatedCapital += Number(position.stake || 0);
         positionValue += marketValue;
@@ -352,7 +381,7 @@ class TennisPaperBot {
     let positionValue = 0;
     let unrealizedPnl = 0;
     for (const position of Object.values(market.positions || {})) {
-      const mark = Number(position.bestBid?.price ?? market.booksByToken?.[position.tokenId]?.bestBid?.price ?? market.bestBid?.price ?? position.entryPrice);
+      const mark = positionMark(market, position);
       const value = position.shares * mark;
       allocatedCapital += Number(position.stake || 0);
       positionValue += value;
@@ -780,9 +809,14 @@ class TennisPaperBot {
         (nameMatches(item.event_second_player, basePlayer) && nameMatches(item.event_first_player, baseOpponent));
     });
     if (!match) {
-      market.scoreStatus = market.currentScore ? "not_live_checking_settlement" : "not_live_or_unmatched";
+      if (market.completedAt && !market.currentScore) market.currentScore = "Match ended · settling";
+      market.scoreStatus = market.completedAt
+        ? "completed_checking_settlement"
+        : market.currentScore ? "not_live_checking_settlement" : "not_live_or_unmatched";
       if (Object.keys(market.positions || {}).length) {
-        const tokenIds = [...new Set(Object.values(market.positions).map((position) => position.tokenId).filter(Boolean))];
+        const tokenIds = market.tokenIds?.length
+          ? market.tokenIds
+          : [...new Set(Object.values(market.positions).map((position) => position.tokenId).filter(Boolean))];
         try {
           const books = await this.readBooks(tokenIds);
           market.booksByToken = Object.fromEntries(tokenIds.map((tokenId, index) => [tokenId, books[index]]));
@@ -794,6 +828,10 @@ class TennisPaperBot {
           market.lastBookAt = Date.now();
           this.clearBookUnavailable(market);
           this.tryFinalTakeProfitExits(market);
+          if (this.settleFromTerminalClobPrices(market)) {
+            if (Object.keys(market.positions || {}).length) await this.checkOfficialSettlement(market);
+            return;
+          }
         } catch (error) {
           if (!this.noteBookUnavailable(market, error)) throw error;
         }
@@ -804,7 +842,8 @@ class TennisPaperBot {
     const selectedPlayer = market.activePlayer || basePlayer;
     const selectedOpponent = nameMatches(selectedPlayer, basePlayer) ? baseOpponent : basePlayer;
     const selectedIsFirst = nameMatches(match.event_first_player, selectedPlayer);
-    market.scoreStatus = "live";
+    const isComplete = matchIsComplete(match);
+    market.scoreStatus = isComplete ? "completed_checking_settlement" : "live";
     const pointScore = matchScore(match);
     market.currentPointScore = pointScore ? {
       player: pointScore[selectedIsFirst ? 0 : 1],
@@ -813,8 +852,11 @@ class TennisPaperBot {
     market.currentScore = pointScore
       ? `${pointScore[selectedIsFirst ? 0 : 1]}–${pointScore[selectedIsFirst ? 1 : 0]}`
       : null;
-    if (matchIsComplete(match)) market.completedAt = Date.now();
-    market.currentServer = match.event_serve || null;
+    if (isComplete) {
+      market.completedAt ||= Date.now();
+      if (!market.currentScore) market.currentScore = "Match ended · settling";
+    }
+    market.currentServer = displayText(match.event_serve);
     market.feedEventKey = String(match.event_key || "");
     const setNumber = Math.max(1, Number(String(match.event_status || "").match(/set\s*(\d+)/i)?.[1] || 1));
     market.currentSet = setNumber;
@@ -849,8 +891,12 @@ class TennisPaperBot {
       if (positionBook) position.bestBid = positionBook.bestBid;
     }
     this.tryFinalTakeProfitExits(market);
-    if (matchIsComplete(match)) {
-      await this.checkOfficialSettlement(market);
+    if (this.settleFromTerminalClobPrices(market)) {
+      if (Object.keys(market.positions || {}).length) await this.checkOfficialSettlement(market);
+      return;
+    }
+    if (isComplete) {
+      if (Object.keys(market.positions || {}).length) await this.checkOfficialSettlement(market);
       return;
     }
     market.lastScoreAt = Date.now();
@@ -1155,6 +1201,45 @@ class TennisPaperBot {
     }
     market.position = Object.values(market.positions)[0] || null;
     return closed;
+  }
+
+  settleFromTerminalClobPrices(market) {
+    if (!Array.isArray(market.tokenIds) || market.tokenIds.length !== 2) return false;
+    const quote = (book) => {
+      const bid = Number(book?.bestBid?.price);
+      const ask = Number(book?.bestAsk?.price);
+      const hasBid = Number.isFinite(bid) && bid > 0 && bid <= 1;
+      const hasAsk = Number.isFinite(ask) && ask > 0 && ask <= 1;
+      if (hasBid && hasAsk) return (bid + ask) / 2;
+      if (hasBid) return bid;
+      if (hasAsk) return ask;
+      return null;
+    };
+    const quotes = market.tokenIds.map((tokenId) => quote(market.booksByToken?.[tokenId]));
+    const winnerIndex = quotes.findIndex((price, index) =>
+      price !== null && price >= FINAL_TAKE_PROFIT &&
+      quotes[index === 0 ? 1 : 0] !== null &&
+      quotes[index === 0 ? 1 : 0] <= 1 - FINAL_TAKE_PROFIT
+    );
+    if (winnerIndex < 0) return false;
+
+    market.completedAt ||= Date.now();
+    for (const [key, position] of Object.entries(market.positions || {})) {
+      const outcomeIndex = market.tokenIds.indexOf(String(position.tokenId));
+      if (outcomeIndex < 0) continue;
+      const payout = outcomeIndex === winnerIndex ? 1 : 0;
+      this.finalizePosition(
+        market,
+        position,
+        payout,
+        `terminal CLOB outcome reached $${FINAL_TAKE_PROFIT.toFixed(2)}`,
+        key,
+      );
+    }
+    market.currentScore = "Winner determined by CLOB price";
+    market.scoreStatus = "resolved_by_terminal_prices";
+    market.settlementStatus = "terminal_clob_prices";
+    return true;
   }
 
   sellPositionFromBook(market, position, book, reason, minPrice = 0) {

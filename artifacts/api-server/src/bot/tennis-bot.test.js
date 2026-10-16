@@ -186,7 +186,8 @@ test("updates open unrealized P&L from the latest CLOB best bid", () => {
   bot.state.bankroll.availableCapital = 9950;
   bot.state.markets = [{
     id: "marked", bestBid: { price: 0.4 },
-    positions: { 1: { shares: 100, stake: 50, entryPrice: 0.5 } },
+    booksByToken: { selected: { bestBid: { price: 0.4 } } },
+    positions: { 1: { tokenId: "selected", shares: 100, stake: 50, entryPrice: 0.5 } },
   }];
   const state = bot.snapshot();
   assert.equal(state.bankroll.unrealizedPnl, -10);
@@ -545,6 +546,78 @@ test("waits for official Polymarket resolution before finalizing an open positio
   assert.equal(bot.state.trades[0].pnl, 50);
 });
 
+test("settles paired terminal CLOB prices without waiting for the score feed", () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-terminal-clob-test.json" });
+  bot.state.bankroll.availableCapital = 50;
+  const market = {
+    title: "Kicker vs Mena",
+    tokenIds: ["kicker-token", "mena-token"],
+    completedAt: null,
+    booksByToken: {
+      "kicker-token": { bestBid: { price: 0.999 }, bestAsk: null },
+      "mena-token": { bestBid: null, bestAsk: { price: 0.001 } },
+    },
+    positions: {
+      kicker: {
+        player: "N. Kicker", tokenId: "kicker-token", shares: 10, stake: 8.8,
+        tranches: [{ tradeId: "kicker-win", shares: 10, stake: 8.8 }],
+      },
+      mena: {
+        player: "F. Mena", tokenId: "mena-token", shares: 20, stake: 3.4,
+        tranches: [
+          { tradeId: "mena-loss-1", shares: 10, stake: 2 },
+          { tradeId: "mena-loss-2", shares: 10, stake: 1.4 },
+        ],
+      },
+    },
+  };
+  bot.state.trades = [
+    { id: "kicker-win", status: "open", stake: 8.8 },
+    { id: "mena-loss-1", status: "open", stake: 2 },
+    { id: "mena-loss-2", status: "open", stake: 1.4 },
+  ];
+  assert.equal(bot.settleFromTerminalClobPrices(market), true);
+  assert.deepEqual(market.positions, {});
+  assert.equal(bot.state.trades.find((trade) => trade.id === "kicker-win").exitPrice, 1);
+  assert.equal(bot.state.trades.find((trade) => trade.id === "mena-loss-1").exitPrice, 0);
+  assert.equal(bot.state.trades.find((trade) => trade.id === "mena-loss-2").exitPrice, 0);
+  assert.equal(bot.state.bankroll.availableCapital, 60);
+  assert.equal(market.scoreStatus, "resolved_by_terminal_prices");
+});
+
+test("terminal CLOB prices settle a match even while its score feed has not ended", async () => {
+  const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-finished-feed-test.json" });
+  bot.state.bankroll.availableCapital = 50;
+  const trade = { id: "mena-trade", status: "open", stake: 3.4, player: "F. Mena" };
+  const market = {
+    id: "kicker-match", title: "Nicolas Kicker vs Facundo Mena",
+    player: "Nicolas Kicker", opponent: "Facundo Mena",
+    tokenIds: ["kicker-token", "mena-token"], tokenId: "kicker-token",
+    positions: {
+      "accumulated:fmena": {
+        player: "F. Mena", tokenId: "mena-token", shares: 20, stake: 3.4,
+        tranches: [{ tradeId: "mena-trade", shares: 20, stake: 3.4 }],
+      },
+    },
+  };
+  bot.state.markets = [market];
+  bot.state.trades = [trade];
+  bot.readBooks = async () => [
+    { bestBid: { price: 0.999 }, bestAsk: null, bidDepth: [{ price: 0.999, size: 100 }], askDepth: [] },
+    { bestBid: null, bestAsk: { price: 0.001 }, bidDepth: [], askDepth: [{ price: 0.001, size: 100 }] },
+  ];
+  bot.checkOfficialSettlement = async () => {};
+  await bot.processMarket(market, [{
+    event_first_player: "Nicolas Kicker", event_second_player: "Facundo Mena",
+    event_status: "In Progress", event_game_result: null, scores: [],
+  }]);
+  assert.equal(market.currentScore, "Winner determined by CLOB price");
+  assert.equal(market.scoreStatus, "resolved_by_terminal_prices");
+  assert.deepEqual(market.positions, {});
+  assert.equal(trade.status, "closed");
+  assert.equal(trade.exitPrice, 0);
+});
+
 test("a final take-profit sells only when full depth is available at $0.99 or better", () => {
   const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-final-tp-test.json" });
   bot.state.bankroll.availableCapital = 95;
@@ -661,6 +734,37 @@ test("completed markets free capacity unless they still hold a position", () => 
     { completedAt: Date.now(), positions: { 1: { shares: 10 } } },
     { positions: {} },
   ]), 2);
+});
+
+test("snapshot avoids exposing undefined labels", () => {
+  const bot = new TennisPaperBot({ file: "/tmp/tennis-undefined-label-test.json" });
+  bot.state.markets = [{
+    id: "missing-labels", slug: "fallback-market", title: "undefined",
+    player: "undefined", opponent: "null", currentServer: "undefined", positions: {},
+  }];
+  const market = bot.snapshot().markets[0];
+  assert.equal(market.title, "fallback-market");
+  assert.equal(market.player, null);
+  assert.equal(market.opponent, null);
+  assert.equal(market.currentServer, null);
+});
+
+test("marks a position from its own outcome book, not the selected player's quote", () => {
+  const bot = new TennisPaperBot({ file: "/tmp/tennis-own-outcome-mark-test.json" });
+  const market = {
+    id: "kicker-match",
+    bestBid: { price: 0.999 },
+    booksByToken: {
+      "mena-token": { bestBid: null, bestAsk: { price: 0.001 } },
+    },
+    positions: {
+      mena: { tokenId: "mena-token", shares: 20, stake: 3.4, entryPrice: 0.17 },
+    },
+  };
+  bot.state.markets = [market];
+  const accounting = bot.marketAccounting(market);
+  assert.equal(accounting.positionValue, 0.02);
+  assert.ok(Math.abs(accounting.unrealizedPnl - (-3.38)) < 1e-9);
 });
 
 test("does not open a sixth match position and resumes when a slot frees", () => {
