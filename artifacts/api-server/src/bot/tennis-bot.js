@@ -22,7 +22,8 @@ const SERVE_POINT_SHARES = 10;
 const FINAL_TAKE_PROFIT = 0.99;
 const BOOK_404_BASE_COOLDOWN_MS = 60_000;
 const BOOK_404_MAX_COOLDOWN_MS = 15 * 60_000;
-const BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
+const BREAKBACK_STRATEGY_VERSION = "breakback-single-entry-v3";
+const PREVIOUS_BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
 const BASE_TRANCHE_SHARES = 250;
 
 function entryGameAllowed(playerGames, opponentGames) {
@@ -59,7 +60,6 @@ function positionMark(market, position) {
   const book = market.booksByToken?.[position.tokenId];
   return Number(position.bestBid?.price ?? book?.bestBid?.price ?? book?.bestAsk?.price ?? position.entryPrice);
 }
-
 
 function nameMatches(left, right) {
   const aParts = String(left || "").trim().split(/\s+/).filter(Boolean);
@@ -241,7 +241,7 @@ function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk, sel
     marketId: String(mapped.market.id || ""),
     status: "armed",
     selectionMode,
-    strategyVersion: SERVE_POINT_STRATEGY_VERSION,
+    strategyVersion: BREAKBACK_STRATEGY_VERSION,
     favoriteAskAtArm: favoriteAsk == null ? null : Number(favoriteAsk),
     scoreStatus: "live",
     currentScore: null,
@@ -297,22 +297,23 @@ class TennisPaperBot {
     console.info(`[tennis-paper] ${message}`);
   }
 
-  migrateServePointMarket(market) {
-    for (const [key, position] of Object.entries(market.positions || {})) {
-      position.player ||= market.activePlayer || market.player;
-      position.tokenId ||= market.tokenId || market.tokenIds?.[0] || null;
-      position.kind = "accumulated";
-      position.entryPrice = Number(position.shares) > 0
-        ? Number(position.stake || 0) / Number(position.shares)
-        : Number(position.entryPrice || 0);
-      market.positions[key] = position;
+  prepareBreakbackMarket(market) {
+    const hasOpenPositions = Object.keys(market.positions || {}).length > 0 ||
+      Number(market.activeServeGame?.position?.shares || 0) > 0;
+    if (market.strategyVersion === SERVE_POINT_STRATEGY_VERSION && hasOpenPositions) {
+      market.legacyExitOnly = true;
+      return;
     }
-    market.strategyVersion = SERVE_POINT_STRATEGY_VERSION;
-    market.selectionMode = "automatic_serve_points";
+    if (market.strategyVersion === PREVIOUS_BREAKBACK_STRATEGY_VERSION &&
+        market.breakCycle?.stage === "await_opponent_hold") {
+      market.breakCycle.stage = "await_player_breakback";
+    }
+    market.strategyVersion = BREAKBACK_STRATEGY_VERSION;
+    market.selectionMode = "automatic_any_break";
     market.activePlayer = null;
-    market.breakCycle = null;
-    market.activeServeGame = null;
+    market.breaksConcededBySet ||= {};
     market.lastObservedGames = {};
+    market.activeServeGame = null;
   }
 
   snapshot() {
@@ -409,9 +410,7 @@ class TennisPaperBot {
       const saved = JSON.parse(await fs.readFile(this.file, "utf8"));
       if (saved?.app === this.state.app) this.state = { ...this.state, ...saved };
     } catch {}
-    for (const market of this.state.markets || []) {
-      if (market.strategyVersion !== SERVE_POINT_STRATEGY_VERSION) this.migrateServePointMarket(market);
-    }
+    for (const market of this.state.markets || []) this.prepareBreakbackMarket(market);
     if (!Number.isFinite(Number(this.state.bankroll?.availableCapital))) {
       const realized = this.state.trades.reduce((total, trade) =>
         total + Number(trade.realizedPnl ?? (trade.status === "closed" ? trade.pnl : 0) ?? 0), 0);
@@ -471,7 +470,7 @@ class TennisPaperBot {
       ...marketDefaults({ slug, event, polyUrl: polyUrl.href, mapped, player, favoriteAsk: null }),
       status: "armed",
       scoreStatus: "waiting",
-      selectionMode: "manual_confirmation",
+      selectionMode: "automatic_any_break",
       favoriteAskAtArm: null,
     };
     this.assertMarketCapacity();
@@ -542,7 +541,9 @@ class TennisPaperBot {
         status: "live_match_found",
         players: [match.event_first_player, match.event_second_player],
         score: match.event_game_result || null,
-        server: match.event_serve || null,
+        server: match.event_serve === "First Player"
+          ? match.event_first_player
+          : match.event_serve === "Second Player" ? match.event_second_player : null,
         eventStatus: match.event_status || null,
         scores: Array.isArray(match.scores) ? match.scores : [],
       };
@@ -677,12 +678,13 @@ class TennisPaperBot {
       const second = String(live.event_second_player || "").trim();
       if (!first || !second) continue;
       const existing = this.state.markets.find((market) =>
-        (nameMatches(market.player, first) && nameMatches(market.opponent, second)) ||
-        (nameMatches(market.player, second) && nameMatches(market.opponent, first)));
+        (!market.completedAt || Object.keys(market.positions || {}).length > 0) &&
+        ((nameMatches(market.player, first) && nameMatches(market.opponent, second)) ||
+         (nameMatches(market.player, second) && nameMatches(market.opponent, first))));
       if (existing) {
-        if (existing.strategyVersion !== SERVE_POINT_STRATEGY_VERSION) {
-          this.migrateServePointMarket(existing);
-          this.log(`${existing.title}: switched to serve-point accumulation while live.`);
+        if (!existing.legacyExitOnly && existing.strategyVersion !== BREAKBACK_STRATEGY_VERSION) {
+          this.prepareBreakbackMarket(existing);
+          this.log(`${existing.title}: switched to single-entry break-back strategy.`);
         }
         continue;
       }
@@ -708,14 +710,16 @@ class TennisPaperBot {
           mapped,
           player,
           favoriteAsk: null,
-          selectionMode: "automatic_serve_points",
+          selectionMode: "automatic_any_break",
         });
-        item.currentServer = live.event_serve || null;
+        item.currentServer = live.event_serve === "First Player"
+          ? live.event_first_player
+          : live.event_serve === "Second Player" ? live.event_second_player : null;
         item.currentScore = live.event_game_result || null;
         item.feedEventKey = String(live.event_key || "");
         this.state.markets.unshift(item);
         this.state.discovery.autoArmed += 1;
-        this.log(`Auto-added live match ${item.title}; both players can trigger serve-point paper entries (paper only).`);
+        this.log(`Auto-added live match ${item.title}; a player who concedes a break can trigger a paper entry.`);
       } catch (error) {
         this.state.discovery.lastMessage = String(error?.message || error).slice(0, 160);
       }
@@ -774,8 +778,6 @@ class TennisPaperBot {
           this.log(`${market.title}: ${market.error}`, "error");
         }
       }));
-      this.state.markets = this.state.markets.filter((market) =>
-        !(market.completedAt && !Object.keys(market.positions || {}).length));
       this.activeTrackedMatches = countTrackedLiveMatches(this.state.markets, matches);
       this.state.feed.activeTrackedMatches = this.activeTrackedMatches;
       this.state.feed.pollIntervalMs = scorePollInterval(this.activeTrackedMatches);
@@ -855,8 +857,15 @@ class TennisPaperBot {
     if (isComplete) {
       market.completedAt ||= Date.now();
       if (!market.currentScore) market.currentScore = "Match ended · settling";
+      market.currentServer = null;
     }
-    market.currentServer = displayText(match.event_serve);
+    if (!isComplete) {
+      market.currentServer = displayText(
+        match.event_serve === "First Player"
+          ? match.event_first_player
+          : match.event_serve === "Second Player" ? match.event_second_player : match.event_serve,
+      );
+    }
     market.feedEventKey = String(match.event_key || "");
     const setNumber = Math.max(1, Number(String(match.event_status || "").match(/set\s*(\d+)/i)?.[1] || 1));
     market.currentSet = setNumber;
@@ -903,6 +912,12 @@ class TennisPaperBot {
     if (market.strategyVersion === SERVE_POINT_STRATEGY_VERSION) {
       await this.processServePointMarket(market, match, selectedIsFirst, setNumber,
         selectedGames, opponentGames, pointScore);
+      if (market.legacyExitOnly &&
+          !Object.keys(market.positions || {}).length &&
+          Number(market.activeServeGame?.position?.shares || 0) <= 0) {
+        market.legacyExitOnly = false;
+        this.prepareBreakbackMarket(market);
+      }
       return;
     }
     market.lastObservedGames ||= {};
@@ -958,6 +973,18 @@ class TennisPaperBot {
 
     const cycle = market.breakCycle;
     let swapObservation = false;
+    let setBreakCounts = market.breaksConcededBySet?.[setNumber] || { player: 0, opponent: 0 };
+    if (gameAdvanced) {
+      const serverLost = previous.serverSelected ? opponentWonGame : selectedWonGame;
+      if (serverLost) {
+        const serverName = previous.serverSelected ? selectedPlayer : selectedOpponent;
+        const side = nameMatches(serverName, market.player) ? "player" : "opponent";
+        market.breaksConcededBySet ||= {};
+        setBreakCounts = market.breaksConcededBySet[setNumber] ||= { player: 0, opponent: 0 };
+        setBreakCounts[side] = Number(setBreakCounts[side] || 0) + 1;
+      }
+    }
+    const setTradingBlocked = setBreakCounts.player >= 2 || setBreakCounts.opponent >= 2;
     if (gameAdvanced && cycle?.stage === "await_player_breakback" && setNumber <= cycle.entrySet + 1 &&
         !previous.serverSelected && selectedWonGame) {
       const position = market.positions?.[cycle.entrySet];
@@ -978,7 +1005,7 @@ class TennisPaperBot {
         cycle.pendingExitReason = `the position player held serve in set ${setNumber}`;
         this.trySweepExit(market, position, cycle.entrySet, cycle.pendingExitReason, cycle.pendingExitShares);
       }
-    } else if (gameAdvanced && !cycle && entryGameAllowed(selectedGames, opponentGames)) {
+    } else if (gameAdvanced && !cycle && !setTradingBlocked && entryGameAllowed(selectedGames, opponentGames)) {
       const anyBreakMode = market.selectionMode === "automatic_any_break";
       const playerWasBroken = anyBreakMode
         ? (previous.serverSelected && opponentWonGame) || (!previous.serverSelected && selectedWonGame)
@@ -1010,7 +1037,7 @@ class TennisPaperBot {
             }));
           }
         }
-        const nextCycle = { entrySet: setNumber, stage: "await_opponent_hold", trancheShares: null };
+        const nextCycle = { entrySet: setNumber, stage: "await_player_breakback", trancheShares: null };
         market.breakCycle = nextCycle;
         if (this.openBreakTranche(market, entryAsk, nextCycle)) {
           if (brokenBook) {
@@ -1026,13 +1053,6 @@ class TennisPaperBot {
             market.tokenId = market.baseTokenId || market.tokenIds?.[0] || market.tokenId;
           }
         }
-      }
-    } else if (gameAdvanced && cycle && cycle.stage === "await_opponent_hold" &&
-        !previous.serverSelected && opponentWonGame &&
-        setNumber <= cycle.entrySet + 1 && entryGameAllowed(selectedGames, opponentGames)) {
-      if (this.openBreakTranche(market, ask, cycle)) {
-        cycle.stage = "await_player_breakback";
-        this.log(`${market.title}: opponent held serve; added the second paper tranche.`);
       }
     }
     market.lastObservedGames[setNumber] = swapObservation ? {
@@ -1088,10 +1108,10 @@ class TennisPaperBot {
       };
     }
     if (active.server !== server) return;
-    if (serverPoints === 0 && returnPoints === 15 && !active.boughtAt15) {
+    if (!market.legacyExitOnly && serverPoints === 0 && returnPoints === 15 && !active.boughtAt15) {
       active.boughtAt15 = true;
       this.openServePointShares(market, active, tokenId, book, "0-15");
-    } else if (serverPoints === 0 && returnPoints === 30 && !active.boughtAt30) {
+    } else if (!market.legacyExitOnly && serverPoints === 0 && returnPoints === 30 && !active.boughtAt30) {
       active.boughtAt30 = true;
       this.openServePointShares(market, active, tokenId, book, "0-30");
     }

@@ -77,6 +77,98 @@ test("uses one-minute polling when no tracked market is live and two seconds whe
   bot.stop();
 });
 
+test("caps tradeable matches at five for manual and automatic arming", async () => {
+  const bot = new TennisPaperBot({
+    apiKey: "test-key",
+    file: "/tmp/tennis-five-match-limit-test.json",
+    fetch: async () => { throw new Error("manual add must be blocked before lookup"); },
+  });
+  bot.state.markets = Array.from({ length: 5 }, (_, index) => ({
+    id: `active-${index}`, player: `Player ${index}`, opponent: `Opponent ${index}`, positions: {},
+  }));
+  assert.equal(countActiveMarkets(bot.state.markets), 5);
+  assert.equal(bot.snapshot().limits.maxActiveMatches, 5);
+  assert.equal(bot.snapshot().limits.activeMatches, 5);
+  await assert.rejects(
+    bot.addMarket({ polymarketUrl: "https://polymarket.com/event/sixth-match", player: "Player 6", confirmPolymarket: true }),
+    /maximum of 5 active matches/,
+  );
+
+  let searchCount = 0;
+  bot.searchPolymarketEvent = async () => { searchCount += 1; return null; };
+  await bot.discoverLiveMarkets([{
+    event_first_player: "Julia Grabher",
+    event_second_player: "Deborah Chiesa",
+  }]);
+  assert.equal(bot.state.markets.length, 5);
+  assert.equal(searchCount, 0);
+  assert.match(bot.state.discovery.lastMessage, /Maximum of 5 active matches/);
+});
+
+test("completed markets free capacity unless they still hold a position", () => {
+  assert.equal(countActiveMarkets([
+    { completedAt: Date.now(), positions: {} },
+    { completedAt: Date.now(), positions: { 1: { shares: 10 } } },
+    { positions: {} },
+  ]), 2);
+});
+
+test("snapshot avoids exposing undefined labels", () => {
+  const bot = new TennisPaperBot({ file: "/tmp/tennis-undefined-label-test.json" });
+  bot.state.markets = [{
+    id: "missing-labels", slug: "fallback-market", title: "undefined",
+    player: "undefined", opponent: "null", currentServer: "undefined", positions: {},
+  }];
+  const market = bot.snapshot().markets[0];
+  assert.equal(market.title, "fallback-market");
+  assert.equal(market.player, null);
+  assert.equal(market.opponent, null);
+  assert.equal(market.currentServer, null);
+});
+
+test("marks a position from its own outcome book, not the selected player's quote", () => {
+  const bot = new TennisPaperBot({ file: "/tmp/tennis-own-outcome-mark-test.json" });
+  const market = {
+    id: "kicker-match",
+    bestBid: { price: 0.999 },
+    booksByToken: {
+      "mena-token": { bestBid: null, bestAsk: { price: 0.001 } },
+    },
+    positions: {
+      mena: { tokenId: "mena-token", shares: 20, stake: 3.4, entryPrice: 0.17 },
+    },
+  };
+  bot.state.markets = [market];
+  const accounting = bot.marketAccounting(market);
+  assert.equal(accounting.positionValue, 0.02);
+  assert.ok(Math.abs(accounting.unrealizedPnl - (-3.38)) < 1e-9);
+});
+
+test("does not open a sixth match position and resumes when a slot frees", () => {
+  const bot = new TennisPaperBot({ file: "/tmp/tennis-position-cap-test.json" });
+  const occupied = Array.from({ length: 5 }, (_, index) => ({
+    id: `occupied-${index}`, entries: 0, positions: { 1: { shares: 10 } },
+  }));
+  const candidate = { id: "candidate", title: "Candidate", entries: 0, positions: {} };
+  bot.state.markets = [...occupied, candidate];
+  assert.equal(countMarketsWithOpenPositions(bot.state.markets), 5);
+  bot.openPaperPosition(candidate, { price: 0.5, size: 1000 }, 1, 2);
+  assert.equal(candidate.entries, 0);
+  assert.equal(candidate.positions[1], undefined);
+
+  const excess = { id: "excess", positions: { 1: { shares: 10 } } };
+  bot.state.markets.push(excess);
+  bot.openPaperPosition(occupied[0], { price: 0.5, size: 1000 }, 2, 3);
+  assert.equal(occupied[0].entries, 0);
+  assert.equal(occupied[0].positions[2], undefined);
+
+  bot.state.markets.splice(bot.state.markets.indexOf(excess), 1);
+  occupied[0].positions = {};
+  bot.openPaperPosition(candidate, { price: 0.5, size: 1000 }, 1, 2);
+  assert.equal(candidate.entries, 1);
+  assert.ok(candidate.positions[1]);
+});
+
 test("surfaces API-Tennis authentication details instead of an opaque numeric error", async () => {
   const bot = new TennisPaperBot({
     apiKey: "test-key",
@@ -254,7 +346,7 @@ test("backs off a missing CLOB book per token and suppresses repeated 404 logs",
   assert.equal(bot.book404Backoff.has("missing"), false);
 });
 
-test("auto-arms a match already in progress for the Polymarket favorite", async () => {
+test("auto-arms a live match for either player's break-back entry", async () => {
   const event = {
     title: "Court event: Julia Grabher vs Deborah Chiesa",
     slug: "wta-grabher-chiesa-live",
@@ -297,16 +389,15 @@ test("auto-arms a match already in progress for the Polymarket favorite", async 
   assert.equal(bot.state.markets.length, 1);
   assert.equal(bot.state.markets[0].player, "Julia Grabher");
   assert.equal(bot.state.markets[0].opponent, "Deborah Chiesa");
-  assert.equal(bot.state.markets[0].selectionMode, "automatic_serve_points");
+  assert.equal(bot.state.markets[0].selectionMode, "automatic_any_break");
   assert.equal(bot.state.markets[0].favoriteAskAtArm, null);
   assert.equal(bot.state.markets[0].tokenId, "grabher-token");
-  assert.equal(bot.state.markets[0].strategyVersion, "serve-point-accumulator-v1");
+  assert.equal(bot.state.markets[0].strategyVersion, "breakback-single-entry-v3");
   assert.equal(bot.state.discovery.autoArmed, 1);
   assert.equal(bot.state.mode, "PAPER");
   await bot.processMarket(bot.state.markets[0], [liveMatch]);
   assert.equal(bot.state.markets[0].position, null);
-  assert.equal(bot.state.markets[0].activeServeGame.server, "J. Grabher");
-  assert.equal(bot.state.markets[0].activeServeGame.position, null);
+  assert.equal(bot.state.markets[0].activeServeGame ?? null, null);
 });
 
 function servePointFixture(bids = { one: "0.60", two: "0.40" }) {
@@ -423,7 +514,7 @@ test("cannot remove a match while a paper position is open", async () => {
   assert.equal(bot.state.markets.length, 1);
 });
 
-test("buys on favorite break, adds on opponent hold, and sells after break-back next set", async () => {
+test("buys only once after a break, sells half on break-back and the rest after a hold", async () => {
   const bot = new TennisPaperBot({
     apiKey: "test",
     file: "/tmp/tennis-bot-test.json",
@@ -435,9 +526,10 @@ test("buys on favorite break, adds on opponent hold, and sells after break-back 
   const market = {
     id: "entry-test", slug: "entry-test", title: "Entry test", player: "Liam Draxl",
     opponent: "Omar Jasika", tokenId: "selected-token", entries: 0,
-    strategyVersion: "breakback-staged-flat-v2", selectionMode: "automatic_favorite",
+    strategyVersion: "breakback-single-entry-v3", selectionMode: "automatic_favorite",
     positions: {}, currentSet: 1,
   };
+  bot.state.markets.push(market);
   const score = (set, playerGames, opponentGames, server) => ({
     event_first_player: "L. Draxl",
     event_second_player: "O. Jasika",
@@ -451,24 +543,28 @@ test("buys on favorite break, adds on opponent hold, and sells after break-back 
   });
   const run = async (event) => bot.processMarket(market, [event]);
   await run(score(1, 2, 2, "First Player"));
+  assert.equal(market.currentServer, "L. Draxl");
   await run(score(1, 2, 3, "Second Player"));
   assert.equal(market.position.shares, 250);
-  assert.equal(market.breakCycle.stage, "await_opponent_hold");
-  await run(score(1, 2, 4, "First Player"));
-  assert.equal(market.position.shares, 500);
   assert.equal(market.breakCycle.stage, "await_player_breakback");
+  await run(score(1, 2, 4, "First Player"));
+  assert.equal(market.position.shares, 250);
   await run(score(1, 2, 4, "Second Player"));
   await run(score(1, 3, 4, "Second Player"));
-  assert.equal(market.position.shares, 250);
-  assert.equal(bot.state.trades.filter((trade) => trade.status === "closed").length, 1);
+  assert.equal(market.position.shares, 125);
+  assert.equal(market.breakCycle.stage, "await_position_hold");
+  assert.equal(bot.state.trades.filter((trade) => trade.status === "closed").length, 0);
   await run(score(1, 3, 4, "First Player"));
   await run(score(1, 4, 4, "First Player"));
   assert.equal(market.positions[1], undefined);
   assert.equal(market.breakCycle, null);
-  assert.equal(bot.state.trades.filter((trade) => trade.status === "closed").length, 2);
-  assert.equal(bot.snapshot().bankroll.availableCapital, 9990);
-  assert.equal(bot.snapshot().bankroll.realizedPnl, -10);
-  assert.equal(bot.snapshot().bankroll.realizedPnl, -10);
+  assert.equal(bot.state.trades.filter((trade) => trade.status === "closed").length, 1);
+  assert.equal(bot.snapshot().bankroll.availableCapital, 9995);
+  assert.equal(bot.snapshot().bankroll.realizedPnl, -5);
+  market.completedAt = Date.now();
+  const finalMatch = bot.snapshot().markets.find((item) => item.id === market.id);
+  assert.equal(finalMatch.accounting.totalPnl, -5);
+  assert.ok(finalMatch.completedAt);
 });
 
 test("neutral first-scan mode buys whichever player was broken", async () => {
@@ -493,7 +589,7 @@ test("neutral first-scan mode buys whichever player was broken", async () => {
     outcomes: ["Player One", "Player Two"],
     tokenIds: ["player-one-token", "player-two-token"],
     tokenId: "player-one-token", entries: 0, positions: {}, lastObservedGames: {},
-    strategyVersion: "breakback-staged-flat-v2", selectionMode: "automatic_any_break",
+    strategyVersion: "breakback-single-entry-v3", selectionMode: "automatic_any_break",
   };
   const score = (one, two, server) => ({
     event_first_player: "Player One",
@@ -513,6 +609,46 @@ test("neutral first-scan mode buys whichever player was broken", async () => {
   assert.deepEqual(market.lastObservedGames[1], {
     playerGames: 2, opponentGames: 3, serverSelected: false,
   });
+});
+
+test("stops opening new positions in a set after either player concedes two breaks", async () => {
+  const bot = new TennisPaperBot({
+    apiKey: "test",
+    file: "/tmp/tennis-break-limit-test.json",
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({ asks: [{ price: "0.50", size: "1500" }], bids: [{ price: "0.48", size: "1500" }] }),
+    }),
+  });
+  const market = {
+    id: "break-limit", slug: "break-limit", title: "Break limit test",
+    player: "Player One", opponent: "Player Two", tokenId: "selected-token",
+    entries: 0, strategyVersion: "breakback-single-entry-v3",
+    selectionMode: "automatic_favorite", positions: {},
+    breaksConcededBySet: { 1: { player: 1, opponent: 0 } },
+  };
+  const score = (set, one, two, server) => ({
+    event_first_player: "Player One",
+    event_second_player: "Player Two",
+    event_serve: server,
+    event_game_result: "15 - 15",
+    event_status: `Set ${set}`,
+    scores: [
+      { score_set: 1, score_first: set === 1 ? one : 2, score_second: set === 1 ? two : 6 },
+      ...(set === 2 ? [{ score_set: 2, score_first: one, score_second: two }] : []),
+    ],
+  });
+  const run = (event) => bot.processMarket(market, [event]);
+  await run(score(1, 2, 2, "First Player"));
+  await run(score(1, 2, 3, "Second Player"));
+  assert.equal(market.breaksConcededBySet[1].player, 2);
+  assert.equal(market.position ?? null, null);
+  assert.equal(market.breakCycle ?? null, null);
+
+  await run(score(2, 0, 0, "First Player"));
+  await run(score(2, 0, 1, "Second Player"));
+  assert.equal(market.position.shares, 250);
+  assert.equal(market.breaksConcededBySet[2].player, 1);
 });
 
 test("keeps fixed 250-share tranches regardless of prior proceeds", () => {
@@ -697,97 +833,4 @@ test("fills shallow-book serve entries with a clearly marked paper shortfall up 
   assert.equal(trade.stake, 4);
   assert.equal(trade.entryPrice, 0.4);
   assert.match(bot.state.events[0].message, /3\.00 shortfall shares paper-filled at \$1\.000/);
-});
-
-
-test("caps tradeable matches at five for manual and automatic arming", async () => {
-  const bot = new TennisPaperBot({
-    apiKey: "test-key",
-    file: "/tmp/tennis-five-match-limit-test.json",
-    fetch: async () => { throw new Error("manual add must be blocked before lookup"); },
-  });
-  bot.state.markets = Array.from({ length: 5 }, (_, index) => ({
-    id: `active-${index}`, player: `Player ${index}`, opponent: `Opponent ${index}`, positions: {},
-  }));
-  assert.equal(countActiveMarkets(bot.state.markets), 5);
-  assert.equal(bot.snapshot().limits.maxActiveMatches, 5);
-  assert.equal(bot.snapshot().limits.activeMatches, 5);
-  await assert.rejects(
-    bot.addMarket({ polymarketUrl: "https://polymarket.com/event/sixth-match", player: "Player 6", confirmPolymarket: true }),
-    /maximum of 5 active matches/,
-  );
-
-  let searchCount = 0;
-  bot.searchPolymarketEvent = async () => { searchCount += 1; return null; };
-  await bot.discoverLiveMarkets([{
-    event_first_player: "Julia Grabher",
-    event_second_player: "Deborah Chiesa",
-  }]);
-  assert.equal(bot.state.markets.length, 5);
-  assert.equal(searchCount, 0);
-  assert.match(bot.state.discovery.lastMessage, /Maximum of 5 active matches/);
-});
-
-test("completed markets free capacity unless they still hold a position", () => {
-  assert.equal(countActiveMarkets([
-    { completedAt: Date.now(), positions: {} },
-    { completedAt: Date.now(), positions: { 1: { shares: 10 } } },
-    { positions: {} },
-  ]), 2);
-});
-
-test("snapshot avoids exposing undefined labels", () => {
-  const bot = new TennisPaperBot({ file: "/tmp/tennis-undefined-label-test.json" });
-  bot.state.markets = [{
-    id: "missing-labels", slug: "fallback-market", title: "undefined",
-    player: "undefined", opponent: "null", currentServer: "undefined", positions: {},
-  }];
-  const market = bot.snapshot().markets[0];
-  assert.equal(market.title, "fallback-market");
-  assert.equal(market.player, null);
-  assert.equal(market.opponent, null);
-  assert.equal(market.currentServer, null);
-});
-
-test("marks a position from its own outcome book, not the selected player's quote", () => {
-  const bot = new TennisPaperBot({ file: "/tmp/tennis-own-outcome-mark-test.json" });
-  const market = {
-    id: "kicker-match",
-    bestBid: { price: 0.999 },
-    booksByToken: {
-      "mena-token": { bestBid: null, bestAsk: { price: 0.001 } },
-    },
-    positions: {
-      mena: { tokenId: "mena-token", shares: 20, stake: 3.4, entryPrice: 0.17 },
-    },
-  };
-  bot.state.markets = [market];
-  const accounting = bot.marketAccounting(market);
-  assert.equal(accounting.positionValue, 0.02);
-  assert.ok(Math.abs(accounting.unrealizedPnl - (-3.38)) < 1e-9);
-});
-
-test("does not open a sixth match position and resumes when a slot frees", () => {
-  const bot = new TennisPaperBot({ file: "/tmp/tennis-position-cap-test.json" });
-  const occupied = Array.from({ length: 5 }, (_, index) => ({
-    id: `occupied-${index}`, entries: 0, positions: { 1: { shares: 10 } },
-  }));
-  const candidate = { id: "candidate", title: "Candidate", entries: 0, positions: {} };
-  bot.state.markets = [...occupied, candidate];
-  assert.equal(countMarketsWithOpenPositions(bot.state.markets), 5);
-  bot.openPaperPosition(candidate, { price: 0.5, size: 1000 }, 1, 2);
-  assert.equal(candidate.entries, 0);
-  assert.equal(candidate.positions[1], undefined);
-
-  const excess = { id: "excess", positions: { 1: { shares: 10 } } };
-  bot.state.markets.push(excess);
-  bot.openPaperPosition(occupied[0], { price: 0.5, size: 1000 }, 2, 3);
-  assert.equal(occupied[0].entries, 0);
-  assert.equal(occupied[0].positions[2], undefined);
-
-  bot.state.markets.splice(bot.state.markets.indexOf(excess), 1);
-  occupied[0].positions = {};
-  bot.openPaperPosition(candidate, { price: 0.5, size: 1000 }, 1, 2);
-  assert.equal(candidate.entries, 1);
-  assert.ok(candidate.positions[1]);
 });
