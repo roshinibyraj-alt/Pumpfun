@@ -25,6 +25,7 @@ const BOOK_404_MAX_COOLDOWN_MS = 15 * 60_000;
 const BREAKBACK_STRATEGY_VERSION = "breakback-single-entry-v3";
 const PREVIOUS_BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
 const BASE_TRANCHE_SHARES = 250;
+const TERMINAL_SETTLEMENT_PRICE = 0.98;
 
 function entryGameAllowed(playerGames, opponentGames) {
   return (playerGames <= 4 && opponentGames <= 3) ||
@@ -804,6 +805,10 @@ class TennisPaperBot {
   }
 
   async processMarket(market, matches) {
+    if (Number.isInteger(market.clobWinnerIndex)) {
+      this.settleFromTerminalClobPrices(market);
+      return;
+    }
     const basePlayer = market.player;
     const baseOpponent = market.opponent;
     const match = matches.find((item) => {
@@ -829,16 +834,12 @@ class TennisPaperBot {
           market.bidDepth = books[0]?.bidDepth || [];
           market.lastBookAt = Date.now();
           this.clearBookUnavailable(market);
+          if (this.settleFromTerminalClobPrices(market)) return;
           this.tryFinalTakeProfitExits(market);
-          if (this.settleFromTerminalClobPrices(market)) {
-            if (Object.keys(market.positions || {}).length) await this.checkOfficialSettlement(market);
-            return;
-          }
         } catch (error) {
           if (!this.noteBookUnavailable(market, error)) throw error;
         }
       }
-      await this.checkOfficialSettlement(market);
       return;
     }
     const selectedPlayer = market.activePlayer || basePlayer;
@@ -882,7 +883,6 @@ class TennisPaperBot {
       books = await this.readBooks(tokenIds);
     } catch (error) {
       if (!this.noteBookUnavailable(market, error)) throw error;
-      await this.checkOfficialSettlement(market);
       return;
     }
     this.clearBookUnavailable(market);
@@ -899,15 +899,11 @@ class TennisPaperBot {
       const positionBook = market.booksByToken[position.tokenId];
       if (positionBook) position.bestBid = positionBook.bestBid;
     }
-    this.tryFinalTakeProfitExits(market);
     if (this.settleFromTerminalClobPrices(market)) {
-      if (Object.keys(market.positions || {}).length) await this.checkOfficialSettlement(market);
       return;
     }
-    if (isComplete) {
-      if (Object.keys(market.positions || {}).length) await this.checkOfficialSettlement(market);
-      return;
-    }
+    this.tryFinalTakeProfitExits(market);
+    if (isComplete) return;
     market.lastScoreAt = Date.now();
     if (market.strategyVersion === SERVE_POINT_STRATEGY_VERSION) {
       await this.processServePointMarket(market, match, selectedIsFirst, setNumber,
@@ -1225,41 +1221,43 @@ class TennisPaperBot {
 
   settleFromTerminalClobPrices(market) {
     if (!Array.isArray(market.tokenIds) || market.tokenIds.length !== 2) return false;
-    const quote = (book) => {
-      const bid = Number(book?.bestBid?.price);
-      const ask = Number(book?.bestAsk?.price);
-      const hasBid = Number.isFinite(bid) && bid > 0 && bid <= 1;
-      const hasAsk = Number.isFinite(ask) && ask > 0 && ask <= 1;
-      if (hasBid && hasAsk) return (bid + ask) / 2;
-      if (hasBid) return bid;
-      if (hasAsk) return ask;
-      return null;
-    };
-    const quotes = market.tokenIds.map((tokenId) => quote(market.booksByToken?.[tokenId]));
-    const winnerIndex = quotes.findIndex((price, index) =>
-      price !== null && price >= FINAL_TAKE_PROFIT &&
-      quotes[index === 0 ? 1 : 0] !== null &&
-      quotes[index === 0 ? 1 : 0] <= 1 - FINAL_TAKE_PROFIT
-    );
+    const observedWinner = market.tokenIds.findIndex((tokenId) =>
+      Number(market.booksByToken?.[tokenId]?.bestBid?.price) >= TERMINAL_SETTLEMENT_PRICE);
+    if (observedWinner >= 0) market.clobWinnerIndex = observedWinner;
+    const winnerIndex = Number.isInteger(market.clobWinnerIndex) ? market.clobWinnerIndex : -1;
     if (winnerIndex < 0) return false;
 
     market.completedAt ||= Date.now();
     for (const [key, position] of Object.entries(market.positions || {})) {
-      const outcomeIndex = market.tokenIds.indexOf(String(position.tokenId));
+      const outcomeIndex = this.positionOutcomeIndex(market, position);
       if (outcomeIndex < 0) continue;
       const payout = outcomeIndex === winnerIndex ? 1 : 0;
       this.finalizePosition(
         market,
         position,
         payout,
-        `terminal CLOB outcome reached $${FINAL_TAKE_PROFIT.toFixed(2)}`,
+        `CLOB best bid reached $${TERMINAL_SETTLEMENT_PRICE.toFixed(2)}`,
         key,
       );
     }
+    market.position = Object.values(market.positions || {})[0] || null;
     market.currentScore = "Winner determined by CLOB price";
-    market.scoreStatus = "resolved_by_terminal_prices";
+    market.currentServer = null;
+    market.scoreStatus = Object.keys(market.positions || {}).length
+      ? "completed_checking_settlement"
+      : "resolved_by_terminal_prices";
     market.settlementStatus = "terminal_clob_prices";
     return true;
+  }
+
+  positionOutcomeIndex(market, position) {
+    const tokenIndex = market.tokenIds.indexOf(String(position.tokenId || ""));
+    if (tokenIndex >= 0) return tokenIndex;
+    const tradePlayer = (position.tranches || [])
+      .map((tranche) => this.state.trades.find((trade) => trade.id === tranche.tradeId)?.player)
+      .find(Boolean);
+    const player = position.player || tradePlayer || market.activePlayer || market.player;
+    return (market.outcomes || []).findIndex((outcome) => nameMatches(outcome, player));
   }
 
   sellPositionFromBook(market, position, book, reason, minPrice = 0) {
@@ -1404,6 +1402,7 @@ class TennisPaperBot {
       tradeIds: [],
       tranches: [],
     };
+    position.tokenId = market.tokenId;
     const tradeId = `${market.id}:breakback:${cycle.entrySet}:${position.tranches.length + 1}:${Date.now()}`;
     const trade = {
       id: tradeId,
@@ -1509,31 +1508,6 @@ class TennisPaperBot {
     return proceeds;
   }
 
-  async checkOfficialSettlement(market) {
-    if (Date.now() - Number(market.lastOfficialCheckAt || 0) < 30000) return;
-    market.lastOfficialCheckAt = Date.now();
-    try {
-      const response = await this.fetch(`${GAMMA}/events?slug=${encodeURIComponent(market.slug)}`, { signal: AbortSignal.timeout(5000) });
-      if (!response.ok) return;
-      const event = (await response.json())?.[0];
-      const resolvedMarket = (event?.markets || []).find((item) => String(item.id) === market.marketId);
-      if (!resolvedMarket || !(resolvedMarket.closed === true || resolvedMarket.closed === "true")) return;
-      market.completedAt ||= Date.now();
-      if (!Object.keys(market.positions || {}).length) return;
-      const outcomes = listValue(resolvedMarket.outcomes).map(String);
-      const prices = listValue(resolvedMarket.outcomePrices).map(Number);
-      for (const [key, position] of Object.entries(market.positions)) {
-        const chosen = outcomes.findIndex((outcome) => nameMatches(outcome, position.player || market.player));
-        if (chosen < 0 || !Number.isFinite(prices[chosen])) continue;
-        const payout = prices[chosen] >= 0.99 ? 1 : prices[chosen] <= 0.01 ? 0 : null;
-        if (payout === null) continue;
-        this.finalizePosition(market, position, payout, "official Polymarket outcome", key);
-      }
-      market.scoreStatus = "officially_resolved";
-    } catch (error) {
-      market.error = `Settlement check failed: ${String(error?.message || error).slice(0, 120)}`;
-    }
-  }
 }
 
 module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, countTrackedLiveMatches, countActiveMarkets, countMarketsWithOpenPositions, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete };

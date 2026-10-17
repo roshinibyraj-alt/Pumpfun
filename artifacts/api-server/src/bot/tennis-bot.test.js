@@ -105,12 +105,12 @@ test("caps tradeable matches at five for manual and automatic arming", async () 
   assert.match(bot.state.discovery.lastMessage, /Maximum of 5 active matches/);
 });
 
-test("completed markets free capacity unless they still hold a position", () => {
-  assert.equal(countActiveMarkets([
-    { completedAt: Date.now(), positions: {} },
-    { completedAt: Date.now(), positions: { 1: { shares: 10 } } },
-    { positions: {} },
-  ]), 2);
+test("collapsed settled results do not block five active matches", () => {
+  const active = Array.from({ length: 5 }, () => ({ positions: {} }));
+  const settled = { completedAt: Date.now(), positions: {} };
+  const pending = { completedAt: Date.now(), positions: { 1: { shares: 10 } } };
+  assert.equal(countActiveMarkets([settled, ...active]), 5);
+  assert.equal(countActiveMarkets([settled, pending, ...active.slice(0, 4)]), 5);
 });
 
 test("snapshot avoids exposing undefined labels", () => {
@@ -660,42 +660,58 @@ test("keeps fixed 250-share tranches regardless of prior proceeds", () => {
   assert.equal(market.position.shares, 250);
 });
 
-test("waits for official Polymarket resolution before finalizing an open position", async () => {
+test("does not use official Polymarket resolution when a match ends", async () => {
+  let gammaRequests = 0;
   const bot = new TennisPaperBot({
     apiKey: "test",
-    file: "/tmp/tennis-bot-test.json",
-    fetch: async () => ({
-      ok: true,
-      json: async () => [{ markets: [{ id: "winner-market", closed: true, outcomes: ["Liam Draxl", "Omar Jasika"], outcomePrices: ["1", "0"] }] }],
-    }),
+    file: "/tmp/tennis-no-official-settlement-test.json",
+    fetch: async (url) => {
+      if (String(url).includes("gamma-api.polymarket.com")) gammaRequests += 1;
+      throw new Error("Unexpected network request");
+    },
   });
-  const position = { tradeId: "trade-1", shares: 100, stake: 50 };
-  const market = {
-    slug: "test-match", marketId: "winner-market", title: "Test match", player: "Liam Draxl",
-    positions: { 1: position }, setBankrolls: { 1: 0 }, currentSet: 2,
+  const position = {
+    tokenId: "draxl-token", shares: 100, stake: 50,
+    tranches: [{ tradeId: "trade-1", shares: 100, stake: 50 }],
   };
-  bot.state.trades.push({ id: "trade-1", status: "open", pnl: 0 });
-  await bot.checkOfficialSettlement(market);
-  assert.equal(market.positions[1], undefined);
-  assert.equal(bot.state.trades[0].status, "closed");
-  assert.equal(bot.state.trades[0].exitPrice, 1);
-  assert.equal(bot.state.trades[0].pnl, 50);
+  const market = {
+    slug: "test-match", id: "test-match", title: "Test match",
+    player: "Liam Draxl", opponent: "Omar Jasika",
+    outcomes: ["Liam Draxl", "Omar Jasika"],
+    tokenIds: ["draxl-token", "jasika-token"], tokenId: "draxl-token",
+    positions: { 1: position }, currentSet: 2,
+  };
+  const trade = { id: "trade-1", marketId: market.id, player: "Liam Draxl", status: "open", pnl: 0 };
+  bot.state.markets = [market];
+  bot.state.trades.push(trade);
+  bot.readBooks = async () => [
+    { bestBid: { price: 0.97 }, bestAsk: { price: 0.98 }, bidDepth: [], askDepth: [] },
+    { bestBid: { price: 0.03 }, bestAsk: { price: 0.04 }, bidDepth: [], askDepth: [] },
+  ];
+  await bot.processMarket(market, [{
+    event_first_player: "Liam Draxl", event_second_player: "Omar Jasika",
+    event_status: "Finished", event_game_result: null, scores: [],
+  }]);
+  assert.equal(gammaRequests, 0);
+  assert.equal(market.positions[1], position);
+  assert.equal(trade.status, "open");
 });
 
-test("settles paired terminal CLOB prices without waiting for the score feed", () => {
+test("settles as soon as either outcome best bid reaches $0.98", () => {
   const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-terminal-clob-test.json" });
   bot.state.bankroll.availableCapital = 50;
   const market = {
     title: "Kicker vs Mena",
+    outcomes: ["N. Kicker", "F. Mena"],
     tokenIds: ["kicker-token", "mena-token"],
     completedAt: null,
     booksByToken: {
-      "kicker-token": { bestBid: { price: 0.999 }, bestAsk: null },
+      "kicker-token": { bestBid: { price: 0.979 }, bestAsk: null },
       "mena-token": { bestBid: null, bestAsk: { price: 0.001 } },
     },
     positions: {
       kicker: {
-        player: "N. Kicker", tokenId: "kicker-token", shares: 10, stake: 8.8,
+        shares: 10, stake: 8.8,
         tranches: [{ tradeId: "kicker-win", shares: 10, stake: 8.8 }],
       },
       mena: {
@@ -708,10 +724,13 @@ test("settles paired terminal CLOB prices without waiting for the score feed", (
     },
   };
   bot.state.trades = [
-    { id: "kicker-win", status: "open", stake: 8.8 },
-    { id: "mena-loss-1", status: "open", stake: 2 },
-    { id: "mena-loss-2", status: "open", stake: 1.4 },
+    { id: "kicker-win", status: "open", stake: 8.8, player: "N. Kicker" },
+    { id: "mena-loss-1", status: "open", stake: 2, player: "F. Mena" },
+    { id: "mena-loss-2", status: "open", stake: 1.4, player: "F. Mena" },
   ];
+  assert.equal(bot.settleFromTerminalClobPrices(market), false);
+  assert.equal(Object.keys(market.positions).length, 2);
+  market.booksByToken["kicker-token"].bestBid.price = 0.98;
   assert.equal(bot.settleFromTerminalClobPrices(market), true);
   assert.deepEqual(market.positions, {});
   assert.equal(bot.state.trades.find((trade) => trade.id === "kicker-win").exitPrice, 1);
@@ -719,6 +738,9 @@ test("settles paired terminal CLOB prices without waiting for the score feed", (
   assert.equal(bot.state.trades.find((trade) => trade.id === "mena-loss-2").exitPrice, 0);
   assert.equal(bot.state.bankroll.availableCapital, 60);
   assert.equal(market.scoreStatus, "resolved_by_terminal_prices");
+  assert.equal(market.clobWinnerIndex, 0);
+  market.booksByToken["kicker-token"].bestBid.price = 0.90;
+  assert.equal(bot.settleFromTerminalClobPrices(market), true);
 });
 
 test("terminal CLOB prices settle a match even while its score feed has not ended", async () => {
@@ -739,10 +761,9 @@ test("terminal CLOB prices settle a match even while its score feed has not ende
   bot.state.markets = [market];
   bot.state.trades = [trade];
   bot.readBooks = async () => [
-    { bestBid: { price: 0.999 }, bestAsk: null, bidDepth: [{ price: 0.999, size: 100 }], askDepth: [] },
+    { bestBid: { price: 0.98 }, bestAsk: null, bidDepth: [{ price: 0.98, size: 100 }], askDepth: [] },
     { bestBid: null, bestAsk: { price: 0.001 }, bidDepth: [], askDepth: [{ price: 0.001, size: 100 }] },
   ];
-  bot.checkOfficialSettlement = async () => {};
   await bot.processMarket(market, [{
     event_first_player: "Nicolas Kicker", event_second_player: "Facundo Mena",
     event_status: "In Progress", event_game_result: null, scores: [],
