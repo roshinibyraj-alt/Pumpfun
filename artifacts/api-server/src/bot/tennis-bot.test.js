@@ -77,40 +77,30 @@ test.skip("legacy API-Tennis adaptive polling is replaced by Polymarket polling"
   bot.stop();
 });
 
-test.skip("legacy break-back scanner cap is replaced by Polymarket live discovery", async () => {
+test("allows 20 active matches before blocking another manual match", async () => {
   const bot = new TennisPaperBot({
-    apiKey: "test-key",
-    file: "/tmp/tennis-five-match-limit-test.json",
+    file: "/tmp/tennis-twenty-match-limit-test.json",
     fetch: async () => { throw new Error("manual add must be blocked before lookup"); },
   });
-  bot.state.markets = Array.from({ length: 5 }, (_, index) => ({
-    id: `active-${index}`, player: `Player ${index}`, opponent: `Opponent ${index}`, positions: {},
+  bot.state.markets = Array.from({ length: 20 }, (_, index) => ({
+    id: `active-${index}`, player: `Player ${index}`, opponent: `Opponent ${index}`,
+    positions: { ladder: { shares: 500 } },
   }));
-  assert.equal(countActiveMarkets(bot.state.markets), 5);
-  assert.equal(bot.snapshot().limits.maxActiveMatches, 5);
-  assert.equal(bot.snapshot().limits.activeMatches, 5);
+  assert.equal(countActiveMarkets(bot.state.markets), 20);
+  assert.equal(bot.snapshot().limits.maxActiveMatches, 20);
+  assert.equal(bot.snapshot().limits.activeMatches, 20);
   await assert.rejects(
-    bot.addMarket({ polymarketUrl: "https://polymarket.com/event/sixth-match", player: "Player 6", confirmPolymarket: true }),
-    /maximum of 5 active matches/,
+    bot.addMarket({ polymarketUrl: "https://polymarket.com/event/twenty-first-match", player: "Player 21", confirmPolymarket: true }),
+    /maximum of 20 active matches/,
   );
-
-  let searchCount = 0;
-  bot.searchPolymarketEvent = async () => { searchCount += 1; return null; };
-  await bot.discoverLiveMarkets([{
-    event_first_player: "Julia Grabher",
-    event_second_player: "Deborah Chiesa",
-  }]);
-  assert.equal(bot.state.markets.length, 5);
-  assert.equal(searchCount, 0);
-  assert.match(bot.state.discovery.lastMessage, /Maximum of 5 active matches/);
 });
 
-test("collapsed settled results do not block five active matches", () => {
-  const active = Array.from({ length: 5 }, () => ({ positions: {} }));
+test("collapsed settled results do not block 20 active matches", () => {
+  const active = Array.from({ length: 20 }, () => ({ positions: {} }));
   const settled = { completedAt: Date.now(), positions: {} };
   const pending = { completedAt: Date.now(), positions: { 1: { shares: 10 } } };
-  assert.equal(countActiveMarkets([settled, ...active]), 5);
-  assert.equal(countActiveMarkets([settled, pending, ...active.slice(0, 4)]), 5);
+  assert.equal(countActiveMarkets([settled, ...active]), 20);
+  assert.equal(countActiveMarkets([settled, pending, ...active.slice(0, 19)]), 20);
 });
 
 test("snapshot avoids exposing undefined labels", () => {
@@ -144,14 +134,14 @@ test("marks a position from its own outcome book, not the selected player's quot
   assert.ok(Math.abs(accounting.unrealizedPnl - (-3.38)) < 1e-9);
 });
 
-test("does not open a sixth match position and resumes when a slot frees", () => {
+test("does not open a 21st match position and resumes when a slot frees", () => {
   const bot = new TennisPaperBot({ file: "/tmp/tennis-position-cap-test.json" });
-  const occupied = Array.from({ length: 5 }, (_, index) => ({
+  const occupied = Array.from({ length: 20 }, (_, index) => ({
     id: `occupied-${index}`, entries: 0, positions: { 1: { shares: 10 } },
   }));
   const candidate = { id: "candidate", title: "Candidate", entries: 0, positions: {} };
   bot.state.markets = [...occupied, candidate];
-  assert.equal(countMarketsWithOpenPositions(bot.state.markets), 5);
+  assert.equal(countMarketsWithOpenPositions(bot.state.markets), 20);
   bot.openPaperPosition(candidate, { price: 0.5, size: 1000 }, 1, 2);
   assert.equal(candidate.entries, 0);
   assert.equal(candidate.positions[1], undefined);

@@ -8,7 +8,7 @@ const CLOB = "https://clob.polymarket.com";
 const POLL_MS = 2000;
 const IDLE_POLL_MS = 60_000;
 const LIVE_SCAN_MS = 30_000;
-const MAX_ACTIVE_MATCHES = 5;
+const MAX_ACTIVE_MATCHES = 20;
 const DISCOVERY_CACHE_MS = 30000;
 const TARGET_PRICE = 0.55;
 const SWITCH_PRICE = 0.45;
@@ -1200,7 +1200,7 @@ class TennisPaperBot {
 
   openServePointShares(market, active, tokenId, book, stage) {
     if (!mayOpenPositionForMarket(market, this.state.markets)) {
-      this.log(`${market.title}: skipped ${active.server} ${stage} entry; five matches already have open positions.`);
+      this.log(`${market.title}: skipped ${active.server} ${stage} entry; ${MAX_ACTIVE_MATCHES} matches already have open positions.`);
       return false;
     }
     const bestAsk = Number(book?.bestAsk?.price ?? book?.askDepth?.[0]?.price);
@@ -1512,7 +1512,7 @@ class TennisPaperBot {
 
   openPaperPosition(market, ask, setNumber, selectedGames) {
     if (!mayOpenPositionForMarket(market, this.state.markets)) {
-      this.log(`${market.title}: skipped entry; five matches already have open positions.`);
+      this.log(`${market.title}: skipped entry; ${MAX_ACTIVE_MATCHES} matches already have open positions.`);
       return;
     }
     if (!ask || ask.price >= 1 || ask.size <= 0) {
