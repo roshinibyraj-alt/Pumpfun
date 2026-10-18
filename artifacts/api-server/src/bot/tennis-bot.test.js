@@ -47,7 +47,7 @@ test("matches API-Tennis live events against both Polymarket participants", () =
   assert.equal(findLiveMatch([event], "Julia Grabher", "Other Player"), null);
 });
 
-test("uses one-minute polling when no tracked market is live and two seconds when one is live", async () => {
+test.skip("legacy API-Tennis adaptive polling is replaced by Polymarket polling", async () => {
   const delays = [];
   const liveEvent = { event_first_player: "Julia Grabher", event_second_player: "Deborah Chiesa" };
   const bot = new TennisPaperBot({
@@ -77,7 +77,7 @@ test("uses one-minute polling when no tracked market is live and two seconds whe
   bot.stop();
 });
 
-test("caps tradeable matches at five for manual and automatic arming", async () => {
+test.skip("legacy break-back scanner cap is replaced by Polymarket live discovery", async () => {
   const bot = new TennisPaperBot({
     apiKey: "test-key",
     file: "/tmp/tennis-five-match-limit-test.json",
@@ -169,7 +169,7 @@ test("does not open a sixth match position and resumes when a slot frees", () =>
   assert.ok(candidate.positions[1]);
 });
 
-test("surfaces API-Tennis authentication details instead of an opaque numeric error", async () => {
+test.skip("legacy API-Tennis authentication handling is no longer used", async () => {
   const bot = new TennisPaperBot({
     apiKey: "test-key",
     file: "/tmp/tennis-api-error-test.json",
@@ -184,7 +184,7 @@ test("surfaces API-Tennis authentication details instead of an opaque numeric er
   await assert.rejects(bot.fetchLiveMatches(), /Wrong login credentials \(API-Tennis code 1004\)/);
 });
 
-test("backs off for an hour after API-Tennis daily quota is exceeded", async () => {
+test.skip("legacy API-Tennis quota handling is no longer used", async () => {
   let requests = 0;
   const bot = new TennisPaperBot({
     apiKey: "test-key",
@@ -223,23 +223,21 @@ test("maps only the active Polymarket match-winner market with both exact player
   assert.equal(marketForPlayers({ ...event, closed: true }, "L. Draxl", "O. Jasika"), null);
 });
 
-test("favorite selection requires an ask strictly above 0.70 and chooses the higher ask", () => {
-  assert.equal(chooseFavorite([{ bestAsk: { price: 0.7, size: 100 } }]), null);
+test("price target selection requires an ask strictly above 0.55 and chooses the higher ask", () => {
+  assert.equal(chooseFavorite([{ bestAsk: { price: 0.55, size: 100 } }]), null);
   assert.equal(chooseFavorite([
-    { bestAsk: { price: 0.72, size: 10 } },
-    { bestAsk: { price: 0.81, size: 5 } },
+    { bestAsk: { price: 0.56, size: 10 } },
+    { bestAsk: { price: 0.61, size: 5 } },
   ]).index, 1);
   assert.equal(chooseFavorite([{ bestAsk: { price: 0.75, size: 0 } }]), null);
 });
 
-test("first-scan odds choose favorite, neutral any-break, or no-trade bands", () => {
+test("first scan targets only a player above the $0.55 price trigger", () => {
   assert.deepEqual(classifyFirstScan([{ bestAsk: { price: 0.73, size: 10 } }]), {
-    selectionMode: "automatic_favorite", index: 0, ask: 0.73,
+    selectionMode: "clob_price_ladder", index: 0, ask: 0.73,
   });
-  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.37, size: 10 } }]).selectionMode, "automatic_any_break");
-  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.66, size: 10 } }]).selectionMode, "automatic_any_break");
-  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.67, size: 10 } }]), null);
-  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.7, size: 10 } }]), null);
+  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.54, size: 10 } }]), null);
+  assert.equal(classifyFirstScan([{ bestAsk: { price: 0.55, size: 10 } }]), null);
 });
 
 test("entries include 4-3 and 3-4, but stop beyond either score", () => {
@@ -346,7 +344,7 @@ test("backs off a missing CLOB book per token and suppresses repeated 404 logs",
   assert.equal(bot.book404Backoff.has("missing"), false);
 });
 
-test("auto-arms a live match for either player's break-back entry", async () => {
+test.skip("legacy score-triggered auto-arming is replaced by the price-ladder strategy", async () => {
   const event = {
     title: "Court event: Julia Grabher vs Deborah Chiesa",
     slug: "wta-grabher-chiesa-live",
@@ -812,7 +810,7 @@ test("a final take-profit sells only when full depth is available at $0.99 or be
   assert.equal(stillOpen.positions.accumulated.shares, 11);
 });
 
-test("continues CLOB maintenance during API-Tennis quota backoff without stale-score entries", async () => {
+test.skip("legacy API-Tennis quota maintenance is replaced by Polymarket live scanning", async () => {
   const bot = new TennisPaperBot({ apiKey: "test", file: "/tmp/tennis-quota-maintenance-test.json" });
   const tokenPosition = { tokenId: "token", shares: 10, stake: 5 };
   bot.state.running = true;
@@ -854,4 +852,112 @@ test("fills shallow-book serve entries with a clearly marked paper shortfall up 
   assert.equal(trade.stake, 4);
   assert.equal(trade.entryPrice, 0.4);
   assert.match(bot.state.events[0].message, /3\.00 shortfall shares paper-filled at \$1\.000/);
+});
+
+test("live discovery fetches Polymarket only and keeps only live events", async () => {
+  let requested;
+  const bot = new TennisPaperBot({
+    file: "/tmp/tennis-polymarket-discovery-test.json",
+    fetch: async (url) => {
+      requested = new URL(String(url));
+      return { ok: true, json: async () => ({ events: [
+        { slug: "live-match", live: true, active: true },
+        { slug: "upcoming-match", live: false, active: true },
+      ] }) };
+    },
+  });
+  const events = await bot.fetchLivePolymarketEvents();
+  assert.equal(requested.hostname, "gamma-api.polymarket.com");
+  assert.equal(requested.searchParams.get("q"), "tennis");
+  assert.deepEqual(events.map((event) => event.slug), ["live-match"]);
+});
+
+test("price ladder buys 500 shares at entry and at each of three 5-cent pullbacks", async () => {
+  let ask = 0.66;
+  const bot = new TennisPaperBot({
+    file: "/tmp/tennis-price-ladder-adds-test.json",
+    fetch: async (url) => {
+      const token = new URL(String(url)).searchParams.get("token_id");
+      const p = token === "a" ? ask : 0.34;
+      return { ok: true, json: async () => ({
+        asks: [{ price: p.toFixed(2), size: "500" }],
+        bids: [{ price: (p - 0.01).toFixed(2), size: "2500" }],
+      }) };
+    },
+  });
+  const market = {
+    id: "ladder", slug: "ladder", title: "A vs B", player: "A", opponent: "B",
+    outcomes: ["A", "B"], tokenIds: ["a", "b"], tokenId: null,
+    strategyVersion: "clob-price-ladder-v1", positions: {}, entries: 0,
+  };
+  bot.state.markets = [market];
+  const event = { slug: "ladder", live: true };
+  for (const [price, expected] of [[0.66, 1], [0.61, 2], [0.56, 3], [0.51, 4]]) {
+    ask = price;
+    await bot.processPriceLadderMarket(market, [event]);
+    assert.equal(market.positions.ladder.ladderBuys, expected);
+    assert.equal(market.positions.ladder.shares, expected * 500);
+  }
+  assert.equal(bot.state.trades.length, 4);
+  assert.equal(bot.state.trades.every((trade) => trade.shares === 500), true);
+});
+
+test("profit exit sells all shares and uses sale price minus five cents as the next entry pivot", async () => {
+  let ask = 0.66;
+  let bid = 0.65;
+  let bidSize = 500;
+  const bot = new TennisPaperBot({
+    file: "/tmp/tennis-price-ladder-pivot-test.json",
+    fetch: async (url) => {
+      const token = new URL(String(url)).searchParams.get("token_id");
+      const a = token === "a" ? ask : 0.34;
+      const b = token === "a" ? bid : 0.33;
+      return { ok: true, json: async () => ({
+        asks: [{ price: a.toFixed(2), size: "500" }],
+        bids: [{ price: b.toFixed(2), size: String(bidSize) }],
+      }) };
+    },
+  });
+  const market = {
+    id: "pivot", slug: "pivot", title: "A vs B", player: "A", opponent: "B",
+    outcomes: ["A", "B"], tokenIds: ["a", "b"], tokenId: null,
+    strategyVersion: "clob-price-ladder-v1", positions: {}, entries: 0,
+  };
+  bot.state.markets = [market];
+  const event = { slug: "pivot", live: true };
+  await bot.processPriceLadderMarket(market, [event]);
+  ask = 0.77; bid = 0.76; bidSize = 500;
+  await bot.processPriceLadderMarket(market, [event]);
+  assert.equal(market.positions.ladder, undefined);
+  assert.equal(market.pivotPrice, 0.76);
+  assert.equal(bot.state.trades[0].status, "closed");
+  ask = 0.71; bid = 0.70;
+  await bot.processPriceLadderMarket(market, [event]);
+  assert.equal(market.positions.ladder.shares, 500);
+});
+
+test("a target bid at 45 cents closes the old side and switches to the player above 55 cents", async () => {
+  const books = {
+    a: { asks: [{ price: "0.46", size: "500" }], bids: [{ price: "0.45", size: "500" }] },
+    b: { asks: [{ price: "0.60", size: "500" }], bids: [{ price: "0.59", size: "500" }] },
+  };
+  const bot = new TennisPaperBot({
+    file: "/tmp/tennis-price-ladder-switch-test.json",
+    fetch: async (url) => ({ ok: true, json: async () => books[new URL(String(url)).searchParams.get("token_id")] }),
+  });
+  const market = {
+    id: "switch", slug: "switch", title: "A vs B", player: "A", opponent: "B",
+    outcomes: ["A", "B"], tokenIds: ["a", "b"], tokenId: null,
+    strategyVersion: "clob-price-ladder-v1", positions: {}, entries: 0,
+  };
+  bot.state.markets = [market];
+  market.activePlayer = "A";
+  market.tokenId = "a";
+  bot.openPriceLadderBuy(market, { askDepth: [{ price: 0.60, size: 500 }] }, "test");
+  books.a = { asks: [{ price: "0.46", size: "500" }], bids: [{ price: "0.45", size: "500" }] };
+  await bot.processPriceLadderMarket(market, [{ slug: "switch", live: true }]);
+  assert.equal(market.activePlayer, "B");
+  assert.equal(market.tokenId, "b");
+  assert.equal(market.positions.ladder.player, "B");
+  assert.equal(bot.state.trades.find((trade) => trade.player === "A").status, "closed");
 });

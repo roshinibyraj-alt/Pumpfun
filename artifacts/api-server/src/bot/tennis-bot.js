@@ -3,17 +3,19 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
-const API_TENNIS = "https://api.api-tennis.com/tennis/";
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
 const POLL_MS = 2000;
 const IDLE_POLL_MS = 60_000;
+const LIVE_SCAN_MS = 30_000;
 const MAX_ACTIVE_MATCHES = 5;
-const API_TENNIS_LIMIT_RETRY_MS = 60 * 60 * 1000;
 const DISCOVERY_CACHE_MS = 30000;
-const FAVORITE_ASK_THRESHOLD = 0.7;
-const NEUTRAL_ASK_MIN = 0.37;
-const NEUTRAL_ASK_MAX = 0.66;
+const TARGET_PRICE = 0.55;
+const SWITCH_PRICE = 0.45;
+const LADDER_STEP = 0.05;
+const TAKE_PROFIT = 0.10;
+const LADDER_SHARES = 500;
+const MAX_ADDITIONAL_BUYS = 3;
 const STAKE_USD = 500;
 const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
@@ -26,6 +28,7 @@ const BREAKBACK_STRATEGY_VERSION = "breakback-single-entry-v3";
 const PREVIOUS_BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
 const BASE_TRANCHE_SHARES = 250;
 const TERMINAL_SETTLEMENT_PRICE = 0.98;
+const PRICE_LADDER_STRATEGY_VERSION = "clob-price-ladder-v1";
 
 function entryGameAllowed(playerGames, opponentGames) {
   return (playerGames <= 4 && opponentGames <= 3) ||
@@ -204,26 +207,15 @@ function marketForPlayers(event, playerOne, playerTwo) {
   return null;
 }
 
-function chooseFavorite(books, threshold = FAVORITE_ASK_THRESHOLD) {
-  const eligible = books
-    .map((book, index) => ({ ...book, index }))
-    .filter((book) => book.bestAsk && Number(book.bestAsk.price) > threshold && Number(book.bestAsk.size) > 0)
-    .sort((a, b) => Number(b.bestAsk.price) - Number(a.bestAsk.price));
-  return eligible[0] || null;
+function chooseFavorite(books, threshold = TARGET_PRICE) {
+  return books.map((book, index) => ({ ...book, index }))
+    .filter((book) => Number(book.bestAsk?.price) > threshold && Number(book.bestAsk?.size) > 0)
+    .sort((a, b) => Number(b.bestAsk.price) - Number(a.bestAsk.price))[0] || null;
 }
 
 function classifyFirstScan(books) {
   const favorite = chooseFavorite(books);
-  if (favorite) return { selectionMode: "automatic_favorite", index: favorite.index, ask: favorite.bestAsk.price };
-  const neutral = books
-    .map((book, index) => ({ ...book, index }))
-    .find((book) => book.bestAsk &&
-      Number(book.bestAsk.price) >= NEUTRAL_ASK_MIN &&
-      Number(book.bestAsk.price) <= NEUTRAL_ASK_MAX &&
-      Number(book.bestAsk.size) > 0);
-  return neutral
-    ? { selectionMode: "automatic_any_break", index: neutral.index, ask: neutral.bestAsk.price }
-    : null;
+  return favorite ? { selectionMode: "clob_price_ladder", index: favorite.index, ask: favorite.bestAsk.price } : null;
 }
 
 function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk, selectionMode = "automatic_favorite" }) {
@@ -242,9 +234,9 @@ function marketDefaults({ slug, event, polyUrl, mapped, player, favoriteAsk, sel
     marketId: String(mapped.market.id || ""),
     status: "armed",
     selectionMode,
-    strategyVersion: BREAKBACK_STRATEGY_VERSION,
+    strategyVersion: PRICE_LADDER_STRATEGY_VERSION,
     favoriteAskAtArm: favoriteAsk == null ? null : Number(favoriteAsk),
-    scoreStatus: "live",
+    scoreStatus: "waiting_for_polymarket_live_status",
     currentScore: null,
     currentServer: null,
     position: null,
@@ -267,9 +259,8 @@ class TennisPaperBot {
     this.fetch = options.fetch || globalThis.fetch;
     this.file = options.file || process.env.TENNIS_STATE_PATH ||
       path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || process.cwd(), "data", "tennis-state.json");
-    this.apiKey = options.apiKey ?? process.env.API_TENNIS_KEY ?? "";
-    this.apiRetryAt = 0;
-    this.scoreFeedUnavailable = !this.apiKey;
+    this.liveEventsCache = null;
+    this.liveEventsCacheAt = 0;
     this.setTimer = options.setTimeout || setTimeout;
     this.clearTimer = options.clearTimeout || clearTimeout;
     this.schedulerActive = false;
@@ -279,8 +270,8 @@ class TennisPaperBot {
       mode: "PAPER",
       running: false,
       updatedAt: Date.now(),
-      feed: { status: this.apiKey ? "connecting" : "missing_key", liveMatches: 0, lastUpdate: null, error: null },
-      discovery: { status: this.apiKey ? "waiting" : "missing_key", lastScanAt: null, candidates: 0, autoArmed: 0, lastMessage: null },
+      feed: { status: "connecting", source: "Polymarket Gamma + CLOB", liveMatches: 0, lastUpdate: null, error: null },
+      discovery: { status: "waiting", lastScanAt: null, candidates: 0, autoArmed: 0, lastMessage: null },
       bankroll: { startingCapital: STARTING_CAPITAL, availableCapital: STARTING_CAPITAL },
       markets: [],
       trades: [],
@@ -299,29 +290,28 @@ class TennisPaperBot {
   }
 
   prepareBreakbackMarket(market) {
-    const hasOpenPositions = Object.keys(market.positions || {}).length > 0 ||
-      Number(market.activeServeGame?.position?.shares || 0) > 0;
-    if (market.strategyVersion === SERVE_POINT_STRATEGY_VERSION && hasOpenPositions) {
-      market.legacyExitOnly = true;
-      return;
+    const openPosition = Object.values(market.positions || {})[0];
+    market.strategyVersion = PRICE_LADDER_STRATEGY_VERSION;
+    market.selectionMode = "clob_price_ladder";
+    if (openPosition) {
+      market.activePlayer = openPosition.player || market.activePlayer || market.player;
+      market.tokenId = openPosition.tokenId || market.tokenId;
+      market.ladderEntryPrice = Number(openPosition.entryPrice || 0);
+      market.ladderBuys = Math.min(MAX_ADDITIONAL_BUYS + 1, Math.max(1, Math.ceil(Number(openPosition.shares || 0) / LADDER_SHARES)));
+    } else {
+      market.activePlayer = null;
+      market.tokenId = null;
+      market.ladderEntryPrice = null;
+      market.ladderBuys = 0;
+      market.pivotPrice = null;
     }
-    if (market.strategyVersion === PREVIOUS_BREAKBACK_STRATEGY_VERSION &&
-        market.breakCycle?.stage === "await_opponent_hold") {
-      market.breakCycle.stage = "await_player_breakback";
-    }
-    market.strategyVersion = BREAKBACK_STRATEGY_VERSION;
-    market.selectionMode = "automatic_any_break";
-    market.activePlayer = null;
-    market.breaksConcededBySet ||= {};
-    market.lastObservedGames = {};
-    market.activeServeGame = null;
   }
 
   snapshot() {
     const snapshot = JSON.parse(JSON.stringify(this.state));
     snapshot.bankroll = this.capitalSummary();
     snapshot.limits = {
-      activeMatches: countActiveMarkets(this.state.markets),
+      activeMatches: countMarketsWithOpenPositions(this.state.markets),
       maxActiveMatches: MAX_ACTIVE_MATCHES,
     };
     snapshot.markets = snapshot.markets.map((market) => {
@@ -428,7 +418,7 @@ class TennisPaperBot {
       };
     }
     this.state.running = true;
-    this.log(this.apiKey ? "Tennis score polling started in paper-only mode." : "Set API_TENNIS_KEY to enable score polling.", this.apiKey ? "info" : "warn");
+    this.log("Polymarket live-match and CLOB price scanning started in paper-only mode.");
     this.schedulerActive = true;
     this.scheduleNextTick(0);
   }
@@ -471,9 +461,11 @@ class TennisPaperBot {
       ...marketDefaults({ slug, event, polyUrl: polyUrl.href, mapped, player, favoriteAsk: null }),
       status: "armed",
       scoreStatus: "waiting",
-      selectionMode: "automatic_any_break",
+      selectionMode: "clob_price_ladder",
       favoriteAskAtArm: null,
     };
+    item.activePlayer = null;
+    item.tokenId = null;
     this.assertMarketCapacity();
     this.state.markets.unshift(item);
     this.log(`Armed ${item.title} for ${player}; PAPER ONLY.`);
@@ -506,7 +498,6 @@ class TennisPaperBot {
         ? { market, outcomes: outcomes.map(String), ids: ids.map(String) } : null;
     }).find(Boolean);
     if (!candidate) throw new Error("No two-player match-winner market found; refusing unsafe outcome mapping.");
-    const scoreFeed = await this.previewScoreFeed(candidate.outcomes);
     const clobBooks = await Promise.all(candidate.ids.map(async (tokenId, index) => {
       try {
         const bookResponse = await this.fetch(`${CLOB}/book?token_id=${encodeURIComponent(tokenId)}`, { signal: AbortSignal.timeout(5000) });
@@ -526,54 +517,27 @@ class TennisPaperBot {
       players: candidate.outcomes,
       slug,
       marketId: String(candidate.market.id || ""),
-      scoreFeed,
+      marketLive: event.live === true || event.live === "true",
       clobBooks,
     };
   }
 
-  async previewScoreFeed(players) {
-    if (!this.apiKey) return { status: "missing_key", message: "API_TENNIS_KEY is not configured." };
-    try {
-      const matches = await this.fetchLiveMatches();
-      this.state.feed = { status: "connected", liveMatches: matches.length, lastUpdate: Date.now(), error: null };
-      const match = findLiveMatch(matches, players[0], players[1]);
-      if (!match) return { status: "not_live", message: "No matching event in the current API-Tennis live feed." };
-      return {
-        status: "live_match_found",
-        players: [match.event_first_player, match.event_second_player],
-        score: match.event_game_result || null,
-        server: match.event_serve === "First Player"
-          ? match.event_first_player
-          : match.event_serve === "Second Player" ? match.event_second_player : null,
-        eventStatus: match.event_status || null,
-        scores: Array.isArray(match.scores) ? match.scores : [],
-      };
-    } catch (error) {
-      const message = String(error?.message || error).slice(0, 160);
-      this.state.feed = { ...this.state.feed, status: "error", error: message };
-      return { status: "error", message };
+  async fetchLivePolymarketEvents() {
+    if (this.liveEventsCache && Date.now() - this.liveEventsCacheAt < LIVE_SCAN_MS) {
+      return this.liveEventsCache;
     }
-  }
-
-  async fetchLiveMatches() {
-    if (!this.apiKey) throw new Error("API_TENNIS_KEY is not configured.");
-    const url = new URL(API_TENNIS);
-    url.searchParams.set("method", "get_livescore");
-    url.searchParams.set("APIkey", this.apiKey);
+    const url = new URL(`${GAMMA}/public-search`);
+    url.searchParams.set("q", "tennis");
+    url.searchParams.set("events_status", "active");
+    url.searchParams.set("limit_per_type", "100");
     const response = await this.fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!response.ok) throw new Error(`API-Tennis HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`Polymarket live-match scan HTTP ${response.status}`);
     const payload = await response.json();
-    if (payload.success !== 1) {
-      const details = Array.isArray(payload.result) ? payload.result : payload.result ? [payload.result] : [];
-      const providerMessage = details.map((item) => {
-        const message = item?.msg || item?.message;
-        const code = item?.cod || item?.code;
-        return message ? `${message}${code ? ` (API-Tennis code ${code})` : ""}` : "";
-      }).filter(Boolean).join("; ");
-      const error = payload.error && String(payload.error) !== "1" ? String(payload.error) : "";
-      throw new Error(providerMessage || error || "API-Tennis rejected the request.");
-    }
-    return Array.isArray(payload.result) ? payload.result : [];
+    const events = (payload.events || []).filter((event) =>
+      event?.live === true || event?.live === "true");
+    this.liveEventsCache = events;
+    this.liveEventsCacheAt = Date.now();
+    return events;
   }
 
   async searchPolymarketEvent(playerOne, playerTwo) {
@@ -657,79 +621,47 @@ class TennisPaperBot {
     delete market.bookRetryAt;
   }
 
-  async discoverLiveMarkets(matches) {
+  async discoverLiveMarkets(events) {
     this.state.discovery = {
       status: "scanning",
       lastScanAt: Date.now(),
-      candidates: matches.length,
+      candidates: events.length,
       autoArmed: 0,
       lastMessage: null,
     };
-    if (!matches.length) {
+    if (!events.length) {
       this.state.discovery.status = "no_live_matches";
-      this.state.discovery.lastMessage = "No live API-Tennis matches to match against Polymarket.";
+      this.state.discovery.lastMessage = "No live tennis markets are currently listed by Polymarket.";
       return;
     }
-    const scanCount = Math.min(20, matches.length);
-    const startIndex = this.discoveryCursor % matches.length;
-    const scanBatch = [...matches.slice(startIndex), ...matches.slice(0, startIndex)].slice(0, scanCount);
-    this.discoveryCursor = (startIndex + scanCount) % matches.length;
-    for (const live of scanBatch) {
-      const first = String(live.event_first_player || "").trim();
-      const second = String(live.event_second_player || "").trim();
-      if (!first || !second) continue;
-      const existing = this.state.markets.find((market) =>
-        (!market.completedAt || Object.keys(market.positions || {}).length > 0) &&
-        ((nameMatches(market.player, first) && nameMatches(market.opponent, second)) ||
-         (nameMatches(market.player, second) && nameMatches(market.opponent, first))));
-      if (existing) {
-        if (!existing.legacyExitOnly && existing.strategyVersion !== BREAKBACK_STRATEGY_VERSION) {
-          this.prepareBreakbackMarket(existing);
-          this.log(`${existing.title}: switched to single-entry break-back strategy.`);
-        }
-        continue;
-      }
-      if (countActiveMarkets(this.state.markets) >= MAX_ACTIVE_MATCHES) {
-        this.state.discovery.lastMessage = `Maximum of ${MAX_ACTIVE_MATCHES} active matches reached; waiting for a match to complete.`;
-        break;
-      }
-      try {
-        const event = await this.searchPolymarketEvent(first, second);
-        const mapped = marketForPlayers(event, first, second);
-        if (!event || !mapped) continue;
-        const slug = String(event.slug || "");
-        if (!slug || this.state.markets.some((market) => market.slug === slug)) continue;
-        const player = mapped.outcomes[0];
-        if (countActiveMarkets(this.state.markets) >= MAX_ACTIVE_MATCHES) {
-          this.state.discovery.lastMessage = `Maximum of ${MAX_ACTIVE_MATCHES} active matches reached; waiting for a match to complete.`;
-          break;
-        }
-        const item = marketDefaults({
-          slug,
-          event,
-          polyUrl: `https://polymarket.com/event/${slug}`,
-          mapped,
-          player,
-          favoriteAsk: null,
-          selectionMode: "automatic_any_break",
-        });
-        item.currentServer = live.event_serve === "First Player"
-          ? live.event_first_player
-          : live.event_serve === "Second Player" ? live.event_second_player : null;
-        item.currentScore = live.event_game_result || null;
-        item.feedEventKey = String(live.event_key || "");
-        this.state.markets.unshift(item);
-        this.state.discovery.autoArmed += 1;
-        this.log(`Auto-added live match ${item.title}; a player who concedes a break can trigger a paper entry.`);
-      } catch (error) {
-        this.state.discovery.lastMessage = String(error?.message || error).slice(0, 160);
-      }
+    for (const event of events) {
+      const slug = String(event.slug || "");
+      const title = String(event.title || event.question || "").trim();
+      const mapped = (event.markets || []).map((market) => {
+        if (String(market.question || "").trim().toLowerCase() !== title.toLowerCase()) return null;
+        const outcomes = listValue(market.outcomes).map(String);
+        const ids = listValue(market.clobTokenIds).map(String);
+        if (outcomes.length !== 2 || ids.length !== 2 ||
+            outcomes.some((label) => /^(yes|no|completed|cancelled|draw)$/i.test(label.trim()))) return null;
+        return { market, outcomes, ids };
+      }).find(Boolean);
+      if (!slug || !title || !mapped || this.state.markets.some((market) => market.slug === slug)) continue;
+      const item = marketDefaults({
+        slug, event, polyUrl: `https://polymarket.com/event/${slug}`, mapped,
+        player: mapped.outcomes[0], favoriteAsk: null, selectionMode: "clob_price_ladder",
+      });
+      item.activePlayer = null;
+      item.tokenId = null;
+      item.currentScore = "Live on Polymarket";
+      this.state.markets.unshift(item);
+      this.state.discovery.autoArmed += 1;
+      this.log(`Auto-added live Polymarket match ${item.title} for CLOB price scanning.`);
     }
     this.state.discovery.status = this.state.discovery.autoArmed ? "matches_armed" : "scanned";
     if (!this.state.discovery.lastMessage) {
       this.state.discovery.lastMessage = this.state.discovery.autoArmed
-        ? `${this.state.discovery.autoArmed} live match(es) automatically armed.`
-        : "Scanning live matches at any score; both players are eligible whenever they serve.";
+        ? `${this.state.discovery.autoArmed} live Polymarket match(es) added.`
+        : "Scanning Polymarket live matches and both outcome prices.";
     }
   }
 
@@ -746,42 +678,26 @@ class TennisPaperBot {
     if (this.busy || !this.state.running) return;
     this.busy = true;
     try {
-      let matches = [];
-      if (!this.apiKey) {
-        this.scoreFeedUnavailable = true;
-        this.state.feed = { ...this.state.feed, status: "missing_key", error: "API_TENNIS_KEY is not configured." };
-      } else if (Date.now() < this.apiRetryAt) {
-        this.scoreFeedUnavailable = true;
-      } else if (Date.now() >= this.apiRetryAt) {
-        try {
-          matches = await this.fetchLiveMatches();
-          this.apiRetryAt = 0;
-          this.scoreFeedUnavailable = false;
-          this.state.feed = { status: "connected", liveMatches: matches.length, lastUpdate: Date.now(), error: null };
-          await this.discoverLiveMarkets(matches);
-        } catch (error) {
-          const message = String(error?.message || error).slice(0, 200);
-          const quotaExceeded = message.includes("API-Tennis code 1007");
-          this.apiRetryAt = quotaExceeded ? Date.now() + API_TENNIS_LIMIT_RETRY_MS : 0;
-          this.scoreFeedUnavailable = true;
-          this.state.feed = {
-            ...this.state.feed, status: "error", error: message,
-            retryAt: quotaExceeded ? this.apiRetryAt : null,
-          };
-          this.log(`Score-feed error: ${message}`, "error");
-        }
+      let events = [];
+      try {
+        events = await this.fetchLivePolymarketEvents();
+        this.state.feed = { status: "connected", source: "Polymarket Gamma + CLOB", liveMatches: events.length, lastUpdate: Date.now(), error: null };
+        await this.discoverLiveMarkets(events);
+      } catch (error) {
+        this.state.feed = { ...this.state.feed, status: "error", source: "Polymarket Gamma + CLOB", error: String(error?.message || error).slice(0, 200) };
+        this.log(`Polymarket live scan error: ${this.state.feed.error}`, "error");
       }
       await Promise.all(this.state.markets.map(async (market) => {
         try {
-          await this.processMarket(market, matches);
+          await this.processMarket(market, events);
         } catch (error) {
           market.error = String(error?.message || error).slice(0, 200);
           this.log(`${market.title}: ${market.error}`, "error");
         }
       }));
-      this.activeTrackedMatches = countTrackedLiveMatches(this.state.markets, matches);
+      this.activeTrackedMatches = events.length;
       this.state.feed.activeTrackedMatches = this.activeTrackedMatches;
-      this.state.feed.pollIntervalMs = scorePollInterval(this.activeTrackedMatches);
+      this.state.feed.pollIntervalMs = this.activeTrackedMatches > 0 ? POLL_MS : LIVE_SCAN_MS;
       this.state.updatedAt = Date.now();
       await this.persist();
     } catch (error) {
@@ -796,15 +712,174 @@ class TennisPaperBot {
       this.busy = false;
       if (this.schedulerActive && this.state.running) {
         const hasPositions = this.state.markets.some((market) => Object.keys(market.positions || {}).length > 0);
-        const delay = this.scoreFeedUnavailable
-          ? hasPositions ? 5_000 : 60_000
-          : scorePollInterval(this.activeTrackedMatches);
+        const delay = hasPositions || this.activeTrackedMatches > 0 ? POLL_MS : LIVE_SCAN_MS;
         this.scheduleNextTick(delay);
       }
     }
   }
 
+  async processPriceLadderMarket(market, liveEvents = []) {
+    market.positions ||= {};
+    const event = liveEvents.find((item) => String(item.slug) === String(market.slug));
+    const position = market.positions.ladder || null;
+    market.marketLive = Boolean(event);
+    market.scoreStatus = event ? "live_on_polymarket" : "not_live_checking_positions";
+    market.currentScore = event ? "Live on Polymarket" : market.currentScore;
+    market.currentServer = null;
+    if (!event && !position) return;
+
+    const books = await this.readBooks(market.tokenIds);
+    market.booksByToken = Object.fromEntries(market.tokenIds.map((token, index) => [token, books[index]]));
+    market.lastBookAt = Date.now();
+    this.clearBookUnavailable(market);
+
+    const targetIndex = market.tokenIds.indexOf(String(market.tokenId || ""));
+    const targetBook = targetIndex >= 0 ? books[targetIndex] : null;
+    market.bestAsk = targetBook?.bestAsk || null;
+    market.bestBid = targetBook?.bestBid || null;
+    market.bidDepth = targetBook?.bidDepth || [];
+    for (const open of Object.values(market.positions)) {
+      open.bestBid = market.booksByToken[open.tokenId]?.bestBid || null;
+    }
+
+    if (market.tokenId && Number(targetBook?.bestBid?.price) <= SWITCH_PRICE) {
+      if (position && !this.sellPositionFromBook(market, position, targetBook, "target price reached $0.45; switch player")) {
+        market.strategyStatus = "Waiting for enough bid depth to switch players.";
+        return;
+      }
+      if (position) delete market.positions.ladder;
+      const otherIndex = targetIndex === 0 ? 1 : 0;
+      market.activePlayer = market.outcomes[otherIndex];
+      market.tokenId = market.tokenIds[otherIndex];
+      market.pivotPrice = null;
+      market.ladderEntryPrice = null;
+      market.ladderBuys = 0;
+      market.position = null;
+      this.log(`${market.title}: switched target to ${market.activePlayer} after the previous side reached $0.45.`);
+    }
+
+    const nextTargetIndex = market.tokenIds.indexOf(String(market.tokenId || ""));
+    let activeBook = nextTargetIndex >= 0 ? books[nextTargetIndex] : null;
+    if (!market.tokenId) {
+      const favorite = chooseFavorite(books);
+      if (!favorite) {
+        market.strategyStatus = "Waiting for either player's best ask to rise above $0.55.";
+        return;
+      }
+      market.activePlayer = market.outcomes[favorite.index];
+      market.tokenId = market.tokenIds[favorite.index];
+      activeBook = books[favorite.index];
+      market.pivotPrice = null;
+      market.ladderEntryPrice = null;
+      market.ladderBuys = 0;
+    }
+
+    const activeIndex = market.tokenIds.indexOf(String(market.tokenId));
+    activeBook = books[activeIndex];
+    market.activePlayer = market.outcomes[activeIndex];
+    market.bestAsk = activeBook?.bestAsk || null;
+    market.bestBid = activeBook?.bestBid || null;
+    market.bidDepth = activeBook?.bidDepth || [];
+    const currentPosition = market.positions.ladder || null;
+
+    if (currentPosition) {
+      const bid = Number(activeBook?.bestBid?.price);
+      if (Number.isFinite(bid) && bid >= Number(currentPosition.entryPrice) + TAKE_PROFIT) {
+        if (!this.sellPositionFromBook(market, currentPosition, activeBook, "best bid reached average entry +$0.10")) {
+          market.strategyStatus = "Take-profit reached; waiting for enough bid depth to sell all shares.";
+          return;
+        }
+        market.pivotPrice = market.lastSellPrice;
+        delete market.positions.ladder;
+        market.position = null;
+        market.ladderEntryPrice = null;
+        market.ladderBuys = 0;
+        market.strategyStatus = `Sold all shares; waiting for a $${LADDER_STEP.toFixed(2)} pullback from the exit pivot.`;
+        return;
+      }
+      if (!event && this.settleFromTerminalClobPrices(market)) return;
+      const buys = Number(currentPosition.ladderBuys || 1);
+      const nextLevel = Number(currentPosition.ladderEntryPrice || currentPosition.entryPrice) - LADDER_STEP * buys;
+      if (buys < MAX_ADDITIONAL_BUYS + 1 && Number(activeBook?.bestAsk?.price) <= nextLevel) {
+        this.openPriceLadderBuy(market, activeBook, `add-on ${buys}`);
+      }
+      market.position = currentPosition;
+      market.strategyStatus = `${currentPosition.ladderBuys || 1}/4 buys · avg ${currentPosition.entryPrice.toFixed(3)} · TP +$0.10`;
+      return;
+    }
+
+    const ask = Number(activeBook?.bestAsk?.price);
+    if (market.pivotPrice != null) {
+      if (Number.isFinite(ask) && ask <= Number(market.pivotPrice) - LADDER_STEP) {
+        if (this.openPriceLadderBuy(market, activeBook, "pivot re-entry")) market.pivotPrice = null;
+      } else {
+        market.strategyStatus = `Waiting for ask ≤ $${(Number(market.pivotPrice) - LADDER_STEP).toFixed(3)} after last exit.`;
+        return;
+      }
+    } else if (Number.isFinite(ask) && ask > TARGET_PRICE) {
+      this.openPriceLadderBuy(market, activeBook, "initial entry");
+    }
+    market.position = market.positions.ladder || null;
+    if (!market.position && !market.strategyStatus) {
+      market.strategyStatus = ask > TARGET_PRICE ? "Waiting for entry fill." : "Waiting for a player above $0.55.";
+    }
+  }
+
+  openPriceLadderBuy(market, book, reason) {
+    if (!mayOpenPositionForMarket(market, this.state.markets) && !market.positions?.ladder) return false;
+    let remaining = LADDER_SHARES;
+    let stake = 0;
+    for (const level of book?.askDepth || []) {
+      if (remaining <= 1e-8) break;
+      const filled = Math.min(remaining, Number(level.size));
+      stake += filled * Number(level.price);
+      remaining -= filled;
+    }
+    if (remaining > 1e-8) {
+      market.strategyStatus = `Need ${LADDER_SHARES} shares of ask depth; entry skipped.`;
+      return false;
+    }
+    const cash = Number(this.state.bankroll?.availableCapital ?? STARTING_CAPITAL);
+    if (cash < stake) {
+      market.strategyStatus = "Insufficient paper cash for a 500-share buy.";
+      return false;
+    }
+    const entryPrice = stake / LADDER_SHARES;
+    const position = market.positions.ladder || {
+      kind: "price_ladder", player: market.activePlayer, tokenId: market.tokenId,
+      shares: 0, stake: 0, tranches: [], ladderBuys: 0, openedAt: Date.now(),
+    };
+    const tradeId = `${market.id}:price-ladder:${Date.now()}`;
+    const trade = {
+      id: tradeId, marketId: market.id, market: market.title, player: market.activePlayer,
+      side: market.activePlayer, entryPrice, shares: LADDER_SHARES, stake,
+      openedAt: Date.now(), status: "open", pnl: 0, realizedPnl: 0,
+      remainingShares: LADDER_SHARES, setNumber: null, entryReason: reason,
+    };
+    position.tranches.push({ tradeId, entryPrice, shares: LADDER_SHARES, stake });
+    position.shares += LADDER_SHARES;
+    position.stake += stake;
+    position.entryPrice = position.stake / position.shares;
+    position.player = market.activePlayer;
+    position.tokenId = market.tokenId;
+    position.ladderEntryPrice ||= entryPrice;
+    position.ladderBuys += 1;
+    market.ladderEntryPrice ||= entryPrice;
+    market.ladderBuys = position.ladderBuys;
+    market.positions.ladder = position;
+    market.position = position;
+    market.entries = Number(market.entries || 0) + 1;
+    this.state.bankroll.availableCapital = cash - stake;
+    this.state.trades.unshift(trade);
+    market.strategyStatus = `${position.ladderBuys}/4 buys · avg ${position.entryPrice.toFixed(3)} · TP +$0.10`;
+    this.log(`${market.title}: bought 500 ${market.activePlayer} shares at $${entryPrice.toFixed(3)} (${reason}).`);
+    return true;
+  }
+
   async processMarket(market, matches) {
+    if (market.strategyVersion === PRICE_LADDER_STRATEGY_VERSION) {
+      return this.processPriceLadderMarket(market, matches);
+    }
     if (Number.isInteger(market.clobWinnerIndex)) {
       this.settleFromTerminalClobPrices(market);
       return;
@@ -1280,6 +1355,7 @@ class TennisPaperBot {
     const shares = Number(position.shares);
     const exitPrice = proceeds / shares;
     const pnl = this.realizePositionShares(market, position, shares, exitPrice, reason);
+    market.lastSellPrice = exitPrice;
     this.log(`${market.title}: sold ${shares.toFixed(2)} ${position.player} shares at $${exitPrice.toFixed(3)} VWAP; realized P&L $${pnl.toFixed(2)} (${reason}).`);
     return true;
   }
