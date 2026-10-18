@@ -33,17 +33,7 @@
     </div>
     <div id="capitalPnl" class="muted" style="margin-top:10px">Total P&amp;L: $0.00</div>
   </section>
-  <section class="grid">
-    <form id="add" class="card fields">
-      <h2>Manual match add</h2>
-      <label>Polymarket match URL<input name="polymarketUrl" type="url" placeholder="https://polymarket.com/event/..." required></label>
-      <label>Choose a reference player<select name="player" id="player" required disabled><option value="">Load a Polymarket match first</option></select></label>
-      <button type="button" id="loadPlayers" class="secondary">Load match players</button>
-      <div id="previewStatus" class="muted" aria-live="polite"></div>
-      <div class="checks"><label><input name="confirmPolymarket" type="checkbox" required> Confirm Polymarket match</label></div>
-      <div class="notice">Only Polymarket Gamma live-match listings and CLOB order books are used. The selected player is a reference for validating the market; price rules choose the target. Paper buys and sells require visible CLOB depth.</div>
-      <button>Add confirmed match manually</button><div id="formError" class="error"></div>
-    </form>
+  <section>
     <section class="card"><div class="row"><h2>Automatic Polymarket live-match scanner</h2><span id="feedStatus" class="pill">Connecting</span></div><div id="feed" class="muted">Scanning Polymarket live matches…</div><div id="discovery" class="item muted">Waiting for the first Polymarket scan…</div><div class="item"><strong>500-share price ladder</strong><div class="muted">Initial buy when a player's ask is above $0.55. Add 500 shares at each $0.05 drop from the first fill, up to three adds. Sell all at average entry +$0.10; switch sides if the target player's bid reaches $0.45. After profit, re-enter at exit price −$0.05.</div></div><div class="item"><strong>Paper fills</strong><div class="muted">Orders sweep visible CLOB depth and use the shared demo balance. Entries are skipped when 500 shares cannot be filled from visible asks.</div></div><div class="muted">CLOB quotes refresh every 2 seconds while matches are live; discovery refreshes every 30 seconds · maximum 20 matches with open positions.</div></section>
   </section>
   <section class="card"><div class="row"><h2>Active matches</h2><button id="refresh" class="secondary">Refresh</button></div><div id="matches" class="match-grid"><div class="empty">No matches added.</div></div></section>
@@ -61,8 +51,6 @@ async function refresh(){try{const r=await fetch("/api/tennis/state",{cache:"no-
 }catch(e){$("#feedStatus").textContent="offline";$("#feed").textContent="Could not reach the bot API.";}}
  function esc(s){const t=String(s??"");if(["undefined","null"].includes(t.trim().toLowerCase()))return "—";return t.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 async function removeMatch(id){await fetch("/api/tennis/markets/"+id,{method:"DELETE"});refresh()}
-$("#loadPlayers").onclick=async()=>{const poly=$("#add [name=polymarketUrl]").value;$("#formError").textContent="";$("#previewStatus").textContent="Loading Polymarket market and CLOB books…";try{const r=await fetch("/api/tennis/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({polymarketUrl:poly})});const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not load players");$("#player").innerHTML='<option value="">Choose a player</option>'+d.players.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join("");$("#player").disabled=false;const books=(d.clobBooks||[]).map(b=>`${b.player}: bid ${money(b.bestBid?.price)} / ask ${money(b.bestAsk?.price)}`).join(" · ");$("#previewStatus").textContent=`${d.title} · ${d.marketLive?"live on Polymarket":"not currently marked live"} · ${books||"CLOB book unavailable"}`}catch(err){$("#previewStatus").textContent="";$("#formError").textContent=err.message}};
- $("#add").addEventListener("submit",async e=>{e.preventDefault();const form=e.currentTarget;$("#formError").textContent="";const f=new FormData(form);const body=Object.fromEntries(f.entries());body.confirmPolymarket=f.has("confirmPolymarket");try{const r=await fetch("/api/tennis/markets",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not add match");form.reset();$("#player").disabled=true;$("#player").innerHTML='<option value="">Load a Polymarket match first</option>';refresh()}catch(err){$("#formError").textContent=err.message}});
   $("#refresh").onclick=refresh;
   const matchesRoot=$("#matches"),innerHtmlDescriptor=Object.getOwnPropertyDescriptor(Element.prototype,"innerHTML");
   function stablePatch(current,next){
@@ -81,7 +69,7 @@ $("#loadPlayers").onclick=async()=>{const poly=$("#add [name=polymarketUrl]").va
     return current;
   }
   Object.defineProperty(matchesRoot,"innerHTML",{configurable:true,get(){return innerHtmlDescriptor.get.call(this)},set(markup){
-    const incoming=document.createElement("div");innerHtmlDescriptor.set.call(incoming,markup);
+    const incoming=document.createElement("div");innerHtmlDescriptor.set.call(incoming,markup.replace(/<small>[^<]*<\/small>/g,"<small>CLOB PRICE LADDER</small>"));
     const cards=[...incoming.children];
     if(!cards.length||cards.some(card=>!card.classList.contains("match-card"))){innerHtmlDescriptor.set.call(this,markup);return}
     const existing=new Map([...this.children].filter(card=>card.classList.contains("match-card")).map(card=>[card.querySelector("h3")?.textContent,card]));
@@ -95,6 +83,5 @@ $("#loadPlayers").onclick=async()=>{const poly=$("#add [name=polymarketUrl]").va
   let matchObserver;
    const syncServeLabels=()=>{};
   matchObserver=new MutationObserver(syncServeLabels);matchObserver.observe(matchList,{childList:true});syncServeLabels();
-  $("#loadPlayers").onclick=async()=>{const poly=$("#add [name=polymarketUrl]").value;$("#formError").textContent="";$("#previewStatus").textContent="Loading Polymarket market and CLOB books…";try{const r=await fetch("/api/tennis/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({polymarketUrl:poly})});const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not load players");$("#player").innerHTML='<option value="">Choose a player</option>'+d.players.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join("");$("#player").disabled=false;const books=(d.clobBooks||[]).map(b=>`${b.player}: bid ${money(b.bestBid?.price)} / ask ${money(b.bestAsk?.price)}`).join(" · ");$("#previewStatus").textContent=`${d.title} · ${d.marketLive?"live on Polymarket":"not currently marked live"} · ${books||"CLOB book unavailable"}`}catch(err){$("#previewStatus").textContent="";$("#formError").textContent=err.message}};
   const updatePriceOnlyLabels=()=>{document.querySelectorAll(".score-breakdown").forEach(el=>el.remove());document.querySelectorAll(".score-label").forEach(el=>el.textContent="POLYMARKET CLOB PRICES");document.querySelectorAll(".score").forEach(el=>{if(el.textContent.includes("Waiting for score"))el.textContent="Waiting for CLOB quotes"});document.querySelectorAll(".selected-player small").forEach(el=>el.textContent="CLOB PRICE LADDER");document.querySelectorAll(".server").forEach(el=>{const card=el.closest(".match-card"),target=card?.querySelector(".selected-player strong")?.textContent;el.textContent=`Target: ${target||"waiting for price > $0.55"}`});document.querySelectorAll(".match-meta span").forEach(el=>{if(el.textContent.startsWith("Updated "))el.textContent="Polymarket prices only"});};setInterval(updatePriceOnlyLabels,500);
  </script></body></html>
