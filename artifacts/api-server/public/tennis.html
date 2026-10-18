@@ -59,7 +59,33 @@ async function refresh(){try{const r=await fetch("/api/tennis/state",{cache:"no-
 async function removeMatch(id){await fetch("/api/tennis/markets/"+id,{method:"DELETE"});refresh()}
 $("#loadPlayers").onclick=async()=>{const poly=$("#add [name=polymarketUrl]").value;$("#formError").textContent="";$("#previewStatus").textContent="Loading Polymarket market and CLOB books…";try{const r=await fetch("/api/tennis/preview",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({polymarketUrl:poly})});const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not load players");$("#player").innerHTML='<option value="">Choose a player</option>'+d.players.map(p=>`<option value="${esc(p)}">${esc(p)}</option>`).join("");$("#player").disabled=false;const books=(d.clobBooks||[]).map(b=>`${b.player}: bid ${money(b.bestBid?.price)} / ask ${money(b.bestAsk?.price)}`).join(" · ");$("#previewStatus").textContent=`${d.title} · ${d.marketLive?"live on Polymarket":"not currently marked live"} · ${books||"CLOB book unavailable"}`}catch(err){$("#previewStatus").textContent="";$("#formError").textContent=err.message}};
  $("#add").addEventListener("submit",async e=>{e.preventDefault();const form=e.currentTarget;$("#formError").textContent="";const f=new FormData(form);const body=Object.fromEntries(f.entries());body.confirmPolymarket=f.has("confirmPolymarket");try{const r=await fetch("/api/tennis/markets",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||"Could not add match");form.reset();$("#player").disabled=true;$("#player").innerHTML='<option value="">Load a Polymarket match first</option>';refresh()}catch(err){$("#formError").textContent=err.message}});
- $("#refresh").onclick=refresh;refresh();setInterval(refresh,1000);
+  $("#refresh").onclick=refresh;
+  const matchesRoot=$("#matches"),innerHtmlDescriptor=Object.getOwnPropertyDescriptor(Element.prototype,"innerHTML");
+  function stablePatch(current,next){
+    if(current.nodeType!==next.nodeType||current.nodeName!==next.nodeName)return next.cloneNode(true);
+    if(current.nodeType===Node.TEXT_NODE||current.nodeType===Node.COMMENT_NODE){if(current.nodeValue!==next.nodeValue)current.nodeValue=next.nodeValue;return current}
+    if(current.nodeType!==Node.ELEMENT_NODE)return current;
+    for(const attr of [...current.attributes])if(!next.hasAttribute(attr.name))current.removeAttribute(attr.name);
+    for(const attr of [...next.attributes])if(current.getAttribute(attr.name)!==attr.value)current.setAttribute(attr.name,attr.value);
+    const oldChildren=[...current.childNodes],newChildren=[...next.childNodes];
+    for(let i=0;i<newChildren.length;i++){
+      if(!oldChildren[i])current.appendChild(newChildren[i].cloneNode(true));
+      else{const patched=stablePatch(oldChildren[i],newChildren[i]);if(patched!==oldChildren[i])current.replaceChild(patched,oldChildren[i])}
+    }
+    for(let i=oldChildren.length-1;i>=newChildren.length;i--)oldChildren[i].remove();
+    return current;
+  }
+  Object.defineProperty(matchesRoot,"innerHTML",{configurable:true,get(){return innerHtmlDescriptor.get.call(this)},set(markup){
+    const incoming=document.createElement("div");innerHtmlDescriptor.set.call(incoming,markup);
+    const cards=[...incoming.children];
+    if(!cards.length||cards.some(card=>!card.classList.contains("match-card"))){innerHtmlDescriptor.set.call(this,markup);return}
+    const existing=new Map([...this.children].filter(card=>card.classList.contains("match-card")).map(card=>[card.querySelector("h3")?.textContent,card]));
+    const desired=cards.map(next=>{const key=next.querySelector("h3")?.textContent,old=existing.get(key);if(!old)return next;existing.delete(key);stablePatch(old,next);return old});
+    for(let i=0;i<desired.length;i++)if(this.children[i]!==desired[i])this.insertBefore(desired[i],this.children[i]||null);
+    for(const card of [...this.children].slice(desired.length))card.remove();
+  }});
+  const priceOnlyStyle=document.createElement("style");priceOnlyStyle.textContent=".score-breakdown{display:none!important}";document.head.appendChild(priceOnlyStyle);
+  refresh();setInterval(refresh,1000);
   const matchList=$("#matches"),resultsList=$("#results"),resultsSection=$("#resultsSection");
   let matchObserver;
    const syncServeLabels=()=>{};
