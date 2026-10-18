@@ -2,6 +2,63 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { stableMoveSignal } = require("./tennis-bot.js");
+
+test("stable price movement confirms a greater-than-15-cent four-minute decline with a sustained trend", () => {
+  const baseline = { at: 0, price: 0.60 };
+  const values = [0.58, 0.54, 0.55, 0.44];
+  const samples = values.flatMap((price, minute) =>
+    Array.from({ length: 30 }, (_, i) => ({ at: minute * 60_000 + i * 2_000, price })));
+  assert.ok(stableMoveSignal(samples, baseline, 240_000, "DOWN"));
+  assert.equal(stableMoveSignal(samples, baseline, 239_999, "DOWN"), null);
+  const exactValues = [0.56, 0.52, 0.49, 0.45];
+  const exactThreshold = exactValues.flatMap((price, minute) =>
+    Array.from({ length: 30 }, (_, i) => ({ at: minute * 60_000 + i * 2_000, price })));
+  assert.equal(stableMoveSignal(exactThreshold, baseline, 240_000, "DOWN"), null);
+});
+
+test("stable-price tennis strategy opens one flat 500-share entry and exits on a confirmed rebound", async () => {
+  const { TennisPaperBot } = require("./tennis-bot.js");
+  const bot = new TennisPaperBot({ file: "/tmp/tennis-stable-move-test.json", fetch: async () => ({ ok: true, json: async () => ({}) }) });
+  const market = {
+    id: "stable-move", slug: "stable-move", title: "A vs B", outcomes: ["A", "B"],
+    tokenIds: ["a", "b"], tokenId: null, positions: {}, entries: 0,
+    strategyVersion: "stable-price-move-v1",
+  };
+  bot.state.markets = [market];
+  bot.state.bankroll.availableCapital = 10000;
+  const base = Date.now() - 240500;
+  const makeSamples = (values) => values.flatMap((price, minute) =>
+    Array.from({ length: 30 }, (_, i) => ({ at: base + minute * 60_000 + i * 2_000, price })));
+  let books = [
+    { bestBid: { price: 0.41, size: 500 }, bestAsk: { price: 0.43, size: 500 }, askDepth: [{ price: 0.43, size: 500 }], bidDepth: [{ price: 0.41, size: 500 }] },
+    { bestBid: { price: 0.30, size: 500 }, bestAsk: { price: 0.31, size: 500 }, askDepth: [{ price: 0.31, size: 500 }], bidDepth: [{ price: 0.30, size: 500 }] },
+  ];
+  bot.readBooks = async () => books;
+  market.priceMoveStates = {
+    a: { baseline: { at: base, price: 0.60 }, samples: makeSamples([0.58, 0.54, 0.49, 0.42]) },
+  };
+  await bot.processMarket(market, [{ slug: market.slug, live: true }]);
+  assert.equal(market.positions.ladder.shares, 500);
+  assert.equal(market.positions.ladder.player, "A");
+  assert.equal(bot.state.trades.length, 1);
+  assert.equal(bot.state.trades[0].shares, 500);
+
+  const exitBase = Date.now() - 240500;
+  market.priceMoveStates.a = {
+    baseline: { at: exitBase, price: 0.42 },
+    samples: [0.46, 0.50, 0.55, 0.60].flatMap((price, minute) =>
+      Array.from({ length: 30 }, (_, i) => ({ at: exitBase + minute * 60_000 + i * 2_000, price }))),
+  };
+  books = [
+    { bestBid: { price: 0.60, size: 500 }, bestAsk: { price: 0.61, size: 500 }, askDepth: [{ price: 0.61, size: 500 }], bidDepth: [{ price: 0.60, size: 500 }] },
+    books[1],
+  ];
+  await bot.processMarket(market, [{ slug: market.slug, live: true }]);
+  assert.equal(market.positions.ladder, undefined);
+  assert.equal(bot.state.trades[0].status, "closed");
+  assert.ok(bot.state.trades[0].pnl > 0);
+});
 const { TennisPaperBot, hasZeroThirty, matchScore, nameMatches, findLiveMatch, countTrackedLiveMatches, countActiveMarkets, countMarketsWithOpenPositions, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete } = require("./tennis-bot.js");
 
 test("reads the current point score and recognizes selected player at 0-30", () => {

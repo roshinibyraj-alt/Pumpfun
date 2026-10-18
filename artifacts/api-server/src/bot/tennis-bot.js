@@ -17,6 +17,10 @@ const TAKE_PROFIT = 0.10;
 const LADDER_SHARES = 500;
 const MAX_ADDITIONAL_BUYS = 3;
 const STAKE_USD = 500;
+const PRICE_STABILITY_MS = 30_000;
+const PRICE_STABILITY_RANGE = 0.02;
+const PRICE_MOVE_WINDOW_MS = 4 * 60_000;
+const PRICE_MOVE_THRESHOLD = 0.15;
 const STARTING_CAPITAL = 10000;
 const MAX_LOGS = 200;
 const SERVE_POINT_STRATEGY_VERSION = "serve-point-accumulator-v1";
@@ -28,7 +32,27 @@ const BREAKBACK_STRATEGY_VERSION = "breakback-single-entry-v3";
 const PREVIOUS_BREAKBACK_STRATEGY_VERSION = "breakback-staged-flat-v2";
 const BASE_TRANCHE_SHARES = 250;
 const TERMINAL_SETTLEMENT_PRICE = 0.98;
-const PRICE_LADDER_STRATEGY_VERSION = "clob-price-ladder-v1";
+const PRICE_LADDER_STRATEGY_VERSION = "stable-price-move-v1";
+const LEGACY_PRICE_LADDER_STRATEGY_VERSION = "clob-price-ladder-v1";
+
+function stableMoveSignal(samples, baseline, now, direction) {
+  if (!baseline || now - Number(baseline.at) < PRICE_MOVE_WINDOW_MS
+    || now - Number(baseline.at) > PRICE_MOVE_WINDOW_MS + 60_000) return null;
+  const points = [Number(baseline.price)];
+  for (let minute = 0; minute < 4; minute += 1) {
+    const start = Number(baseline.at) + minute * 60_000;
+    const end = start + 60_000;
+    const bucket = samples.filter((item) => item.at >= start && item.at < end);
+    if (bucket.length < 10) return null;
+    points.push(bucket.reduce((sum, item) => sum + item.price, 0) / bucket.length);
+  }
+  const down = direction === "DOWN";
+  const delta = down ? points[0] - points[4] : points[4] - points[0];
+  const directionalSteps = points.slice(1).reduce((count, price, index) =>
+    count + (down ? price < points[index] : price > points[index]), 0);
+  return delta > PRICE_MOVE_THRESHOLD + 1e-9 && directionalSteps >= 3
+    ? { delta, points, directionalSteps } : null;
+}
 
 function entryGameAllowed(playerGames, opponentGames) {
   return (playerGames <= 4 && opponentGames <= 3) ||
@@ -825,6 +849,109 @@ class TennisPaperBot {
     }
   }
 
+  async processStablePriceMarket(market, liveEvents = []) {
+    market.positions ||= {};
+    market.priceMoveStates ||= {};
+    const event = liveEvents.find((item) => String(item.slug) === String(market.slug));
+    const position = market.positions.ladder || null;
+    market.marketLive = Boolean(event);
+    market.scoreStatus = event ? "live_on_polymarket" : "not_live_checking_positions";
+    market.currentScore = event ? "Live on Polymarket" : market.currentScore;
+    market.currentServer = null;
+    if (!event && !position) return;
+
+    const books = await this.readBooks(market.tokenIds);
+    const now = Date.now();
+    market.booksByToken = Object.fromEntries(market.tokenIds.map((token, index) => [token, books[index]]));
+    market.lastBookAt = now;
+    this.clearBookUnavailable(market);
+    const prices = books.map((book, index) => {
+      const bid = Number(book?.bestBid?.price), ask = Number(book?.bestAsk?.price);
+      if (!Number.isFinite(bid) || !Number.isFinite(ask) || bid <= 0 || ask <= 0) return null;
+      const mid = (bid + ask) / 2;
+      const tokenId = String(market.tokenIds[index]);
+      const state = market.priceMoveStates[tokenId] ||= { samples: [], baseline: null };
+      state.samples.push({ at: now, price: mid });
+      state.samples = state.samples.filter((sample) => now - sample.at <= 6 * 60_000);
+      const stable = state.samples.filter((sample) => now - sample.at <= PRICE_STABILITY_MS);
+      if (stable.length >= 8 && stable[0].at <= now - PRICE_STABILITY_MS + 2_000
+        && stable[stable.length - 1].at >= now - 2_000) {
+        const values = stable.map((sample) => sample.price);
+        if (Math.max(...values) - Math.min(...values) <= PRICE_STABILITY_RANGE
+          && (!state.baseline || now - state.baseline.at > PRICE_MOVE_WINDOW_MS + 60_000)) {
+          state.baseline = {
+            at: now,
+            price: values.reduce((sum, value) => sum + value, 0) / values.length,
+          };
+        }
+      }
+      return { tokenId, mid, book, state };
+    });
+    for (const open of Object.values(market.positions)) {
+      open.bestBid = market.booksByToken[open.tokenId]?.bestBid || null;
+    }
+
+    if (position) {
+      const index = market.tokenIds.indexOf(String(position.tokenId));
+      const current = prices[index];
+      market.activePlayer = position.player;
+      market.tokenId = position.tokenId;
+      market.bestAsk = current?.book?.bestAsk || null;
+      market.bestBid = current?.book?.bestBid || null;
+      if (current && current.state.baseline) {
+        const rebound = stableMoveSignal(current.state.samples, current.state.baseline, now, "UP");
+        const bid = Number(current.book.bestBid?.price);
+        if (rebound && current.mid - current.state.baseline.price > PRICE_MOVE_THRESHOLD
+          && bid >= Number(position.entryPrice)) {
+          if (this.sellPositionFromBook(market, position, current.book,
+            "stable-price rebound exceeded $0.15 in four minutes")) {
+            delete market.positions.ladder;
+            market.position = null;
+            market.activePlayer = null;
+            market.tokenId = null;
+            market.priceMoveStates = {};
+            market.strategyStatus = "Sold 500 shares after a confirmed $0.15 rebound; waiting for a new stable-price setup.";
+            return;
+          }
+          market.strategyStatus = "Rebound confirmed; waiting for enough bid depth to sell all 500 shares.";
+        } else {
+          market.strategyStatus = `Holding one 500-share position · entry $${Number(position.entryPrice).toFixed(3)} · waiting for a stable +$0.15 rebound.`;
+        }
+      } else {
+        market.strategyStatus = "Position open · establishing a fresh 30-second stable-price baseline.";
+      }
+      if (!event) this.settleFromTerminalClobPrices(market);
+      return;
+    }
+
+    market.activePlayer = null;
+    market.tokenId = null;
+    const candidates = prices.map((item, index) => item && item.state.baseline ? ({
+      ...item,
+      index,
+      signal: stableMoveSignal(item.state.samples, item.state.baseline, now, "DOWN"),
+    }) : null)
+      .filter((item) => item?.signal
+        && item.state.baseline.price - item.mid > PRICE_MOVE_THRESHOLD)
+      .sort((a, b) => b.signal.delta - a.signal.delta);
+    if (!candidates.length) {
+      market.strategyStatus = "Monitoring both player prices for a stable baseline followed by a gradual $0.15 drop over four minutes.";
+      return;
+    }
+    const candidate = candidates[0];
+    market.activePlayer = market.outcomes[candidate.index];
+    market.tokenId = candidate.tokenId;
+    market.bestAsk = candidate.book.bestAsk || null;
+    market.bestBid = candidate.book.bestBid || null;
+    if (this.openPriceLadderBuy(market, candidate.book, `confirmed $${candidate.signal.delta.toFixed(2)} gradual price drop`)) {
+      const state = candidate.state;
+      state.samples = [];
+      state.baseline = null;
+      market.positions.ladder.kind = "stable_price_move";
+      market.strategyStatus = `Bought 500 ${market.activePlayer} shares after a confirmed $${candidate.signal.delta.toFixed(2)} four-minute drop; waiting for a stable rebound.`;
+    }
+  }
+
   openPriceLadderBuy(market, book, reason) {
     if (!mayOpenPositionForMarket(market, this.state.markets) && !market.positions?.ladder) return false;
     let remaining = LADDER_SHARES;
@@ -877,8 +1004,10 @@ class TennisPaperBot {
   }
 
   async processMarket(market, matches) {
-    if (market.strategyVersion === PRICE_LADDER_STRATEGY_VERSION) {
-      return this.processPriceLadderMarket(market, matches);
+    if (market.strategyVersion === PRICE_LADDER_STRATEGY_VERSION
+      || market.strategyVersion === LEGACY_PRICE_LADDER_STRATEGY_VERSION) {
+      market.strategyVersion = PRICE_LADDER_STRATEGY_VERSION;
+      return this.processStablePriceMarket(market, matches);
     }
     if (Number.isInteger(market.clobWinnerIndex)) {
       this.settleFromTerminalClobPrices(market);
@@ -1586,4 +1715,4 @@ class TennisPaperBot {
 
 }
 
-module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, countTrackedLiveMatches, countActiveMarkets, countMarketsWithOpenPositions, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete };
+module.exports = { TennisPaperBot, matchScore, hasZeroThirty, nameMatches, findLiveMatch, countTrackedLiveMatches, countActiveMarkets, countMarketsWithOpenPositions, scorePollInterval, mayTradeSet, parseUrl, marketForPlayers, chooseFavorite, classifyFirstScan, tennisScoreSnapshot, entryGameAllowed, matchIsComplete, stableMoveSignal };
