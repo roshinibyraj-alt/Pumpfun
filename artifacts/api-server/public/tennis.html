@@ -69,6 +69,7 @@ $("#loadPlayers").onclick=async()=>{const poly=$("#add [name=polymarketUrl]").va
     if(current.nodeType!==next.nodeType||current.nodeName!==next.nodeName)return next.cloneNode(true);
     if(current.nodeType===Node.TEXT_NODE||current.nodeType===Node.COMMENT_NODE){if(current.nodeValue!==next.nodeValue)current.nodeValue=next.nodeValue;return current}
     if(current.nodeType!==Node.ELEMENT_NODE)return current;
+    if(current.matches(".selected-player small")){current.textContent="CLOB PRICE LADDER";return current}
     for(const attr of [...current.attributes])if(!next.hasAttribute(attr.name))current.removeAttribute(attr.name);
     for(const attr of [...next.attributes])if(current.getAttribute(attr.name)!==attr.value)current.setAttribute(attr.name,attr.value);
     const oldChildren=[...current.childNodes],newChildren=[...next.childNodes];
@@ -84,7 +85,7 @@ $("#loadPlayers").onclick=async()=>{const poly=$("#add [name=polymarketUrl]").va
     const cards=[...incoming.children];
     if(!cards.length||cards.some(card=>!card.classList.contains("match-card"))){innerHtmlDescriptor.set.call(this,markup);return}
     const existing=new Map([...this.children].filter(card=>card.classList.contains("match-card")).map(card=>[card.querySelector("h3")?.textContent,card]));
-    const desired=cards.map(next=>{const key=next.querySelector("h3")?.textContent,old=existing.get(key);if(!old)return next;existing.delete(key);stablePatch(old,next);return old});
+    const desired=cards.map(next=>{const label=next.querySelector(".selected-player small");if(label)label.textContent="CLOB PRICE LADDER";const key=next.querySelector("h3")?.textContent,old=existing.get(key);if(!old)return next;existing.delete(key);stablePatch(old,next);return old});
     for(let i=0;i<desired.length;i++)if(this.children[i]!==desired[i])this.insertBefore(desired[i],this.children[i]||null);
     for(const card of [...this.children].slice(desired.length))card.remove();
   }});
