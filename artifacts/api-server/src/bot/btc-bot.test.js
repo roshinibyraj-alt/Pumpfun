@@ -6,14 +6,17 @@ const config = require("./btc/config.js");
 const Bot = require("./btc/wick-bot.js");
 const marketData = require("./btc/wick-market-data.js");
 
-test("BTC bot uses a strict $0.70 threshold, 30-second checks, and five total entries", () => {
+test("BTC bot uses a strict $0.70 threshold, 30-second checks, and no entry-count cap", () => {
   assert.equal(config.ENTRY_PRICE_THRESHOLD, 0.70);
   assert.equal(config.ENTRY_CHECK_INTERVAL_MS, 30_000);
-  assert.equal(config.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW, 5);
+  assert.equal("MAX_SUCCESSFUL_ENTRIES_PER_WINDOW" in config, false);
   assert.equal("MARTINGALE_EXIT_BID_THRESHOLD" in config, false);
   const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
   assert.match(dashboard, /<title>Thirty Seconds Bot<\/title>/);
   assert.match(dashboard, /Every 30 seconds/);
+  assert.match(dashboard, /id="countdown-\$\{k\}"/);
+  assert.match(dashboard, /Next fire in/);
+  assert.match(dashboard, /paintCountdown/);
 
   const bot = new Bot();
   const start = 1_800_000;
@@ -30,6 +33,27 @@ test("BTC bot uses a strict $0.70 threshold, 30-second checks, and five total en
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, "DOWN");
   assert.equal(bot.positions[0].shares, 100);
+});
+
+test("successful entries continue past five and martingale sizing keeps doubling", () => {
+  const bot = new Bot();
+  const start = 1_800_000;
+  bot.cash = 10_000_000_000;
+  bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
+  bot.openStrategyWindow(start, start);
+
+  for (let checkpoint = 1; checkpoint <= 7; checkpoint += 1) {
+    const now = start + checkpoint * config.ENTRY_CHECK_INTERVAL_MS;
+    bot.liveQuotes = {
+      UP: { status: "LIVE", updatedAt: now, bestAsk: 0.71, askSize: 1_000_000 },
+      DOWN: { status: "LIVE", updatedAt: now, bestAsk: 0.71, askSize: 1_000_000 },
+    };
+    bot.processTimedEntries(start, now);
+  }
+
+  assert.equal(bot.windowFiredEntries, 14);
+  assert.equal(bot.positions.length, 14);
+  assert.equal(bot.positions[0].shares, 100 * 2 ** 13);
 });
 
 test("a best bid below $0.30 does not trigger a forced sale after the entry cap", async () => {
