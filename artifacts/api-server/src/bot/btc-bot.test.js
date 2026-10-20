@@ -1,18 +1,23 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const config = require("./btc/config.js");
 const Bot = require("./btc/wick-bot.js");
 const marketData = require("./btc/wick-market-data.js");
 
-test("BTC bot uses a strict $0.70 threshold, 15-second checks, and five total entries", () => {
+test("BTC bot uses a strict $0.70 threshold, 30-second checks, and five total entries", () => {
   assert.equal(config.ENTRY_PRICE_THRESHOLD, 0.70);
-  assert.equal(config.ENTRY_CHECK_INTERVAL_MS, 15_000);
+  assert.equal(config.ENTRY_CHECK_INTERVAL_MS, 30_000);
   assert.equal(config.MAX_SUCCESSFUL_ENTRIES_PER_WINDOW, 5);
   assert.equal("MARTINGALE_EXIT_BID_THRESHOLD" in config, false);
+  const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
+  assert.match(dashboard, /<title>Thirty Seconds Bot<\/title>/);
+  assert.match(dashboard, /Every 30 seconds/);
 
   const bot = new Bot();
   const start = 1_800_000;
-  const now = start + 15_000;
+  const now = start + 30_000;
   bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
   bot.openStrategyWindow(start, now);
   bot.liveQuotes = {
