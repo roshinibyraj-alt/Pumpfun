@@ -35,13 +35,14 @@ app.use("/api", router);
 
 app.get("/", (_req, res, next) => {
   const dashboardPath = [
-    path.resolve(process.cwd(), "public/tennis.html"),
-    path.resolve(process.cwd(), "artifacts/api-server/public/tennis.html"),
+    path.resolve(process.cwd(), "public/btc.html"),
+    path.resolve(process.cwd(), "artifacts/api-server/public/btc.html"),
   ].find(existsSync);
   if (!dashboardPath) {
     next();
     return;
   }
+  res.set("Cache-Control", "no-store");
   res.sendFile(
     dashboardPath,
     (error) => {
