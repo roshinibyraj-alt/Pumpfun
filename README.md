@@ -17,6 +17,12 @@ For each outcome (UP and DOWN), compare the same outcome on both venues:
 
 The signal is a paper model, not guaranteed or risk-free arbitrage. Venue prices, fees, order-book depth, execution timing, and settlement rules can differ.
 
+## Thirty Seconds BTC CLOB paper bot
+
+The separate BTC 5-minute CLOB paper bot now gates new entries on a fresh Chainlink BTC/USD regime check. It samples price every 10 seconds over a rolling 90-second window. Repeated reversals with little net progress, a very small range, a mixed signal, insufficient history, or stale feed data pause new entries. Only a confirmed trend allows entries; existing positions continue through their normal settlement logic.
+
+The detector uses a simple directional-efficiency ratio plus reversal count and range. Its thresholds are heuristics, not a trained or validated market model, and should be reviewed against recorded paper results. This filter does not change the bot's share-sizing ladder or its existing take-profit and settlement rules.
+
 ## Polling and simulated fills
 
 - The scanner targets a **500 ms start-to-start read cycle** with no overlapping scans. Polymarket and Predict.fun books are read concurrently; the dashboard reports the target interval and recent cycle time.

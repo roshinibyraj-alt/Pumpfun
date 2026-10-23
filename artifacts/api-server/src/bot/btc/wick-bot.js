@@ -2,6 +2,8 @@
 
 const cfg=require('./config');
 const md=require('./wick-market-data');
+const {feed:chainlinkFeed}=require('./chainlink-price-feed');
+const {classifyRegime}=require('./regime-detector');
 
 function levels(xs){return (xs||[]).map(x=>({price:Number(x.price),size:Number(x.size)}))
   .filter(x=>Number.isFinite(x.price)&&x.size>0).sort((a,b)=>a.price-b.price)}
@@ -69,8 +71,11 @@ function clobQuoteWinner(up,down){
   return u>=d?'UP':'DOWN';
 }
 class WickBot{
-  constructor({timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL_5M}={}){
+  constructor({timeframe='5m',windowMs=cfg.WINDOW_MS_5M,capital=cfg.DEMO_CAPITAL_5M,
+    priceFeed=chainlinkFeed}={}){
     this.timeframe=timeframe;this.windowMs=windowMs;this.capital=capital;this.cash=capital;
+    this.priceFeed=priceFeed;
+    this.marketRegime={state:'UNKNOWN',reason:'Waiting for fresh BTC price history'};
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';
     this.error=null;this.market=null;this.lastMarketAt=0;
@@ -97,6 +102,7 @@ class WickBot{
         }
       }
       await this.refreshLiveQuotes(now);
+      this.updateMarketRegime(now);
       if(this.orderWindowStart!==start)this.openStrategyWindow(start,now);
       this.processTimedEntries(start,now);
       if(now>=start+this.windowMs-3000&&now<start+this.windowMs){
@@ -114,6 +120,18 @@ class WickBot{
       if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{cash:this.cash,windowStart:start})}
     }catch(e){this.status='blocked_or_error';this.error=e.message;
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
+  }
+  updateMarketRegime(now=Date.now()){
+    try{
+      this.marketRegime=classifyRegime(this.priceFeed.getTicks(),now,{
+        lookbackMs:cfg.CHOP_LOOKBACK_MS,sampleMs:cfg.CHOP_SAMPLE_MS,
+        chopEfficiencyMax:cfg.CHOP_MIN_EFFICIENCY,minReversals:cfg.CHOP_MIN_REVERSALS,
+        trendEfficiencyMin:cfg.TREND_MIN_EFFICIENCY,trendNetMoveMinPct:cfg.TREND_MIN_NET_MOVE_PCT,
+      });
+    }catch(error){
+      this.marketRegime={state:'UNKNOWN',reason:error?.message||'BTC price feed unavailable'};
+    }
+    return this.marketRegime;
   }
   openStrategyWindow(start,now){
     this.orderWindowStart=start;
@@ -148,6 +166,11 @@ class WickBot{
       order.ask=ask;
       if(ask<=cfg.ENTRY_PRICE_THRESHOLD){
         order.reason=`Ask is not above $${cfg.ENTRY_PRICE_THRESHOLD.toFixed(2)}.`;
+        continue;
+      }
+      if(this.marketRegime.state!=='TRENDING'){
+        order.status='SKIPPED_REGIME';
+        order.reason=`New paper entries paused: BTC regime is ${this.marketRegime.state}. ${this.marketRegime.reason||''}`.trim();
         continue;
       }
       if(this.windowFiredEntries>=cfg.MAX_ENTRIES_PER_WINDOW){
@@ -245,6 +268,8 @@ class WickBot{
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
         strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
+           regime:{...this.marketRegime,entryPolicy:'New entries allowed only when fresh BTC data classifies as TRENDING'},
+           btcPriceFeed:this.priceFeed.snapshot(),
           entries:{orderType:'MARKET',triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
              checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
              baseShares:cfg.BASE_ENTRY_SHARES,sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
@@ -265,14 +290,14 @@ class WickBot{
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
         scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
-          source:'Polymarket market discovery and UP/DOWN CLOB order books only',
+           source:'Polymarket Gamma/CLOB plus Chainlink BTC/USD price regime filter',
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved'},
        positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-  start(){if(this.running)return;this.running=true;this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m CLOB timed-threshold entries on both UP and DOWN sides; no live orders.'});
+   start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m timed entries; new entries require a fresh trending BTC regime; no live orders.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
-  stop(){this.running=false;clearTimeout(this.timer)}
+  stop(){this.running=false;clearTimeout(this.timer);this.priceFeed.stop()}
 }
 module.exports=WickBot;
 module.exports._test={simulateAtBestAsk,feeFor,payout,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,clobQuoteFloor,takeProfitHit,stopLossHit};

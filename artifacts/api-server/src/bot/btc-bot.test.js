@@ -15,15 +15,17 @@ test("BTC bot uses a strict $0.70 floor, 30-second checks, and a five-entry cap 
   assert.equal("MARTINGALE_EXIT_BID_THRESHOLD" in config, false);
   const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
   assert.match(dashboard, /<title>Thirty Seconds Bot<\/title>/);
-  assert.match(dashboard, /Starting 30 seconds into each window, check UP and DOWN every 30 seconds/);
-  assert.match(dashboard, /there is no maximum ask/);
-  assert.match(dashboard, /Maximum 5 total entries per window, including the base bet/);
+  assert.match(dashboard, /fresh Chainlink BTC\/USD data shows a clear trend/);
+  assert.match(dashboard, /choppy, mixed, stale, or insufficient data pauses entries/);
   assert.doesNotMatch(dashboard, /270 seconds|0\.90 maximum|at or below \$0\.90/);
   assert.match(dashboard, /id="countdown-\$\{k\}"/);
   assert.match(dashboard, /Next fire in/);
   assert.match(dashboard, /paintCountdown/);
 
   const bot = new Bot();
+  bot.marketRegime = { state: "TRENDING", reason: "test trend" };
+  assert.match(bot.snapshot().strategy.entries.timing, /no maximum ask/);
+  assert.match(bot.snapshot().strategy.entries.timing, /up to 5 total entries/);
   const start = 1_800_000;
   const now = start + 30_000;
   bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
@@ -43,6 +45,7 @@ test("BTC bot uses a strict $0.70 floor, 30-second checks, and a five-entry cap 
 
 test("checks before 30 seconds do not place entries but asks above $0.90 are allowed at the first check", () => {
   const bot = new Bot();
+  bot.marketRegime = { state: "TRENDING", reason: "test trend" };
   const start = 1_800_000;
   bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
   bot.openStrategyWindow(start, start);
@@ -64,6 +67,7 @@ test("checks before 30 seconds do not place entries but asks above $0.90 are all
 
 test("entry checks continue at 270 seconds and stop at the five-minute window boundary", () => {
   const bot = new Bot();
+  bot.marketRegime = { state: "TRENDING", reason: "test trend" };
   const start = 1_800_000;
   bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
   bot.openStrategyWindow(start, start);
@@ -84,6 +88,7 @@ test("entry checks continue at 270 seconds and stop at the five-minute window bo
 
 test("successful entries stop at five total per window including the base bet", () => {
   const bot = new Bot();
+  bot.marketRegime = { state: "TRENDING", reason: "test trend" };
   const start = 1_800_000;
   bot.cash = 10_000_000_000;
   bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
@@ -112,6 +117,7 @@ test("a best bid below $0.30 does not trigger a forced sale after the entry cap"
   });
   try {
     const bot = new Bot();
+    bot.marketRegime = { state: "TRENDING", reason: "test trend" };
     const start = 1_800_000;
     const now = start + 60_000;
     bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
@@ -133,5 +139,27 @@ test("a best bid below $0.30 does not trigger a forced sale after the entry cap"
     assert.equal(bot.events.some((event) => event.event.includes("MARTINGALE_EXIT")), false);
   } finally {
     marketData.getBook = oldGetBook;
+  }
+});
+
+test("new paper entries pause during choppy, mixed, or unknown BTC regimes", () => {
+  for (const state of ["CHOPPY", "MIXED", "UNKNOWN"]) {
+    const bot = new Bot({ priceFeed: { getTicks: () => [], snapshot: () => ({ status: "live" }), stop() {} } });
+    const start = 1_800_000;
+    const now = start + config.ENTRY_CHECK_INTERVAL_MS;
+    bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
+    bot.openStrategyWindow(start, start);
+    bot.marketRegime = { state, reason: `${state.toLowerCase()} test condition` };
+    bot.liveQuotes = {
+      UP: { status: "LIVE", updatedAt: now, bestAsk: 0.80, askSize: 100 },
+      DOWN: { status: "LIVE", updatedAt: now, bestAsk: 0.82, askSize: 100 },
+    };
+
+    bot.processTimedEntries(start, now);
+
+    assert.equal(bot.positions.length, 0);
+    assert.equal(bot.windowFiredEntries, 0);
+    assert.ok(bot.windowOrders.every(order => order.status === "SKIPPED_REGIME"));
+    assert.match(bot.windowOrders[0].reason, new RegExp(state));
   }
 });
