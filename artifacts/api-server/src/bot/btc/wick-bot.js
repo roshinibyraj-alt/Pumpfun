@@ -123,16 +123,16 @@ class WickBot{
     this.windowOrders=[];
     this.log('PAPER_TIMED_ENTRY_STRATEGY_STARTED',{windowStart:start,
       checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
-      priceAbove:cfg.ENTRY_PRICE_THRESHOLD,maxPrice:cfg.MAX_ENTRY_PRICE,
+      priceAbove:cfg.ENTRY_PRICE_THRESHOLD,
       baseShares:cfg.BASE_ENTRY_SHARES,sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
-      maxEntries:cfg.MAX_ENTRIES_PER_WINDOW,cutoffSeconds:cfg.MAX_ENTRY_SECONDS});
+      maxEntries:cfg.MAX_ENTRIES_PER_WINDOW});
   }
   processTimedEntries(start,now){
-    const elapsedMs=now-start,cutoffMs=cfg.MAX_ENTRY_SECONDS*1000;
+    const elapsedMs=now-start;
+    if(elapsedMs<cfg.ENTRY_CHECK_INTERVAL_MS||elapsedMs>=this.windowMs)return;
     const checkpoint=Math.floor(elapsedMs/cfg.ENTRY_CHECK_INTERVAL_MS);
     if(checkpoint<=this.lastEntryCheckpoint)return;
     this.lastEntryCheckpoint=checkpoint;
-    if(elapsedMs<cfg.ENTRY_CHECK_INTERVAL_MS||elapsedMs>=cutoffMs)return;
     for(const side of ['UP','DOWN']){
       const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);
       const id=`${this.timeframe}-${start}-${side}-check-${checkpoint}`;
@@ -148,10 +148,6 @@ class WickBot{
       order.ask=ask;
       if(ask<=cfg.ENTRY_PRICE_THRESHOLD){
         order.reason=`Ask is not above $${cfg.ENTRY_PRICE_THRESHOLD.toFixed(2)}.`;
-        continue;
-      }
-      if(ask>cfg.MAX_ENTRY_PRICE){
-        order.reason=`Ask is above the $${cfg.MAX_ENTRY_PRICE.toFixed(2)} maximum.`;
         continue;
       }
       if(this.windowFiredEntries>=cfg.MAX_ENTRIES_PER_WINDOW){
@@ -250,12 +246,11 @@ class WickBot{
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
         strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
           entries:{orderType:'MARKET',triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
-             maxAsk:cfg.MAX_ENTRY_PRICE,checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
+             checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
              baseShares:cfg.BASE_ENTRY_SHARES,sizeMultiplier:cfg.ENTRY_SIZE_MULTIPLIER,
              maxEntriesPerWindow:cfg.MAX_ENTRIES_PER_WINDOW,
-             maxEntrySeconds:cfg.MAX_ENTRY_SECONDS,
             sides:['UP','DOWN'],
-              timing:`From ${cfg.ENTRY_CHECK_INTERVAL_MS/1000} seconds into each window, check both sides every ${cfg.ENTRY_CHECK_INTERVAL_MS/1000} seconds; enter only above $${cfg.ENTRY_PRICE_THRESHOLD.toFixed(2)} and at or below $${cfg.MAX_ENTRY_PRICE.toFixed(2)}; double size after each filled entry, up to ${cfg.MAX_ENTRIES_PER_WINDOW} total entries including the base entry; stop at ${cfg.MAX_ENTRY_SECONDS} seconds or when paper cash is insufficient`},
+              timing:`From ${cfg.ENTRY_CHECK_INTERVAL_MS/1000} seconds into each window, check both sides every ${cfg.ENTRY_CHECK_INTERVAL_MS/1000} seconds until the five-minute window ends; enter when the ask is above $${cfg.ENTRY_PRICE_THRESHOLD.toFixed(2)} with no maximum ask; double size after each filled entry, up to ${cfg.MAX_ENTRIES_PER_WINDOW} total entries including the base entry; paper cash must cover the entry and its fee`},
           exit:'Any fresh own-side CLOB bid/ask/mid >= $0.99 immediately pays $1/share; <= $0.01 immediately pays $0/share; otherwise use official Gamma outcome at window close',
           direction:'CLOB prices only; accumulate UP and DOWN positions independently',
            entryFillModel:'Paper market buys fill at the fresh best ask and include the configured taker fee',

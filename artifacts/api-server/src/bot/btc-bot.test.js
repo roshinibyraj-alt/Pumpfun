@@ -6,17 +6,19 @@ const config = require("./btc/config.js");
 const Bot = require("./btc/wick-bot.js");
 const marketData = require("./btc/wick-market-data.js");
 
-test("BTC bot uses a strict $0.70 floor, inclusive $0.90 ceiling, 30-second checks, and a five-entry cap", () => {
+test("BTC bot uses a strict $0.70 floor, 30-second checks, and a five-entry cap without a price ceiling or early cutoff", () => {
   assert.equal(config.ENTRY_PRICE_THRESHOLD, 0.70);
-  assert.equal(config.MAX_ENTRY_PRICE, 0.90);
   assert.equal(config.ENTRY_CHECK_INTERVAL_MS, 30_000);
   assert.equal(config.MAX_ENTRIES_PER_WINDOW, 5);
+  assert.equal("MAX_ENTRY_PRICE" in config, false);
+  assert.equal("MAX_ENTRY_SECONDS" in config, false);
   assert.equal("MARTINGALE_EXIT_BID_THRESHOLD" in config, false);
   const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
   assert.match(dashboard, /<title>Thirty Seconds Bot<\/title>/);
   assert.match(dashboard, /Starting 30 seconds into each window, check UP and DOWN every 30 seconds/);
-  assert.match(dashboard, /at or below \$0\.90/);
+  assert.match(dashboard, /there is no maximum ask/);
   assert.match(dashboard, /Maximum 5 total entries per window, including the base bet/);
+  assert.doesNotMatch(dashboard, /270 seconds|0\.90 maximum|at or below \$0\.90/);
   assert.match(dashboard, /id="countdown-\$\{k\}"/);
   assert.match(dashboard, /Next fire in/);
   assert.match(dashboard, /paintCountdown/);
@@ -28,7 +30,7 @@ test("BTC bot uses a strict $0.70 floor, inclusive $0.90 ceiling, 30-second chec
   bot.openStrategyWindow(start, now);
   bot.liveQuotes = {
     UP: { status: "LIVE", updatedAt: now, bestAsk: 0.70, askSize: 100 },
-    DOWN: { status: "LIVE", updatedAt: now, bestAsk: 0.90, askSize: 100 },
+    DOWN: { status: "LIVE", updatedAt: now, bestAsk: 0.95, askSize: 100 },
   };
 
   bot.processTimedEntries(start, now);
@@ -36,10 +38,10 @@ test("BTC bot uses a strict $0.70 floor, inclusive $0.90 ceiling, 30-second chec
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, "DOWN");
   assert.equal(bot.positions[0].shares, 100);
-  assert.equal(bot.positions[0].avgEntry, 0.90);
+  assert.equal(bot.positions[0].avgEntry, 0.95);
 });
 
-test("checks before 30 seconds do not place entries and asks above $0.90 are skipped", () => {
+test("checks before 30 seconds do not place entries but asks above $0.90 are allowed at the first check", () => {
   const bot = new Bot();
   const start = 1_800_000;
   bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
@@ -56,8 +58,28 @@ test("checks before 30 seconds do not place entries and asks above $0.90 are ski
   bot.liveQuotes.UP = { status: "LIVE", updatedAt: now, bestAsk: 0.9001, askSize: 100 };
   bot.liveQuotes.DOWN = { status: "LIVE", updatedAt: now, bestAsk: 0.91, askSize: 100 };
   bot.processTimedEntries(start, now);
-  assert.equal(bot.positions.length, 0);
-  assert.ok(bot.windowOrders.every((order) => order.reason.includes("above the $0.90 maximum")));
+  assert.equal(bot.positions.length, 2);
+  assert.deepEqual(bot.positions.map((position) => position.avgEntry).reverse(), [0.9001, 0.91]);
+});
+
+test("entry checks continue at 270 seconds and stop at the five-minute window boundary", () => {
+  const bot = new Bot();
+  const start = 1_800_000;
+  bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
+  bot.openStrategyWindow(start, start);
+  const lastCheck = start + 270_000;
+  bot.liveQuotes = {
+    UP: { status: "LIVE", updatedAt: lastCheck, bestAsk: 0.71, askSize: 100 },
+    DOWN: { status: "LIVE", updatedAt: lastCheck, bestAsk: 0.71, askSize: 100 },
+  };
+  bot.processTimedEntries(start, lastCheck);
+  assert.equal(bot.windowFiredEntries, 2);
+
+  const atWindowEnd = start + config.WINDOW_MS_5M;
+  bot.liveQuotes.UP.updatedAt = atWindowEnd;
+  bot.liveQuotes.DOWN.updatedAt = atWindowEnd;
+  bot.processTimedEntries(start, atWindowEnd);
+  assert.equal(bot.windowFiredEntries, 2);
 });
 
 test("successful entries stop at five total per window including the base bet", () => {
