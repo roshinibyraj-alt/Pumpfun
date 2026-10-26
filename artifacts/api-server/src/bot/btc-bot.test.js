@@ -15,8 +15,9 @@ test("BTC bot uses a strict $0.70 floor, 30-second checks, and a five-entry cap 
   assert.equal("MARTINGALE_EXIT_BID_THRESHOLD" in config, false);
   const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
   assert.match(dashboard, /<title>Thirty Seconds Bot<\/title>/);
-  assert.match(dashboard, /fresh Chainlink BTC\/USD data shows a clear trend/);
-  assert.match(dashboard, /choppy, mixed, stale, or insufficient data pauses entries/);
+  assert.match(dashboard, /BTC regime is still displayed for context, but it no longer pauses new paper entries/);
+  assert.match(dashboard, /regime is informational and does not pause entries/);
+  assert.doesNotMatch(dashboard, /only when a fresh BTC trend is confirmed/);
   assert.doesNotMatch(dashboard, /270 seconds|0\.90 maximum|at or below \$0\.90/);
   assert.match(dashboard, /id="countdown-\$\{k\}"/);
   assert.match(dashboard, /Next fire in/);
@@ -26,6 +27,7 @@ test("BTC bot uses a strict $0.70 floor, 30-second checks, and a five-entry cap 
   bot.marketRegime = { state: "TRENDING", reason: "test trend" };
   assert.match(bot.snapshot().strategy.entries.timing, /no maximum ask/);
   assert.match(bot.snapshot().strategy.entries.timing, /up to 5 total entries/);
+  assert.equal(bot.snapshot().strategy.regime.entryPolicy, "Informational only; BTC regime does not block entries");
   const start = 1_800_000;
   const now = start + 30_000;
   bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
@@ -142,7 +144,7 @@ test("a best bid below $0.30 does not trigger a forced sale after the entry cap"
   }
 });
 
-test("new paper entries pause during choppy, mixed, or unknown BTC regimes", () => {
+test("choppy, mixed, and unknown BTC regimes no longer skip valid paper entries", () => {
   for (const state of ["CHOPPY", "MIXED", "UNKNOWN"]) {
     const bot = new Bot({ priceFeed: { getTicks: () => [], snapshot: () => ({ status: "live" }), stop() {} } });
     const start = 1_800_000;
@@ -157,9 +159,9 @@ test("new paper entries pause during choppy, mixed, or unknown BTC regimes", () 
 
     bot.processTimedEntries(start, now);
 
-    assert.equal(bot.positions.length, 0);
-    assert.equal(bot.windowFiredEntries, 0);
-    assert.ok(bot.windowOrders.every(order => order.status === "SKIPPED_REGIME"));
-    assert.match(bot.windowOrders[0].reason, new RegExp(state));
+    assert.equal(bot.positions.length, 2);
+    assert.equal(bot.windowFiredEntries, 2);
+    assert.ok(bot.windowOrders.every(order => order.status === "FILLED"));
+    assert.ok(bot.positions.every(position => position.shares > 0));
   }
 });
