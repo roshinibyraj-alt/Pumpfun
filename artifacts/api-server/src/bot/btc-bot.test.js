@@ -304,6 +304,93 @@ test("window rollover closes a position for $0 when its token has no bid", async
   assert.equal(bot.completedWindows.get(start).reason, "WINDOW_ROLLOVER");
 });
 
+test("two consecutive completed windows settle independently without carrying shares", async () => {
+  const { bot, start } = makeBot();
+  const firstUp = {
+    id: "first-up-tp",
+    side: "UP",
+    status: "OPEN",
+    windowStart: start,
+    shares: 50,
+    totalCost: 25,
+  };
+  const firstDown = {
+    id: "first-down-150",
+    side: "DOWN",
+    status: "OPEN",
+    windowStart: start,
+    shares: 150,
+    totalCost: 90,
+  };
+  bot.positions = [firstUp, firstDown];
+  bot.orders = [{ id: "first-pending", windowStart: start, status: "PENDING", remainingShares: 50 }];
+  bot.cash -= firstUp.totalCost + firstDown.totalCost;
+  bot.liveQuotes = {
+    UP: { status: "LIVE", updatedAt: start + 60_000, bestBid: 0.99 },
+    DOWN: { status: "LIVE", updatedAt: start + 60_000, bestBid: 0.2 },
+  };
+
+  await bot.completeWindow(start, firstUp, true, "TAKE_PROFIT_BID", 0.99, start + 60_000);
+
+  assert.deepEqual([firstUp.status, firstDown.status], ["SETTLED_EXIT", "SETTLED_EXIT"]);
+  assert.deepEqual([firstUp.proceeds, firstDown.proceeds], [50, 30]);
+  assert.equal(firstDown.realizedPnl, -60);
+  assert.equal(bot.orders[0].status, "EXPIRED_WINDOW_COMPLETE");
+  assert.equal(bot.cash, bot.capital - 35);
+  assert.equal(bot.snapshot().account.openPositions, 0);
+  assert.deepEqual(bot.snapshot().inventory, {
+    UP: { shares: 0, cost: 0, averageCost: null, positions: 0 },
+    DOWN: { shares: 0, cost: 0, averageCost: null, positions: 0 },
+  });
+
+  const secondStart = start + bot.windowMs;
+  bot.market = {
+    ...bot.market,
+    id: "second-window",
+    slug: "second-window",
+    start: secondStart,
+    end: secondStart + bot.windowMs,
+  };
+  assert.equal(bot.snapshot().inventory.DOWN.shares, 0);
+  const secondUp = {
+    id: "second-up",
+    side: "UP",
+    status: "OPEN",
+    windowStart: secondStart,
+    shares: 150,
+    totalCost: 75,
+  };
+  const secondDown = {
+    id: "second-down-sl",
+    side: "DOWN",
+    status: "OPEN",
+    windowStart: secondStart,
+    shares: 50,
+    totalCost: 20,
+  };
+  bot.positions.push(secondUp, secondDown);
+  bot.orders.push({ id: "second-pending", windowStart: secondStart, status: "PENDING", remainingShares: 50 });
+  bot.cash -= secondUp.totalCost + secondDown.totalCost;
+  bot.liveQuotes = {
+    UP: { status: "LIVE", updatedAt: secondStart + 60_000, bestBid: 0.35 },
+    DOWN: { status: "LIVE", updatedAt: secondStart + 60_000, bestBid: 0.01 },
+  };
+
+  await bot.completeWindow(secondStart, secondDown, false, "STOP_LOSS_BID", 0.01, secondStart + 60_000);
+
+  assert.deepEqual([secondUp.status, secondDown.status], ["SETTLED_EXIT", "SETTLED_EXIT"]);
+  assert.deepEqual([secondUp.proceeds, secondDown.proceeds], [52.5, 0]);
+  assert.equal(bot.orders[1].status, "EXPIRED_WINDOW_COMPLETE");
+  assert.equal(bot.cash, bot.capital - 77.5);
+  const final = bot.snapshot();
+  assert.equal(final.account.openPositions, 0);
+  assert.equal(final.account.settledTrades, 4);
+  assert.equal(final.account.realizedPnl, -77.5);
+  assert.equal(final.window.complete, true);
+  assert.deepEqual([final.inventory.UP.shares, final.inventory.DOWN.shares], [0, 0]);
+  assert.ok(bot.positions.every(position => position.status === "SETTLED_EXIT"));
+});
+
 test("old-window positions can still settle from their own token threshold", async () => {
   const { bot } = makeBot();
   const now = Date.now();
