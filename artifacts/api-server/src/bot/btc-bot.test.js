@@ -36,6 +36,9 @@ test("no-merge bot uses independent 50-share limits every five seconds", () => {
   const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
   assert.match(dashboard, /BTC No-Merge Paper Bot/);
   assert.match(dashboard, /Shares are never merged/);
+  for (const id of ["upShares", "downShares", "upAverageCost", "downAverageCost", "upTotalCost", "downTotalCost", "upBid", "downBid", "upAsk", "downAsk"]) {
+    assert.ok(dashboard.includes(`id="${id}"`), `dashboard should render ${id}`);
+  }
 
   const { bot, start } = makeBot();
   const now = start + config.ENTRY_CHECK_INTERVAL_MS;
