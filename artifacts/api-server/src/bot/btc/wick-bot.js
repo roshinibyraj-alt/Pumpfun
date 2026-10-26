@@ -168,11 +168,6 @@ class WickBot{
         order.reason=`Ask is not above $${cfg.ENTRY_PRICE_THRESHOLD.toFixed(2)}.`;
         continue;
       }
-      if(this.marketRegime.state!=='TRENDING'){
-        order.status='SKIPPED_REGIME';
-        order.reason=`New paper entries paused: BTC regime is ${this.marketRegime.state}. ${this.marketRegime.reason||''}`.trim();
-        continue;
-      }
       if(this.windowFiredEntries>=cfg.MAX_ENTRIES_PER_WINDOW){
         order.reason=`The ${cfg.MAX_ENTRIES_PER_WINDOW}-entry window limit, including the base entry, has been reached.`;
         continue;
@@ -268,7 +263,7 @@ class WickBot{
     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
         strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-           regime:{...this.marketRegime,entryPolicy:'New entries allowed only when fresh BTC data classifies as TRENDING'},
+            regime:{...this.marketRegime,entryPolicy:'Informational only; BTC regime does not block entries'},
            btcPriceFeed:this.priceFeed.snapshot(),
           entries:{orderType:'MARKET',triggerAskAbove:cfg.ENTRY_PRICE_THRESHOLD,
              checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
@@ -290,11 +285,11 @@ class WickBot{
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
         scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
-           source:'Polymarket Gamma/CLOB plus Chainlink BTC/USD price regime filter',
+           source:'Polymarket Gamma/CLOB plus Chainlink BTC/USD reference feed (regime is informational only)',
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved'},
        positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-   start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m timed entries; new entries require a fresh trending BTC regime; no live orders.'});
+    start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m timed entries; BTC regime is informational and does not block entries; no live orders.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer);this.priceFeed.stop()}
