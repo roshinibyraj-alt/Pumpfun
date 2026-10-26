@@ -4,164 +4,132 @@ const path = require("node:path");
 const test = require("node:test");
 const config = require("./btc/config.js");
 const Bot = require("./btc/wick-bot.js");
-const marketData = require("./btc/wick-market-data.js");
 
-test("BTC bot uses a strict $0.70 floor, 30-second checks, and a five-entry cap without a price ceiling or early cutoff", () => {
-  assert.equal(config.ENTRY_PRICE_THRESHOLD, 0.70);
-  assert.equal(config.ENTRY_CHECK_INTERVAL_MS, 30_000);
-  assert.equal(config.MAX_ENTRIES_PER_WINDOW, 5);
-  assert.equal("MAX_ENTRY_PRICE" in config, false);
-  assert.equal("MAX_ENTRY_SECONDS" in config, false);
-  assert.equal("MARTINGALE_EXIT_BID_THRESHOLD" in config, false);
-  const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
-  assert.match(dashboard, /<title>Thirty Seconds Bot<\/title>/);
-  assert.match(dashboard, /BTC regime is still displayed for context, but it no longer pauses new paper entries/);
-  assert.match(dashboard, /regime is informational and does not pause entries/);
-  assert.doesNotMatch(dashboard, /only when a fresh BTC trend is confirmed/);
-  assert.doesNotMatch(dashboard, /270 seconds|0\.90 maximum|at or below \$0\.90/);
-  assert.match(dashboard, /id="countdown-\$\{k\}"/);
-  assert.match(dashboard, /Next fire in/);
-  assert.match(dashboard, /paintCountdown/);
-
-  const bot = new Bot();
-  bot.marketRegime = { state: "TRENDING", reason: "test trend" };
-  assert.match(bot.snapshot().strategy.entries.timing, /no maximum ask/);
-  assert.match(bot.snapshot().strategy.entries.timing, /up to 5 total entries/);
-  assert.equal(bot.snapshot().strategy.regime.entryPolicy, "Informational only; BTC regime does not block entries");
+function makeBot() {
+  const bot = new Bot({
+    priceFeed: {
+      getTicks: () => [],
+      snapshot: () => ({ status: "test" }),
+      start() {},
+      stop() {},
+    },
+  });
   const start = 1_800_000;
-  const now = start + 30_000;
-  bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
-  bot.openStrategyWindow(start, now);
+  bot.market = {
+    id: "market",
+    slug: "market",
+    title: "market",
+    start,
+    tokens: { UP: "up-token", DOWN: "down-token" },
+    feesEnabled: false,
+  };
+  bot.openStrategyWindow(start, start);
+  return { bot, start };
+}
+
+test("no-merge bot uses independent 50-share limits every five seconds", () => {
+  assert.equal(config.ENTRY_CHECK_INTERVAL_MS, 5_000);
+  assert.equal(config.BASE_ENTRY_SHARES, 50);
+  assert.equal(config.LIMIT_PRICE_OFFSET, 0.05);
+  assert.equal("MERGE_LOT_SHARES" in config, false);
+
+  const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
+  assert.match(dashboard, /BTC No-Merge Paper Bot/);
+  assert.match(dashboard, /Shares are never merged/);
+
+  const { bot, start } = makeBot();
+  const now = start + config.ENTRY_CHECK_INTERVAL_MS;
   bot.liveQuotes = {
-    UP: { status: "LIVE", updatedAt: now, bestAsk: 0.70, askSize: 100 },
-    DOWN: { status: "LIVE", updatedAt: now, bestAsk: 0.95, askSize: 100 },
+    UP: { status: "LIVE", updatedAt: now, bestBid: 0.50, bestAsk: 0.60, mid: 0.55 },
+    DOWN: { status: "LIVE", updatedAt: now, bestBid: 0.40, bestAsk: 0.50, mid: 0.45 },
   };
 
   bot.processTimedEntries(start, now);
-  assert.equal(bot.windowFiredEntries, 1);
+  assert.equal(bot.windowOrders.length, 2);
+  assert.deepEqual(bot.windowOrders.map(order => [order.side, order.limitPrice, order.shares]), [
+    ["DOWN", 0.4, 50],
+    ["UP", 0.5, 50],
+  ]);
+  assert.ok(bot.windowOrders.every(order => order.status === "PENDING"));
+  assert.equal(bot.positions.length, 0);
+  assert.equal(bot.snapshot().strategy.merge.enabled, false);
+  assert.equal("mergeStatus" in bot.snapshot(), false);
+  assert.equal("merges" in bot.snapshot(), false);
+});
+
+test("pending limits fill only on a later fresh ask at or below the limit and remain separate", () => {
+  const { bot, start } = makeBot();
+  const placedAt = start + 5_000;
+  bot.liveQuotes = {
+    UP: { status: "LIVE", updatedAt: placedAt, bestBid: 0.50, bestAsk: 0.60, mid: 0.55 },
+    DOWN: { status: "LIVE", updatedAt: placedAt, bestBid: 0.40, bestAsk: 0.50, mid: 0.45 },
+  };
+  bot.processTimedEntries(start, placedAt);
+
+  bot.liveQuotes.UP.updatedAt = placedAt + 500;
+  bot.liveQuotes.UP.bestAsk = 0.51;
+  bot.liveQuotes.DOWN.updatedAt = placedAt + 500;
+  bot.liveQuotes.DOWN.bestAsk = 0.39;
+  bot.processPendingLimitOrders(placedAt + 500);
+
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, "DOWN");
-  assert.equal(bot.positions[0].shares, 100);
-  assert.equal(bot.positions[0].avgEntry, 0.95);
-});
+  assert.equal(bot.positions[0].shares, 50);
+  assert.equal(bot.windowOrders.find(order => order.side === "UP").status, "PENDING");
 
-test("checks before 30 seconds do not place entries but asks above $0.90 are allowed at the first check", () => {
-  const bot = new Bot();
-  bot.marketRegime = { state: "TRENDING", reason: "test trend" };
-  const start = 1_800_000;
-  bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
-  bot.openStrategyWindow(start, start);
-  bot.liveQuotes = {
-    UP: { status: "LIVE", updatedAt: start + 29_999, bestAsk: 0.80, askSize: 100 },
-    DOWN: { status: "LIVE", updatedAt: start + 29_999, bestAsk: 0.91, askSize: 100 },
-  };
+  bot.liveQuotes.UP.updatedAt = placedAt + 1_000;
+  bot.liveQuotes.UP.bestAsk = 0.50;
+  bot.processPendingLimitOrders(placedAt + 1_000);
 
-  bot.processTimedEntries(start, start + 29_999);
-  assert.equal(bot.positions.length, 0);
-
-  const now = start + config.ENTRY_CHECK_INTERVAL_MS;
-  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now, bestAsk: 0.9001, askSize: 100 };
-  bot.liveQuotes.DOWN = { status: "LIVE", updatedAt: now, bestAsk: 0.91, askSize: 100 };
-  bot.processTimedEntries(start, now);
   assert.equal(bot.positions.length, 2);
-  assert.deepEqual(bot.positions.map((position) => position.avgEntry).reverse(), [0.9001, 0.91]);
+  assert.deepEqual(new Set(bot.positions.map(position => position.side)), new Set(["UP", "DOWN"]));
+  assert.ok(bot.positions.every(position => position.status === "OPEN" && position.shares === 50));
+  assert.equal(bot.positions.reduce((sum, position) => sum + position.shares, 0), 100);
+  assert.equal(bot.cash, 9_955);
 });
 
-test("entry checks continue at 270 seconds and stop at the five-minute window boundary", () => {
-  const bot = new Bot();
-  bot.marketRegime = { state: "TRENDING", reason: "test trend" };
-  const start = 1_800_000;
-  bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
-  bot.openStrategyWindow(start, start);
-  const lastCheck = start + 270_000;
+test("unfilled limits expire at the window close and no merge routine is present", () => {
+  const { bot, start } = makeBot();
+  const placedAt = start + 5_000;
   bot.liveQuotes = {
-    UP: { status: "LIVE", updatedAt: lastCheck, bestAsk: 0.71, askSize: 100 },
-    DOWN: { status: "LIVE", updatedAt: lastCheck, bestAsk: 0.71, askSize: 100 },
+    UP: { status: "LIVE", updatedAt: placedAt, bestBid: 0.50, bestAsk: 0.60, mid: 0.55 },
+    DOWN: { status: "LIVE", updatedAt: placedAt, bestBid: 0.40, bestAsk: 0.50, mid: 0.45 },
   };
-  bot.processTimedEntries(start, lastCheck);
-  assert.equal(bot.windowFiredEntries, 2);
+  bot.processTimedEntries(start, placedAt);
+  bot.processPendingLimitOrders(start + config.WINDOW_MS_5M);
 
-  const atWindowEnd = start + config.WINDOW_MS_5M;
-  bot.liveQuotes.UP.updatedAt = atWindowEnd;
-  bot.liveQuotes.DOWN.updatedAt = atWindowEnd;
-  bot.processTimedEntries(start, atWindowEnd);
-  assert.equal(bot.windowFiredEntries, 2);
+  assert.ok(bot.orders.filter(order => order.windowStart === start).every(order => order.status === "EXPIRED_UNFILLED"));
+  assert.equal(bot.positions.length, 0);
+  assert.equal(typeof bot.mergeMatchedPairs, "undefined");
 });
 
-test("successful entries stop at five total per window including the base bet", () => {
-  const bot = new Bot();
-  bot.marketRegime = { state: "TRENDING", reason: "test trend" };
-  const start = 1_800_000;
-  bot.cash = 10_000_000_000;
-  bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
-  bot.openStrategyWindow(start, start);
+test("a bid-based exit closes only that position; opposite-side shares stay open", () => {
+  const { bot, start } = makeBot();
+  bot.positions = [
+    { id: "up", side: "UP", status: "OPEN", windowStart: start, shares: 50, totalCost: 25, fees: 0 },
+    { id: "down", side: "DOWN", status: "OPEN", windowStart: start, shares: 50, totalCost: 20, fees: 0 },
+  ];
+  const exited = bot.positions[0];
+  bot.finalizeExit(exited, 0.99, "TAKE_PROFIT_BID");
 
-  for (let checkpoint = 1; checkpoint <= 7; checkpoint += 1) {
-    const now = start + checkpoint * config.ENTRY_CHECK_INTERVAL_MS;
-    bot.liveQuotes = {
-      UP: { status: "LIVE", updatedAt: now, bestAsk: 0.71, askSize: 1_000_000 },
-      DOWN: { status: "LIVE", updatedAt: now, bestAsk: 0.71, askSize: 1_000_000 },
-    };
-    bot.processTimedEntries(start, now);
-  }
-
-  assert.equal(bot.windowFiredEntries, 5);
-  assert.equal(bot.positions.length, 5);
-  assert.deepEqual(bot.positions.map((position) => position.shares).reverse(), [100, 200, 400, 800, 1600]);
-  assert.ok(bot.windowOrders.some((order) => order.reason?.includes("5-entry window limit")));
+  assert.equal(exited.status, "SETTLED_EXIT");
+  assert.equal(exited.proceeds, 49.5);
+  assert.equal(exited.realizedPnl, 24.5);
+  assert.equal(bot.positions[1].status, "OPEN");
+  assert.equal(bot.positions[1].shares, 50);
+  assert.equal(bot.cash, 10_049.5);
 });
 
-test("a best bid below $0.30 does not trigger a forced sale after the entry cap", async () => {
-  const oldGetBook = marketData.getBook;
-  marketData.getBook = async () => ({
-    bids: [{ price: 0.29, size: 100 }],
-    asks: [{ price: 0.30, size: 100 }],
-  });
-  try {
-    const bot = new Bot();
-    bot.marketRegime = { state: "TRENDING", reason: "test trend" };
-    const start = 1_800_000;
-    const now = start + 60_000;
-    bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
-    bot.orderWindowStart = start;
-    bot.windowFiredEntries = 5;
-    bot.positions = ["UP", "DOWN"].map((side) => ({
-      id: side,
-      side,
-      status: "OPEN",
-      windowStart: start,
-      shares: 100,
-      totalCost: 80,
-      fees: 0,
-    }));
+test("BTC regime remains informational and does not block new paper orders", () => {
+  const { bot, start } = makeBot();
+  bot.marketRegime = { state: "CHOPPY", reason: "test regime" };
+  const now = start + config.ENTRY_CHECK_INTERVAL_MS;
+  bot.liveQuotes = {
+    UP: { status: "LIVE", updatedAt: now, bestBid: 0.50, bestAsk: 0.60, mid: 0.55 },
+    DOWN: { status: "LIVE", updatedAt: now, bestBid: 0.40, bestAsk: 0.50, mid: 0.45 },
+  };
+  bot.processTimedEntries(start, now);
 
-    await bot.refreshLiveQuotes(now);
-    assert.deepEqual(bot.positions.map((position) => position.status), ["OPEN", "OPEN"]);
-    assert.equal(bot.snapshot().strategy.martingaleExit, undefined);
-    assert.equal(bot.events.some((event) => event.event.includes("MARTINGALE_EXIT")), false);
-  } finally {
-    marketData.getBook = oldGetBook;
-  }
-});
-
-test("choppy, mixed, and unknown BTC regimes no longer skip valid paper entries", () => {
-  for (const state of ["CHOPPY", "MIXED", "UNKNOWN"]) {
-    const bot = new Bot({ priceFeed: { getTicks: () => [], snapshot: () => ({ status: "live" }), stop() {} } });
-    const start = 1_800_000;
-    const now = start + config.ENTRY_CHECK_INTERVAL_MS;
-    bot.market = { id: "market", slug: "market", title: "market", start, tokens: { UP: "up", DOWN: "down" } };
-    bot.openStrategyWindow(start, start);
-    bot.marketRegime = { state, reason: `${state.toLowerCase()} test condition` };
-    bot.liveQuotes = {
-      UP: { status: "LIVE", updatedAt: now, bestAsk: 0.80, askSize: 100 },
-      DOWN: { status: "LIVE", updatedAt: now, bestAsk: 0.82, askSize: 100 },
-    };
-
-    bot.processTimedEntries(start, now);
-
-    assert.equal(bot.positions.length, 2);
-    assert.equal(bot.windowFiredEntries, 2);
-    assert.ok(bot.windowOrders.every(order => order.status === "FILLED"));
-    assert.ok(bot.positions.every(position => position.shares > 0));
-  }
+  assert.equal(bot.windowOrders.length, 2);
+  assert.equal(bot.snapshot().strategy.regime.entryPolicy, "Informational only; BTC regime does not block entries");
 });
