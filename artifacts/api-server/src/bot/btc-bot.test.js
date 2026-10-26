@@ -106,21 +106,68 @@ test("unfilled limits expire at the window close and no merge routine is present
   assert.equal(typeof bot.mergeMatchedPairs, "undefined");
 });
 
-test("a bid-based exit closes only that position; opposite-side shares stay open", () => {
+test("take profit at $0.99 settles the position at $1/share; opposite-side shares stay open", () => {
   const { bot, start } = makeBot();
   bot.positions = [
     { id: "up", side: "UP", status: "OPEN", windowStart: start, shares: 50, totalCost: 25, fees: 0 },
     { id: "down", side: "DOWN", status: "OPEN", windowStart: start, shares: 50, totalCost: 20, fees: 0 },
   ];
+  bot.cash -= 45;
   const exited = bot.positions[0];
-  bot.finalizeExit(exited, 0.99, "TAKE_PROFIT_BID");
+  bot.finalizePosition(exited, true, "TAKE_PROFIT_BID", 0.99);
 
-  assert.equal(exited.status, "SETTLED_EXIT");
-  assert.equal(exited.proceeds, 49.5);
-  assert.equal(exited.realizedPnl, 24.5);
+  assert.equal(exited.status, "SETTLED_WIN");
+  assert.equal(exited.payout, 1);
+  assert.equal(exited.proceeds, 50);
+  assert.equal(exited.exitFees, 0);
+  assert.equal(exited.realizedPnl, 25);
+  assert.equal(exited.tpTriggerQuote, 0.99);
   assert.equal(bot.positions[1].status, "OPEN");
   assert.equal(bot.positions[1].shares, 50);
-  assert.equal(bot.cash, 10_049.5);
+  assert.equal(bot.cash, 10_005);
+});
+
+test("stop loss at $0.01 settles the position at $0/share", () => {
+  const { bot, start } = makeBot();
+  const stopped = {
+    id: "stopped-up",
+    side: "UP",
+    status: "OPEN",
+    windowStart: start,
+    shares: 50,
+    totalCost: 20,
+    fees: 0,
+  };
+  bot.positions = [stopped];
+  bot.cash -= stopped.totalCost;
+
+  bot.finalizePosition(stopped, false, "STOP_LOSS_BID", 0.01);
+
+  assert.equal(stopped.status, "SETTLED_LOSS");
+  assert.equal(stopped.payout, 0);
+  assert.equal(stopped.proceeds, 0);
+  assert.equal(stopped.exitFees, 0);
+  assert.equal(stopped.realizedPnl, -20);
+  assert.equal(stopped.stopTriggerQuote, 0.01);
+  assert.equal(bot.cash, 9_980);
+});
+
+test("official binary settlement deducts both sides' costs from the winner payout", () => {
+  const { bot } = makeBot();
+  const up = { id: "up", side: "UP", status: "OPEN", shares: 700, totalCost: 350 };
+  const down = { id: "down", side: "DOWN", status: "OPEN", shares: 900, totalCost: 450 };
+  bot.positions = [up, down];
+  bot.cash -= up.totalCost + down.totalCost;
+
+  bot.finalizePosition(up, true, "OFFICIAL_RESOLUTION_WIN", null);
+  bot.finalizePosition(down, false, "OFFICIAL_RESOLUTION_LOSS", null);
+
+  const state = bot.snapshot();
+  assert.equal(up.proceeds, 700);
+  assert.equal(down.proceeds, 0);
+  assert.equal(state.account.realizedPnl, -100);
+  assert.equal(state.account.cash, 9_900);
+  assert.equal(state.account.equity, 9_900);
 });
 
 test("BTC regime remains informational and does not block new paper orders", () => {
