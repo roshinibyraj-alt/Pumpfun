@@ -306,6 +306,18 @@ class WickBot{
       }
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
+     const inventory={UP:{shares:0,cost:0,averageCost:null,positions:0},DOWN:{shares:0,cost:0,averageCost:null,positions:0}};
+     for(const p of this.positions){
+       if((p.status!=='OPEN'&&p.status!=='PENDING_CLOB_RESULT')||!inventory[p.side])continue;
+       const shares=Number(p.shares)||0;
+       inventory[p.side].shares+=shares;
+       inventory[p.side].cost+=Number(p.totalCost)||((Number(p.avgEntry)||0)*shares);
+       inventory[p.side].positions++;
+     }
+     for(const side of ['UP','DOWN']){
+       const sideInventory=inventory[side];
+       sideInventory.averageCost=sideInventory.shares?sideInventory.cost/sideInventory.shares:null;
+     }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
          strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
             regime:{...this.marketRegime,entryPolicy:'Informational only; BTC regime does not block entries'},
@@ -333,7 +345,7 @@ class WickBot{
         scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
            source:'Polymarket Gamma/CLOB plus Chainlink BTC/USD reference feed (regime is informational only)',
           marketResolution:'Own-side fresh CLOB quote >= $0.99 settles $1/share, <= $0.01 settles $0/share immediately; otherwise official Gamma result is retried until resolved'},
-        positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
+       inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
      start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m independent UP/DOWN midpoint-offset limit buys; merges disabled; no live orders.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};

@@ -133,3 +133,33 @@ test("BTC regime remains informational and does not block new paper orders", () 
   assert.equal(bot.windowOrders.length, 2);
   assert.equal(bot.snapshot().strategy.regime.entryPolicy, "Informational only; BTC regime does not block entries");
 });
+
+test("snapshot reports weighted average cost for all open UP and DOWN shares", () => {
+  const { bot, start } = makeBot();
+  bot.positions = [
+    { side: "UP", status: "OPEN", shares: 25, totalCost: 10 },
+    { side: "UP", status: "OPEN", shares: 75, totalCost: 45 },
+    { side: "UP", status: "PENDING_CLOB_RESULT", shares: 5, totalCost: 2.5 },
+    { side: "DOWN", status: "OPEN", shares: 50, totalCost: 20 },
+    { side: "DOWN", status: "OPEN", shares: 10, totalCost: 8 },
+    { side: "DOWN", status: "SETTLED_EXIT", shares: 40, totalCost: 15 },
+    ...Array.from({ length: 55 }, (_, index) => ({
+      id: `settled-${index}`,
+      side: "UP",
+      status: "SETTLED_WIN",
+      shares: 100,
+      totalCost: 90,
+      settledAt: start + index,
+    })),
+  ];
+
+  const inventory = bot.snapshot().inventory;
+  assert.equal(inventory.UP.shares, 105);
+  assert.equal(inventory.UP.cost, 57.5);
+  assert.equal(inventory.UP.averageCost, 57.5 / 105);
+  assert.equal(inventory.UP.positions, 3);
+  assert.equal(inventory.DOWN.shares, 60);
+  assert.equal(inventory.DOWN.cost, 28);
+  assert.equal(inventory.DOWN.averageCost, 28 / 60);
+  assert.equal(inventory.DOWN.positions, 2);
+});
