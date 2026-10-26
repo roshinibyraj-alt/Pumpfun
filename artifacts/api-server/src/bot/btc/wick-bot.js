@@ -75,6 +75,7 @@ class WickBot{
         this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
         this.closeQuotes=null;
       }
+      await this.closePreviousWindows(start,now);
       if(!this.market||this.market.start!==start||now-this.lastMarketAt>cfg.MARKET_REFRESH_MS){
         this.market=await md.getBtcMarket(start,this.windowMs);this.lastMarketAt=now;
         if(!this.market){
@@ -97,6 +98,53 @@ class WickBot{
       if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{cash:this.cash,windowStart:start})}
     }catch(e){this.status='blocked_or_error';this.error=e.message;
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
+  }
+  async closePreviousWindows(currentStart,now=Date.now()){
+    const previousOrders=this.orders.filter(order=>order.status==='PENDING'&&order.windowStart!==currentStart);
+    const open=this.positions.filter(p=>p.status==='OPEN'&&p.windowStart!==currentStart);
+    if(!previousOrders.length&&!open.length)return 0;
+    for(const order of previousOrders){
+      order.status='EXPIRED_WINDOW_ROLLOVER';order.expiredAt=now;order.remainingShares=0;
+    }
+    const previousStarts=new Set([
+      ...previousOrders.map(order=>order.windowStart),
+      ...open.map(p=>p.windowStart),
+    ]);
+    for(const windowStart of previousStarts){
+      if(Number.isFinite(Number(windowStart))&&!this.completedWindows.has(windowStart)){
+        this.completedWindows.set(windowStart,{completedAt:now,reason:'WINDOW_ROLLOVER'});
+      }
+    }
+    const quoteCache=new Map();
+    const readQuote=async p=>{
+      if(p.markBid!=null&&Number.isFinite(Number(p.markBid))&&Number.isFinite(p.markUpdatedAt)&&now-p.markUpdatedAt<=5000){
+        return {bestBid:Number(p.markBid),updatedAt:p.markUpdatedAt,status:'LIVE'};
+      }
+      if(!p.tokenId)return null;
+      if(!quoteCache.has(p.tokenId)){
+        quoteCache.set(p.tokenId,md.getBook(p.tokenId).then(book=>quoteFromBook(book,now)).catch(()=>null));
+      }
+      return quoteCache.get(p.tokenId);
+    };
+    const quoted=await Promise.all(open.map(async p=>[p,await readQuote(p)]));
+    for(const [p,q] of quoted){
+      if(p.status!=='OPEN')continue;
+      if(takeProfitHit(q,now)){
+        this.finalizePosition(p,true,'TAKE_PROFIT_BID',Number(q.bestBid));
+      }else if(stopLossHit(q,now)){
+        this.finalizePosition(p,false,'STOP_LOSS_BID',Number(q.bestBid));
+      }else if(q?.bestBid!=null&&Number.isFinite(Number(q.bestBid))){
+        p.markBid=Number(q.bestBid);p.markUpdatedAt=q.updatedAt||now;
+        this.finalizeWindowLiquidation(p,Number(q.bestBid),'WINDOW_ROLLOVER_BID',now);
+      }else{
+        this.finalizeWindowLiquidation(p,0,'WINDOW_ROLLOVER_NO_BID',now);
+      }
+    }
+    for(const windowStart of previousStarts){
+      this.log('PAPER_WINDOW_ROLLED_OVER',{windowStart,currentStart,closedPositions:open.filter(p=>p.windowStart===windowStart).length,
+        cancelledOrders:previousOrders.filter(order=>order.windowStart===windowStart).length});
+    }
+    return open.length;
   }
   updateMarketRegime(now=Date.now()){
     try{
@@ -371,7 +419,7 @@ class WickBot{
               fill:'A limit fills only after a later fresh best ask walks down to or through its limit',
               unfilled:'Unfilled orders expire at the five-minute window close'},
           merge:{enabled:false},
-            exit:'A fresh own-side best bid >= $0.99 pays $1/share; <= $0.01 pays $0/share and completes that window. All other positions in the same window close at their own current bid (or $0 if no bid); pending entries are cancelled. No official results are used.',
+           exit:'A fresh own-side best bid >= $0.99 pays $1/share; <= $0.01 pays $0/share and completes that window. All other positions in that window close at their own current bid (or $0 if no bid); pending entries are cancelled. Any remaining positions close at their own bid (or $0) when the next window begins. No shares carry over, and no official results are used.',
           direction:'CLOB prices only; accumulate UP and DOWN positions independently; no shares are merged',
           entryFillModel:'Paper limit buys are priced five cents below each side midpoint; fill is confirmed when a later fresh best ask walks down to or through the limit',
           fees:'Maker fills have zero fees. Crypto rebate estimates are illustrative; actual daily rebates depend on market-wide maker activity.',
@@ -387,7 +435,7 @@ class WickBot{
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
         scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
            source:'Polymarket Gamma/CLOB plus Chainlink BTC/USD reference feed (regime is informational only)',
-            marketResolution:'A fresh own-side CLOB bid >= $0.99 pays $1/share or <= $0.01 pays $0/share and completes that window. Remaining positions in the window close at their own current bid (or $0 if no bid). No official results are used.'},
+             marketResolution:'A fresh own-side CLOB bid >= $0.99 pays $1/share or <= $0.01 pays $0/share and completes that window. Remaining positions close at their own bid (or $0 if no bid) at threshold completion or when the next window begins. No shares carry over and no official results are used.'},
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
      start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m independent UP/DOWN midpoint-offset limit buys; merges disabled; no live orders.'});

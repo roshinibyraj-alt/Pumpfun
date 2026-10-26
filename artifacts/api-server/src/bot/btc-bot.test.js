@@ -42,6 +42,7 @@ test("no-merge bot uses independent 50-share limits every five seconds", () => {
   assert.match(dashboard, /official market results are not used/i);
   assert.match(dashboard, /Current-window UP shares/);
   assert.match(dashboard, /cancels its pending entries/);
+  assert.match(dashboard, /No shares carry into the next window/);
   for (const id of ["upShares", "downShares", "upAverageCost", "downAverageCost", "upTotalCost", "downTotalCost", "upBid", "downBid", "upAsk", "downAsk"]) {
     assert.ok(dashboard.includes(`id="${id}"`), `dashboard should render ${id}`);
   }
@@ -219,7 +220,7 @@ test("combined threshold payouts deduct both sides' costs, even when the net is 
   assert.equal(state.account.losingExits, 1);
 });
 
-test("positions stay open after window close when neither threshold is reached", async () => {
+test("rollover clears previous-window shares and cancels pending orders", async () => {
   const { bot } = makeBot();
   const currentStart = Math.floor(Date.now() / bot.windowMs) * bot.windowMs;
   bot.market = {
@@ -233,22 +234,74 @@ test("positions stay open after window close when neither threshold is reached",
   bot.refreshLiveQuotes = async () => {};
   bot.updateMarketRegime = () => {};
   bot.processTimedEntries = () => {};
+  const oldStart = currentStart - bot.windowMs;
   bot.positions = [{
-    id: "old-window",
+    id: "old-down-losing-side",
+    side: "DOWN",
+    status: "OPEN",
+    windowStart: oldStart,
+    windowMs: bot.windowMs,
+    shares: 150,
+    totalCost: 90,
+    tokenId: "old-down",
+  }];
+  bot.orders = [{
+    id: "old-pending",
+    side: "DOWN",
+    status: "PENDING",
+    windowStart: oldStart,
+    remainingShares: 50,
+  }];
+  bot.cash -= 90;
+  const originalGetBook = marketData.getBook;
+  marketData.getBook = async tokenId => ({
+    bids: [{ price: tokenId === "old-down" ? 0.2 : 0.5, size: 150 }],
+    asks: [],
+  });
+
+  try {
+    await bot.tick();
+  } finally {
+    marketData.getBook = originalGetBook;
+  }
+
+  assert.equal(bot.positions[0].status, "SETTLED_EXIT");
+  assert.equal(bot.positions[0].settlementBasis, "WINDOW_ROLLOVER_BID");
+  assert.equal(bot.positions[0].shares, 150);
+  assert.equal(bot.positions[0].proceeds, 30);
+  assert.equal(bot.cash, bot.capital - 60);
+  assert.equal(bot.snapshot().account.openPositions, 0);
+  assert.equal(bot.snapshot().inventory.DOWN.shares, 0);
+  assert.match(bot.snapshot().strategy.exit, /No shares carry over/);
+  assert.equal(bot.orders[0].status, "EXPIRED_WINDOW_ROLLOVER");
+  assert.equal(bot.orders[0].remainingShares, 0);
+  assert.equal(bot.completedWindows.get(oldStart).reason, "WINDOW_ROLLOVER");
+});
+
+test("window rollover closes a position for $0 when its token has no bid", async () => {
+  const { bot, start } = makeBot();
+  bot.positions = [{
+    id: "old-window-no-bid",
     side: "UP",
     status: "OPEN",
-    windowStart: currentStart - bot.windowMs,
-    windowMs: bot.windowMs,
+    windowStart: start,
     shares: 50,
-    totalCost: 20,
+    totalCost: 25,
     tokenId: "old-up",
   }];
+  const originalGetBook = marketData.getBook;
+  marketData.getBook = async () => ({ bids: [], asks: [] });
 
-  await bot.tick();
+  try {
+    await bot.closePreviousWindows(start + bot.windowMs, start + bot.windowMs);
+  } finally {
+    marketData.getBook = originalGetBook;
+  }
 
-  assert.equal(bot.positions[0].status, "OPEN");
-  assert.equal(bot.snapshot().account.openPositions, 1);
-  assert.equal(typeof bot.trySettle, "undefined");
+  assert.equal(bot.positions[0].status, "SETTLED_EXIT");
+  assert.equal(bot.positions[0].settlementBasis, "WINDOW_ROLLOVER_NO_BID");
+  assert.equal(bot.positions[0].proceeds, 0);
+  assert.equal(bot.completedWindows.get(start).reason, "WINDOW_ROLLOVER");
 });
 
 test("old-window positions can still settle from their own token threshold", async () => {
