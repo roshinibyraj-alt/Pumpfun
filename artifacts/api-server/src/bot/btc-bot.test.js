@@ -31,8 +31,10 @@ function makeBot() {
 
 test("no-merge bot uses independent 50-share limits every five seconds", () => {
   assert.equal(config.ENTRY_CHECK_INTERVAL_MS, 5_000);
+  assert.equal(config.ENTRY_ORDER_TTL_MS, 4_000);
   assert.equal(config.BASE_ENTRY_SHARES, 50);
   assert.equal(config.LIMIT_PRICE_OFFSET, 0.05);
+  assert.equal(config.MIN_ENTRY_PRICE, 0.05);
   assert.equal("MERGE_LOT_SHARES" in config, false);
 
   const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
@@ -42,6 +44,8 @@ test("no-merge bot uses independent 50-share limits every five seconds", () => {
   assert.match(dashboard, /official market results are not used/i);
   assert.match(dashboard, /Current-window UP shares/);
   assert.match(dashboard, /cancels its pending entries/);
+  assert.match(dashboard, /cancel after 4 seconds/i);
+  assert.match(dashboard, /hard \$0\.05 minimum on both sides/i);
   assert.match(dashboard, /No shares carry into the next window/);
   for (const id of ["upShares", "downShares", "upAverageCost", "downAverageCost", "upTotalCost", "downTotalCost", "upBid", "downBid", "upAsk", "downAsk"]) {
     assert.ok(dashboard.includes(`id="${id}"`), `dashboard should render ${id}`);
@@ -65,6 +69,96 @@ test("no-merge bot uses independent 50-share limits every five seconds", () => {
   assert.equal(bot.snapshot().strategy.merge.enabled, false);
   assert.equal("mergeStatus" in bot.snapshot(), false);
   assert.equal("merges" in bot.snapshot(), false);
+});
+
+test("a 100-share UP imbalance places a 100-share DOWN rebalance order", () => {
+  const { bot, start } = makeBot();
+  bot.positions = [{
+    id: "up-filled",
+    side: "UP",
+    status: "OPEN",
+    windowStart: start,
+    shares: 100,
+    totalCost: 50,
+  }];
+  const now = start + config.ENTRY_CHECK_INTERVAL_MS;
+  bot.liveQuotes = {
+    UP: { status: "LIVE", updatedAt: now, bestBid: 0.50, bestAsk: 0.60, mid: 0.55 },
+    DOWN: { status: "LIVE", updatedAt: now, bestBid: 0.40, bestAsk: 0.50, mid: 0.45 },
+  };
+
+  bot.processTimedEntries(start, now);
+
+  assert.equal(bot.windowOrders.length, 1);
+  assert.equal(bot.windowOrders[0].side, "DOWN");
+  assert.equal(bot.windowOrders[0].shares, 100);
+  assert.equal(bot.windowOrders[0].entryMode, "REBALANCE");
+  assert.equal(bot.windowOrders[0].limitPrice, 0.4);
+});
+
+test("unfilled entries expire after four seconds and the next check rebalances actual fills", () => {
+  const { bot, start } = makeBot();
+  const placedAt = start + config.ENTRY_CHECK_INTERVAL_MS;
+  bot.liveQuotes = {
+    UP: { status: "LIVE", updatedAt: placedAt, bestBid: 0.50, bestAsk: 0.60, mid: 0.55 },
+    DOWN: { status: "LIVE", updatedAt: placedAt, bestBid: 0.40, bestAsk: 0.50, mid: 0.45 },
+  };
+  bot.processTimedEntries(start, placedAt);
+  const upOrder = bot.windowOrders.find(order => order.side === "UP");
+  const downOrder = bot.windowOrders.find(order => order.side === "DOWN");
+
+  bot.liveQuotes.UP.updatedAt = placedAt + 500;
+  bot.liveQuotes.UP.bestAsk = 0.50;
+  bot.processPendingLimitOrders(placedAt + 500);
+  assert.equal(upOrder.status, "FILLED");
+  assert.equal(bot.positions[0].shares, 50);
+
+  bot.liveQuotes.DOWN.updatedAt = placedAt + config.ENTRY_ORDER_TTL_MS;
+  bot.liveQuotes.DOWN.bestAsk = 0.39;
+  bot.processPendingLimitOrders(placedAt + config.ENTRY_ORDER_TTL_MS);
+  assert.equal(downOrder.status, "EXPIRED_UNFILLED_TIMEOUT");
+  assert.equal(bot.positions.length, 1, "crossing quote at expiry must not fill");
+
+  const nextCheck = start + 2 * config.ENTRY_CHECK_INTERVAL_MS;
+  bot.liveQuotes.UP.updatedAt = nextCheck;
+  bot.liveQuotes.DOWN.updatedAt = nextCheck;
+  bot.liveQuotes.DOWN.bestAsk = 0.50;
+  bot.processTimedEntries(start, nextCheck);
+  const rebalance = bot.windowOrders.find(order => order.checkpoint === 2);
+  assert.equal(rebalance.side, "DOWN");
+  assert.equal(rebalance.shares, 50);
+  assert.equal(rebalance.entryMode, "REBALANCE");
+});
+
+test("both sides skip sub-$0.05 limits and never fill while the ask is below $0.05", () => {
+  const { bot, start } = makeBot();
+  const placedAt = start + config.ENTRY_CHECK_INTERVAL_MS;
+  bot.liveQuotes = {
+    UP: { status: "LIVE", updatedAt: placedAt, bestBid: 0.03, bestAsk: 0.06, mid: 0.09 },
+    DOWN: { status: "LIVE", updatedAt: placedAt, bestBid: 0.03, bestAsk: 0.06, mid: 0.09 },
+  };
+  bot.processTimedEntries(start, placedAt);
+  assert.deepEqual(bot.windowOrders.map(order => order.status), [
+    "SKIPPED_BELOW_MIN_PRICE",
+    "SKIPPED_BELOW_MIN_PRICE",
+  ]);
+  assert.deepEqual(bot.windowOrders.map(order => order.calculatedLimitPrice), [0.04, 0.04]);
+
+  const next = start + 2 * config.ENTRY_CHECK_INTERVAL_MS;
+  bot.liveQuotes = {
+    UP: { status: "LIVE", updatedAt: next, bestBid: 0.09, bestAsk: 0.11, mid: 0.15 },
+    DOWN: { status: "LIVE", updatedAt: next, bestBid: 0.09, bestAsk: 0.11, mid: 0.15 },
+  };
+  bot.processTimedEntries(start, next);
+  const pending = bot.windowOrders.filter(order => order.status === "PENDING");
+  assert.equal(pending.length, 2);
+  bot.liveQuotes.UP.updatedAt = next + 500;
+  bot.liveQuotes.UP.bestAsk = 0.04;
+  bot.liveQuotes.DOWN.updatedAt = next + 500;
+  bot.liveQuotes.DOWN.bestAsk = 0.04;
+  bot.processPendingLimitOrders(next + 500);
+  assert.equal(bot.positions.length, 0);
+  assert.ok(pending.every(order => order.limitPrice >= 0.05));
 });
 
 test("pending limits fill only on a later fresh ask at or below the limit and remain separate", () => {
