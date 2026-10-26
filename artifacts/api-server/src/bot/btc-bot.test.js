@@ -4,6 +4,7 @@ const path = require("node:path");
 const test = require("node:test");
 const config = require("./btc/config.js");
 const Bot = require("./btc/wick-bot.js");
+const MultiBot = require("./btc/multi-bot.js");
 const marketData = require("./btc/wick-market-data.js");
 
 function makeBot() {
@@ -37,8 +38,10 @@ test("no-merge bot uses independent 50-share limits every five seconds", () => {
   const dashboard = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
   assert.match(dashboard, /BTC No-Merge Paper Bot/);
   assert.match(dashboard, /Complete UP\/DOWN sets are never merged/);
-  assert.match(dashboard, /Market-side counts do not choose payout/);
+  assert.match(dashboard, /All other positions in that window close at their own current bid/);
   assert.match(dashboard, /official market results are not used/i);
+  assert.match(dashboard, /Current-window UP shares/);
+  assert.match(dashboard, /cancels its pending entries/);
   for (const id of ["upShares", "downShares", "upAverageCost", "downAverageCost", "upTotalCost", "downTotalCost", "upBid", "downBid", "upAsk", "downAsk"]) {
     assert.ok(dashboard.includes(`id="${id}"`), `dashboard should render ${id}`);
   }
@@ -109,15 +112,16 @@ test("unfilled limits expire at the window close and no merge routine is present
   assert.equal(typeof bot.mergeMatchedPairs, "undefined");
 });
 
-test("take profit pays $1/share but is not labeled as an official market win", () => {
+test("take profit completes the window and clears all same-window shares", async () => {
   const { bot, start } = makeBot();
   bot.positions = [
     { id: "up", side: "UP", status: "OPEN", windowStart: start, shares: 50, totalCost: 25, fees: 0 },
     { id: "down", side: "DOWN", status: "OPEN", windowStart: start, shares: 50, totalCost: 20, fees: 0 },
   ];
+  bot.orders = [{ id: "pending", windowStart: start, status: "PENDING", remainingShares: 50 }];
   bot.cash -= 45;
   const exited = bot.positions[0];
-  bot.finalizePosition(exited, true, "TAKE_PROFIT_BID", 0.99);
+  await bot.completeWindow(start, exited, true, "TAKE_PROFIT_BID", 0.99, start);
 
   assert.equal(exited.status, "SETTLED_EXIT");
   assert.equal(exited.payout, 1);
@@ -126,9 +130,45 @@ test("take profit pays $1/share but is not labeled as an official market win", (
   assert.equal(exited.realizedPnl, 25);
   assert.equal(exited.tpTriggerQuote, 0.99);
   assert.equal(bot.snapshot().account.profitableExits, 1);
-  assert.equal(bot.positions[1].status, "OPEN");
+  assert.equal(bot.positions[1].status, "SETTLED_EXIT");
+  assert.equal(bot.positions[1].settlementBasis, "WINDOW_EXIT_NO_BID");
   assert.equal(bot.positions[1].shares, 50);
   assert.equal(bot.cash, 10_005);
+  assert.equal(bot.snapshot().inventory.UP.shares, 0);
+  assert.equal(bot.snapshot().inventory.DOWN.shares, 0);
+  assert.equal(bot.orders[0].status, "EXPIRED_WINDOW_COMPLETE");
+  assert.equal(bot.snapshot().window.complete, true);
+  const orderCount = bot.orders.length;
+  bot.processTimedEntries(start, start + config.ENTRY_CHECK_INTERVAL_MS);
+  assert.equal(bot.orders.length, orderCount);
+});
+
+test("window completion closes remaining shares at their own current CLOB bid", async () => {
+  const { bot, start } = makeBot();
+  const now = start + 30_000;
+  const up = { id: "up", side: "UP", status: "OPEN", windowStart: start, shares: 50, totalCost: 25 };
+  const down = { id: "down", side: "DOWN", status: "OPEN", windowStart: start, shares: 50, totalCost: 20 };
+  bot.positions = [up, down];
+  bot.cash -= 45;
+  const originalGetBook = marketData.getBook;
+  marketData.getBook = async tokenId => ({
+    bids: [{ price: tokenId === "up-token" ? 0.99 : 0.45, size: 50 }],
+    asks: [{ price: tokenId === "up-token" ? 0.995 : 0.5, size: 50 }],
+  });
+  try {
+    await bot.refreshLiveQuotes(now);
+  } finally {
+    marketData.getBook = originalGetBook;
+  }
+
+  assert.equal(up.proceeds, 50);
+  assert.equal(up.settlementBasis, "TAKE_PROFIT_BID");
+  assert.equal(down.settlementBasis, "WINDOW_EXIT_BID");
+  assert.equal(down.exitBid, 0.45);
+  assert.equal(down.proceeds, 22.5);
+  assert.equal(down.realizedPnl, 2.5);
+  assert.equal(bot.snapshot().account.openPositions, 0);
+  assert.equal(bot.snapshot().inventory.DOWN.shares, 0);
 });
 
 test("stop loss pays $0/share and is counted as a losing exit, not an official result", () => {
@@ -267,11 +307,11 @@ test("BTC regime remains informational and does not block new paper orders", () 
 test("snapshot reports weighted average cost for all open UP and DOWN shares", () => {
   const { bot, start } = makeBot();
   bot.positions = [
-    { side: "UP", status: "OPEN", shares: 25, totalCost: 10 },
-    { side: "UP", status: "OPEN", shares: 75, totalCost: 45 },
-    { side: "UP", status: "OPEN", shares: 5, totalCost: 2.5 },
-    { side: "DOWN", status: "OPEN", shares: 50, totalCost: 20 },
-    { side: "DOWN", status: "OPEN", shares: 10, totalCost: 8 },
+    { side: "UP", status: "OPEN", windowStart: start, shares: 25, totalCost: 10 },
+    { side: "UP", status: "OPEN", windowStart: start, shares: 75, totalCost: 45 },
+    { side: "UP", status: "OPEN", windowStart: start, shares: 5, totalCost: 2.5 },
+    { side: "DOWN", status: "OPEN", windowStart: start, shares: 50, totalCost: 20 },
+    { side: "DOWN", status: "OPEN", windowStart: start, shares: 10, totalCost: 8 },
     { side: "DOWN", status: "SETTLED_EXIT", shares: 40, totalCost: 15 },
     ...Array.from({ length: 55 }, (_, index) => ({
       id: `settled-${index}`,
@@ -292,4 +332,10 @@ test("snapshot reports weighted average cost for all open UP and DOWN shares", (
   assert.equal(inventory.DOWN.cost, 28);
   assert.equal(inventory.DOWN.averageCost, 28 / 60);
   assert.equal(inventory.DOWN.positions, 2);
+});
+
+test("multi-timeframe snapshot exposes a completed window status", () => {
+  const multiBot = new MultiBot();
+  multiBot.bots["5m"].status = "window_complete";
+  assert.equal(multiBot.snapshot().status, "window_complete");
 });

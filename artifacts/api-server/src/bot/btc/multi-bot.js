@@ -20,7 +20,8 @@ class MultiBot {
     const wins=states.reduce((n,s)=>n+s.account.wins,0),losses=states.reduce((n,s)=>n+s.account.losses,0);
     const status=states.some(s=>s.status==='blocked_or_error')?'blocked_or_error':
       states.some(s=>['scanning','position_open'].includes(s.status))?
-        (openPositions?'position_open':'scanning'):'waiting_for_market';
+        (openPositions?'position_open':'scanning'):
+        states.every(s=>s.status==='window_complete')?'window_complete':'waiting_for_market';
     const primary=timeframes['5m'],capital=states.reduce((n,s)=>n+s.account.capital,0);
     const series=states.map(s=>s.account.equityCurve||[]);
     const current=series.map(x=>Number(x[0]?.equity||0));

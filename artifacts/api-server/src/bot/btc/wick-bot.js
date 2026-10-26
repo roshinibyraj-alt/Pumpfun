@@ -60,7 +60,7 @@ class WickBot{
     this.priceFeed=priceFeed;
     this.marketRegime={state:'UNKNOWN',reason:'Waiting for fresh BTC price history'};
     this.startedAt=Date.now();
-    this.positions=[];this.events=[];this.status='starting';
+    this.positions=[];this.events=[];this.status='starting';this.completedWindows=new Map();
     this.error=null;this.market=null;this.lastMarketAt=0;
     this.lastScanAt=null;this.orders=[];this.windowOrders=[];this.orderWindowStart=null;this.running=false;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
@@ -93,7 +93,7 @@ class WickBot{
       }
       this.lastScanAt=now;this.error=null;
       const hasOpen=this.positions.some(p=>p.windowStart===start&&p.status==='OPEN');
-      this.status=hasOpen?'position_open':'scanning';
+      this.status=this.completedWindows.has(start)?'window_complete':hasOpen?'position_open':'scanning';
       if(!this.lastHeartbeat||now-this.lastHeartbeat>30000){this.lastHeartbeat=now;this.log('HEARTBEAT',{cash:this.cash,windowStart:start})}
     }catch(e){this.status='blocked_or_error';this.error=e.message;
       if(this.lastError!==e.message||Date.now()-this.lastErrorAt>30000){this.lastError=e.message;this.lastErrorAt=Date.now();this.log('SCAN_ERROR',{note:e.message})}}
@@ -122,6 +122,7 @@ class WickBot{
       mergeEnabled:false});
   }
   processTimedEntries(start,now){
+    if(this.completedWindows.has(start))return;
     const elapsedMs=now-start;
     if(elapsedMs<cfg.ENTRY_CHECK_INTERVAL_MS||elapsedMs>=this.windowMs)return;
     const checkpoint=Math.floor(elapsedMs/cfg.ENTRY_CHECK_INTERVAL_MS);
@@ -133,6 +134,7 @@ class WickBot{
     }
   }
   attemptEntry(start,now,side,shares,checkpoint,id){
+    if(this.completedWindows.has(start))return false;
     const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk),bid=Number(quote?.bestBid),mid=Number(quote?.mid);
     const order={id,timeframe:this.timeframe,windowStart:start,side,checkpoint,
       secondsIntoWindow:checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000,
@@ -168,6 +170,9 @@ class WickBot{
   processPendingLimitOrders(now){
     for(const order of this.orders){
       if(order.status!=='PENDING')continue;
+      if(this.completedWindows.has(order.windowStart)){
+        order.status='EXPIRED_WINDOW_COMPLETE';order.expiredAt=now;order.remainingShares=0;continue;
+      }
       if(now>=order.windowStart+this.windowMs){
         order.status='EXPIRED_UNFILLED';order.expiredAt=now;order.remainingShares=0;continue;
       }
@@ -222,8 +227,8 @@ class WickBot{
         const q=this.liveQuotes[p.side];
         p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';
         if(p.status==='OPEN'){
-          if(takeProfitHit(q,now))this.finalizePosition(p,true,'TAKE_PROFIT_BID',Number(q.bestBid));
-          else if(stopLossHit(q,now))this.finalizePosition(p,false,'STOP_LOSS_BID',Number(q.bestBid));
+          if(p.status==='OPEN'&&takeProfitHit(q,now))await this.completeWindow(p.windowStart,p,true,'TAKE_PROFIT_BID',Number(q.bestBid),now);
+          else if(p.status==='OPEN'&&stopLossHit(q,now))await this.completeWindow(p.windowStart,p,false,'STOP_LOSS_BID',Number(q.bestBid),now);
         }
       }
     }
@@ -233,8 +238,8 @@ class WickBot{
       try{
         const q=quoteFromBook(await md.getBook(p.tokenId),now);
         p.markBid=q.bestBid;p.markUpdatedAt=now;p.markStatus=q.bestBid!=null?'LIVE':'MISSING';
-        if(takeProfitHit(q,now))this.finalizePosition(p,true,'TAKE_PROFIT_BID',Number(q.bestBid));
-        else if(stopLossHit(q,now))this.finalizePosition(p,false,'STOP_LOSS_BID',Number(q.bestBid));
+        if(p.status==='OPEN'&&takeProfitHit(q,now))await this.completeWindow(p.windowStart,p,true,'TAKE_PROFIT_BID',Number(q.bestBid),now);
+        else if(p.status==='OPEN'&&stopLossHit(q,now))await this.completeWindow(p.windowStart,p,false,'STOP_LOSS_BID',Number(q.bestBid),now);
       }
       catch(_){p.markStatus=p.markBid!=null?'STALE':'MISSING'}
     }));
@@ -257,6 +262,61 @@ class WickBot{
     const event=takeProfit?'PAPER_TP_HIT':stopLoss?'PAPER_STOP_LOSS':won?'PAPER_OFFICIAL_WIN':'PAPER_OFFICIAL_LOSS';
     this.log(event,{id:p.id,status:p.status,pnl:p.realizedPnl,side:p.side,shares:p.shares,
       proceeds:p.proceeds,triggerQuote,tpTarget:.99,stopLoss:p.stopLossThreshold??.01,reason});
+  }
+  async completeWindow(windowStart,triggerPosition,triggerWon,triggerReason,triggerQuote,now=Date.now()){
+    if(this.completedWindows.has(windowStart))return false;
+    this.completedWindows.set(windowStart,{completedAt:now,reason:triggerReason});
+    for(const order of this.orders){
+      if(order.windowStart===windowStart&&order.status==='PENDING'){
+        order.status='EXPIRED_WINDOW_COMPLETE';order.expiredAt=now;order.remainingShares=0;
+      }
+    }
+    const open=this.positions.filter(p=>p.windowStart===windowStart&&p.status==='OPEN');
+    const quoteCache=new Map();
+    const readQuote=async p=>{
+      if(p===triggerPosition)return {bestBid:triggerQuote,updatedAt:now,status:'LIVE'};
+      if(p.windowStart===this.market?.start){
+        const current=this.liveQuotes[p.side];
+        if(current?.status==='LIVE'&&current.bestBid!=null&&Number.isFinite(current.updatedAt)&&now-current.updatedAt<=5000)return current;
+      }
+      if(!p.tokenId)return null;
+      if(!quoteCache.has(p.tokenId)){
+        quoteCache.set(p.tokenId,md.getBook(p.tokenId).then(book=>quoteFromBook(book,now)).catch(()=>null));
+      }
+      return quoteCache.get(p.tokenId);
+    };
+    const quotes=await Promise.all(open.map(async p=>[p,await readQuote(p)]));
+    for(const [p,q] of quotes){
+      if(p.status!=='OPEN')continue;
+      if(p===triggerPosition){
+        this.finalizePosition(p,triggerWon,triggerReason,triggerQuote);
+      }else if(takeProfitHit(q,now)){
+        this.finalizePosition(p,true,'TAKE_PROFIT_BID',Number(q.bestBid));
+      }else if(stopLossHit(q,now)){
+        this.finalizePosition(p,false,'STOP_LOSS_BID',Number(q.bestBid));
+      }else if(q?.bestBid!=null&&Number.isFinite(Number(q.bestBid))){
+        this.finalizeWindowLiquidation(p,Number(q.bestBid),'WINDOW_EXIT_BID',now);
+      }else{
+        this.finalizeWindowLiquidation(p,0,'WINDOW_EXIT_NO_BID',now);
+      }
+    }
+    this.log('PAPER_WINDOW_COMPLETED',{windowStart,reason:triggerReason,closedPositions:open.length});
+    return true;
+  }
+  finalizeWindowLiquidation(p,bid,reason,now=Date.now()){
+    if(p.status!=='OPEN')return;
+    p.payout=Math.max(0,Math.min(1,bid));
+    p.proceeds=p.shares*p.payout;
+    p.exitFees=0;
+    p.realizedPnl=p.proceeds-p.totalCost;
+    p.status='SETTLED_EXIT';
+    p.settledAt=now;
+    p.settlementBasis=reason;
+    p.exitReason=reason;
+    p.exitBid=reason==='WINDOW_EXIT_BID'?p.payout:null;
+    this.cash+=p.proceeds;
+    this.log(reason==='WINDOW_EXIT_NO_BID'?'PAPER_WINDOW_EXIT_NO_BID':'PAPER_WINDOW_EXIT_BID',
+      {id:p.id,side:p.side,shares:p.shares,exitBid:p.exitBid,proceeds:p.proceeds,pnl:p.realizedPnl,windowStart:p.windowStart});
   }
   snapshot(){
     const now=Date.now();
@@ -289,8 +349,8 @@ class WickBot{
       const mark=p.markBid==null?null:p.markBid*p.shares;p.markAgeMs=p.markUpdatedAt?Math.max(0,now-p.markUpdatedAt):null;p.markStatus=mark==null?'UNAVAILABLE':p.markAgeMs>15000?'STALE':'LIVE';const freshMark=mark!=null&&p.markAgeMs<=15000;p.markValue=freshMark?mark:null;p.unrealizedPnl=freshMark?mark-p.totalCost:null;if(!freshMark)unpricedOpenPositions++;else{markedValue+=mark;unrealizedPnl+=p.unrealizedPnl}
     }
      const inventory={UP:{shares:0,cost:0,averageCost:null,positions:0},DOWN:{shares:0,cost:0,averageCost:null,positions:0}};
-     for(const p of this.positions){
-        if(p.status!=='OPEN'||!inventory[p.side])continue;
+      for(const p of this.positions){
+         if(p.status!=='OPEN'||p.windowStart!==this.market?.start||!inventory[p.side])continue;
        const shares=Number(p.shares)||0;
        inventory[p.side].shares+=shares;
        inventory[p.side].cost+=Number(p.totalCost)||((Number(p.avgEntry)||0)*shares);
@@ -311,7 +371,7 @@ class WickBot{
               fill:'A limit fills only after a later fresh best ask walks down to or through its limit',
               unfilled:'Unfilled orders expire at the five-minute window close'},
           merge:{enabled:false},
-           exit:'Thresholds only: a fresh own-side best bid >= $0.99 pays $1/share; <= $0.01 pays $0/share. Other positions stay open and continue monitoring their original token, including after the window closes. Official market results are not used.',
+            exit:'A fresh own-side best bid >= $0.99 pays $1/share; <= $0.01 pays $0/share and completes that window. All other positions in the same window close at their own current bid (or $0 if no bid); pending entries are cancelled. No official results are used.',
           direction:'CLOB prices only; accumulate UP and DOWN positions independently; no shares are merged',
           entryFillModel:'Paper limit buys are priced five cents below each side midpoint; fill is confirmed when a later fresh best ask walks down to or through the limit',
           fees:'Maker fills have zero fees. Crypto rebate estimates are illustrative; actual daily rebates depend on market-wide maker activity.',
@@ -321,12 +381,13 @@ class WickBot{
           openPositions:this.positions.filter(p=>p.status==='OPEN').length,
          maxConsecutiveLosses,maxDrawdown,maxDrawdownPercent:peak?maxDrawdown/peak*100:0,
           wins,losses,equityCurve},
-      window:this.market?{title:this.market.title,slug:this.market.slug,start:this.market.start,end:this.market.end}:null,
+       window:this.market?{title:this.market.title,slug:this.market.slug,start:this.market.start,end:this.market.end,
+         complete:this.completedWindows.has(this.market.start),completionReason:this.completedWindows.get(this.market.start)?.reason||null}:null,
       livePrices:{marketSlug:this.market?.slug||null,updatedAt:Math.max(this.liveQuotes.UP.updatedAt||0,this.liveQuotes.DOWN.updatedAt||0)||null,
         UP:this.liveQuotes.UP,DOWN:this.liveQuotes.DOWN},
         scanner:{timeframe:this.timeframe,lastScanAt:this.lastScanAt,
            source:'Polymarket Gamma/CLOB plus Chainlink BTC/USD reference feed (regime is informational only)',
-           marketResolution:'Thresholds only: a fresh own-side CLOB bid >= $0.99 settles $1/share; <= $0.01 settles $0/share. Otherwise the position stays open and is monitored on its original token. Official market results are not used.'},
+            marketResolution:'A fresh own-side CLOB bid >= $0.99 pays $1/share or <= $0.01 pays $0/share and completes that window. Remaining positions in the window close at their own current bid (or $0 if no bid). No official results are used.'},
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
      start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m independent UP/DOWN midpoint-offset limit buys; merges disabled; no live orders.'});
