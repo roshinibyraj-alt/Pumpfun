@@ -145,11 +145,10 @@ function detectPatternCandidates(candles) {
 
 function signalForPrevious(candles) {
   if (!candles.length) return {
-    side: 'UP',
-    pattern: 'NO_HISTORY_DEFAULT_UP',
+    side: null,
+    pattern: 'WAITING_FOR_COMPLETE_CANDLE',
     matchedPatterns: [],
-    fallback: true,
-    reason: 'No complete BTC candle history is available; using the explicit UP fallback so this window still receives orders',
+    reason: 'No previous complete 5-minute candle is available; waiting for candle data',
   };
   const matches = detectPatternCandidates(candles);
   const selected = matches.find(match => match.side);
@@ -194,12 +193,11 @@ function signalForPrevious(candles) {
     reason: `${priorDirection.color === 'GREEN' ? 'UP' : 'DOWN'} because a neutral doji continued the latest ${priorDirection.color.toLowerCase()} candle`,
   };
   return {
-    side: 'UP',
-    pattern: 'DOJI_NO_DIRECTION_DEFAULT_UP',
+    side: null,
+    pattern: 'DOJI_NO_DIRECTION',
     matchedPatterns: matches,
     previous,
-    fallback: true,
-    reason: 'UP because no directional candle pattern is available; explicit fallback keeps this window trading',
+    reason: 'No directional doji rule or named formation matched',
   };
 }
 

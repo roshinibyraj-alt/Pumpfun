@@ -135,6 +135,17 @@ test("signal-side limits fill only on a newer fresh ask at or below the limit an
   assert.ok(Math.abs(bot.snapshot().account.estimatedMakerRebate-4.03375)<1e-8);
 });
 
+test("a later Chainlink feed error does not overwrite the chosen signal reason", () => {
+  const { bot, start } = makeBot();
+  bot.processCandleEntries(start, start + 1_000);
+  const reason = bot.candleEvaluation.reason;
+  bot.priceFeed.getMinuteCandles = () => { throw new Error("Chainlink stream disconnected"); };
+  bot.updateCandleContext();
+  assert.equal(bot.windowSignalSide, "UP");
+  assert.equal(bot.candleEvaluation.reason, reason);
+  assert.equal(bot.candleFeedError, "Chainlink stream disconnected");
+});
+
 test("every window submits a fresh ladder on its own candle side", () => {
   const { bot, start } = makeBot();
   const nextStart = start + config.WINDOW_MS_5M;
@@ -153,13 +164,14 @@ test("every window submits a fresh ladder on its own candle side", () => {
   assert.ok(bot.windowOrders.every(order=>order.side==="DOWN"&&order.windowStart===nextStart));
 });
 
-test("missing and neutral candle history still selects a side and submits a ladder", () => {
+test("missing history waits; directional candle colors and doji rules choose sides", () => {
   const { bot, start } = makeBot();
   bot.minuteCandles = bot.minuteCandles.slice(1);
   bot.processCandleEntries(start, start + 1_000);
-  assert.equal(bot.windowSignalSide,"UP");
-  assert.equal(bot.candleEvaluation.pattern,"NO_HISTORY_DEFAULT_UP");
-  assert.equal(bot.windowOrders.length,6);
+  assert.equal(bot.windowSignalSide,null);
+  assert.equal(bot.candleEvaluation.pattern,"WAITING_FOR_COMPLETE_CANDLE");
+  assert.equal(bot.windowOrders.length,0);
+  assert.equal(bot.candleOrdersPlaced,false);
 
   bot.openStrategyWindow(start+bot.windowMs,start+bot.windowMs);
   bot.minuteCandles = Array.from({ length: 5 }, (_, index) => ({
@@ -168,8 +180,9 @@ test("missing and neutral candle history still selects a side and submits a ladd
   }));
   bot.market.start=start+bot.windowMs;
   bot.processCandleEntries(start+bot.windowMs,start+bot.windowMs+2_000);
-  assert.equal(bot.windowOrders.length,6);
-  assert.equal(bot.candleEvaluation.pattern,"DOJI_NO_DIRECTION_DEFAULT_UP");
+  assert.equal(bot.windowOrders.length,0);
+  assert.equal(bot.windowSignalSide,null);
+  assert.equal(bot.candleEvaluation.pattern,"DOJI_NO_DIRECTION");
 });
 
 test.skip("legacy: contrarian bot buys only the opposite side of the signed BTC move", () => {

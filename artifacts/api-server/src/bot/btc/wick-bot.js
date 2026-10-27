@@ -200,9 +200,10 @@ class WickBot{
   updateCandleContext(){
     try{
       this.minuteCandles=this.priceFeed.getMinuteCandles();
+      this.candleFeedError=null;
     }catch(error){
-      this.minuteCandles=[];
-      this.candleEvaluation={side:null,reason:error?.message||'BTC candle history is unavailable'};
+      this.candleFeedError=error?.message||'BTC candle history is unavailable';
+      if(!this.windowSignalSide)this.candleEvaluation={side:null,reason:this.candleFeedError};
     }
   }
   processCandleEntries(start,now){
@@ -211,6 +212,12 @@ class WickBot{
       .filter(candle=>candle.end<=start);
     const signal=candleStrategy.signalForPrevious(windows);
     this.candleEvaluation={...signal,ready:!!signal.previous};
+    if(!signal.side){
+      this.candleOrdersPlaced=false;
+      this.windowSignalSide=null;
+      this.windowStrategySide=null;
+      return;
+    }
     this.windowSignalSide=signal.side;
     this.windowStrategySide=signal.side;
     this.candleOrdersPlaced=true;
