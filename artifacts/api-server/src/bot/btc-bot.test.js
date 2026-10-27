@@ -47,6 +47,7 @@ test("no-merge bot uses independent 50-share limits every five seconds", () => {
   assert.match(dashboard, /cancel after 4 seconds/i);
   assert.match(dashboard, /hard \$0\.05 minimum on both sides/i);
   assert.match(dashboard, /No shares carry into the next window/);
+  assert.match(dashboard, /Download diagnostics JSON/);
   for (const id of ["upShares", "downShares", "upAverageCost", "downAverageCost", "upTotalCost", "downTotalCost", "upBid", "downBid", "upAsk", "downAsk"]) {
     assert.ok(dashboard.includes(`id="${id}"`), `dashboard should render ${id}`);
   }
@@ -190,6 +191,10 @@ test("pending limits fill only on a later fresh ask at or below the limit and re
   assert.ok(bot.positions.every(position => position.status === "OPEN" && position.shares === 50));
   assert.equal(bot.positions.reduce((sum, position) => sum + position.shares, 0), 100);
   assert.equal(bot.cash, 9_955);
+  assert.equal(bot.positions[0].entryQuotes.UP.bestBid, 0.50);
+  assert.equal(bot.positions[0].entryQuotes.DOWN.bestBid, 0.40);
+  assert.equal(bot.positions[0].submissionQuotes.UP.bestAsk, 0.60);
+  assert.equal(bot.positions[0].entryType, "MIDPOINT_OFFSET");
 });
 
 test("unfilled limits expire at the window close and no merge routine is present", () => {
@@ -257,6 +262,8 @@ test("window completion closes remaining shares at their own current CLOB bid", 
   }
 
   assert.equal(up.proceeds, 50);
+  assert.equal(up.exitQuotes.UP.bestBid, 0.99);
+  assert.equal(up.exitQuotes.DOWN.bestBid, 0.45);
   assert.equal(up.settlementBasis, "TAKE_PROFIT_BID");
   assert.equal(down.settlementBasis, "WINDOW_EXIT_BID");
   assert.equal(down.exitBid, 0.45);
@@ -572,4 +579,37 @@ test("multi-timeframe snapshot exposes a completed window status", () => {
   const multiBot = new MultiBot();
   multiBot.bots["5m"].status = "window_complete";
   assert.equal(multiBot.snapshot().status, "window_complete");
+});
+
+test("diagnostics export every position, quote pairs, and side-level summaries", () => {
+  const multiBot = new MultiBot();
+  const bot = multiBot.bots["5m"];
+  bot.positions = Array.from({ length: 60 }, (_, index) => ({
+    id: `trade-${index}`,
+    timeframe: "5m",
+    side: index % 2 ? "DOWN" : "UP",
+    status: "SETTLED_EXIT",
+    openedAt: index,
+    settledAt: index + 1,
+    entryMode: index % 2 ? "REBALANCE" : "BASE",
+    settlementBasis: "WINDOW_EXIT_BID",
+    realizedPnl: index % 2 ? -1 : 2,
+    totalCost: 10,
+    proceeds: index % 2 ? 9 : 12,
+    entryQuotes: { UP: { bestBid: 0.5 }, DOWN: { bestBid: 0.4 } },
+    exitQuotes: { UP: { bestBid: 0.6 }, DOWN: { bestBid: 0.4 } },
+  }));
+  bot.orders = [{ id: "retained-order", status: "FILLED", createdAt: 1 }];
+  bot.totalOrderAttempts = 1201;
+
+  const diagnostics = multiBot.diagnostics();
+
+  assert.equal(diagnostics.tradeCount, 60);
+  assert.equal(diagnostics.trades.length, 60);
+  assert.equal(diagnostics.summary.bySide.UP.positions, 30);
+  assert.equal(diagnostics.summary.bySide.DOWN.positions, 30);
+  assert.equal(diagnostics.orderAttempts, 1201);
+  assert.equal(diagnostics.retainedOrderCount, 1);
+  assert.equal(diagnostics.orderHistoryTruncated, true);
+  assert.ok(diagnostics.trades.every(trade => trade.entryQuotes && trade.exitQuotes));
 });

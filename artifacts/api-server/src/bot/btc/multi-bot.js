@@ -48,6 +48,39 @@ class MultiBot {
          maxDrawdown,maxDrawdownPercent:peak?maxDrawdown/peak*100:0,
          equityCurve}};
   }
+  diagnostics(){
+    const state=this.snapshot();
+    const perTimeframe=Object.fromEntries(Object.entries(this.bots).map(([timeframe,bot])=>[
+      timeframe,{sessionStartedAt:bot.startedAt,tradeCount:bot.positions.length,
+        orderAttempts:bot.totalOrderAttempts,retainedOrders:bot.orders.length},
+    ]));
+    const trades=Object.values(this.bots).flatMap(bot=>bot.positions)
+      .slice().sort((a,b)=>(a.filledAt||a.openedAt||0)-(b.filledAt||b.openedAt||0));
+    const orders=Object.values(this.bots).flatMap(bot=>bot.orders)
+      .slice().sort((a,b)=>(a.createdAt||0)-(b.createdAt||0));
+    const summarize=items=>{
+      const settled=items.filter(item=>item.status==='SETTLED_EXIT');
+      const wins=settled.filter(item=>(Number(item.realizedPnl)||0)>0).length;
+      const losses=settled.filter(item=>(Number(item.realizedPnl)||0)<0).length;
+      return {positions:items.length,settled:settled.length,open:items.filter(item=>item.status==='OPEN').length,
+        wins,losses,winRate:settled.length?wins/settled.length*100:0,
+        realizedPnl:settled.reduce((sum,item)=>sum+(Number(item.realizedPnl)||0),0),
+        totalCost:items.reduce((sum,item)=>sum+(Number(item.totalCost)||0),0),
+        proceeds:settled.reduce((sum,item)=>sum+(Number(item.proceeds)||0),0)};
+    };
+    const group=(items,keyOf)=>Object.fromEntries([...new Set(items.map(keyOf).filter(Boolean))]
+      .sort().map(key=>[key,summarize(items.filter(item=>keyOf(item)===key))]));
+    return {generatedAt:Date.now(),mode:'DEMO ONLY',execution:'PAPER ONLY',
+      account:state.account,equityCurve:state.account.equityCurve,timeframes:perTimeframe,
+      tradeCount:trades.length,orderAttempts:Object.values(this.bots)
+        .reduce((sum,bot)=>sum+bot.totalOrderAttempts,0),
+      retainedOrderCount:orders.length,orderHistoryTruncated:orders.length<
+        Object.values(this.bots).reduce((sum,bot)=>sum+bot.totalOrderAttempts,0),
+      summary:{bySide:group(trades,item=>item.side),
+        byEntryMode:group(trades,item=>item.entryMode||'UNKNOWN'),
+        byExitReason:group(trades,item=>item.exitReason||item.settlementBasis||'OPEN')},
+      trades,orders};
+  }
 }
 
 module.exports=MultiBot;

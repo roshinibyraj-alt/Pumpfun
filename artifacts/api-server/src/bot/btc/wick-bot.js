@@ -62,11 +62,34 @@ class WickBot{
     this.startedAt=Date.now();
     this.positions=[];this.events=[];this.status='starting';this.completedWindows=new Map();
     this.error=null;this.market=null;this.lastMarketAt=0;
-    this.lastScanAt=null;this.orders=[];this.windowOrders=[];this.orderWindowStart=null;this.running=false;
+    this.lastScanAt=null;this.orders=[];this.totalOrderAttempts=0;
+    this.windowOrders=[];this.orderWindowStart=null;this.running=false;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;
   }
   log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
+  captureQuotePair(now=Date.now(),source=this.liveQuotes,overrides={}){
+    const numberOrNull=value=>value==null||value===''||!Number.isFinite(Number(value))?null:Number(value);
+    return Object.fromEntries(['UP','DOWN'].map(side=>{
+      const quote=overrides[side]||source?.[side]||{};
+      const updatedAt=numberOrNull(quote.updatedAt);
+      return [side,{
+        status:quote.status||(quote.bestBid!=null||quote.bestAsk!=null?'LIVE':'MISSING'),
+        bestBid:numberOrNull(quote.bestBid),bidSize:numberOrNull(quote.bidSize),
+        bestAsk:numberOrNull(quote.bestAsk),askSize:numberOrNull(quote.askSize),
+        mid:numberOrNull(quote.mid),updatedAt,
+        ageMs:updatedAt==null?null:Math.max(0,now-updatedAt),
+        stale:quote.stale===true||(updatedAt!=null&&now-updatedAt>5000),
+      }];
+    }));
+  }
+  captureExitQuotes(p,now,ownBid,hasBid=true){
+    const source=p.closeQuotes||this.liveQuotes;
+    const ownQuote={...(source?.[p.side]||{}),bestBid:hasBid?ownBid:null,updatedAt:now,
+      status:hasBid?'LIVE':'MISSING'};
+    p.exitQuotes=this.captureQuotePair(now,source,{[p.side]:ownQuote});
+    p.exitQuoteAt=now;
+  }
   async tick(){
     try{
       const now=Date.now(),start=Math.floor(now/this.windowMs)*this.windowMs;
@@ -203,7 +226,9 @@ class WickBot{
       secondsIntoWindow:checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000,
       entryMode,ask:Number.isFinite(ask)?ask:null,bid:Number.isFinite(bid)?bid:null,
       midpoint:Number.isFinite(mid)?mid:null,shares,orderType:'LIMIT',status:'SKIPPED',
-      createdAt:now,entryType:entryMode==='REBALANCE'?'OPPOSITE_SIDE_REBALANCE':'MIDPOINT_OFFSET'};
+      createdAt:now,entryType:entryMode==='REBALANCE'?'OPPOSITE_SIDE_REBALANCE':'MIDPOINT_OFFSET',
+      quotePairAtSubmission:this.captureQuotePair(now)};
+    this.totalOrderAttempts++;
     this.windowOrders.unshift(order);this.orders.unshift(order);
     if(this.orders.length>1000)this.orders.length=1000;
     const fresh=quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)
@@ -275,11 +300,17 @@ class WickBot{
         windowStart:order.windowStart,marketId:this.market.id,slug:this.market.slug,
         title:this.market.title,side:order.side,tokenId:this.market.tokens[order.side],
         entryKey:order.id,entryLabel:`${order.side} midpoint-offset limit buy ${usdPrice(order.limitPrice)} · ${shares} shares`,
-        entryType:'CLOB_MIDPOINT_OFFSET',orderType:'LIMIT',fillModel:'PAPER_FRESH_ASK_WALK_THROUGH',
+        entryMode:order.entryMode,checkpoint:order.checkpoint,secondsIntoWindow:order.secondsIntoWindow,
+        entryType:order.entryType,entryTypeLabel:'CLOB_MIDPOINT_OFFSET',
+        limitPrice:order.limitPrice,submittedBid:order.bid,submittedAsk:order.ask,
+        submittedMidpoint:order.midpoint,
+        orderType:'LIMIT',fillModel:'PAPER_FRESH_ASK_WALK_THROUGH',
         shares,initialShares:shares,avgEntry:order.limitPrice,cost,totalCost:cost,fees:0,
         makerFeeEquivalent:maker.feeEquivalent,estimatedMakerRebate:maker.estimate,
         status:'OPEN',submittedAt:order.submittedAt,openedAt:now,filledAt:now,
-        visibleAskSize:quote.askSize,simulatedShares:shares};
+        visibleAskSize:quote.askSize,simulatedShares:shares,
+        submissionQuotes:order.quotePairAtSubmission,entryQuotes:this.captureQuotePair(now),
+        entryQuoteAt:now,entryRegime:{...this.marketRegime}};
       order.status='FILLED';order.filledAt=now;order.positionId=order.id;
       order.fillPrice=order.limitPrice;order.fee=0;order.feeEquivalent=maker.feeEquivalent;
       order.estimatedMakerRebate=maker.estimate;order.remainingShares=0;
@@ -329,6 +360,7 @@ class WickBot{
   }
   finalizePosition(p,won,reason,triggerQuote){
     if(p.status!=='OPEN')return;
+    const settledAt=Date.now();
     const takeProfit=reason==='TAKE_PROFIT_BID'||reason==='TP_HIT_0_99';
     const stopLoss=reason==='STOP_LOSS_BID'||reason.startsWith('STOP_LOSS_HIT_');
     p.payout=won?1:0;
@@ -336,11 +368,13 @@ class WickBot{
     p.exitFees=0;
     p.realizedPnl=p.proceeds-p.totalCost;
     p.status='SETTLED_EXIT';
-    p.settledAt=Date.now();
+    p.settledAt=settledAt;
     p.settlementBasis=reason;
     p.exitReason=takeProfit||stopLoss?reason:null;
     p.tpTriggerQuote=takeProfit?triggerQuote:null;
     p.stopTriggerQuote=stopLoss?triggerQuote:null;
+    p.exitBid=Number.isFinite(Number(triggerQuote))?Number(triggerQuote):null;
+    this.captureExitQuotes(p,settledAt,p.exitBid,p.exitBid!=null);
     this.cash+=p.proceeds;
     const event=takeProfit?'PAPER_TP_HIT':stopLoss?'PAPER_STOP_LOSS':won?'PAPER_OFFICIAL_WIN':'PAPER_OFFICIAL_LOSS';
     this.log(event,{id:p.id,status:p.status,pnl:p.realizedPnl,side:p.side,shares:p.shares,
@@ -388,6 +422,7 @@ class WickBot{
   }
   finalizeWindowLiquidation(p,bid,reason,now=Date.now()){
     if(p.status!=='OPEN')return;
+    const hasBid=reason.endsWith('_BID');
     p.payout=Math.max(0,Math.min(1,bid));
     p.proceeds=p.shares*p.payout;
     p.exitFees=0;
@@ -396,7 +431,8 @@ class WickBot{
     p.settledAt=now;
     p.settlementBasis=reason;
     p.exitReason=reason;
-    p.exitBid=reason==='WINDOW_EXIT_BID'?p.payout:null;
+    p.exitBid=hasBid?Number(bid):null;
+    this.captureExitQuotes(p,now,p.exitBid,hasBid);
     this.cash+=p.proceeds;
     this.log(reason==='WINDOW_EXIT_NO_BID'?'PAPER_WINDOW_EXIT_NO_BID':'PAPER_WINDOW_EXIT_BID',
       {id:p.id,side:p.side,shares:p.shares,exitBid:p.exitBid,proceeds:p.proceeds,pnl:p.realizedPnl,windowStart:p.windowStart});

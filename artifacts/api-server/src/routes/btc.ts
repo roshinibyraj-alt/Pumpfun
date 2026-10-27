@@ -6,6 +6,7 @@ const MultiBot = requireFromBundle("./bot/btc/multi-bot.js") as new () => {
   start(): void;
   stop(): void;
   snapshot(): Record<string, any>;
+  diagnostics(): Record<string, any>;
 };
 
 const bot = new MultiBot();
@@ -17,6 +18,11 @@ router.get("/state", (_req, res) => {
 });
 router.get("/bot/state", (_req, res) => {
   res.set("Cache-Control", "no-store").json(bot.snapshot());
+});
+router.get("/diagnostics", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.set("Content-Disposition", 'attachment; filename="btc-paper-diagnostics.json"');
+  res.json(bot.diagnostics());
 });
 router.post("/bot/start", (_req, res) => {
   bot.start();
