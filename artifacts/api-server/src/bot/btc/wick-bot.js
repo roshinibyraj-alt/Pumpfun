@@ -64,6 +64,7 @@ class WickBot{
     this.error=null;this.market=null;this.lastMarketAt=0;
     this.lastScanAt=null;this.orders=[];this.totalOrderAttempts=0;
     this.windowOrders=[];this.orderWindowStart=null;this.running=false;
+    this.windowStrategySide=null;
     this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;
   }
@@ -185,11 +186,12 @@ class WickBot{
     this.orderWindowStart=start;
     this.lastEntryCheckpoint=0;
     this.windowOrders=[];
+    this.windowStrategySide=null;
     this.log('PAPER_NO_MERGE_STRATEGY_STARTED',{windowStart:start,
       checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
-      sharesPerSide:cfg.BASE_ENTRY_SHARES,
+      sharesPerEntry:cfg.BASE_ENTRY_SHARES,
       limitOffset:cfg.LIMIT_PRICE_OFFSET,
-      sides:['UP','DOWN'],
+      strategy:'CONTRARIAN_BTC_DIRECTION',
       mergeEnabled:false});
   }
   processTimedEntries(start,now){
@@ -199,21 +201,15 @@ class WickBot{
     const checkpoint=Math.floor(elapsedMs/cfg.ENTRY_CHECK_INTERVAL_MS);
     if(checkpoint<=this.lastEntryCheckpoint)return;
     this.lastEntryCheckpoint=checkpoint;
-    const upShares=this.windowShares(start,'UP'),downShares=this.windowShares(start,'DOWN');
-    if(upShares>downShares){
-      const shares=upShares-downShares,id=`${this.timeframe}-${start}-DOWN-check-${checkpoint}-rebalance`;
-      this.attemptEntry(start,now,'DOWN',shares,checkpoint,id,'REBALANCE');
-      return;
+    const direction=this.marketRegime?.direction;
+    if(!this.windowStrategySide&&['UP','DOWN'].includes(direction)){
+      this.windowStrategySide=direction==='UP'?'DOWN':'UP';
+      this.log('PAPER_CONTRARIAN_SIDE_SELECTED',{windowStart:start,btcDirection:direction,
+        side:this.windowStrategySide,regime:this.marketRegime.state});
     }
-    if(downShares>upShares){
-      const shares=downShares-upShares,id=`${this.timeframe}-${start}-UP-check-${checkpoint}-rebalance`;
-      this.attemptEntry(start,now,'UP',shares,checkpoint,id,'REBALANCE');
-      return;
-    }
-    for(const side of ['UP','DOWN']){
-      const id=`${this.timeframe}-${start}-${side}-check-${checkpoint}`;
-      this.attemptEntry(start,now,side,cfg.BASE_ENTRY_SHARES,checkpoint,id,'BASE');
-    }
+    if(!this.windowStrategySide)return;
+    const id=`${this.timeframe}-${start}-${this.windowStrategySide}-check-${checkpoint}-contrarian`;
+    this.attemptEntry(start,now,this.windowStrategySide,cfg.BASE_ENTRY_SHARES,checkpoint,id,'CONTRARIAN');
   }
   windowShares(start,side){
     return this.positions.filter(p=>p.status==='OPEN'&&p.windowStart===start&&p.side===side)
@@ -226,7 +222,7 @@ class WickBot{
       secondsIntoWindow:checkpoint*cfg.ENTRY_CHECK_INTERVAL_MS/1000,
       entryMode,ask:Number.isFinite(ask)?ask:null,bid:Number.isFinite(bid)?bid:null,
       midpoint:Number.isFinite(mid)?mid:null,shares,orderType:'LIMIT',status:'SKIPPED',
-      createdAt:now,entryType:entryMode==='REBALANCE'?'OPPOSITE_SIDE_REBALANCE':'MIDPOINT_OFFSET',
+      createdAt:now,entryType:entryMode==='CONTRARIAN'?'CONTRARIAN_BTC_DIRECTION':'MIDPOINT_OFFSET',
       quotePairAtSubmission:this.captureQuotePair(now)};
     this.totalOrderAttempts++;
     this.windowOrders.unshift(order);this.orders.unshift(order);
@@ -481,20 +477,21 @@ class WickBot{
      }
     return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
          strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-            regime:{...this.marketRegime,entryPolicy:'Informational only; BTC regime does not block entries'},
+            regime:{...this.marketRegime,entryPolicy:'Entries require a fresh signed BTC direction; selected side is contrarian and locked for the window.'},
            btcPriceFeed:this.priceFeed.snapshot(),
           entries:{orderType:'LIMIT',checkIntervalSeconds:cfg.ENTRY_CHECK_INTERVAL_MS/1000,
-              baseShares:cfg.BASE_ENTRY_SHARES,sideIndependent:true,priceReference:'midpoint',
+              baseShares:cfg.BASE_ENTRY_SHARES,sideIndependent:false,priceReference:'midpoint',
               limitOffset:cfg.LIMIT_PRICE_OFFSET,minimumLimitPrice:cfg.MIN_ENTRY_PRICE,
               orderLifetimeSeconds:cfg.ENTRY_ORDER_TTL_MS/1000,sides:['UP','DOWN'],
-              timing:'Every 5 seconds, place 50-share UP and DOWN limit buys when inventory is balanced; if one side has more filled shares, place an opposite-side rebalance order for the share difference.',
+              direction:'Contrarian: lock one side per window, buying DOWN when BTC rises over the 90-second lookback and UP when BTC falls.',
+              timing:'Every 5 seconds, place a 50-share limit buy on the locked side opposite the signed BTC move. Skip entries until a fresh directional reading is available.',
               fill:'A limit fills only after a later fresh best ask walks down to or through its limit',
               unfilled:'Cancel each unfilled order after four seconds. Do not place a limit below $0.05 on either side; skip it if midpoint minus the offset is below the floor.',
-              rebalance:'Use current-window filled shares only. If UP exceeds DOWN, buy DOWN for the difference; if DOWN exceeds UP, buy UP for the difference.'},
+              rebalance:'Disabled; the contrarian side is selected once per window and held for that window.'},
           merge:{enabled:false},
            exit:'A fresh own-side best bid >= $0.99 pays $1/share; <= $0.01 pays $0/share and completes that window. All other positions in that window close at their own current bid (or $0 if no bid); pending entries are cancelled. Any remaining positions close at their own bid (or $0) when the next window begins. No shares carry over, and no official results are used.',
-          direction:'CLOB prices only; accumulate UP and DOWN positions independently; no shares are merged',
-           entryFillModel:'Paper limit buys are priced five cents below each side midpoint, never below $0.05; unfilled orders cancel after four seconds, and the next check rebalances filled share differences.',
+          direction:'Contrarian to signed 90-second Chainlink BTC/USD movement; one selected outcome side per window; no shares are merged',
+           entryFillModel:'Paper limit buys are priced five cents below the selected side midpoint, never below $0.05; unfilled orders cancel after four seconds.',
           fees:'Maker fills have zero fees. Crypto rebate estimates are illustrative; actual daily rebates depend on market-wide maker activity.',
           execution:'PAPER ONLY'},
          account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,
@@ -511,7 +508,7 @@ class WickBot{
              marketResolution:'A fresh own-side CLOB bid >= $0.99 pays $1/share or <= $0.01 pays $0/share and completes that window. Remaining positions close at their own bid (or $0 if no bid) at threshold completion or when the next window begins. No shares carry over and no official results are used.'},
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-     start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only BTC 5m UP/DOWN limit buys with 4-second expiry and opposite-side share rebalancing; $0.05 minimum limit; merges disabled; no live orders.'});
+     start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only contrarian BTC 5m paper buys; one side per window opposite signed BTC movement; 4-second expiry; $0.05 minimum; no live orders.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer);this.priceFeed.stop()}

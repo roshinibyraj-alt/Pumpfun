@@ -13,8 +13,19 @@ test('classifies a sustained BTC move as trending', () => {
   const ticks = ticksFrom(Array.from({ length: 10 }, (_, i) => 100 + i * 0.08), now);
   const result = classifyRegime(ticks, now);
   assert.equal(result.state, 'TRENDING');
+  assert.equal(result.direction, 'UP');
+  assert.ok(result.signedNetMovePct > 0);
   assert.ok(result.efficiency > 0.9);
   assert.equal(result.reversals, 0);
+});
+
+test('preserves signed direction for a sustained BTC decline', () => {
+  const now = 1_800_000;
+  const ticks = ticksFrom(Array.from({ length: 10 }, (_, i) => 100 - i * 0.08), now);
+  const result = classifyRegime(ticks, now);
+  assert.equal(result.direction, 'DOWN');
+  assert.ok(result.signedNetMovePct < 0);
+  assert.ok(result.netMovePct > 0);
 });
 
 test('classifies repeated reversals with little net progress as choppy', () => {

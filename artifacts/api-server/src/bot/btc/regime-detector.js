@@ -50,7 +50,9 @@ function classifyRegime(ticks, now = Date.now(), options = {}) {
 
   const prices = samples.map(x => x.price);
   const mean = prices.reduce((sum, x) => sum + x, 0) / prices.length;
-  const netMovePct = Math.abs(prices.at(-1) - prices[0]) / mean;
+  const signedMove = prices.at(-1) - prices[0];
+  const signedNetMovePct = signedMove / mean;
+  const netMovePct = Math.abs(signedNetMovePct);
   const rangePct = (Math.max(...prices) - Math.min(...prices)) / mean;
   let grossMove = 0;
   let reversals = 0;
@@ -70,6 +72,8 @@ function classifyRegime(ticks, now = Date.now(), options = {}) {
     reversals,
     rangePct,
     netMovePct,
+    signedNetMovePct,
+    direction: signedMove > 0 ? 'UP' : signedMove < 0 ? 'DOWN' : 'FLAT',
     sampleCount: samples.length,
     spanMs,
     ageMs: now - Number(last.ts),
