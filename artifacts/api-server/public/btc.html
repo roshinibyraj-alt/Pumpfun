@@ -30,7 +30,7 @@
  <section class="panel"><h2>Active market windows</h2><div id="timeframe-panels" class="windows"></div></section>
  <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
  <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
- <p class="small">Previous complete candle signals UP on green and DOWN on red; qualifying dojis follow the source rule. Three 500-share paper limits are placed at $0.40, $0.30, and $0.20. After all three fill and take profit, the next four windows trade opposite the triggering signal, then normal candle signals resume. Paper history resets on process restart. No official results or live orders are used.</p>
+ <p class="small">Previous complete candle signals UP on green and DOWN on red; qualifying dojis follow the source rule. Normal signal-side windows use three 500-share paper limits at $0.40, $0.30, and $0.20. After all three fill and take profit, each of the next four windows gets one 500-share opposite-side paper market buy; limit rungs are inactive until normal trading resumes. Paper history resets on process restart. No official results or live orders are used.</p>
  <div class="err" id="error"></div>
 </main>
 <script>
@@ -68,7 +68,7 @@ setInterval(paintCountdown,250);
    const phase=flip.currentWindowFlipped
      ?`Opposite-signal phase · ${flip.windowsRemaining??0} more windows after this`
      :flip.armed?`Opposite-signal phase · ${flip.windowsRemaining} windows remaining`:'Normal signal-side trading';
-   const resting=orders.map(o=>`${px(o.limitPrice)} ${o.status}`).join(' · ')||'None';
+   const resting=orders.map(o=>o.orderType==='MARKET'?`MARKET · ${sharesFmt(o.shares)} shares · ${o.status}`:`${px(o.limitPrice)} ${o.status}`).join(' · ')||'None';
    const ask=`${px(quotes.UP?.bestAsk)} / ${px(quotes.DOWN?.bestAsk)}`;
    return `<article class="card window bot-card"><h2>5m · ${esc(w.slug||'Waiting for market')}</h2>
    <div class="metric"><span>Status</span><b>${esc(t.status||'starting')}</b></div>
@@ -78,7 +78,7 @@ setInterval(paintCountdown,250);
    <div class="metric"><span>Side cycle</span><b class="${flip.armed||flip.currentWindowFlipped?'gold':'good'}">${esc(phase)}</b></div>
    <div class="metric"><span>Window remaining</span><b>${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}</b></div>
    <div class="metric"><span>UP ask / DOWN ask</span><b>${ask}</b></div>
-   <div class="metric"><span>Limit rungs</span><b>$0.40 · $0.30 · $0.20 — 500 shares each</b></div>
+   <div class="metric"><span>${entries.windowWasFlipped?'Opposite-phase entry':'Limit rungs'}</span><b>${entries.windowWasFlipped?'One 500-share market buy · rungs inactive':'$0.40 · $0.30 · $0.20 — 500 shares each'}</b></div>
    <div class="metric"><span>Resting orders</span><b>${esc(resting)}</b></div>
    <div class="metric"><span>Open shares / paper cash</span><b>${positions.reduce((n,p)=>n+Number(p.shares||0),0)} / ${usd(t.account?.cash)}</b></div>
    </article>`;

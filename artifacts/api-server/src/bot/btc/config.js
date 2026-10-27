@@ -14,6 +14,7 @@ module.exports = {
     { price: 0.30, shares: 500 },
     { price: 0.20, shares: 500 },
   ],
+  OPPOSITE_PHASE_SHARES: 500,
   ORDER_CUTOFF_MS: 180 * 1000,
   CHOP_LOOKBACK_MS: 90 * 1000,
   CHOP_SAMPLE_MS: 10 * 1000,

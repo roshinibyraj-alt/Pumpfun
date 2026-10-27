@@ -100,7 +100,7 @@ test("unfilled rungs expire at the source bot's three-minute cutoff", () => {
   assert.deepEqual(bot.windowOrders.map(order => order.status), ["EXPIRED", "EXPIRED", "EXPIRED"]);
 });
 
-test("opposite-signal phase requires all rung take-profits and lasts exactly four windows", async () => {
+test("opposite phase places one immediate 500-share market buy for four consecutive windows", async () => {
   const { bot, start } = makeBot();
   const now = start + 60_000;
   bot.windowSignalSide = "UP";
@@ -122,14 +122,22 @@ test("opposite-signal phase requires all rung take-profits and lasts exactly fou
     const nextStart = start + (i + 1) * config.WINDOW_MS_5M;
     const signalSide = i % 2 === 0 ? "UP" : "DOWN";
     bot.market.start = nextStart;
-    bot.minuteCandles = Array.from({ length: 5 }, (_, index) => ({
+    bot.minuteCandles = i === 0 ? [] : Array.from({ length: 5 }, (_, index) => ({
       t: nextStart - 300_000 + index * 60_000,
       o: 100, h: 102, l: 99, c: signalSide === "UP" ? 101 : 99,
     }));
+    bot.liveQuotes.DOWN = { status: "LIVE", updatedAt: nextStart + 1_000, bestBid: 0.43, bestAsk: 0.45 };
     bot.openStrategyWindow(nextStart, nextStart);
     bot.processCandleEntries(nextStart, nextStart + 1_000);
-    assert.equal(bot.windowSignalSide, signalSide);
+    assert.equal(bot.windowSignalSide, i === 0 ? null : signalSide);
     assert.equal(bot.windowStrategySide, "DOWN");
+    assert.equal(bot.windowOrders.length, 1);
+    assert.deepEqual(
+      [bot.windowOrders[0].orderType, bot.windowOrders[0].shares, bot.windowOrders[0].status, bot.windowOrders[0].fillPrice],
+      ["MARKET", 500, "FILLED", 0.45],
+    );
+    assert.equal(bot.positions[0].entryMode, "FOUR_WINDOW_OPPOSITE_MARKET");
+    assert.equal(bot.positions[0].avgEntry, 0.45);
     assert.equal(bot.flipWindowsRemaining, 3 - i);
   }
 
@@ -143,6 +151,28 @@ test("opposite-signal phase requires all rung take-profits and lasts exactly fou
   bot.processCandleEntries(normalStart, normalStart + 1_000);
   assert.equal(bot.windowStrategySide, "UP");
   assert.equal(bot.windowWasFlipped, false);
+  assert.equal(bot.windowOrders.length, 3);
+  assert.ok(bot.windowOrders.every(order => order.orderType === "GTC LIMIT" && order.status === "LIVE"));
+});
+
+test("opposite market order waits for a fresh ask and fills at that ask without rung limits", () => {
+  const { bot, start } = makeBot();
+  bot.flipWindowsRemaining = 4;
+  bot.flipAnchorSide = "UP";
+  bot.minuteCandles = [];
+
+  bot.processCandleEntries(start, start + 1_000);
+  assert.equal(bot.windowOrders.length, 1);
+  assert.equal(bot.windowOrders[0].status, "MARKET_PENDING");
+  assert.equal(bot.windowOrders[0].limitPrice, undefined);
+  assert.equal(bot.flipWindowsRemaining, 3);
+
+  bot.liveQuotes.DOWN = { status: "LIVE", updatedAt: start + 2_000, bestBid: 0.72, bestAsk: 0.76 };
+  bot.processCandleOrders(start, start + 2_000);
+  assert.equal(bot.windowOrders[0].status, "FILLED");
+  assert.equal(bot.windowOrders[0].fillPrice, 0.76);
+  assert.equal(bot.positions[0].shares, 500);
+  assert.equal(bot.positions[0].cost, 380);
 });
 
 test("a take-profit on an incomplete rung set does not arm the opposite phase", async () => {
