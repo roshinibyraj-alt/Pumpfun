@@ -516,7 +516,7 @@ class WickBot{
                signalSide:this.windowSignalSide,signal:this.candleEvaluation,
                  sharesPerRung:250,totalShares:cfg.SIGNAL_LIMIT_RUNGS.reduce((sum,rung)=>sum+rung.shares,0),
                  rungs:cfg.SIGNAL_LIMIT_RUNGS.map(rung=>({...rung})),
-                 direction:'Previous green selects UP and previous red selects DOWN; qualified dojis use the available candle-pattern rule. Neutral or missing history uses the latest directional candle, then an explicit UP fallback.',
+                  direction:'Detects morning/evening star, bullish/bearish engulfing and harami, piercing line, dark cloud cover, hammer-family, doji variants, and three soldiers/crows patterns; uses candle direction only as fallback.',
                  timing:'Submit six 250-share signal-side paper limit buys as soon as the current 5-minute window and its candle signal are available.',
                  fill:'A rung fills at its limit when a newer fresh signal-side best ask is at or below that limit.',
                  unfilled:`Cancel unfilled orders at ${cfg.ENTRY_ORDER_TTL_MS/1000} seconds after window open or at window rollover.`,

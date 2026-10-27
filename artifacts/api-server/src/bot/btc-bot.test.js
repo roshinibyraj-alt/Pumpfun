@@ -51,6 +51,29 @@ test("previous-candle signals match the copied source strategy", () => {
   assert.equal(candleStrategy.signalForPrevious(candleStrategy.aggregateCompleteCandles(minutes("RED"), 300_000)).side, "DOWN");
 });
 
+test("named BTC candle formations choose the bullish or bearish signal side", () => {
+  const c = (open, high, low, close) => ({
+    open, high, low, close,
+    color: close > open ? "GREEN" : close < open ? "RED" : "DOJI",
+  });
+  const cases = [
+    [[c(10,10.2,5.8,6),c(5.5,10.6,5.4,10.5)],"BULLISH_ENGULFING","UP"],
+    [[c(10,10.2,5.8,6),c(5.8,6,5.7,5.9),c(6,9.6,5.9,9.5)],"MORNING_STAR","UP"],
+    [[c(10,10.2,5.8,6),c(7,8.2,5,8)],"BULLISH_HARAMI","UP"],
+    [[c(10,10.2,5.8,6),c(5.9,10.6,5.8,10.5)],"BULLISH_ENGULFING","UP"],
+    [[c(6,10.2,5.8,10),c(10.1,10.4,10,10.2),c(10.2,10.3,6,6.5)],"EVENING_STAR","DOWN"],
+    [[c(6,10.2,5.8,10),c(10.5,10.6,5.4,5.5)],"BEARISH_ENGULFING","DOWN"],
+    [[c(6,10.2,5.8,10),c(9,10.4,7.4,8)],"BEARISH_HARAMI","DOWN"],
+    [[c(10,10.2,8,8.2),c(8.2,8.4,6.5,6.8),c(6.8,7,5.5,5.7),c(7.9,8.2,5,8.1)],"HAMMER","UP"],
+  ];
+  for (const [candles, pattern, side] of cases) {
+    const signal = candleStrategy.signalForPrevious(candles);
+    assert.equal(signal.pattern, pattern);
+    assert.equal(signal.side, side);
+    assert.ok(signal.reason.startsWith(`${side} because`));
+  }
+});
+
 test("Chainlink feed retains minute OHLC bars for candle signals", () => {
   let now = 1_800_000_000_000;
   const feed = new ChainlinkPriceFeed({ now: () => now, WebSocketImpl: null });
