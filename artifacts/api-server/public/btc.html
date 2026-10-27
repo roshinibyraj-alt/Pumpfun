@@ -10,33 +10,28 @@
  .inventory-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:12px}.inventory-card{background:linear-gradient(145deg,#151f30,#101723);border:1px solid var(--line);border-radius:15px;padding:17px}.inventory-card.up{border-top:3px solid var(--green)}.inventory-card.down{border-top:3px solid var(--red)}.inventory-count{font-size:26px;font-weight:850;margin:8px 0 11px}.inventory-meta{display:flex;justify-content:space-between;align-items:center;gap:10px;padding-top:9px;border-top:1px solid var(--line);color:var(--muted)}.inventory-meta b{color:var(--text);font-size:16px}.inventory-live{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}.inventory-live-label{color:var(--muted);font-size:11px}.inventory-quote{font-weight:750}.inventory-quote-status{display:block;margin-top:3px;color:var(--muted);font-size:10px;text-align:right;text-transform:uppercase;letter-spacing:.06em}
  @media(max-width:430px){.inventory-grid{grid-template-columns:1fr}}
   .download-button{display:inline-flex;align-items:center;padding:10px 14px;border:1px solid #2563eb;border-radius:9px;background:#15305c;color:#eaf2ff;text-decoration:none;font-weight:800}.download-button:hover{background:#1d4078}
- </style></head><body><main>
-  <header class="head"><div><div class="title">BTC Candle Rung Paper Bot</div><div class="sub">5-minute previous-candle signal · three 500-share paper rungs · paper only</div></div><span class="pill" id="status">CONNECTING</span></header>
-<section class="grid">
-<div class="card"><div class="label">Starting bankroll</div><div class="value money-color" id="capital">—</div></div>
-<div class="card"><div class="label">Live equity</div><div class="value money-color" id="equity">—</div></div>
-<div class="card"><div class="label">Available cash</div><div class="value money-color" id="cash">—</div></div>
-<div class="card"><div class="label">Estimated maker rebates · paper</div><div class="value good" id="makerRebate">—</div></div>
-<div class="card"><div class="label">Realized P&amp;L</div><div class="value" id="realized">—</div></div>
-<div class="card"><div class="label">Floating P&amp;L</div><div class="value" id="unrealized">—</div></div>
-<div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
-<div class="card"><div class="label">Total trades</div><div class="value" id="totalTrades">—</div></div>
- <div class="card"><div class="label">Profitable exit rate</div><div class="value" id="winRate">—</div></div>
- <div class="card"><div class="label">Profitable exits</div><div class="value good" id="wins">—</div></div>
-<div class="card"><div class="label">Max consecutive losses</div><div class="value" id="maxLossStreak">—</div></div>
-<div class="card"><div class="label">Max drawdown</div><div class="value bad" id="maxDrawdown">—</div></div>
-</section>
- <section class="inventory-grid" aria-label="Current-window open shares">
- <article class="inventory-card up"><div class="label">Current-window UP shares</div><div class="inventory-count up-color"><span id="upShares">—</span> shares</div><div class="inventory-meta"><span>Average cost / share</span><b id="upAverageCost">—</b></div><div class="inventory-meta"><span>Total cost</span><b id="upTotalCost">—</b></div><div class="inventory-live"><span class="inventory-live-label">Live bid / ask</span><span class="inventory-quote"><span id="upBid">—</span> / <span id="upAsk">—</span><small class="inventory-quote-status" id="upQuoteStatus">WAITING</small></span></div></article>
- <article class="inventory-card down"><div class="label">Current-window DOWN shares</div><div class="inventory-count down-color"><span id="downShares">—</span> shares</div><div class="inventory-meta"><span>Average cost / share</span><b id="downAverageCost">—</b></div><div class="inventory-meta"><span>Total cost</span><b id="downTotalCost">—</b></div><div class="inventory-live"><span class="inventory-live-label">Live bid / ask</span><span class="inventory-quote"><span id="downBid">—</span> / <span id="downAsk">—</span><small class="inventory-quote-status" id="downQuoteStatus">WAITING</small></span></div></article>
+  </style>
+  <style>
+    .grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.card{min-height:96px;box-shadow:0 8px 26px #0003}.card.primary{border-color:#3879c7;background:linear-gradient(145deg,#19355a,#111c2d)}.card.success{border-color:#23784b;background:linear-gradient(145deg,#153a2c,#111c2d)}.card.danger{border-color:#9d3848;background:linear-gradient(145deg,#3b1b2a,#111c2d)}.card.primary .value{color:#8ec5ff}.card.success .value{color:var(--green)}.card.danger .value{color:var(--red)}.metric-note{display:block;margin-top:6px;font-size:10px;color:var(--muted)}.windows{grid-template-columns:1fr}.bot-card{border-top:3px solid var(--cyan)}.subhead{margin:18px 0 4px;padding-top:14px;border-top:1px solid var(--line)}.section-note{margin:0 0 8px}.event{padding:7px 0;border-bottom:1px solid var(--line);font-size:12px}
+    @media(max-width:700px){.grid{grid-template-columns:repeat(2,1fr)}}
+  </style></head><body><main>
+   <header class="head"><div><div class="title">BTC Candle Pattern Paper Bot</div><div class="sub">5m Polymarket market · simulated resting limits · settlement only</div></div><span class="pill" id="status">CONNECTING</span></header>
+ <section class="grid">
+ <div class="card primary"><div class="label">Combined paper equity</div><div class="value" id="equity">—</div></div>
+ <div class="card"><div class="label">Cash</div><div class="value" id="cash">—</div></div>
+ <div class="card"><div class="label">Realized P&amp;L</div><div class="value" id="realized">—</div></div>
+ <div class="card"><div class="label">Floating P&amp;L</div><div class="value" id="unrealized">—</div></div>
+ <div class="card primary"><div class="label">Total trades</div><div class="value" id="totalTrades">—</div><span class="metric-note" id="settledTrades">— settled</span></div>
+ <div class="card primary"><div class="label">Win rate</div><div class="value" id="winRate">—</div><span class="metric-note">wins ÷ settled trades</span></div>
+ <div class="card success"><div class="label">Wins</div><div class="value" id="wins">—</div></div>
+ <div class="card danger"><div class="label">Losses</div><div class="value" id="losses">—</div></div>
+ <div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
  </section>
-<section class="panel"><h2>Combined all-time equity</h2><div id="equityChart" class="chart-wrap"><div class="empty">Waiting for settled trades</div></div><div class="small">Settled-trade equity from the starting bankroll; in-memory history resets if the bot process restarts.</div></section>
-<section class="panel"><h2>Trade diagnostics</h2><p class="small">Download every filled position with entry/exit quotes for both UP and DOWN, plus the equity curve and retained order records. Detailed trade history is in memory and resets when this process restarts.</p><a class="download-button" href="/api/diagnostics">Download diagnostics JSON</a></section>
-  <div class="notice">Previous complete 5-minute Chainlink BTC candle selects the signal: green → UP, red → DOWN; a doji follows the source bot's two-candle run rule. The bot places three separate 500-share paper limit buys on the selected side at $0.40, $0.30, and $0.20. A rung fills only when a fresh own-side ask reaches its limit; unfilled rungs expire after 180 seconds. A fresh own-side bid at $0.99 or higher pays $1/share; a bid at $0.01 or lower pays $0/share and ends the window. If all three rungs filled and all reach $0.99 TP, the next four windows trade opposite the signal side from that qualifying window, regardless of later signals. Normal signal-side trading resumes after those four windows. No official results are used and no live orders are sent.</div>
-<div class="err" id="error"></div>
-<section class="cols" id="timeframe-panels"></section>
-<section class="panel"><h2>Recent paper trades · entry prices and window timestamps</h2><div id="positions" class="empty">No paper trades yet.</div></section>
-   <p class="small">Threshold exits close all positions in the window at their own bid (or $0 if no bid) and cancel pending rungs. At rollover, remaining positions also close at their own bid. The temporary four-window opposite-signal cycle is armed only when all three rungs filled and all three reached take profit. Paper history and cycle state reset on process restart. No official market results are used; no live orders are sent.</p>
+ <section class="panel"><h2>Active market windows</h2><div id="timeframe-panels" class="windows"></div></section>
+ <section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
+ <section class="panel"><h2>Recent bot events</h2><div id="events"></div></section>
+ <p class="small">Previous complete candle signals UP on green and DOWN on red; qualifying dojis follow the source rule. Three 500-share paper limits are placed at $0.40, $0.30, and $0.20. After all three fill and take profit, the next four windows trade opposite the triggering signal, then normal candle signals resume. Paper history resets on process restart. No official results or live orders are used.</p>
+ <div class="err" id="error"></div>
 </main>
 <script>
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -65,55 +60,67 @@ function paintCountdown(){
 }
 setInterval(paintCountdown,250);
  function timeframePanel(tf,t){
-   const acc=t.account||{},orders=(t.orders||[]).filter(o=>o.windowStart===t.window?.start);
-   const regime=t.strategy?.regime||{},feed=t.strategy?.btcPriceFeed||{},entries=t.strategy?.entries||{};
-   const signal=entries.signal||{},flip= t.strategy?.flipCycle||{};
-   const pnlClass=n=>Number(n)>=0?'good':'bad';
-   const entryHtml=orders.map(o=>`<div class="entry"><span>${esc(o.side)} · ${px(o.limitPrice)} · ${sharesFmt(o.shares)} shares</span><b class="${o.status==='FILLED'?'good':o.status==='REJECTED_INSUFFICIENT_CASH'?'bad':'muted'}">${esc(o.status)}</b></div>`).join('');
+   const w=t.window||{},entries=t.strategy?.entries||{},signal=entries.signal||{};
+   const flip=t.strategy?.flipCycle||{},quotes=t.livePrices||{};
+   const orders=(t.orders||[]).filter(o=>o.windowStart===w.start);
+   const positions=(t.positions||[]).filter(p=>p.windowStart===w.start&&p.status==='OPEN');
+   const remaining=w.end?Math.max(0,Math.floor((w.end-Date.now())/1000)):0;
    const phase=flip.currentWindowFlipped
      ?`Opposite-signal phase · ${flip.windowsRemaining??0} more windows after this`
-     :flip.armed?`Opposite-signal phase pending · ${flip.windowsRemaining} windows`:'Normal signal-side trading';
-   return `<div class="panel bot-card"><h2><span class="tf-label">5M</span> · candle rung strategy</h2>
-     <div class="metric"><span>Previous candle signal</span><b>${esc(signal.pattern||'WAITING')} · ${esc(entries.signalSide||signal.side||'NO SIGNAL')}</b></div>
-     <div class="metric"><span>Selected side</span><b>${esc(entries.side||'—')} ${entries.windowWasFlipped?'· opposite signal':''}</b></div>
-     <div class="tiny">Chainlink ${esc(feed.status||'unknown')}${feed.ageMs==null?'':' · '+(feed.ageMs/1000).toFixed(1)+'s old'} · ${esc(signal.reason||regime.reason||'Waiting for complete candle history')}</div>
-     <div class="metric"><span>Side-cycle state</span><b class="${flip.armed||flip.currentWindowFlipped?'gold':'good'}">${esc(phase)}</b></div>
-     <div class="metric"><span>Cash / bankroll</span><b class="money-color">${usd(acc.cash)} / ${usd(acc.capital)}</b></div>
-     <div class="metric"><span>Realized</span><b class="${pnlClass(acc.realizedPnl)}">${usd(acc.realizedPnl)}</b></div>
-     <div class="metric"><span>Unrealized</span><b class="${pnlClass(acc.unrealizedPnl)}">${usd(acc.unrealizedPnl)}${acc.unpricedOpenPositions?` · ${acc.unpricedOpenPositions} unpriced`:''}</b></div>
-     <div class="metric"><span>Market window</span><b>${esc(t.window?.slug||'Waiting')}<br><small class="muted">${timestamp(t.window?.start)} → ${timestamp(t.window?.end)}</small></b></div>
-     <div class="metric"><span>Limit rungs</span><b>$0.40 · $0.30 · $0.20 — 500 shares each</b></div>
-     <div class="metric"><span>Take profit / stop loss</span><b class="gold">$0.99 pays $1/share · $0.01 pays $0/share</b></div>
-     <div class="metric"><span>Win rate / max losing streak</span><b>${Number(acc.winRate||0).toFixed(1)}% · ${acc.maxConsecutiveLosses??0}</b></div>
-     <div class="metric"><span>Peak drawdown</span><b>${usd(acc.maxDrawdown)} (${Number(acc.maxDrawdownPercent||0).toFixed(2)}%)</b></div>
-     <div class="chart-wrap">${equitySvg(acc.equityCurve||[])}</div>
-     <div class="tiny">Opposite-signal mode only arms when all three rungs fill and all three reach the $0.99 own-side bid. The next four windows keep trading opposite the signal side that triggered the cycle.</div>
-     <div>${entryHtml||'<div class="empty">Waiting for the next 5-minute market.</div>'}</div></div>`;
+     :flip.armed?`Opposite-signal phase · ${flip.windowsRemaining} windows remaining`:'Normal signal-side trading';
+   const resting=orders.map(o=>`${px(o.limitPrice)} ${o.status}`).join(' · ')||'None';
+   const ask=`${px(quotes.UP?.bestAsk)} / ${px(quotes.DOWN?.bestAsk)}`;
+   return `<article class="card window bot-card"><h2>5m · ${esc(w.slug||'Waiting for market')}</h2>
+   <div class="metric"><span>Status</span><b>${esc(t.status||'starting')}</b></div>
+   <div class="metric"><span>Previous candle</span><b>${esc(signal.pattern||'WAITING')}</b></div>
+   <div class="metric"><span>Selected side</span><b class="${entries.side==='UP'?'good':entries.side==='DOWN'?'bad':''}">${esc(entries.side||'—')}${entries.windowWasFlipped?' · opposite signal':''}</b></div>
+   <div class="metric"><span>Signal reason</span><span>${esc(signal.reason||'Waiting for complete candle history')}</span></div>
+   <div class="metric"><span>Side cycle</span><b class="${flip.armed||flip.currentWindowFlipped?'gold':'good'}">${esc(phase)}</b></div>
+   <div class="metric"><span>Window remaining</span><b>${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}</b></div>
+   <div class="metric"><span>UP ask / DOWN ask</span><b>${ask}</b></div>
+   <div class="metric"><span>Limit rungs</span><b>$0.40 · $0.30 · $0.20 — 500 shares each</b></div>
+   <div class="metric"><span>Resting orders</span><b>${esc(resting)}</b></div>
+   <div class="metric"><span>Open shares / paper cash</span><b>${positions.reduce((n,p)=>n+Number(p.shares||0),0)} / ${usd(t.account?.cash)}</b></div>
+   </article>`;
+ }
+ function positionTable(positions,open){
+   if(!positions.length)return `<div class="empty">${open?'No open positions are floating right now.':'No closed trades yet.'}</div>`;
+   const headers=open?['Window','Side','Shares','Avg entry','Own bid · value','Unrealized P&L','Mark status']:['Window','Side','Shares','Avg entry','Exit','Proceeds','Realized P&L','Closed'];
+   const rows=positions.map(p=>{
+     const fresh=p.markStatus==='LIVE'&&p.markBid!=null&&p.markValue!=null;
+     const common=`<td>${esc(p.timeframe||'5m')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}</td><td>${Number(p.shares||0).toLocaleString()}</td><td>${px(p.avgEntry)}</td>`;
+     if(open)return `<tr>${common}<td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${esc(fresh?'LIVE':p.markStatus||'UNAVAILABLE')}</td></tr>`;
+     return `<tr>${common}<td>${px(p.exitBid)}</td><td>${p.proceeds==null?'—':usd(p.proceeds)}</td><td class="${Number(p.realizedPnl)>=0?'good':'bad'}">${p.realizedPnl==null?'—':usd(p.realizedPnl)}</td><td>${timestamp(p.settledAt)}</td></tr>`;
+   }).join('');
+   return `<table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
  }
 function equitySvg(points){if(!Array.isArray(points)||points.length<2)return '<div class="empty">Settled trades will appear here.</div>';const vals=points.map(p=>Number(p.equity)).filter(Number.isFinite);if(vals.length<2)return '<div class="empty">Settled trades will appear here.</div>';const w=900,h=220,pad=28,min=Math.min(...vals),max=Math.max(...vals),span=max-min||1,coords=vals.map((v,i)=>`${pad+i*(w-pad*2)/(vals.length-1)},${h-pad-(v-min)*(h-pad*2)/span}`).join(' ');return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Settled account equity over time"><line class="chart-grid" x1="${pad}" y1="${pad}" x2="${w-pad}" y2="${pad}"/><line class="chart-grid" x1="${pad}" y1="${h/2}" x2="${w-pad}" y2="${h/2}"/><line class="chart-grid" x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}"/><polyline class="equity-line" points="${coords}"/><text class="chart-label" x="${pad}" y="16">${usd(max)}</text><text class="chart-label" x="${pad}" y="${h-5}">${usd(min)}</text><text class="chart-label" x="${w-pad}" y="${h-5}" text-anchor="end">${vals.length-1} settled trades</text></svg>`}
-async function refresh(){try{const r=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'}),s=await r.json();
- document.querySelector('#status').textContent=String(s.status||'unknown').replaceAll('_',' ').toUpperCase();
-   document.querySelector('#capital').textContent=usd(s.account?.capital);document.querySelector('#equity').textContent=usd(s.account?.equity);document.querySelector('#cash').textContent=usd(s.account?.cash);document.querySelector('#makerRebate').textContent=usd(s.account?.estimatedMakerRebate);document.querySelector('#open').textContent=s.account?.openPositions??0;document.querySelector('#totalTrades').textContent=s.account?.totalTrades??0;document.querySelector('#winRate').textContent=Number(s.account?.winRate||0).toFixed(1)+'% ('+(s.account?.wins??0)+'/'+(s.account?.settledTrades??0)+')';document.querySelector('#wins').textContent=s.account?.wins??0;document.querySelector('#maxLossStreak').textContent=s.account?.maxConsecutiveLosses??0;document.querySelector('#maxDrawdown').textContent=usd(s.account?.maxDrawdown)+' ('+Number(s.account?.maxDrawdownPercent||0).toFixed(1)+'%)';document.querySelector('#equityChart').innerHTML=equitySvg(s.account?.equityCurve);document.querySelector('#error').textContent=s.error||'';
-   const inventory=s.inventory||{UP:{},DOWN:{}};
-   const live=s.livePrices||{};
-   for(const [side,prefix] of [['UP','up'],['DOWN','down']]){
-     const sideInventory=inventory[side]||{},quote=live[side]||{};
-     document.querySelector(`#${prefix}Shares`).textContent=sharesFmt(sideInventory.shares);
-     document.querySelector(`#${prefix}AverageCost`).textContent=sideInventory.averageCost==null?'—':px(sideInventory.averageCost);
-     document.querySelector(`#${prefix}TotalCost`).textContent=usd(sideInventory.cost);
-     document.querySelector(`#${prefix}Bid`).textContent=px(quote.bestBid);
-     document.querySelector(`#${prefix}Ask`).textContent=px(quote.bestAsk);
-     const status=document.querySelector(`#${prefix}QuoteStatus`);
-     status.textContent=String(quote.status||'MISSING').replaceAll('_',' ');
-     status.className='inventory-quote-status '+(quote.status==='LIVE'?'good':'muted');
-   }
- const realized=document.querySelector('#realized'),unrealized=document.querySelector('#unrealized');realized.textContent=usd(s.account?.realizedPnl);unrealized.textContent=usd(s.account?.unrealizedPnl)+(s.account?.unpricedOpenPositions?` · partial (${s.account.unpricedOpenPositions} unpriced)`:'' );realized.className='value '+(Number(s.account?.realizedPnl)>=0?'good':'bad');unrealized.className='value '+(Number(s.account?.unrealizedPnl)>=0?'good':'bad');
-   const t=s.timeframes?.['5m']||s;
+ async function refresh(){try{
+   const r=await fetch('/api/state?ts='+Date.now(),{cache:'no-store'});
+   if(!r.ok)throw Error('State request failed: '+r.status);
+   const s=await r.json(),a=s.account||{},t=s.timeframes?.['5m']||s;
+   document.querySelector('#status').textContent=String(s.status||'unknown').replaceAll('_',' ').toUpperCase();
+   document.querySelector('#equity').textContent=usd(a.equity);
+   document.querySelector('#cash').textContent=usd(a.cash);
+   const realized=document.querySelector('#realized'),unrealized=document.querySelector('#unrealized');
+   realized.textContent=usd(a.realizedPnl);realized.className='value '+(Number(a.realizedPnl)>=0?'good':'bad');
+   unrealized.textContent=usd(a.unrealizedPnl)+(a.unpricedOpenPositions?` · ${a.unpricedOpenPositions} unpriced`:'');
+   unrealized.className='value '+(Number(a.unrealizedPnl)>=0?'good':'bad');
+   document.querySelector('#open').textContent=a.openPositions??0;
+   document.querySelector('#totalTrades').textContent=a.totalTrades??0;
+   document.querySelector('#settledTrades').textContent=`${a.settledTrades??0} settled · ${a.openPositions??0} open`;
+   document.querySelector('#winRate').textContent=`${Number(a.winRate||0).toFixed(1)}%`;
+   document.querySelector('#wins').textContent=a.wins??0;
+   document.querySelector('#losses').textContent=a.losses??0;
    document.querySelector('#timeframe-panels').innerHTML=timeframePanel('5m',t);
-    const entries=t.strategy?.entries||{};
-     countdownState={serverNow:Number(s.now||Date.now()),receivedAt:Date.now(),start:Number(t.window?.start),intervalMs:5000,windowMs:Number(t.window?.end)-Number(t.window?.start)};
-   paintCountdown();
-     const ps=s.positions||[];document.querySelector('#positions').innerHTML=ps.length?ps.slice(0,20).map(p=>`<div class="metric"><span><b>${esc(p.timeframe||'')} · <span class="${p.side==='UP'?'up-color':'down-color'}">${esc(p.side)}</span> · ${esc(p.entryLabel||p.entryKey||'entry')}</b><br><small class="muted">${p.shares} shares · entry ${usd(p.avgEntry)} · ${esc(p.markStatus||'UNMARKED')}</small><small class="muted trade-times">Window ${timestamp(p.windowStart)}–${timestamp((p.windowStart||0)+(p.windowMs||0))} · Order ${timestamp(p.submittedAt)} · Fill ${timestamp(p.filledAt)} · Settlement ${settlementLabel(p)}</small></span><b class="${p.status==='SETTLED_EXIT'?(Number(p.realizedPnl)>=0?'good':'bad'):p.status==='OPEN'?'gold':'muted'}">${esc(p.status)}<br>R ${p.realizedPnl==null?'—':usd(p.realizedPnl)} · U ${p.unrealizedPnl==null?'—':usd(p.unrealizedPnl)}</b></div>`).join(''):'<div class="empty">No open or recent paper trades.</div>';
-}catch(e){document.querySelector('#error').textContent='Dashboard data unavailable: '+e.message}}
+   const positions=Array.isArray(s.positions)?s.positions:[];
+   const openPositions=positions.filter(p=>p.status==='OPEN'||p.status==='PENDING_CLOB_RESULT');
+   const closedPositions=positions.filter(p=>['SETTLED_EXIT','SETTLED_WIN','SETTLED_LOSS'].includes(p.status))
+     .sort((x,y)=>(Number(y.settledAt)||0)-(Number(x.settledAt)||0)).slice(0,30);
+   document.querySelector('#openPositions').innerHTML=positionTable(openPositions,true);
+   document.querySelector('#closedPositions').innerHTML=positionTable(closedPositions,false);
+   document.querySelector('#events').innerHTML=(s.events||[]).slice(0,16).map(e=>`<div class="event"><span class="muted">${timestamp(e.ts)}</span> · <b>${esc(e.event)}</b> · ${esc(e.note||e.pattern||e.side||'')}</div>`).join('')||'<div class="empty">Waiting for events.</div>';
+   document.querySelector('#error').textContent=s.error||'';
+ }catch(e){document.querySelector('#error').textContent='Dashboard data unavailable: '+e.message}}
 refresh();setInterval(refresh,2000);
 </script></body></html>
