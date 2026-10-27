@@ -294,18 +294,28 @@ class WickBot{
     order.positionId=order.id;order.remainingShares=0;
     this.cash-=cost;this.positions.unshift(position);
     this.log(marketOrder?'PAPER_OPPOSITE_MARKET_ORDER_FILLED':'PAPER_CANDLE_RUNG_FILLED',{
-      id:order.id,side:order.side,signalSide:order.signalSide,price:fillPrice,shares:order.shares});
+      id:order.id,side:order.side,signalSide:order.signalSide,price:fillPrice,
+      limitPrice:order.limitPrice??null,walkedAsk:quote.bestAsk,shares:order.shares,
+      quoteUpdatedAt:quote.updatedAt,fillModel:position.fillModel});
     return true;
   }
   processCandleOrders(start,now){
     for(const order of this.windowOrders){
       if(!['LIVE','MARKET_PENDING'].includes(order.status))continue;
       const marketOrder=order.orderType==='MARKET';
-      if(now>=order.expiresAt){order.status=marketOrder?'EXPIRED_WINDOW_ROLLOVER':'EXPIRED';order.expiredAt=now;continue}
       const quote=this.liveQuotes[order.side],ask=Number(quote?.bestAsk);
-      if(quote?.status!=='LIVE'||!Number.isFinite(quote.updatedAt)||now-quote.updatedAt>5000
-        ||!Number.isFinite(ask)||ask<=0||ask>=1||(!marketOrder&&ask>order.limitPrice))continue;
-      this.fillCandleOrder(order,now,quote,marketOrder?ask:order.limitPrice);
+      const fresh=quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)
+        &&now>=quote.updatedAt&&now-quote.updatedAt<=5000
+        &&Number.isFinite(ask)&&ask>0&&ask<1;
+      const withinWindow=marketOrder?now<order.expiresAt:now<=order.expiresAt;
+      if(fresh&&withinWindow&&(marketOrder||ask<=order.limitPrice)){
+        this.fillCandleOrder(order,now,quote,marketOrder?ask:order.limitPrice);
+        continue;
+      }
+      if(now>=order.expiresAt){
+        order.status=marketOrder?'EXPIRED_WINDOW_ROLLOVER':'EXPIRED';
+        order.expiredAt=now;
+      }
     }
   }
   windowShares(start,side){

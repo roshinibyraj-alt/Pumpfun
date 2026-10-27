@@ -93,6 +93,38 @@ test("candle signal places and fills three independent 500-share rungs", () => {
   assert.equal(bot.cash, 9_550);
 });
 
+test("a price jump below the limit fills every crossed rung at its limit", () => {
+  const { bot, start } = makeBot();
+  bot.processCandleEntries(start, start + 1_000);
+  const now = start + 2_000;
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now, bestBid: 0.17, bestAsk: 0.19 };
+
+  bot.processCandleOrders(start, now);
+
+  assert.deepEqual(bot.windowOrders.map(order => [order.limitPrice, order.status, order.fillPrice]), [
+    [0.40, "FILLED", 0.40],
+    [0.30, "FILLED", 0.30],
+    [0.20, "FILLED", 0.20],
+  ]);
+  assert.deepEqual(bot.positions.map(position => position.entryRungPrice), [0.20, 0.30, 0.40]);
+});
+
+test("a rung crossed on the cutoff timestamp fills before remaining orders expire", () => {
+  const { bot, start } = makeBot();
+  bot.processCandleEntries(start, start + 1_000);
+  const cutoff = start + config.ORDER_CUTOFF_MS;
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: cutoff, bestBid: 0.34, bestAsk: 0.35 };
+
+  bot.processCandleOrders(start, cutoff);
+
+  assert.deepEqual(bot.windowOrders.map(order => [order.limitPrice, order.status]), [
+    [0.40, "FILLED"],
+    [0.30, "EXPIRED"],
+    [0.20, "EXPIRED"],
+  ]);
+  assert.equal(bot.positions[0].avgEntry, 0.40);
+});
+
 test("unfilled rungs expire at the source bot's three-minute cutoff", () => {
   const { bot, start } = makeBot();
   bot.processCandleEntries(start, start + 1_000);
