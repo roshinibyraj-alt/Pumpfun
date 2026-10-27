@@ -6,17 +6,28 @@ const config = require("./btc/config.js");
 const Bot = require("./btc/wick-bot.js");
 const MultiBot = require("./btc/multi-bot.js");
 const marketData = require("./btc/wick-market-data.js");
+const candleStrategy = require("./btc/candle-strategy.js");
+const { ChainlinkPriceFeed } = require("./btc/chainlink-price-feed.js");
 
 function makeBot() {
+  const start = 1_800_000;
+  const minuteCandles = Array.from({ length: 5 }, (_, index) => ({
+    t: start - 300_000 + index * 60_000,
+    o: 100,
+    h: 102,
+    l: 99,
+    c: 101,
+  }));
   const bot = new Bot({
     priceFeed: {
       getTicks: () => [],
+      getMinuteCandles: () => minuteCandles,
       snapshot: () => ({ status: "test" }),
       start() {},
       stop() {},
     },
   });
-  const start = 1_800_000;
+  bot.minuteCandles = minuteCandles;
   bot.market = {
     id: "market",
     slug: "market",
@@ -30,7 +41,127 @@ function makeBot() {
   return { bot, start };
 }
 
-test("contrarian bot buys only the opposite side of the signed BTC move", () => {
+test("previous-candle signals match the copied source strategy", () => {
+  const start = config.WINDOW_MS_5M;
+  const minutes = color => Array.from({ length: 5 }, (_, index) => ({
+    t: start - 300_000 + index * 60_000,
+    o: 100, h: 102, l: 99, c: color === "GREEN" ? 101 : 99,
+  }));
+  assert.equal(candleStrategy.signalForPrevious(candleStrategy.aggregateCompleteCandles(minutes("GREEN"), 300_000)).side, "UP");
+  assert.equal(candleStrategy.signalForPrevious(candleStrategy.aggregateCompleteCandles(minutes("RED"), 300_000)).side, "DOWN");
+});
+
+test("Chainlink feed retains minute OHLC bars for candle signals", () => {
+  let now = 1_800_000_000_000;
+  const feed = new ChainlinkPriceFeed({ now: () => now, WebSocketImpl: null });
+  feed.started = true;
+  feed.addPrice({ timestamp: now - 1_000, value: 100 });
+  feed.addPrice({ timestamp: now - 500, value: 103 });
+  feed.addPrice({ timestamp: now - 100, value: 99 });
+  feed.lastUpdateAt = now;
+
+  assert.deepEqual(feed.getMinuteCandles(), [{
+    t: now - 60_000, o: 100, h: 103, l: 99, c: 99, v: 0,
+  }]);
+  now += 16_000;
+  assert.throws(() => feed.getMinuteCandles(), /stale|fresh/i);
+  feed.stop();
+});
+
+test("candle signal places and fills three independent 500-share rungs", () => {
+  const { bot, start } = makeBot();
+  const now = start + 1_000;
+  bot.processCandleEntries(start, now);
+
+  assert.deepEqual(bot.windowOrders.map(order => [order.side, order.limitPrice, order.shares, order.status]), [
+    ["UP", 0.40, 500, "LIVE"],
+    ["UP", 0.30, 500, "LIVE"],
+    ["UP", 0.20, 500, "LIVE"],
+  ]);
+  assert.equal(bot.windowSignalSide, "UP");
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now + 1, bestBid: 0.34, bestAsk: 0.35 };
+  bot.processCandleOrders(start, now + 1);
+  assert.deepEqual(bot.positions.map(position => position.entryRungPrice), [0.40]);
+
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now + 2, bestBid: 0.24, bestAsk: 0.25 };
+  bot.processCandleOrders(start, now + 2);
+  assert.deepEqual(bot.positions.map(position => position.entryRungPrice), [0.30, 0.40]);
+
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now + 3, bestBid: 0.18, bestAsk: 0.19 };
+  bot.processCandleOrders(start, now + 3);
+  assert.deepEqual(bot.positions.map(position => position.entryRungPrice), [0.20, 0.30, 0.40]);
+  assert.equal(bot.cash, 9_550);
+});
+
+test("unfilled rungs expire at the source bot's three-minute cutoff", () => {
+  const { bot, start } = makeBot();
+  bot.processCandleEntries(start, start + 1_000);
+  bot.processCandleOrders(start, start + config.ORDER_CUTOFF_MS);
+  assert.deepEqual(bot.windowOrders.map(order => order.status), ["EXPIRED", "EXPIRED", "EXPIRED"]);
+});
+
+test("opposite-signal phase requires all rung take-profits and lasts exactly four windows", async () => {
+  const { bot, start } = makeBot();
+  const now = start + 60_000;
+  bot.windowSignalSide = "UP";
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now, bestBid: 0.99 };
+  bot.orders = config.RESTING_LIMITS.map(level => ({
+    windowStart: start, limitPrice: level.price, shares: level.shares,
+    status: "FILLED", entryMode: "SIGNALLED_SIDE",
+  }));
+  bot.positions = config.RESTING_LIMITS.map((level, index) => ({
+    id: `rung-${index}`, side: "UP", status: "OPEN", windowStart: start,
+    shares: level.shares, totalCost: level.price * level.shares,
+    entryRungPrice: level.price, tokenId: "up-token",
+  }));
+  bot.cash = 9_550;
+  await bot.completeWindow(start, bot.positions[0], true, "TAKE_PROFIT_BID", 0.99, now);
+  assert.equal(bot.flipWindowsRemaining, 4);
+
+  for (let i = 0; i < 4; i++) {
+    const nextStart = start + (i + 1) * config.WINDOW_MS_5M;
+    const signalSide = i % 2 === 0 ? "UP" : "DOWN";
+    bot.market.start = nextStart;
+    bot.minuteCandles = Array.from({ length: 5 }, (_, index) => ({
+      t: nextStart - 300_000 + index * 60_000,
+      o: 100, h: 102, l: 99, c: signalSide === "UP" ? 101 : 99,
+    }));
+    bot.openStrategyWindow(nextStart, nextStart);
+    bot.processCandleEntries(nextStart, nextStart + 1_000);
+    assert.equal(bot.windowSignalSide, signalSide);
+    assert.equal(bot.windowStrategySide, "DOWN");
+    assert.equal(bot.flipWindowsRemaining, 3 - i);
+  }
+
+  const normalStart = start + 5 * config.WINDOW_MS_5M;
+  bot.market.start = normalStart;
+  bot.minuteCandles = Array.from({ length: 5 }, (_, index) => ({
+    t: normalStart - 300_000 + index * 60_000,
+    o: 100, h: 102, l: 99, c: 101,
+  }));
+  bot.openStrategyWindow(normalStart, normalStart);
+  bot.processCandleEntries(normalStart, normalStart + 1_000);
+  assert.equal(bot.windowStrategySide, "UP");
+  assert.equal(bot.windowWasFlipped, false);
+});
+
+test("a take-profit on an incomplete rung set does not arm the opposite phase", async () => {
+  const { bot, start } = makeBot();
+  const now = start + 60_000;
+  bot.windowSignalSide = "UP";
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now, bestBid: 0.99 };
+  bot.orders = config.RESTING_LIMITS.slice(0, 2).map(level => ({
+    windowStart: start, limitPrice: level.price, status: "FILLED", entryMode: "SIGNALLED_SIDE",
+  }));
+  bot.positions = config.RESTING_LIMITS.slice(0, 2).map((level, index) => ({
+    id: `rung-${index}`, side: "UP", status: "OPEN", windowStart: start,
+    shares: 500, totalCost: level.price * 500, entryRungPrice: level.price, tokenId: "up-token",
+  }));
+  await bot.completeWindow(start, bot.positions[0], true, "TAKE_PROFIT_BID", 0.99, now);
+  assert.equal(bot.flipWindowsRemaining, 0);
+});
+
+test.skip("legacy: contrarian bot buys only the opposite side of the signed BTC move", () => {
   assert.equal(config.ENTRY_CHECK_INTERVAL_MS, 5_000);
   assert.equal(config.ENTRY_ORDER_TTL_MS, 4_000);
   assert.equal(config.BASE_ENTRY_SHARES, 50);
@@ -72,7 +203,7 @@ test("contrarian bot buys only the opposite side of the signed BTC move", () => 
   assert.equal("merges" in bot.snapshot(), false);
 });
 
-test("contrarian side stays locked for the window when BTC direction later changes", () => {
+test.skip("legacy: contrarian side stays locked for the window when BTC direction later changes", () => {
   const { bot, start } = makeBot();
   const now = start + config.ENTRY_CHECK_INTERVAL_MS;
   bot.liveQuotes = {
@@ -93,7 +224,7 @@ test("contrarian side stays locked for the window when BTC direction later chang
   assert.ok(bot.windowOrders.every(order => order.side === "DOWN"));
 });
 
-test("contrarian entries expire after four seconds and checks use only the locked side", () => {
+test.skip("legacy: contrarian entries expire after four seconds and checks use only the locked side", () => {
   const { bot, start } = makeBot();
   const placedAt = start + config.ENTRY_CHECK_INTERVAL_MS;
   bot.liveQuotes = {
@@ -121,7 +252,7 @@ test("contrarian entries expire after four seconds and checks use only the locke
 
 });
 
-test("contrarian side skips sub-$0.05 limits and never fills below the floor", () => {
+test.skip("legacy: contrarian side skips sub-$0.05 limits and never fills below the floor", () => {
   const { bot, start } = makeBot();
   const placedAt = start + config.ENTRY_CHECK_INTERVAL_MS;
   bot.liveQuotes = {
@@ -149,7 +280,7 @@ test("contrarian side skips sub-$0.05 limits and never fills below the floor", (
   assert.ok(pending.every(order => order.limitPrice >= 0.05));
 });
 
-test("pending limits fill only on a later fresh ask at or below the limit and remain separate", () => {
+test.skip("legacy: pending limits fill only on a later fresh ask at or below the limit and remain separate", () => {
   const { bot, start } = makeBot();
   const placedAt = start + 5_000;
   bot.liveQuotes = {
@@ -177,7 +308,7 @@ test("pending limits fill only on a later fresh ask at or below the limit and re
   assert.equal(bot.positions[0].entryType, "CONTRARIAN_BTC_DIRECTION");
 });
 
-test("unfilled limits expire at the window close and no merge routine is present", () => {
+test.skip("legacy: unfilled limits expire at the window close and no merge routine is present", () => {
   const { bot, start } = makeBot();
   const placedAt = start + 5_000;
   bot.liveQuotes = {
@@ -219,7 +350,7 @@ test("take profit completes the window and clears all same-window shares", async
   assert.equal(bot.orders[0].status, "EXPIRED_WINDOW_COMPLETE");
   assert.equal(bot.snapshot().window.complete, true);
   const orderCount = bot.orders.length;
-  bot.processTimedEntries(start, start + config.ENTRY_CHECK_INTERVAL_MS);
+  bot.processCandleEntries(start, start + config.ENTRY_CHECK_INTERVAL_MS);
   assert.equal(bot.orders.length, orderCount);
 });
 
@@ -511,7 +642,7 @@ test("old-window positions can still settle from their own token threshold", asy
   assert.equal(oldPosition.realizedPnl, 30);
 });
 
-test("contrarian strategy uses a direction signal even in a choppy regime", () => {
+test.skip("legacy: contrarian strategy uses a direction signal even in a choppy regime", () => {
   const { bot, start } = makeBot();
   bot.marketRegime = { state: "CHOPPY", direction: "UP", reason: "test regime" };
   const now = start + config.ENTRY_CHECK_INTERVAL_MS;
@@ -526,7 +657,7 @@ test("contrarian strategy uses a direction signal even in a choppy regime", () =
   assert.equal(bot.snapshot().strategy.entries.direction.includes("Contrarian"), true);
 });
 
-test("falling BTC selects UP and missing direction skips entries", () => {
+test.skip("legacy: falling BTC selects UP and missing direction skips entries", () => {
   const { bot, start } = makeBot();
   const now = start + config.ENTRY_CHECK_INTERVAL_MS;
   bot.marketRegime = { state: "UNKNOWN", direction: null };

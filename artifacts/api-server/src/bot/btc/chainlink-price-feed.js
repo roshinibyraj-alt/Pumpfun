@@ -3,13 +3,14 @@
 const URL = 'wss://ws-live-data.polymarket.com';
 const SYMBOL = 'btc/usd';
 const MAX_AGE_MS = 15_000;
-const RETAIN_MS = 10 * 60 * 1000;
+const RETAIN_MS = 60 * 60 * 1000;
 
 class ChainlinkPriceFeed {
   constructor({ WebSocketImpl = globalThis.WebSocket, now = Date.now } = {}) {
     this.WebSocketImpl = WebSocketImpl;
     this.now = now;
     this.ticks = [];
+    this.minuteBars = new Map();
     this.socket = null;
     this.started = false;
     this.status = 'starting';
@@ -115,12 +116,35 @@ class ChainlinkPriceFeed {
       const index = this.ticks.findIndex(x => x.ts > timestamp);
       this.ticks.splice(index < 0 ? this.ticks.length : index, 0, tick);
     }
+    const minute = Math.floor(timestamp / 60_000) * 60_000;
+    const bar = this.minuteBars.get(minute);
+    if (!bar) {
+      this.minuteBars.set(minute, { t: minute, o: price, h: price, l: price, c: price, firstTs: timestamp, lastTs: timestamp });
+    } else {
+      bar.h = Math.max(bar.h, price);
+      bar.l = Math.min(bar.l, price);
+      if (timestamp < bar.firstTs) { bar.o = price; bar.firstTs = timestamp; }
+      if (timestamp >= bar.lastTs) { bar.c = price; bar.lastTs = timestamp; }
+    }
     return true;
   }
 
   prune() {
     const cutoff = this.now() - RETAIN_MS;
+    for (const timestamp of this.minuteBars.keys()) if (timestamp < cutoff) this.minuteBars.delete(timestamp);
     while (this.ticks.length && this.ticks[0].ts < cutoff) this.ticks.shift();
+  }
+
+  getMinuteCandles() {
+    this.start();
+    const ageMs = this.lastUpdateAt == null ? null : this.now() - this.lastUpdateAt;
+    if (this.lastUpdateAt == null || ageMs > MAX_AGE_MS) {
+      if (this.status === 'live') this.status = 'stale';
+      if (ageMs != null && ageMs > MAX_AGE_MS && this.socket) this.socket.close?.();
+      throw new Error(this.error || `Chainlink BTC/USD feed ${this.status}; waiting for a fresh price update`);
+    }
+    return [...this.minuteBars.values()].sort((a, b) => a.t - b.t)
+      .map(({ t, o, h, l, c }) => ({ t, o, h, l, c, v: 0 }));
   }
 
   getTicks() {
@@ -143,6 +167,7 @@ class ChainlinkPriceFeed {
       lastUpdateAt: this.lastUpdateAt,
       ageMs,
       ticks: this.ticks.length,
+      minuteBars: this.minuteBars.size,
       error: this.error,
     };
   }
