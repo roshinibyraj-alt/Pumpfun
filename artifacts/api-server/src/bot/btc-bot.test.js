@@ -68,159 +68,85 @@ test("Chainlink feed retains minute OHLC bars for candle signals", () => {
   feed.stop();
 });
 
-test("candle signal places and fills three independent 500-share rungs", () => {
+test("a green signal submits six 250-share limit buys on UP", () => {
   const { bot, start } = makeBot();
   const now = start + 1_000;
   bot.processCandleEntries(start, now);
 
-  assert.deepEqual(bot.windowOrders.map(order => [order.side, order.limitPrice, order.shares, order.status]), [
-    ["UP", 0.40, 500, "LIVE"],
-    ["UP", 0.30, 500, "LIVE"],
-    ["UP", 0.20, 500, "LIVE"],
-  ]);
   assert.equal(bot.windowSignalSide, "UP");
-  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now + 1, bestBid: 0.34, bestAsk: 0.35 };
-  bot.processCandleOrders(start, now + 1);
-  assert.deepEqual(bot.positions.map(position => position.entryRungPrice), [0.40]);
-
-  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now + 2, bestBid: 0.24, bestAsk: 0.25 };
-  bot.processCandleOrders(start, now + 2);
-  assert.deepEqual(bot.positions.map(position => position.entryRungPrice), [0.30, 0.40]);
-
-  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now + 3, bestBid: 0.18, bestAsk: 0.19 };
-  bot.processCandleOrders(start, now + 3);
-  assert.deepEqual(bot.positions.map(position => position.entryRungPrice), [0.20, 0.30, 0.40]);
-  assert.equal(bot.cash, 9_550);
-});
-
-test("a price jump below the limit fills every crossed rung at its limit", () => {
-  const { bot, start } = makeBot();
-  bot.processCandleEntries(start, start + 1_000);
-  const now = start + 2_000;
-  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now, bestBid: 0.17, bestAsk: 0.19 };
-
-  bot.processCandleOrders(start, now);
-
-  assert.deepEqual(bot.windowOrders.map(order => [order.limitPrice, order.status, order.fillPrice]), [
-    [0.40, "FILLED", 0.40],
-    [0.30, "FILLED", 0.30],
-    [0.20, "FILLED", 0.20],
-  ]);
-  assert.deepEqual(bot.positions.map(position => position.entryRungPrice), [0.20, 0.30, 0.40]);
-});
-
-test("a rung crossed on the cutoff timestamp fills before remaining orders expire", () => {
-  const { bot, start } = makeBot();
-  bot.processCandleEntries(start, start + 1_000);
-  const cutoff = start + config.ORDER_CUTOFF_MS;
-  bot.liveQuotes.UP = { status: "LIVE", updatedAt: cutoff, bestBid: 0.34, bestAsk: 0.35 };
-
-  bot.processCandleOrders(start, cutoff);
-
-  assert.deepEqual(bot.windowOrders.map(order => [order.limitPrice, order.status]), [
-    [0.40, "FILLED"],
-    [0.30, "EXPIRED"],
-    [0.20, "EXPIRED"],
-  ]);
-  assert.equal(bot.positions[0].avgEntry, 0.40);
-});
-
-test("unfilled rungs expire at the source bot's three-minute cutoff", () => {
-  const { bot, start } = makeBot();
-  bot.processCandleEntries(start, start + 1_000);
-  bot.processCandleOrders(start, start + config.ORDER_CUTOFF_MS);
-  assert.deepEqual(bot.windowOrders.map(order => order.status), ["EXPIRED", "EXPIRED", "EXPIRED"]);
-});
-
-test("opposite phase places one immediate 500-share market buy for four consecutive windows", async () => {
-  const { bot, start } = makeBot();
-  const now = start + 60_000;
-  bot.windowSignalSide = "UP";
-  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now, bestBid: 0.99 };
-  bot.orders = config.RESTING_LIMITS.map(level => ({
-    windowStart: start, limitPrice: level.price, shares: level.shares,
-    status: "FILLED", entryMode: "SIGNALLED_SIDE",
-  }));
-  bot.positions = config.RESTING_LIMITS.map((level, index) => ({
-    id: `rung-${index}`, side: "UP", status: "OPEN", windowStart: start,
-    shares: level.shares, totalCost: level.price * level.shares,
-    entryRungPrice: level.price, tokenId: "up-token",
-  }));
-  bot.cash = 9_550;
-  await bot.completeWindow(start, bot.positions[0], true, "TAKE_PROFIT_BID", 0.99, now);
-  assert.equal(bot.flipWindowsRemaining, 4);
-
-  for (let i = 0; i < 4; i++) {
-    const nextStart = start + (i + 1) * config.WINDOW_MS_5M;
-    const signalSide = i % 2 === 0 ? "UP" : "DOWN";
-    bot.market.start = nextStart;
-    bot.minuteCandles = i === 0 ? [] : Array.from({ length: 5 }, (_, index) => ({
-      t: nextStart - 300_000 + index * 60_000,
-      o: 100, h: 102, l: 99, c: signalSide === "UP" ? 101 : 99,
-    }));
-    bot.liveQuotes.DOWN = { status: "LIVE", updatedAt: nextStart + 1_000, bestBid: 0.43, bestAsk: 0.45 };
-    bot.openStrategyWindow(nextStart, nextStart);
-    bot.processCandleEntries(nextStart, nextStart + 1_000);
-    assert.equal(bot.windowSignalSide, i === 0 ? null : signalSide);
-    assert.equal(bot.windowStrategySide, "DOWN");
-    assert.equal(bot.windowOrders.length, 1);
-    assert.deepEqual(
-      [bot.windowOrders[0].orderType, bot.windowOrders[0].shares, bot.windowOrders[0].status, bot.windowOrders[0].fillPrice],
-      ["MARKET", 500, "FILLED", 0.45],
-    );
-    assert.equal(bot.positions[0].entryMode, "FOUR_WINDOW_OPPOSITE_MARKET");
-    assert.equal(bot.positions[0].avgEntry, 0.45);
-    assert.equal(bot.flipWindowsRemaining, 3 - i);
-  }
-
-  const normalStart = start + 5 * config.WINDOW_MS_5M;
-  bot.market.start = normalStart;
-  bot.minuteCandles = Array.from({ length: 5 }, (_, index) => ({
-    t: normalStart - 300_000 + index * 60_000,
-    o: 100, h: 102, l: 99, c: 101,
-  }));
-  bot.openStrategyWindow(normalStart, normalStart);
-  bot.processCandleEntries(normalStart, normalStart + 1_000);
   assert.equal(bot.windowStrategySide, "UP");
-  assert.equal(bot.windowWasFlipped, false);
-  assert.equal(bot.windowOrders.length, 3);
-  assert.ok(bot.windowOrders.every(order => order.orderType === "GTC LIMIT" && order.status === "LIVE"));
+  assert.deepEqual(bot.windowOrders.map(order=>[order.side,order.signalSide,order.limitPrice,order.shares,order.status]),[
+    ...[0.40,0.35,0.30,0.25,0.20,0.15].map(price=>["UP","UP",price,250,"PENDING"]),
+  ]);
+  assert.equal(bot.windowOrders.reduce((sum,order)=>sum+order.limitPrice*order.shares,0),412.5);
+  assert.equal(bot.snapshot().strategy.entries.orderType,"LIMIT");
+  assert.equal(bot.snapshot().strategy.entries.totalShares,1500);
 });
 
-test("opposite market order waits for a fresh ask and fills at that ask without rung limits", () => {
+test("a red signal submits the same six limits on DOWN", () => {
   const { bot, start } = makeBot();
-  bot.flipWindowsRemaining = 4;
-  bot.flipAnchorSide = "UP";
-  bot.minuteCandles = [];
+  bot.minuteCandles = Array.from({ length: 5 }, (_, index) => ({
+    t: start - 300_000 + index * 60_000,
+    o: 100, h: 101, l: 98, c: 99,
+  }));
+  const now = start + 1_000;
+  bot.processCandleEntries(start, now);
 
+  assert.equal(bot.windowSignalSide, "DOWN");
+  assert.equal(bot.windowStrategySide,"DOWN");
+  assert.ok(bot.windowOrders.every(order=>order.side==="DOWN"&&order.shares===250&&order.status==="PENDING"));
+});
+
+test("signal-side limits fill only on a newer fresh ask at or below the limit and estimate rebate", () => {
+  const { bot, start } = makeBot();
+  bot.market.feesEnabled=true;
+  bot.market.feeSchedule={rate:0.07,exponent:1};
   bot.processCandleEntries(start, start + 1_000);
-  assert.equal(bot.windowOrders.length, 1);
-  assert.equal(bot.windowOrders[0].status, "MARKET_PENDING");
-  assert.equal(bot.windowOrders[0].limitPrice, undefined);
-  assert.equal(bot.flipWindowsRemaining, 3);
 
-  bot.liveQuotes.DOWN = { status: "LIVE", updatedAt: start + 2_000, bestBid: 0.72, bestAsk: 0.76 };
-  bot.processCandleOrders(start, start + 2_000);
-  assert.equal(bot.windowOrders[0].status, "FILLED");
-  assert.equal(bot.windowOrders[0].fillPrice, 0.76);
-  assert.equal(bot.positions[0].shares, 500);
-  assert.equal(bot.positions[0].cost, 380);
+  assert.ok(bot.windowOrders.every(order=>order.status==="PENDING"));
+  bot.liveQuotes.UP={status:"LIVE",updatedAt:start+2_000,bestBid:0.1,bestAsk:0.14};
+  bot.processPendingLimitOrders(start+2_000);
+  assert.equal(bot.windowOrders.filter(order=>order.status==="FILLED").length,6);
+  assert.equal(bot.positions.reduce((sum,position)=>sum+position.shares,0),1500);
+  assert.equal(bot.positions.reduce((sum,position)=>sum+position.cost,0),412.5);
+  assert.ok(Math.abs(bot.snapshot().account.estimatedMakerRebate-4.03375)<1e-8);
 });
 
-test("a take-profit on an incomplete rung set does not arm the opposite phase", async () => {
+test("every window submits a fresh ladder on its own candle side", () => {
   const { bot, start } = makeBot();
-  const now = start + 60_000;
-  bot.windowSignalSide = "UP";
-  bot.liveQuotes.UP = { status: "LIVE", updatedAt: now, bestBid: 0.99 };
-  bot.orders = config.RESTING_LIMITS.slice(0, 2).map(level => ({
-    windowStart: start, limitPrice: level.price, status: "FILLED", entryMode: "SIGNALLED_SIDE",
+  const nextStart = start + config.WINDOW_MS_5M;
+  bot.market.start = nextStart;
+  bot.minuteCandles = Array.from({ length: 5 }, (_, index) => ({
+    t: nextStart - 300_000 + index * 60_000,
+    o: 100, h: 101, l: 98, c: 99,
   }));
-  bot.positions = config.RESTING_LIMITS.slice(0, 2).map((level, index) => ({
-    id: `rung-${index}`, side: "UP", status: "OPEN", windowStart: start,
-    shares: 500, totalCost: level.price * 500, entryRungPrice: level.price, tokenId: "up-token",
+  bot.openStrategyWindow(nextStart, nextStart);
+  const now = nextStart + 1_000;
+  bot.processCandleEntries(nextStart, now);
+
+  assert.equal(bot.windowSignalSide, "DOWN");
+  assert.equal(bot.windowStrategySide,"DOWN");
+  assert.equal(bot.windowOrders.length,6);
+  assert.ok(bot.windowOrders.every(order=>order.side==="DOWN"&&order.windowStart===nextStart));
+});
+
+test("missing and neutral candle history still selects a side and submits a ladder", () => {
+  const { bot, start } = makeBot();
+  bot.minuteCandles = bot.minuteCandles.slice(1);
+  bot.processCandleEntries(start, start + 1_000);
+  assert.equal(bot.windowSignalSide,"UP");
+  assert.equal(bot.candleEvaluation.pattern,"NO_HISTORY_DEFAULT_UP");
+  assert.equal(bot.windowOrders.length,6);
+
+  bot.openStrategyWindow(start+bot.windowMs,start+bot.windowMs);
+  bot.minuteCandles = Array.from({ length: 5 }, (_, index) => ({
+    t: start+bot.windowMs-300_000 + index * 60_000,
+    o: 100, h: 102, l: 98, c: 100,
   }));
-  await bot.completeWindow(start, bot.positions[0], true, "TAKE_PROFIT_BID", 0.99, now);
-  assert.equal(bot.flipWindowsRemaining, 0);
+  bot.market.start=start+bot.windowMs;
+  bot.processCandleEntries(start+bot.windowMs,start+bot.windowMs+2_000);
+  assert.equal(bot.windowOrders.length,6);
+  assert.equal(bot.candleEvaluation.pattern,"DOJI_NO_DIRECTION_DEFAULT_UP");
 });
 
 test.skip("legacy: contrarian bot buys only the opposite side of the signed BTC move", () => {
@@ -547,8 +473,9 @@ test("rollover clears previous-window shares and cancels pending orders", async 
   assert.equal(bot.snapshot().account.openPositions, 0);
   assert.equal(bot.snapshot().inventory.DOWN.shares, 0);
   assert.match(bot.snapshot().strategy.exit, /No shares carry over/);
-  assert.equal(bot.orders[0].status, "EXPIRED_WINDOW_ROLLOVER");
-  assert.equal(bot.orders[0].remainingShares, 0);
+  const expiredOrder=bot.orders.find(order=>order.id==="old-pending");
+  assert.equal(expiredOrder.status, "EXPIRED_WINDOW_ROLLOVER");
+  assert.equal(expiredOrder.remainingShares, 0);
   assert.equal(bot.completedWindows.get(oldStart).reason, "WINDOW_ROLLOVER");
 });
 

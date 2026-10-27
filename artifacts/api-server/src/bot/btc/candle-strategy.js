@@ -28,7 +28,12 @@ function aggregateCompleteCandles(minuteCandles, windowMs) {
 }
 
 function signalForPrevious(candles) {
-  if (!candles.length) return { side: null, reason: 'Waiting for a complete previous candle' };
+  if (!candles.length) return {
+    side: 'UP',
+    pattern: 'NO_HISTORY_DEFAULT_UP',
+    fallback: true,
+    reason: 'No complete BTC candle history is available; using the explicit UP fallback so this window still receives orders',
+  };
   const previous = candles.at(-1);
   if (previous.color === 'GREEN') return { side: 'UP', pattern: 'PREVIOUS_GREEN', previous };
   if (previous.color === 'RED') return { side: 'DOWN', pattern: 'PREVIOUS_RED', previous };
@@ -41,7 +46,21 @@ function signalForPrevious(candles) {
   }
   if (red >= 2) return { side: 'UP', pattern: 'DOJI_AFTER_RED_RUN', previous };
   if (green >= 2) return { side: 'DOWN', pattern: 'DOJI_AFTER_GREEN_RUN', previous };
-  return { side: null, pattern: 'DOJI_NO_RUN', previous, reason: 'Doji needs two consecutive prior candles of one color' };
+  const priorDirection = [...candles.slice(0, -1)].reverse().find(candle => ['GREEN', 'RED'].includes(candle.color));
+  if (priorDirection) return {
+    side: priorDirection.color === 'GREEN' ? 'UP' : 'DOWN',
+    pattern: 'DOJI_FALLBACK_LAST_DIRECTION',
+    previous,
+    fallbackCandle: priorDirection,
+    reason: `Neutral doji; continuing the latest directional candle (${priorDirection.color})`,
+  };
+  return {
+    side: 'UP',
+    pattern: 'DOJI_NO_DIRECTION_DEFAULT_UP',
+    previous,
+    fallback: true,
+    reason: 'No directional candle pattern is available; using the explicit UP fallback so this window still receives orders',
+  };
 }
 
 module.exports = { candleColor, aggregateCompleteCandles, signalForPrevious };
