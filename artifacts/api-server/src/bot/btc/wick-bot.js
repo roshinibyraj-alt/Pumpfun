@@ -208,8 +208,11 @@ class WickBot{
   }
   processCandleEntries(start,now){
     if(this.completedWindows.has(start)||this.orderWindowStart!==start||this.candleOrdersPlaced)return;
-    const windows=candleStrategy.aggregateCompleteCandles(this.minuteCandles||[],this.windowMs)
-      .filter(candle=>candle.end<=start);
+    const windowsByStart=new Map((this.priceFeed.getHistoricalCandles?.()||[])
+      .filter(candle=>candle.end<=start).map(candle=>[candle.start,candle]));
+    for(const candle of candleStrategy.aggregateCompleteCandles(this.minuteCandles||[],this.windowMs)
+      .filter(candle=>candle.end<=start))windowsByStart.set(candle.start,candle);
+    const windows=[...windowsByStart.values()].sort((a,b)=>a.start-b.start);
     const signal=candleStrategy.signalForPrevious(windows);
     this.candleEvaluation={...signal,ready:!!signal.previous};
     if(!signal.side){

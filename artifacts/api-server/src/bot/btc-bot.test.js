@@ -91,6 +91,42 @@ test("Chainlink feed retains minute OHLC bars for candle signals", () => {
   feed.stop();
 });
 
+test("Binance history seeds completed 5-minute candles and excludes the active candle", async () => {
+  const now = 1_800_000_000_000;
+  const bucket = Math.floor(now / 300_000) * 300_000;
+  const rows = [
+    [bucket - 600_000, "100", "103", "99", "102", "1", bucket - 300_001],
+    [bucket - 300_000, "102", "103", "98", "99", "1", bucket - 1],
+    [bucket, "99", "104", "97", "103", "1", bucket + 299_999],
+  ];
+  const feed = new ChainlinkPriceFeed({
+    WebSocketImpl: null,
+    now: () => now,
+    fetchImpl: async () => ({ ok: true, json: async () => rows }),
+  });
+  await feed.loadHistoricalCandles();
+  const candles = feed.getHistoricalCandles();
+  assert.equal(feed.historyStatus, "ready");
+  assert.equal(candles.length, 2);
+  assert.equal(candles[1].color, "RED");
+  assert.equal(candles[1].source, "BINANCE_HISTORY");
+  assert.equal(candleStrategy.signalForPrevious(candles).side, "DOWN");
+  feed.stop();
+});
+
+test("Binance-seeded previous candle places the six-ladder on its color side", () => {
+  const { bot, start } = makeBot();
+  bot.minuteCandles = [];
+  bot.priceFeed.getHistoricalCandles = () => [{
+    start: start - 300_000, end: start, open: 100, high: 102, low: 99, close: 101,
+    color: "GREEN", source: "BINANCE_HISTORY",
+  }];
+  bot.processCandleEntries(start, start + 1_000);
+  assert.equal(bot.candleEvaluation.pattern, "PREVIOUS_GREEN_FALLBACK");
+  assert.equal(bot.windowSignalSide, "UP");
+  assert.equal(bot.windowOrders.length, 6);
+});
+
 test("a green signal submits six 250-share limit buys on UP", () => {
   const { bot, start } = makeBot();
   const now = start + 1_000;

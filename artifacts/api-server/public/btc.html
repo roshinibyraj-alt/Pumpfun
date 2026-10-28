@@ -62,7 +62,7 @@ function paintCountdown(){
 }
 setInterval(paintCountdown,250);
  function timeframePanel(tf,t){
-    const w=t.window||{},entries=t.strategy?.entries||{},signal=entries.signal||{},feed=t.strategy?.btcPriceFeed||{};
+    const w=t.window||{},entries=t.strategy?.entries||{},signal=entries.signal||{},feed=t.strategy?.btcPriceFeed||{},history=feed.history||{};
     const quotes=t.livePrices||{};
    const orders=(t.orders||[]).filter(o=>o.windowStart===w.start);
    const positions=(t.positions||[]).filter(p=>p.windowStart===w.start&&p.status==='OPEN');
@@ -72,6 +72,7 @@ setInterval(paintCountdown,250);
    return `<article class="card window bot-card"><h2>5m · ${esc(w.slug||'Waiting for market')}</h2>
    <div class="metric"><span>Status</span><b>${esc(t.status||'starting')}</b></div>
     <div class="metric"><span>Chainlink feed</span><b class="${feed.status==='live'?'good':feed.status==='stale'||feed.status==='error'?'bad':'gold'}">${esc(String(feed.status||'unknown').toUpperCase())} · ${feed.ageMs==null?'waiting':`${Math.round(feed.ageMs/1000)}s old`}</b></div>
+    <div class="metric"><span>5-minute history</span><b class="${history.status==='ready'?'good':history.status==='error'?'bad':'gold'}">${esc(String(history.status||'waiting').toUpperCase())} · ${esc(history.candles||0)} Binance candles</b></div>
     <div class="metric"><span>Detected pattern</span><b>${esc((signal.pattern||'WAITING').replaceAll('_',' '))}</b></div>
     <div class="metric"><span>Signal side</span><b class="${entries.side==='UP'?'good':entries.side==='DOWN'?'bad':''}">${esc(entries.side||'—')}</b></div>
     <div class="metric"><span>Signal reason</span><b class="signal-reason ${entries.side==='UP'?'good':entries.side==='DOWN'?'bad':''}">${esc(signal.reason||'Waiting for complete candle history')}</b></div>
