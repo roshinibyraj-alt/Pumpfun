@@ -192,6 +192,78 @@ test("signal-side limits stay active until rollover and fill every crossed rung"
   assert.ok(bot.windowOrders.every(order => order.status === "FILLED" || order.status === "EXPIRED_UNFILLED"));
 });
 
+test("two early rung fills trigger one combined market buy after two minutes in the CLOB band", () => {
+  const { bot, start } = makeBot();
+  bot.market.feesEnabled = true;
+  bot.market.feeSchedule = { rate: 0.07, exponent: 1 };
+  bot.processCandleEntries(start, start + 1_000);
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 60_000, bestBid: 0.34, bestAsk: 0.35 };
+  bot.processPendingLimitOrders(start + 60_000);
+  assert.equal(bot.windowOrders.filter(order => order.status === "FILLED").length, 2);
+
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 119_999, bestBid: 0.64, bestAsk: 0.65 };
+  bot.processPendingLimitOrders(start + 119_999);
+  assert.equal(bot.catchUpDecision.executed, false);
+
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 120_000, bestBid: 0.59, bestAsk: 0.60 };
+  bot.processPendingLimitOrders(start + 120_000);
+  assert.equal(bot.catchUpDecision.eligible, true);
+  assert.equal(bot.catchUpDecision.executed, false);
+
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 125_000, bestBid: 0.69, bestAsk: 0.70 };
+  bot.processPendingLimitOrders(start + 125_000);
+  assert.equal(bot.catchUpDecision.executed, false);
+
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 130_000, bestBid: 0.64, bestAsk: 0.65 };
+  bot.processPendingLimitOrders(start + 130_000);
+  const marketOrders = bot.windowOrders.filter(order => order.orderType === "MARKET");
+  assert.equal(marketOrders.length, 1);
+  assert.equal(marketOrders[0].status, "FILLED");
+  assert.equal(marketOrders[0].shares, 1_000);
+  assert.equal(marketOrders[0].fillPrice, 0.65);
+  assert.ok(Math.abs(marketOrders[0].fee - 15.925) < 1e-8);
+  assert.equal(marketOrders[0].estimatedMakerRebate, 0);
+  assert.equal(bot.windowOrders.filter(order => order.status === "CANCELLED_CONSOLIDATED_MARKET_BUY").length, 4);
+  assert.equal(bot.positions.reduce((sum, position) => sum + position.shares, 0), 1_500);
+  assert.ok(Math.abs(bot.cash - 9_146.575) < 1e-8);
+  assert.ok(Math.abs(bot.snapshot().account.takerFees - 15.925) < 1e-8);
+  assert.equal(bot.catchUpDecision.executed, true);
+  assert.match(bot.snapshot().strategy.entries.catchUp.reason, /bought together/);
+});
+
+test("CLOB CHoCH checks the candle-signalled DOWN price, not UP", () => {
+  const { bot, start } = makeBot();
+  bot.minuteCandles = Array.from({ length: 5 }, (_, index) => ({
+    t: start - 300_000 + index * 60_000, o: 100, h: 101, l: 98, c: 99,
+  }));
+  bot.processCandleEntries(start, start + 1_000);
+  assert.equal(bot.windowSignalSide, "DOWN");
+
+  bot.liveQuotes.DOWN = { status: "LIVE", updatedAt: start + 60_000, bestBid: 0.34, bestAsk: 0.35 };
+  bot.processPendingLimitOrders(start + 60_000);
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 120_000, bestBid: 0.64, bestAsk: 0.65 };
+  bot.liveQuotes.DOWN = { status: "LIVE", updatedAt: start + 120_000, bestBid: 0.54, bestAsk: 0.55 };
+  bot.processPendingLimitOrders(start + 120_000);
+  assert.equal(bot.catchUpDecision.eligible, true);
+  assert.equal(bot.catchUpDecision.executed, false);
+
+  bot.liveQuotes.DOWN = { status: "LIVE", updatedAt: start + 125_000, bestBid: 0.64, bestAsk: 0.65 };
+  bot.processPendingLimitOrders(start + 125_000);
+  const marketOrder = bot.windowOrders.find(order => order.orderType === "MARKET");
+  assert.equal(marketOrder.side, "DOWN");
+});
+
+test("CLOB catch-up is not eligible unless exactly two rungs filled by two minutes", () => {
+  const { bot, start } = makeBot();
+  bot.processCandleEntries(start, start + 1_000);
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 60_000, bestBid: 0.39, bestAsk: 0.40 };
+  bot.processPendingLimitOrders(start + 60_000);
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 120_000, bestBid: 0.64, bestAsk: 0.65 };
+  bot.processPendingLimitOrders(start + 120_000);
+  assert.equal(bot.catchUpDecision.status, "not_eligible");
+  assert.equal(bot.windowOrders.filter(order => order.orderType === "MARKET").length, 0);
+});
+
 test("a later Chainlink feed error does not overwrite the chosen signal reason", () => {
   const { bot, start } = makeBot();
   bot.processCandleEntries(start, start + 1_000);

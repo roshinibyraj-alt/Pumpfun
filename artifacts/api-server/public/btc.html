@@ -62,12 +62,12 @@ function paintCountdown(){
 }
 setInterval(paintCountdown,250);
  function timeframePanel(tf,t){
-    const w=t.window||{},entries=t.strategy?.entries||{},signal=entries.signal||{},feed=t.strategy?.btcPriceFeed||{},history=feed.history||{};
+    const w=t.window||{},entries=t.strategy?.entries||{},signal=entries.signal||{},feed=t.strategy?.btcPriceFeed||{},history=feed.history||{},catchUp=entries.catchUp||{};
     const quotes=t.livePrices||{};
    const orders=(t.orders||[]).filter(o=>o.windowStart===w.start);
    const positions=(t.positions||[]).filter(p=>p.windowStart===w.start&&p.status==='OPEN');
    const remaining=w.end?Math.max(0,Math.floor((w.end-Date.now())/1000)):0;
-     const entryOrder=orders.map(o=>`${px(o.limitPrice)} · ${sharesFmt(o.shares)} shares · ${o.status} · rebate est. ${usd(o.estimatedMakerRebate)}`).join(' · ')||'Not submitted';
+      const entryOrder=orders.map(o=>`${o.orderType==='MARKET'?`MARKET @ ${px(o.fillPrice)}`:px(o.limitPrice)} · ${sharesFmt(o.shares)} shares · ${o.status} · rebate est. ${usd(o.estimatedMakerRebate)}`).join(' · ')||'Not submitted';
    const ask=`${px(quotes.UP?.bestAsk)} / ${px(quotes.DOWN?.bestAsk)}`;
    return `<article class="card window bot-card"><h2>5m · ${esc(w.slug||'Waiting for market')}</h2>
    <div class="metric"><span>Status</span><b>${esc(t.status||'starting')}</b></div>
@@ -76,6 +76,7 @@ setInterval(paintCountdown,250);
     <div class="metric"><span>Detected pattern</span><b>${esc((signal.pattern||'WAITING').replaceAll('_',' '))}</b></div>
     <div class="metric"><span>Signal side</span><b class="${entries.side==='UP'?'good':entries.side==='DOWN'?'bad':''}">${esc(entries.side||'—')}</b></div>
     <div class="metric"><span>Signal reason</span><b class="signal-reason ${entries.side==='UP'?'good':entries.side==='DOWN'?'bad':''}">${esc(signal.reason||'Waiting for complete candle history')}</b></div>
+     <div class="metric"><span>CLOB CHoCH filter</span><b class="${catchUp.executed?'good':catchUp.status==='not_eligible'?'bad':'gold'}">${esc(catchUp.reason||'Check after 2 minutes; require exactly two filled rungs and signalled-side ask in $0.60–$0.70')}</b></div>
    <div class="metric"><span>Window remaining</span><b>${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}</b></div>
    <div class="metric"><span>UP ask / DOWN ask</span><b>${ask}</b></div>
      <div class="metric"><span>Entry strategy</span><b>Six 250-share limits · signal side</b></div>
