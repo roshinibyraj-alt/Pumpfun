@@ -233,7 +233,7 @@ class WickBot{
       return;
     }
     const tokenId=this.market.tokens[signal.side];
-    const expiresAt=start+cfg.ENTRY_ORDER_TTL_MS;
+    const expiresAt=start+this.windowMs;
     for(const rung of cfg.SIGNAL_LIMIT_RUNGS){
       const id=`${this.timeframe}-${start}-${rung.price.toFixed(2)}`;
       const order={id,timeframe:this.timeframe,windowStart:start,side:signal.side,
@@ -295,7 +295,7 @@ class WickBot{
     }
     order.limitPrice=limitPrice;order.remainingShares=shares;order.status='PENDING';
     order.submittedAt=now;order.quoteAtSubmission=quote.updatedAt;
-    order.expiresAt=now+cfg.ENTRY_ORDER_TTL_MS;
+    order.expiresAt=order.windowStart+this.windowMs;
     order.fillModel='PAPER_FRESH_ASK_WALK_THROUGH';order.fee=0;order.estimatedMakerRebate=0;
     this.log('PAPER_LIMIT_ORDER_PLACED',{id,side,entryMode,checkpointSeconds:order.secondsIntoWindow,
       limitPrice,shares,ask,bid,midpoint:mid,fee:0});
@@ -309,14 +309,6 @@ class WickBot{
       }
       if(now>=order.windowStart+this.windowMs){
         order.status='EXPIRED_UNFILLED';order.expiredAt=now;order.remainingShares=0;continue;
-      }
-      if(now>=order.expiresAt){
-        const remainingShares=order.remainingShares||order.shares;
-        order.status='EXPIRED_UNFILLED_TIMEOUT';order.expiredAt=now;order.remainingShares=0;
-        order.reason=`Unfilled limit expired at the ${Math.floor((order.expiresAt-order.windowStart)/1000)}-second window cutoff.`;
-        this.log('PAPER_LIMIT_ORDER_EXPIRED',{id:order.id,side:order.side,entryMode:order.entryMode,
-          limitPrice:order.limitPrice,remainingShares,reason:order.reason});
-        continue;
       }
       if(Number(order.limitPrice)<cfg.MIN_ENTRY_PRICE){
         order.status='REJECTED_BELOW_MIN_PRICE';order.expiredAt=now;order.remainingShares=0;
@@ -529,7 +521,7 @@ class WickBot{
                   direction:'Detects morning/evening star, bullish/bearish engulfing and harami, piercing line, dark cloud cover, hammer-family, doji variants, and three soldiers/crows patterns; uses candle direction only as fallback.',
                  timing:'Submit six 250-share signal-side paper limit buys as soon as the current 5-minute window and its candle signal are available.',
                  fill:'A rung fills at its limit when a newer fresh signal-side best ask is at or below that limit.',
-                 unfilled:`Cancel unfilled orders at ${cfg.ENTRY_ORDER_TTL_MS/1000} seconds after window open or at window rollover.`,
+                 unfilled:'Keep unfilled limit orders active until the 5-minute window rolls over.',
                  rebateFormula:'Estimated maker rebate = quantity × market taker-fee rate × [price × (1 − price)]^fee exponent × maker-rebate pool share.'},
           merge:{enabled:false},
            exit:'A fresh own-side best bid >= $0.99 pays $1/share; <= $0.01 pays $0/share and completes that window. All other positions close at their own bid (or $0 if no bid). No shares carry over. No official results are used.',

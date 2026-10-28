@@ -171,6 +171,27 @@ test("signal-side limits fill only on a newer fresh ask at or below the limit an
   assert.ok(Math.abs(bot.snapshot().account.estimatedMakerRebate-4.03375)<1e-8);
 });
 
+test("signal-side limits stay active until rollover and fill every crossed rung", () => {
+  const { bot, start } = makeBot();
+  bot.processCandleEntries(start, start + 1_000);
+  const lateQuoteTime = start + 240_000;
+  bot.liveQuotes.UP = {
+    status: "LIVE", updatedAt: lateQuoteTime, bestBid: 0.34, bestAsk: 0.35,
+  };
+  bot.processPendingLimitOrders(lateQuoteTime);
+
+  const byPrice = new Map(bot.windowOrders.map(order => [order.limitPrice, order]));
+  assert.equal(byPrice.get(0.40).status, "FILLED");
+  assert.equal(byPrice.get(0.35).status, "FILLED");
+  for (const price of [0.30, 0.25, 0.20, 0.15]) {
+    assert.equal(byPrice.get(price).status, "PENDING");
+  }
+  assert.ok(bot.windowOrders.every(order => order.expiresAt === start + bot.windowMs));
+
+  bot.processPendingLimitOrders(start + bot.windowMs);
+  assert.ok(bot.windowOrders.every(order => order.status === "FILLED" || order.status === "EXPIRED_UNFILLED"));
+});
+
 test("a later Chainlink feed error does not overwrite the chosen signal reason", () => {
   const { bot, start } = makeBot();
   bot.processCandleEntries(start, start + 1_000);
@@ -223,7 +244,6 @@ test("missing history waits; directional candle colors and doji rules choose sid
 
 test.skip("legacy: contrarian bot buys only the opposite side of the signed BTC move", () => {
   assert.equal(config.ENTRY_CHECK_INTERVAL_MS, 5_000);
-  assert.equal(config.ENTRY_ORDER_TTL_MS, 4_000);
   assert.equal(config.BASE_ENTRY_SHARES, 50);
   assert.equal(config.LIMIT_PRICE_OFFSET, 0.05);
   assert.equal(config.MIN_ENTRY_PRICE, 0.05);
@@ -284,7 +304,7 @@ test.skip("legacy: contrarian side stays locked for the window when BTC directio
   assert.ok(bot.windowOrders.every(order => order.side === "DOWN"));
 });
 
-test.skip("legacy: contrarian entries expire after four seconds and checks use only the locked side", () => {
+test.skip("legacy: contrarian orders remain active until window rollover", () => {
   const { bot, start } = makeBot();
   const placedAt = start + config.ENTRY_CHECK_INTERVAL_MS;
   bot.liveQuotes = {
@@ -306,8 +326,8 @@ test.skip("legacy: contrarian entries expire after four seconds and checks use o
   bot.processTimedEntries(start, nextCheck);
   const nextOrder = bot.windowOrders.find(order => order.checkpoint === 2);
   assert.ok(nextOrder);
-  bot.processPendingLimitOrders(nextCheck + config.ENTRY_ORDER_TTL_MS);
-  assert.equal(nextOrder.status, "EXPIRED_UNFILLED_TIMEOUT");
+  bot.processPendingLimitOrders(start + bot.windowMs);
+  assert.equal(nextOrder.status, "EXPIRED_UNFILLED");
   assert.equal(bot.positions.length, 1);
 
 });
