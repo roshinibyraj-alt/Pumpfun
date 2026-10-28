@@ -363,11 +363,11 @@ class WickBot{
        const fillsByCheckpoint=this.windowOrders.filter(order=>
          order.entryType==='SIGNAL_PATTERN_LIMIT'&&order.status==='FILLED'&&
          Number.isFinite(order.filledAt)&&order.filledAt<=checkpoint).length;
-       this.catchUpDecision=fillsByCheckpoint===2
-         ?{status:'watching_price',eligible:true,executed:false,checkedAt:now,
-           reason:'Exactly two rungs filled by 2 minutes; waiting for the signalled-side CLOB best ask above $0.60 and below $0.70.'}
+        this.catchUpDecision=fillsByCheckpoint<=2
+          ?{status:'watching_price',eligible:true,executed:false,checkedAt:now,
+            reason:`${fillsByCheckpoint} rungs filled by 2 minutes; buying the remaining rungs together when the signalled-side CLOB best ask is above $0.60 and below $0.70.`}
          :{status:'not_eligible',eligible:false,executed:false,checkedAt:now,
-           reason:`${fillsByCheckpoint} rungs filled by 2 minutes; exactly two are required.`};
+            reason:`${fillsByCheckpoint} rungs filled by 2 minutes; CHoCH catch-up requires two or fewer.`};
        this.log('PAPER_CHOCH_CHECKPOINT',{windowStart:start,signalSide:this.windowSignalSide,
          fillsByCheckpoint,eligible:this.catchUpDecision.eligible,reason:this.catchUpDecision.reason});
      }

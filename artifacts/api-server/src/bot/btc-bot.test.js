@@ -253,11 +253,37 @@ test("CLOB CHoCH checks the candle-signalled DOWN price, not UP", () => {
   assert.equal(marketOrder.side, "DOWN");
 });
 
-test("CLOB catch-up is not eligible unless exactly two rungs filled by two minutes", () => {
+test("CLOB catch-up buys all remaining rungs when zero were filled by two minutes", () => {
   const { bot, start } = makeBot();
   bot.processCandleEntries(start, start + 1_000);
-  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 60_000, bestBid: 0.39, bestAsk: 0.40 };
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 120_000, bestBid: 0.64, bestAsk: 0.65 };
+  bot.processPendingLimitOrders(start + 120_000);
+  const marketOrder = bot.windowOrders.find(order => order.orderType === "MARKET");
+  assert.equal(bot.catchUpDecision.executed, true);
+  assert.equal(marketOrder.shares, 1_500);
+  assert.equal(bot.windowOrders.filter(order => order.status === "CANCELLED_CONSOLIDATED_MARKET_BUY").length, 6);
+});
+
+test("CLOB catch-up buys all remaining rungs when one was filled by two minutes", () => {
+  const { bot, start } = makeBot();
+  bot.processCandleEntries(start, start + 1_000);
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 60_000, bestBid: 0.38, bestAsk: 0.39 };
   bot.processPendingLimitOrders(start + 60_000);
+  assert.equal(bot.windowOrders.filter(order => order.status === "FILLED").length, 1);
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 120_000, bestBid: 0.64, bestAsk: 0.65 };
+  bot.processPendingLimitOrders(start + 120_000);
+  const marketOrder = bot.windowOrders.find(order => order.orderType === "MARKET");
+  assert.equal(bot.catchUpDecision.executed, true);
+  assert.equal(marketOrder.shares, 1_250);
+  assert.equal(bot.windowOrders.filter(order => order.status === "CANCELLED_CONSOLIDATED_MARKET_BUY").length, 5);
+});
+
+test("CLOB catch-up does not trigger when more than two rungs filled by two minutes", () => {
+  const { bot, start } = makeBot();
+  bot.processCandleEntries(start, start + 1_000);
+  bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 60_000, bestBid: 0.24, bestAsk: 0.25 };
+  bot.processPendingLimitOrders(start + 60_000);
+  assert.equal(bot.windowOrders.filter(order => order.status === "FILLED").length, 4);
   bot.liveQuotes.UP = { status: "LIVE", updatedAt: start + 120_000, bestBid: 0.64, bestAsk: 0.65 };
   bot.processPendingLimitOrders(start + 120_000);
   assert.equal(bot.catchUpDecision.status, "not_eligible");

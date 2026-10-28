@@ -76,7 +76,7 @@ setInterval(paintCountdown,250);
     <div class="metric"><span>Detected pattern</span><b>${esc((signal.pattern||'WAITING').replaceAll('_',' '))}</b></div>
     <div class="metric"><span>Signal side</span><b class="${entries.side==='UP'?'good':entries.side==='DOWN'?'bad':''}">${esc(entries.side||'—')}</b></div>
     <div class="metric"><span>Signal reason</span><b class="signal-reason ${entries.side==='UP'?'good':entries.side==='DOWN'?'bad':''}">${esc(signal.reason||'Waiting for complete candle history')}</b></div>
-     <div class="metric"><span>CLOB CHoCH filter</span><b class="${catchUp.executed?'good':catchUp.status==='not_eligible'?'bad':'gold'}">${esc(catchUp.reason||'Check after 2 minutes; require exactly two filled rungs and signalled-side ask in $0.60–$0.70')}</b></div>
+      <div class="metric"><span>CLOB CHoCH filter</span><b class="${catchUp.executed?'good':catchUp.status==='not_eligible'?'bad':'gold'}">${esc(catchUp.reason||'After 2 minutes, if two or fewer rungs filled, buy remaining shares when signalled-side ask is in $0.60–$0.70')}</b></div>
    <div class="metric"><span>Window remaining</span><b>${Math.floor(remaining/60)}:${String(remaining%60).padStart(2,'0')}</b></div>
    <div class="metric"><span>UP ask / DOWN ask</span><b>${ask}</b></div>
      <div class="metric"><span>Entry strategy</span><b>Six 250-share limits · signal side</b></div>
