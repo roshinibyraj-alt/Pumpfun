@@ -55,7 +55,7 @@ function observe(bot, start, at, { upAsk, downAsk, upBid, downBid } = {}) {
   bot.processClimbEntries(start, at);
 }
 
-test("config defines seven ascending 100-share rungs and an 75-cent take profit", () => {
+test("config defines five ascending 100-share rungs and a 75-cent take profit", () => {
   assert.deepEqual(config.CLIMB_RUNGS, [0.25, 0.35, 0.45, 0.55, 0.65]);
   assert.equal(config.CLIMB_SHARES, 100);
   assert.equal(config.TAKE_PROFIT_PRICE, 0.75);
@@ -95,26 +95,26 @@ test("higher rungs wait until the 25-cent pivot has triggered", () => {
 
 test("a price gap fills each crossed rung once at the observed ask", () => {
   const { bot, start } = makeBot();
-  observe(bot, start, start + 1, { upAsk: 0.14 });
+  observe(bot, start, start + 1, { upAsk: 0.24 });
   observe(bot, start, start + 2, { upAsk: 0.56 });
-  assert.deepEqual(bot.positions.map(position => position.rungPrice), [0.45, 0.35, 0.25, 0.15]);
-  assert.ok(bot.positions.every(position => position.avgEntry === 0.46 && position.shares === 100));
+  assert.deepEqual(bot.positions.map(position => position.rungPrice), [0.55, 0.45, 0.35, 0.25]);
+  assert.ok(bot.positions.every(position => position.avgEntry === 0.56 && position.shares === 100));
   assert.equal(bot.cash, 10000 - 4 * 56);
 });
 
 test("rung triggers require fresh quotes and stay isolated by side", () => {
   const { bot, start } = makeBot();
-  observe(bot, start, start + 1, { upAsk: 0.14 });
-  quote(bot, "UP", 0.15, 0.14, start - 10_000);
+  observe(bot, start, start + 1, { upAsk: 0.24 });
+  quote(bot, "UP", 0.25, 0.24, start - 10_000);
   bot.processClimbEntries(start, start + 2);
   assert.equal(bot.positions.length, 0);
-  observe(bot, start, start + 3, { downAsk: 0.14 });
-  observe(bot, start, start + 4, { downAsk: 0.15 });
+  observe(bot, start, start + 3, { downAsk: 0.24 });
+  observe(bot, start, start + 4, { downAsk: 0.25 });
   assert.equal(bot.positions.length, 1);
   assert.equal(bot.positions[0].side, "DOWN");
 });
 
-test("85-cent take profit closes one position without clearing the other", () => {
+test("75-cent take profit closes one position without clearing the other", () => {
   const { bot, start } = makeBot();
   const winner = {
     id: "winner", status: "OPEN", side: "UP", shares: 100, totalCost: 45,
@@ -153,15 +153,15 @@ test("a 75-cent TP raises only the opposite side target to 99 cents", () => {
 
 test("API snapshot exposes both active ladders and adaptive take profit settings", () => {
   const { bot, start } = makeBot();
-  observe(bot, start, start + 1, { upAsk: 0.14, downAsk: 0.84 });
-  observe(bot, start, start + 2, { upAsk: 0.15, downAsk: 0.15 });
+  observe(bot, start, start + 1, { upAsk: 0.24, downAsk: 0.84 });
+  observe(bot, start, start + 2, { upAsk: 0.25, downAsk: 0.25 });
   const snapshot = bot.snapshot();
   assert.equal(snapshot.strategy.entries.sideIndependent, true);
   assert.deepEqual(snapshot.strategy.entries.rungs.map(rung => rung.price), config.CLIMB_RUNGS);
   assert.equal(snapshot.strategy.entries.sharesPerRung, 100);
   assert.equal(snapshot.strategy.entries.takeProfitPrice, 0.75);
   assert.deepEqual(snapshot.strategy.entries.sideLadders.UP.triggeredRungs, [0.25]);
-  assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
+  assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.25]);
 });
 
 test("dashboard presents colorful side ladders and current strategy settings", () => {
