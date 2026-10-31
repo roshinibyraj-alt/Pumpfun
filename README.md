@@ -17,11 +17,11 @@ For each outcome (UP and DOWN), compare the same outcome on both venues:
 
 The signal is a paper model, not guaranteed or risk-free arbitrage. Venue prices, fees, order-book depth, execution timing, and settlement rules can differ.
 
-## Thirty Seconds BTC CLOB paper bot
+## Five-minute BTC CLOB paper bot
 
-The separate BTC 5-minute CLOB paper bot now gates new entries on a fresh Chainlink BTC/USD regime check. It samples price every 10 seconds over a rolling 90-second window. Repeated reversals with little net progress, a very small range, a mixed signal, insufficient history, or stale feed data pause new entries. Only a confirmed trend allows entries; existing positions continue through their normal settlement logic.
+The BTC CLOB bot runs a paper-only two-sided climbing ladder. UP and DOWN are tracked independently: a 100-share entry triggers when that side crosses $0.15 either way, then another 100 shares enter at each upward crossing of $0.25 through $0.75. Gaps trigger each crossed rung at the currently observed best ask. Each position exits independently when its own-side best bid reaches $0.85; any remaining position is closed at its own-side bid when the five-minute window rolls over (or $0 when no bid is available).
 
-The detector uses a simple directional-efficiency ratio plus reversal count and range. Its thresholds are heuristics, not a trained or validated market model, and should be reviewed against recorded paper results. This filter does not change the bot's share-sizing ladder or its existing take-profit and settlement rules.
+The BTC regime display is informational only and does not block entries. No live orders, candle-pattern signal, recovery entry, or official outcome is used. Paper history resets when the Railway process restarts.
 
 ## Polling and simulated fills
 
