@@ -225,7 +225,6 @@ class WickBot{
     if(this.oppositeTakeProfitSide==null){const hitSides=new Set(open.filter(p=>takeProfitHit(this.liveQuotes[p.side],now,cfg.TAKE_PROFIT_PRICE)).map(p=>p.side));if(hitSides.size===1){const hitSide=[...hitSides][0];this.oppositeTakeProfitSide=hitSide==='UP'?'DOWN':'UP';this.log('PAPER_OPPOSITE_TP_RAISED',{hitSide,side:this.oppositeTakeProfitSide,takeProfitPrice:cfg.OPPOSITE_TAKE_PROFIT_PRICE});}}
     for(const p of open){const q=this.liveQuotes[p.side];p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';const target=this.getTakeProfitTarget(p.side);if(takeProfitHit(q,now,target))this.finalizePosition(p,true,`TAKE_PROFIT_BID_${target.toFixed(2)}`,Number(q.bestBid));}
   }
-  }
   finalizePosition(p,won,reason,triggerQuote){
     if(p.status!=='OPEN')return;
     const settledAt=Date.now();
