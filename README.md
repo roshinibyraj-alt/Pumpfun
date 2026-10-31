@@ -19,7 +19,7 @@ The signal is a paper model, not guaranteed or risk-free arbitrage. Venue prices
 
 ## Five-minute BTC CLOB paper bot
 
-The BTC CLOB bot runs a paper-only two-sided climbing ladder. UP and DOWN are tracked independently: a 100-share entry triggers when that side crosses the $0.25 pivot, then another 100 shares enter at each upward crossing through $0.65. Gaps trigger each crossed rung at the currently observed best ask. Every position on both sides exits independently when its own-side best bid reaches $0.99; any remaining position is closed at its own-side bid when the five-minute window rolls over (or $0 when no bid is available).
+The BTC CLOB bot uses a paper-only opening-window dip strategy. For the first five seconds after each five-minute market opens, UP and DOWN are checked independently; when either side's fresh best ask is below $0.40, the bot buys 500 shares at the observed ask, once on that side. At an own-side best bid of $0.99 or higher, the position closes with modeled proceeds of exactly $1.00 per share. Positions still open at rollover close at their own-side bid, or $0 when no bid is available. The service remains paper-only; it does not submit live orders.
 
 The BTC regime display is informational only and does not block entries. No live orders, candle-pattern signal, recovery entry, or official outcome is used. Paper history resets when the Railway process restarts.
 
