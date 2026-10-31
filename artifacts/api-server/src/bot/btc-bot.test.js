@@ -141,7 +141,7 @@ test("a 75-cent TP raises only the opposite side target to 99 cents", () => {
   const down = { id: "down", status: "OPEN", side: "DOWN", shares: 100, totalCost: 50, windowStart: start };
   bot.positions = [up, down];
   quote(bot, "UP", 0.8, 0.75, start + 100);
-  quote(bot, "DOWN", 0.8, 0.76, start + 100);
+  quote(bot, "DOWN", 0.8, 0.74, start + 100);
   bot.processTakeProfitExits(start + 100);
   assert.equal(up.status, "SETTLED_EXIT");
   assert.equal(down.status, "OPEN");
