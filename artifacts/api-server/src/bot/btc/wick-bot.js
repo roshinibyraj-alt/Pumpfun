@@ -67,7 +67,6 @@ class WickBot{
     this.previousAskBySide={UP:null,DOWN:null};
           this.quoteWindowStart=null;this.liveQuotes={UP:{status:'MISSING'},DOWN:{status:'MISSING'}};
     this.closeQuotes=null;
-    this.oppositeTakeProfitSide=null;
   }
   log(event,data={}){const e={ts:Date.now(),timeframe:this.timeframe,event,...data};this.events.unshift(e);this.events.length=Math.min(100,this.events.length);console.log('[wick] '+JSON.stringify(e))}
   captureQuotePair(now=Date.now(),source=this.liveQuotes,overrides={}){
@@ -183,12 +182,10 @@ class WickBot{
     this.orderWindowStart=start;
     this.lastEntryCheckpoint=0;
     this.windowOrders=[];
-    this.oppositeTakeProfitSide=null;
     this.log('PAPER_CLIMB_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe});
     this.windowRungs={UP:new Set(),DOWN:new Set()};
     this.previousAskBySide={UP:null,DOWN:null};
   }
-  getTakeProfitTarget(side){return this.oppositeTakeProfitSide===side?cfg.OPPOSITE_TAKE_PROFIT_PRICE:cfg.TAKE_PROFIT_PRICE}
   processClimbEntries(start,now){
     if(this.completedWindows.has(start)||this.orderWindowStart!==start||!this.market||this.market.start!==start)return;
     for(const side of ['UP','DOWN']){
@@ -222,8 +219,7 @@ class WickBot{
   }
   processTakeProfitExits(now){
     const open=this.positions.filter(p=>p.status==='OPEN'&&p.windowStart===this.market?.start);
-    if(this.oppositeTakeProfitSide==null){const hitSides=new Set(open.filter(p=>takeProfitHit(this.liveQuotes[p.side],now,cfg.TAKE_PROFIT_PRICE)).map(p=>p.side));if(hitSides.size===1){const hitSide=[...hitSides][0];this.oppositeTakeProfitSide=hitSide==='UP'?'DOWN':'UP';this.log('PAPER_OPPOSITE_TP_RAISED',{hitSide,side:this.oppositeTakeProfitSide,takeProfitPrice:cfg.OPPOSITE_TAKE_PROFIT_PRICE});}}
-    for(const p of open){const q=this.liveQuotes[p.side];p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';const target=this.getTakeProfitTarget(p.side);if(takeProfitHit(q,now,target))this.finalizePosition(p,true,`TAKE_PROFIT_BID_${target.toFixed(2)}`,Number(q.bestBid));}
+    for(const p of open){const q=this.liveQuotes[p.side];p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';if(takeProfitHit(q,now,cfg.TAKE_PROFIT_PRICE))this.finalizePosition(p,true,`TAKE_PROFIT_BID_${cfg.TAKE_PROFIT_PRICE.toFixed(2)}`,Number(q.bestBid));}
   }
   finalizePosition(p,won,reason,triggerQuote){
     if(p.status!=='OPEN')return;
@@ -243,7 +239,7 @@ class WickBot{
     this.cash+=p.proceeds;
     const event=takeProfit?'PAPER_TP_HIT':won?'PAPER_OFFICIAL_WIN':'PAPER_OFFICIAL_LOSS';
     this.log(event,{id:p.id,status:p.status,pnl:p.realizedPnl,side:p.side,shares:p.shares,
-      proceeds:p.proceeds,triggerQuote,tpTarget:this.getTakeProfitTarget(p.side),reason});
+      proceeds:p.proceeds,triggerQuote,tpTarget:cfg.TAKE_PROFIT_PRICE,reason});
   }
   finalizeWindowLiquidation(p,bid,reason,now=Date.now()){
     if(p.status!=='OPEN')return;
@@ -306,7 +302,7 @@ class WickBot{
      }
       return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
          strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-               regime:{...this.marketRegime,entryPolicy:'Informational only; both sides climb independently.'},btcPriceFeed:this.priceFeed.snapshot(),entries:{orderType:'MARKET',sideIndependent:true,sharesPerRung:cfg.CLIMB_SHARES,takeProfitPrice:cfg.TAKE_PROFIT_PRICE,rungs:cfg.CLIMB_RUNGS.map(price=>({price,shares:cfg.CLIMB_SHARES})),oppositeTakeProfitSide:this.oppositeTakeProfitSide,oppositeTakeProfitPrice:cfg.OPPOSITE_TAKE_PROFIT_PRICE,sideLadders:Object.fromEntries(['UP','DOWN'].map(side=>{const triggered=[...this.windowRungs[side]].map(Number).sort((a,b)=>a-b),open=this.positions.filter(p=>p.status==='OPEN'&&p.windowStart===this.market?.start&&p.side===side),quote=this.liveQuotes[side]||{};return[side,{side,bestAsk:quote.bestAsk??null,bestBid:quote.bestBid??null,takeProfitPrice:this.getTakeProfitTarget(side),triggeredRungs:triggered,nextRung:cfg.CLIMB_RUNGS.find(price=>!this.windowRungs[side].has(price.toFixed(2)))??null,shares:open.reduce((n,p)=>n+Number(p.shares||0),0),openPositions:open.length}]})),direction:'Each side independently triggers its 100-share $0.25 pivot, then buys on upward crossings through $0.65.',timing:'No candle signal, recovery entry, or entry cutoff.',fill:'Paper market buy at the fresh best ask when a rung is crossed.',unfilled:'No resting entries; reached rungs fill immediately subject to available cash.'},merge:{enabled:false},exit:`Each position exits at its own-side bid at or above its current target (${cfg.TAKE_PROFIT_PRICE.toFixed(2)} normally; ${cfg.OPPOSITE_TAKE_PROFIT_PRICE.toFixed(2)} on the opposite side after a take-profit). Remaining positions close at window rollover using their own-side bid or $0 if unavailable.`,direction:'UP and DOWN are monitored independently.',entryFillModel:'Fresh own-side best ask at each crossing.',fees:'Paper entry fees are estimates from the market fee schedule.',execution:'PAPER ONLY'},
+               regime:{...this.marketRegime,entryPolicy:'Informational only; both sides climb independently.'},btcPriceFeed:this.priceFeed.snapshot(),entries:{orderType:'MARKET',sideIndependent:true,sharesPerRung:cfg.CLIMB_SHARES,takeProfitPrice:cfg.TAKE_PROFIT_PRICE,rungs:cfg.CLIMB_RUNGS.map(price=>({price,shares:cfg.CLIMB_SHARES})),sideLadders:Object.fromEntries(['UP','DOWN'].map(side=>{const triggered=[...this.windowRungs[side]].map(Number).sort((a,b)=>a-b),open=this.positions.filter(p=>p.status==='OPEN'&&p.windowStart===this.market?.start&&p.side===side),quote=this.liveQuotes[side]||{};return[side,{side,bestAsk:quote.bestAsk??null,bestBid:quote.bestBid??null,takeProfitPrice:cfg.TAKE_PROFIT_PRICE,triggeredRungs:triggered,nextRung:cfg.CLIMB_RUNGS.find(price=>!this.windowRungs[side].has(price.toFixed(2)))??null,shares:open.reduce((n,p)=>n+Number(p.shares||0),0),openPositions:open.length}]})),direction:'Each side independently triggers its 100-share $0.25 pivot, then buys on upward crossings through $0.65.',timing:'No candle signal, recovery entry, or entry cutoff.',fill:'Paper market buy at the fresh best ask when a rung is crossed.',unfilled:'No resting entries; reached rungs fill immediately subject to available cash.'},merge:{enabled:false},exit:`Each position exits at its own-side bid at or above ${cfg.TAKE_PROFIT_PRICE.toFixed(2)}. Remaining positions close at window rollover using their own-side bid or $0 if unavailable.`,direction:'UP and DOWN are monitored independently.',entryFillModel:'Fresh own-side best ask at each crossing.',fees:'Paper entry fees are estimates from the market fee schedule.',execution:'PAPER ONLY'},
          account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,
           totalTrades,settledTrades,wins,losses,profitableExits,losingExits,breakEvenExits,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
           openPositions:this.positions.filter(p=>p.status==='OPEN').length,
@@ -321,7 +317,7 @@ class WickBot{
              marketResolution:`Each position exits at its own-side bid at or above ${cfg.TAKE_PROFIT_PRICE.toFixed(2)}; remaining positions close at window rollover.`},
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-      start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only two-sided climbing ladder: 100 shares at $0.25 and each $0.10 rise through $0.65; $0.75 take profit, with $0.99 on the opposite side after a TP.'});
+      start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only two-sided climbing ladder: 100 shares at $0.25 and each $0.10 rise through $0.65; $0.99 take profit on both sides.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer);this.priceFeed.stop()}

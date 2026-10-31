@@ -36,7 +36,7 @@
     <article class="stat"><label>Win rate</label><strong id="winrate">—</strong></article>
   </section>
   <div id="error" class="error"></div>
-  <div class="section-title"><div><div class="eyebrow">RUNG TRACKER</div><h2>Both sides, independently</h2></div><small>Buy size: 100 shares · TP: 75¢; opposite side: 99¢</small></div>
+  <div class="section-title"><div><div class="eyebrow">RUNG TRACKER</div><h2>Both sides, independently</h2></div><small>Buy size: 100 shares · Take profit: 99¢ on both sides</small></div>
   <section id="ladders" class="ladders"></section>
   <div class="section-title"><div><div class="eyebrow">MARKET WINDOW</div><h2>Scanner status</h2></div><small>5m · paper only</small></div>
   <section id="timeframes" class="timeframes"></section>
@@ -52,7 +52,7 @@
   function ladderCard(side,info,prices){
     const fired=new Set((info.triggeredRungs||[]).map(Number));
     const levels=prices.map(price=>`<div class="level ${fired.has(price)?'done':''}"><b>${px(price)}</b><small>${fired.has(price)?'FILLED':'WAIT'}</small></div>`).join('');
-    const ask=info.bestAsk==null?'—':px(info.bestAsk),bid=info.bestBid==null?'—':px(info.bestBid),tp=px(info.takeProfitPrice??0.75);
+    const ask=info.bestAsk==null?'—':px(info.bestAsk),bid=info.bestBid==null?'—':px(info.bestBid),tp=px(info.takeProfitPrice??0.99);
     const progress=fired.size/prices.length*100;
     return `<article class="ladder ${side.toLowerCase()}"><div class="ladder-head"><div><div class="side-name">${side}</div><div class="muted">Best ask ${ask} · bid ${bid} · TP ${tp}</div></div><div class="price">${info.shares||0}<small> shares open</small></div></div><div class="levels">${levels}</div><div class="ladder-meta"><span>${fired.size}/${prices.length} rungs triggered</span><span>${info.openPositions||0} open entries</span></div><div class="progress"><i style="width:${progress}%"></i></div></article>`;
   }
