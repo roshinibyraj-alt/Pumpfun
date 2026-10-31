@@ -31,6 +31,18 @@ function makerRebateFor(m,price,qty){
     ?rate*Math.pow(price*(1-price),exponent)*qty:0;
   return {feeEquivalent,estimate:feeEquivalent*cfg.CRYPTO_MAKER_REBATE_RATE};
 }
+function previousFiveMinuteCandle(priceFeed, windowStart){
+  let minuteBars;
+  try{minuteBars=priceFeed.getMinuteCandles();}catch(_){return null;}
+  const candleStart=windowStart-300000;
+  const bars=(minuteBars||[]).filter(bar=>Number(bar?.t)>=candleStart&&Number(bar?.t)<windowStart)
+    .map(bar=>({t:Number(bar.t),open:Number(bar.o),close:Number(bar.c)})).sort((a,b)=>a.t-b.t);
+  if(bars.length!==5||bars.some((bar,index)=>bar.t!==candleStart+index*60000||
+      !Number.isFinite(bar.open)||!Number.isFinite(bar.close)))return null;
+  const open=bars[0].open,close=bars[4].close;
+  return {start:candleStart,end:windowStart,open,close,
+    color:close>open?'GREEN':close<open?'RED':'DOJI'};
+}
 function clobWinner(up,down){
   if(!Number.isFinite(up)||!Number.isFinite(down))return null;
   return up>=.98?'UP':down>=.98?'DOWN':up>=down?'UP':'DOWN';
@@ -181,28 +193,31 @@ class WickBot{
     this.orderWindowStart=start;
     this.windowOrders=[];
     this.windowEntrySides=new Set();
-    this.log('PAPER_OPENING_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe,entryWindowMs:cfg.ENTRY_WINDOW_MS});
+    this.log('PAPER_OPENING_WINDOW_STARTED',{windowStart:start,timeframe:this.timeframe,entryWindowMs:cfg.ENTRY_WINDOW_MS,filter:'UP after previous closed green 5m candle; DOWN after previous closed red 5m candle'});
   }
   processClimbEntries(start,now){
         const elapsed=now-start;
         if(this.completedWindows.has(start)||this.orderWindowStart!==start||!this.market||this.market.start!==start||elapsed<0||elapsed>=cfg.ENTRY_WINDOW_MS)return;
+        const previousCandle=previousFiveMinuteCandle(this.priceFeed,start);
+        if(!previousCandle)return;
         for(const signalSide of ['UP','DOWN']){
-          if(this.windowEntrySides.has(signalSide))continue;
+          const expectedColor=signalSide==='UP'?'GREEN':'RED';
+          if(previousCandle.color!==expectedColor||this.windowEntrySides.has(signalSide))continue;
           const signalQuote=this.liveQuotes[signalSide],signalAsk=Number(signalQuote?.bestAsk);
           const signalFresh=signalQuote?.status==='LIVE'&&Number.isFinite(signalQuote.updatedAt)&&signalQuote.updatedAt>=start&&now-signalQuote.updatedAt<=5000&&Number.isFinite(signalAsk)&&signalAsk>0&&signalAsk<1;
           if(!signalFresh||signalAsk>=cfg.ENTRY_THRESHOLD_PRICE)continue;
-          const side=signalSide==='UP'?'DOWN':'UP';
+          const side=signalSide;
           const quote=this.liveQuotes[side],ask=Number(quote?.bestAsk);
           const entryFresh=quote?.status==='LIVE'&&Number.isFinite(quote.updatedAt)&&quote.updatedAt>=start&&now-quote.updatedAt<=5000&&Number.isFinite(ask)&&ask>0&&ask<1;
           if(!entryFresh)continue;
           this.windowEntrySides.add(signalSide);
           const shares=cfg.ENTRY_SHARES,cost=ask*shares,fee=makerRebateFor(this.market,ask,shares).feeEquivalent;
-          const id=`${this.timeframe}-${start}-${signalSide}-opposite-opening-dip`;
-          const order={id,timeframe:this.timeframe,windowStart:start,side,signalSide,tokenId:this.market.tokens[side],orderType:'MARKET',triggerPrice:cfg.ENTRY_THRESHOLD_PRICE,signalAsk,shares,status:'FILLED',entryMode:'OPENING_WINDOW_DIP',entryType:'OPENING_WINDOW_DIP',createdAt:now,submittedAt:now,filledAt:now,fillPrice:ask,averageFillPrice:ask,fee,estimatedMakerRebate:0,fillModel:'PAPER_FRESH_OPPOSITE_ASK_AFTER_SIGNAL_BELOW_40_CENTS'};
+          const id=`${this.timeframe}-${start}-${signalSide}-opening-dip`;
+          const order={id,timeframe:this.timeframe,windowStart:start,side,signalSide,tokenId:this.market.tokens[side],orderType:'MARKET',triggerPrice:cfg.ENTRY_THRESHOLD_PRICE,signalAsk,shares,status:'FILLED',entryMode:'OPENING_WINDOW_DIP',entryType:'OPENING_WINDOW_DIP',createdAt:now,submittedAt:now,filledAt:now,fillPrice:ask,averageFillPrice:ask,fee,estimatedMakerRebate:0,fillModel:'PAPER_FRESH_SIGNAL_SIDE_ASK_AFTER_CANDLE_COLOR_MATCH'};
           if(cost+fee>this.cash+1e-9){order.status='REJECTED_INSUFFICIENT_CASH';order.reason='Insufficient paper cash for the 500-share entry.';this.totalOrderAttempts++;this.orders.unshift(order);this.windowOrders.unshift(order);this.log('PAPER_OPENING_DIP_REJECTED',{id,signalSide,side,signalAsk,ask,shares,cash:this.cash});continue;}
-          const position={id,timeframe:this.timeframe,windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,title:this.market.title,side,signalSide,tokenId:this.market.tokens[side],entryKey:id,entryLabel:`${side} opposite of ${signalSide} opening signal`,entryMode:'OPENING_WINDOW_DIP',entryType:'OPENING_WINDOW_DIP',rungPrice:cfg.ENTRY_THRESHOLD_PRICE,triggerPrice:cfg.ENTRY_THRESHOLD_PRICE,orderType:'MARKET',fillModel:order.fillModel,shares,initialShares:shares,avgEntry:ask,fillPrice:ask,cost,totalCost:cost+fee,fees:fee,makerFeeEquivalent:0,estimatedMakerRebate:0,status:'OPEN',submittedAt:now,openedAt:now,filledAt:now,visibleAskSize:quote.askSize,simulatedShares:shares,submissionQuotes:this.captureQuotePair(now),entryQuotes:this.captureQuotePair(now),entryQuoteAt:now,entryRegime:{...this.marketRegime}};
+          const position={id,timeframe:this.timeframe,windowMs:this.windowMs,windowStart:start,marketId:this.market.id,slug:this.market.slug,title:this.market.title,side,signalSide,tokenId:this.market.tokens[side],entryKey:id,entryLabel:`${side} candle-confirmed opening signal`,entryMode:'OPENING_WINDOW_DIP',entryType:'OPENING_WINDOW_DIP',rungPrice:cfg.ENTRY_THRESHOLD_PRICE,triggerPrice:cfg.ENTRY_THRESHOLD_PRICE,orderType:'MARKET',fillModel:order.fillModel,shares,initialShares:shares,avgEntry:ask,fillPrice:ask,cost,totalCost:cost+fee,fees:fee,makerFeeEquivalent:0,estimatedMakerRebate:0,status:'OPEN',submittedAt:now,openedAt:now,filledAt:now,visibleAskSize:quote.askSize,simulatedShares:shares,submissionQuotes:this.captureQuotePair(now),entryQuotes:this.captureQuotePair(now),entryQuoteAt:now,entryRegime:{...this.marketRegime}};
           order.positionId=id;this.orders.unshift(order);this.windowOrders.unshift(order);this.positions.unshift(position);this.cash-=cost+fee;this.totalOrderAttempts++;
-          this.log('PAPER_OPENING_DIP_FILLED',{id,windowStart:start,signalSide,side,signalAsk,triggerPrice:cfg.ENTRY_THRESHOLD_PRICE,price:ask,shares,cost,fee});
+          this.log('PAPER_OPENING_DIP_FILLED',{id,windowStart:start,signalSide,side,candleColor:previousCandle.color,signalAsk,triggerPrice:cfg.ENTRY_THRESHOLD_PRICE,price:ask,shares,cost,fee});
         }
         if(this.orders.length>1000)this.orders.length=1000;
       }
@@ -298,7 +313,7 @@ class WickBot{
      }
       return {now,mode:'DEMO ONLY',status:this.status,error:this.error,
          strategy:{timeframe:this.timeframe,market:'Polymarket BTC 5-minute UP/DOWN',capital:this.capital,
-               regime:{...this.marketRegime,entryPolicy:'Informational only; both sides climb independently.'},btcPriceFeed:this.priceFeed.snapshot(),entries:{orderType:'MARKET',sideIndependent:true,sharesPerEntry:cfg.ENTRY_SHARES,entryThreshold:cfg.ENTRY_THRESHOLD_PRICE,entryWindowSeconds:cfg.ENTRY_WINDOW_MS/1000,takeProfitPrice:cfg.TAKE_PROFIT_PRICE,rungs:[{price:cfg.ENTRY_THRESHOLD_PRICE,shares:cfg.ENTRY_SHARES}],sideLadders:Object.fromEntries(['UP','DOWN'].map(side=>{const triggered=this.windowEntrySides.has(side)?[cfg.ENTRY_THRESHOLD_PRICE]:[],open=this.positions.filter(p=>p.status==='OPEN'&&p.windowStart===this.market?.start&&p.side===side),quote=this.liveQuotes[side]||{};return[side,{side,bestAsk:quote.bestAsk??null,bestBid:quote.bestBid??null,takeProfitPrice:cfg.TAKE_PROFIT_PRICE,triggeredRungs:triggered,nextRung:this.windowEntrySides.has(side)?null:cfg.ENTRY_THRESHOLD_PRICE,shares:open.reduce((n,p)=>n+Number(p.shares||0),0),openPositions:open.length}]})),direction:'In the first five seconds, a side ask below $0.40 triggers a 500-share buy of the opposite side at its fresh best ask.',timing:'Entry window is limited to the first five seconds of each market window.',fill:'Paper market buy at the opposite side fresh best ask; only the signal side must be below $0.40.',unfilled:'No resting orders; each signal side is checked independently, once per window.'},merge:{enabled:false},exit:`At an own-side bid of $0.99, each position closes for a modeled $1.00 per share. Remaining positions close at window rollover using their own-side bid or $0 if unavailable.`,direction:'UP and DOWN are monitored independently.',entryFillModel:'Fresh opposite-side best ask after the signal side is below $0.40 during the first five seconds.',fees:'Paper entry fees are estimates from the market fee schedule.',execution:'PAPER ONLY'},
+               regime:{...this.marketRegime,entryPolicy:'Informational only; both sides climb independently.'},btcPriceFeed:this.priceFeed.snapshot(),entries:{orderType:'MARKET',sideIndependent:false,sharesPerEntry:cfg.ENTRY_SHARES,entryThreshold:cfg.ENTRY_THRESHOLD_PRICE,entryWindowSeconds:cfg.ENTRY_WINDOW_MS/1000,takeProfitPrice:cfg.TAKE_PROFIT_PRICE,rungs:[{price:cfg.ENTRY_THRESHOLD_PRICE,shares:cfg.ENTRY_SHARES}],sideLadders:Object.fromEntries(['UP','DOWN'].map(side=>{const triggered=this.windowEntrySides.has(side)?[cfg.ENTRY_THRESHOLD_PRICE]:[],open=this.positions.filter(p=>p.status==='OPEN'&&p.windowStart===this.market?.start&&p.side===side),quote=this.liveQuotes[side]||{};return[side,{side,bestAsk:quote.bestAsk??null,bestBid:quote.bestBid??null,takeProfitPrice:cfg.TAKE_PROFIT_PRICE,triggeredRungs:triggered,nextRung:this.windowEntrySides.has(side)?null:cfg.ENTRY_THRESHOLD_PRICE,shares:open.reduce((n,p)=>n+Number(p.shares||0),0),openPositions:open.length}]})),direction:'In the first five seconds, buy 500 shares on the signal side only when the previous closed 5-minute BTC candle confirms it: green for UP, red for DOWN.',timing:'Entry window is limited to the first five seconds of each market window.',fill:'Paper market buy at the fresh signal-side best ask below $0.40; entries require a complete previous 5-minute candle matching the side.',unfilled:'No resting orders; only the candle-matching side can enter, once per window.'},merge:{enabled:false},exit:`At an own-side bid of $0.99, each position closes for a modeled $1.00 per share. Remaining positions close at window rollover using their own-side bid or $0 if unavailable.`,direction:'UP and DOWN are monitored independently.',entryFillModel:'Fresh opposite-side best ask after the signal side is below $0.40 during the first five seconds.',fees:'Paper entry fees are estimates from the market fee schedule.',execution:'PAPER ONLY'},
          account:{capital:this.capital,cash:this.cash,realizedPnl,unrealizedPnl,equity:this.cash+markedValue,takerFees,estimatedMakerRebate,
           totalTrades,settledTrades,wins,losses,profitableExits,losingExits,breakEvenExits,winRate:settledTrades?wins/settledTrades*100:0,markedValue,unpricedOpenPositions,
           openPositions:this.positions.filter(p=>p.status==='OPEN').length,
@@ -313,10 +328,10 @@ class WickBot{
              marketResolution:`Each position exits at its own-side bid at or above ${cfg.TAKE_PROFIT_PRICE.toFixed(2)}; remaining positions close at window rollover.`},
        inventory,positions:this.positions.slice(0,50),orders:this.orders.slice(0,100),events:this.events};
   }
-      start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only opening-window dip strategy: buy 500 shares on each side with a fresh ask below $0.40 in the first five seconds; exit at 99¢, modeled as $1/share.'});
+      start(){if(this.running)return;this.running=true;this.priceFeed.start();this.log('BOT_STARTED',{timeframe:this.timeframe,note:'Paper-only opening-window dip strategy: in the first five seconds, buy 500 shares on the side matching the previous closed 5-minute candle (green=UP, red=DOWN), with that side ask below $0.40; exit at 99¢, modeled as $1/share.'});
     const loop=async()=>{if(!this.running)return;await this.tick();if(this.running)this.timer=setTimeout(loop,cfg.POLL_INTERVAL_MS)};
     void loop();}
   stop(){this.running=false;clearTimeout(this.timer);this.priceFeed.stop()}
 }
 module.exports=WickBot;
-module.exports._test={simulateAtBestAsk,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,clobQuoteFloor,takeProfitHit};
+module.exports._test={simulateAtBestAsk,quoteFromBook,clobWinner,clobQuoteWinner,clobQuoteValue,clobQuoteFloor,takeProfitHit,previousFiveMinuteCandle};
