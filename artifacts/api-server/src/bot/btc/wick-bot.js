@@ -210,6 +210,13 @@ class WickBot{
     }
     if(this.orders.length>1000)this.orders.length=1000;
   }
+  async refreshLiveQuotes(now){
+    if(!this.market)return;
+    const sides=['UP','DOWN'];
+    const results=await Promise.allSettled(sides.map(side=>md.getBook(this.market.tokens[side])));
+    sides.forEach((side,i)=>{const result=results[i];if(result.status==='fulfilled')this.liveQuotes[side]=quoteFromBook(result.value,now);else{const previous=this.liveQuotes[side]||{};const stale=previous.updatedAt?now-previous.updatedAt>10000:true;this.liveQuotes[side]={...previous,status:previous.updatedAt?(stale?'STALE':'LIVE'):'ERROR',stale,attemptedAt:now,error:result.reason?.message||'Order book unavailable'};}});
+    for(const p of this.positions){if(p.status!=='OPEN'||p.windowStart!==this.market.start)continue;const q=this.liveQuotes[p.side];p.markBid=q?.bestBid??null;p.markUpdatedAt=q?.updatedAt||now;p.markStatus=q?.bestBid!=null?'LIVE':'MISSING';if(takeProfitHit(q,now))this.finalizePosition(p,true,'TAKE_PROFIT_BID',Number(q.bestBid));}
+  }
   finalizePosition(p,won,reason,triggerQuote){
     if(p.status!=='OPEN')return;
     const settledAt=Date.now();

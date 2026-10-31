@@ -32,6 +32,11 @@ function makeBot() {
   return { bot, start };
 }
 
+test("bot keeps its live quote refresh loop", () => {
+  const { bot } = makeBot();
+  assert.equal(typeof bot.refreshLiveQuotes, "function");
+});
+
 function quote(bot, side, ask, bid, at) {
   bot.liveQuotes[side] = {
     status: "LIVE",
