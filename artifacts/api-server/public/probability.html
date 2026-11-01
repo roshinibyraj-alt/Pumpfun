@@ -70,10 +70,11 @@
 </main>
 <script>
 const $=id=>document.getElementById(id);
-const money=(n,d=2)=>Number.isFinite(Number(n))?'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d}):'—';
-const signed=(n,d=2)=>Number.isFinite(Number(n))?(Number(n)>=0?'+':'')+money(n,d):'—';
-const pct=n=>Number.isFinite(Number(n))?(Number(n)*100).toFixed(1)+'%':'—';
-const time=n=>Number.isFinite(Number(n))?new Date(n).toLocaleTimeString('en-AU',{timeZone:'UTC',hour12:false}):'—';
+const isNumeric=n=>n!==null&&n!==undefined&&n!==''&&Number.isFinite(Number(n));
+const money=(n,d=2)=>isNumeric(n)?'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d}):'—';
+const signed=(n,d=2)=>isNumeric(n)?(Number(n)>=0?'+':'')+money(n,d):'—';
+const pct=n=>isNumeric(n)?(Number(n)*100).toFixed(1)+'%':'—';
+const time=n=>isNumeric(n)?new Date(n).toLocaleTimeString('en-AU',{timeZone:'UTC',hour12:false}):'—';
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function renderTrades(trades){
  if(!trades?.length){$('trades').innerHTML='<div class="empty">No signal entries yet.</div>';return}
@@ -85,12 +86,12 @@ function renderEvents(events){
 function renderSide(side,state){
  const probability=state.probability?.[side],edge=state.edges?.[side],ask=state.quotes?.[side]?.bestAsk;
  $(side.toLowerCase()+'Prob').textContent=pct(probability);
- $(side.toLowerCase()+'Bar').style.width=Number.isFinite(Number(probability))?Math.max(0,Math.min(1,Number(probability)))*100+'%':'0%';
+  $(side.toLowerCase()+'Bar').style.width=isNumeric(probability)?Math.max(0,Math.min(1,Number(probability)))*100+'%':'0%';
  $(side.toLowerCase()+'Ask').textContent=money(state.quotes?.[side]?.estimatedAverageAsk);
  $(side.toLowerCase()+'Net').textContent=signed(edge,3);
  $(side.toLowerCase()+'Net').className=Number(edge)>=.05?'edge-good':Number(edge)<0?'edge-bad':'';
  $(side.toLowerCase()+'Edge').textContent='EDGE '+signed(edge,3);
- $(side.toLowerCase()+'Signal').textContent=Number(edge)>=.05?'BUY 100':Number.isFinite(Number(edge))?'WAIT':'—';
+  $(side.toLowerCase()+'Signal').textContent=isNumeric(edge)&&Number(edge)>=.05?'BUY 100':isNumeric(edge)?'WAIT':'—';
 }
 async function poll(){
  try{
@@ -102,7 +103,7 @@ async function poll(){
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
   $('reference').textContent=money(s.referencePrice,2);$('spot').textContent=money(s.spotPrice,2);
   $('gap').textContent='Difference from reference '+signed(s.priceGap,2);
-  $('expected').textContent=money(s.expectedMove,2);$('zscore').textContent=Number.isFinite(Number(s.standardizedGap))?Number(s.standardizedGap).toFixed(3):'—';
+   $('expected').textContent=money(s.expectedMove,2);$('zscore').textContent=isNumeric(s.standardizedGap)?Number(s.standardizedGap).toFixed(3):'—';
   renderSide('UP',s);renderSide('DOWN',s);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
