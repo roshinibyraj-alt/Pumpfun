@@ -8,9 +8,9 @@ const WINDOW_MS = 5 * 60 * 1000;
 const SHARES_PER_SIGNAL = 100;
 const MIN_EDGE = 0.05;
 const STARTING_CASH = 10_000;
-const POLL_MS = 1000;
+const POLL_MS = 500;
 const FEED_MAX_AGE_MS = 15_000;
-const ENTRY_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
+const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
 const TAKE_PROFIT_BID = 0.99;
 const TAKE_PROFIT_PAYOUT = 1;
@@ -55,6 +55,12 @@ function probabilityUp({ openPrice, spotPrice, secondsRemaining, volatility5m })
   return normalCdf(Math.log(spotPrice / openPrice) / remainingVol);
 }
 
+function estimateTakerFee(price, shares) {
+  if (!Number.isFinite(price) || price < 0 || price > 1
+    || !Number.isFinite(shares) || shares < 0) return 0;
+  return TAKER_FEE_RATE * price * (1 - price) * shares;
+}
+
 function simulateBuy(asks, shares = SHARES_PER_SIGNAL) {
   let remaining = shares;
   let cost = 0;
@@ -63,7 +69,7 @@ function simulateBuy(asks, shares = SHARES_PER_SIGNAL) {
   for (const level of parseLevels(asks, 'ask')) {
     const fill = Math.min(remaining, level.size);
     cost += fill * level.price;
-    fees += ENTRY_FEE_RATE * level.price * (1 - level.price) * fill;
+    fees += estimateTakerFee(level.price, fill);
     visibleShares += fill;
     remaining -= fill;
     if (remaining <= 1e-8) break;
@@ -260,9 +266,9 @@ class ProbabilityBot {
         trade.lastOutcomeBid = bid;
         trade.lastOutcomeBidAt = quote.updatedAt;
         if (bid >= TAKE_PROFIT_BID) {
-          this.closeTrade(trade, TAKE_PROFIT_PAYOUT, trade.shares * TAKE_PROFIT_PAYOUT, 'TAKE_PROFIT', 'Own-side best bid reached $0.99; credited $1.00 per share.', now);
+          this.closeTrade(trade, TAKE_PROFIT_PAYOUT, trade.shares * TAKE_PROFIT_PAYOUT, 'TAKE_PROFIT', 'Own-side best bid reached $0.99; credited $1.00 per share before fees.', now, bid);
         } else if (bid <= STOP_LOSS_BID) {
-          this.closeTrade(trade, STOP_LOSS_PAYOUT, STOP_LOSS_PAYOUT, 'STOP_LOSS', 'Own-side best bid reached $0.01; credited $0.00 per share.', now);
+          this.closeTrade(trade, STOP_LOSS_PAYOUT, STOP_LOSS_PAYOUT, 'STOP_LOSS', 'Own-side best bid reached $0.01; credited $0.00 per share before fees.', now, bid);
         }
         continue;
       }
@@ -279,27 +285,35 @@ class ProbabilityBot {
           trade.lastOutcomeBid,
           payout,
           'WINDOW_PRICE_EXIT',
-          'Window ended; marked at the last own-side best bid before close.',
+          'Window ended; marked at the last own-side best bid before close, less taker fee.',
           now,
+          trade.lastOutcomeBid,
         );
       }
     }
   }
 
-  closeTrade(trade, exitPrice, payout, outcome, settlementSource, now) {
+  closeTrade(trade, exitPrice, payout, outcome, settlementSource, now, feeExecutionPrice) {
+    const exitFees = estimateTakerFee(feeExecutionPrice, trade.shares);
+    const netPayout = payout - exitFees;
     trade.status = 'SETTLED';
     trade.finalOutcome = outcome;
     trade.closePrice = exitPrice;
     trade.exitPrice = exitPrice;
+    trade.grossPayout = payout;
+    trade.exitFees = exitFees;
+    trade.netPayout = netPayout;
     trade.settlementSource = settlementSource;
-    trade.realizedPnl = payout - trade.totalCost;
+    trade.realizedPnl = netPayout - trade.totalCost;
     trade.settledAt = now;
-    this.cash += payout;
+    this.cash += netPayout;
     this.log('PAPER_EXIT', {
       side: trade.side,
       outcome,
       exitPrice,
-      payout,
+      grossPayout: payout,
+      exitFees,
+      netPayout,
       realizedPnl: trade.realizedPnl,
     });
   }
@@ -344,14 +358,16 @@ class ProbabilityBot {
       statusReason: this.statusReason,
       strategy: {
         timeframe: '5m',
+        pollIntervalMs: POLL_MS,
         sharesPerSignal: SHARES_PER_SIGNAL,
         minimumNetEdge: MIN_EDGE,
+        takerFeeRate: TAKER_FEE_RATE,
         takeProfitBid: TAKE_PROFIT_BID,
         takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: STOP_LOSS_PAYOUT,
         model: '20 closed 5-minute log-return volatility; normal-CDF probability estimate',
-        exitModel: 'Own-side CLOB best bid; expiry mark uses the last own-side bid, not BTC reference.',
+        exitModel: 'Own-side CLOB best bid; all exits deduct the configured taker fee; expiry mark uses the last own-side bid, not BTC reference.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
       referencePrice: this.referencePrice,

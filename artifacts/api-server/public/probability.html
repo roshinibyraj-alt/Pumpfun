@@ -37,7 +37,7 @@
     <div class="top-right"><span class="badge"><i class="dot"></i>PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement, compares it with the executable ask, and records a 100-share paper buy only when net edge crosses 5¢. Positions exit on their own token bid: 99¢ earns $1 per share; 1¢ loses the full share value.</p></div>
+    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement, compares it with the executable ask, and records a 100-share paper buy only when net edge crosses 5¢. Positions exit on their own token bid: 99¢ credits $1 gross per share; 1¢ credits $0 gross. Entry and exit taker fees are included. The bot checks every 500 ms.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
@@ -66,7 +66,7 @@
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
     <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Net edge = model probability − outcome ask − estimated fee. A 5¢ upward crossing triggers one paper buy; it rearms after the edge falls below 5¢.</div>
   </section>
-  <p class="footer">Simulation only—no live order submission. Probabilities use a normal-CDF approximation from the previous 20 completed Binance BTC 5-minute candles. Position exits use the fresh own-side CLOB best bid: $0.99 credits $1.00 per share, and $0.01 credits $0.00. Any still-open position at window close is marked at its last own-side bid; BTC reference prices do not decide paper P&amp;L.</p>
+  <p class="footer">Simulation only—no live order submission. Probabilities use a normal-CDF approximation from the previous 20 completed Binance BTC 5-minute candles. Position exits use the fresh own-side CLOB best bid: $0.99 credits $1.00 gross per share, and $0.01 credits $0.00 gross. The configured Polymarket taker-fee formula is applied to entries and exits. Any still-open position at window close is marked at its last own-side bid; BTC reference prices do not decide paper P&amp;L.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);

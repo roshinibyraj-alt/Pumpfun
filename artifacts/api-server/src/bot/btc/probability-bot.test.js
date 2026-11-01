@@ -91,8 +91,11 @@ test('own-side bid at 0.99 takes profit and credits one dollar per share', () =>
   assert.equal(bot.trades[0].status, 'SETTLED');
   assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
   assert.equal(bot.trades[0].closePrice, 1);
-  assert.equal(bot.trades[0].realizedPnl, 55);
-  assert.equal(bot.cash, 10_100);
+  assert.equal(bot.trades[0].grossPayout, 100);
+  assert.ok(Math.abs(bot.trades[0].exitFees - 0.0693) < 1e-9);
+  assert.ok(Math.abs(bot.trades[0].realizedPnl - 54.9307) < 1e-9);
+  assert.ok(Math.abs(bot.cash - 10_099.9307) < 1e-9);
+  assert.equal(bot.snapshot().strategy.pollIntervalMs, 500);
 });
 
 test('own-side bid at 0.01 stops out and credits zero per share', () => {
@@ -115,8 +118,10 @@ test('own-side bid at 0.01 stops out and credits zero per share', () => {
   assert.equal(bot.trades[0].status, 'SETTLED');
   assert.equal(bot.trades[0].finalOutcome, 'STOP_LOSS');
   assert.equal(bot.trades[0].closePrice, 0);
-  assert.equal(bot.trades[0].realizedPnl, -45);
-  assert.equal(bot.cash, 10_000);
+  assert.equal(bot.trades[0].grossPayout, 0);
+  assert.ok(Math.abs(bot.trades[0].exitFees - 0.0693) < 1e-9);
+  assert.ok(Math.abs(bot.trades[0].realizedPnl + 45.0693) < 1e-9);
+  assert.ok(Math.abs(bot.cash - 9_999.9307) < 1e-9);
 });
 
 test('missing or stale own-side bids do not trigger exits', () => {
@@ -156,8 +161,10 @@ test('window-end paper mark uses the last own-side token bid, not BTC reference'
   assert.equal(bot.trades[0].status, 'SETTLED');
   assert.equal(bot.trades[0].finalOutcome, 'WINDOW_PRICE_EXIT');
   assert.equal(bot.trades[0].closePrice, 0.64);
-  assert.equal(bot.trades[0].realizedPnl, 19);
-  assert.equal(bot.cash, 10_064);
+  assert.equal(bot.trades[0].grossPayout, 64);
+  assert.ok(Math.abs(bot.trades[0].exitFees - 1.6128) < 1e-9);
+  assert.ok(Math.abs(bot.trades[0].realizedPnl - 17.3872) < 1e-9);
+  assert.ok(Math.abs(bot.cash - 10_062.3872) < 1e-9);
 });
 
 test('CLOB exits run even when the Chainlink reference feed is unavailable', async () => {
@@ -185,6 +192,6 @@ test('CLOB exits run even when the Chainlink reference feed is unavailable', asy
 
   assert.equal(bot.trades[0].status, 'SETTLED');
   assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
-  assert.equal(bot.trades[0].realizedPnl, 55);
+  assert.ok(Math.abs(bot.trades[0].realizedPnl - 54.9307) < 1e-9);
   assert.match(bot.error, /Chainlink/);
 });
