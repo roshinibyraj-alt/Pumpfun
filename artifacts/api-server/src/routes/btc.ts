@@ -65,8 +65,11 @@ async function getClient(): Promise<any> {
   const signerName = "@polymarket/client/viem";
   const sdk: any = await import(sdkName);
   const signer: any = await import(signerName);
+  const privateKey = process.env.PRIVATE_KEY.startsWith("0x")
+    ? process.env.PRIVATE_KEY
+    : `0x${process.env.PRIVATE_KEY}`;
   tradingClient = await sdk.createSecureClient({
-    signer: signer.privateKey(process.env.PRIVATE_KEY),
+    signer: signer.privateKey(privateKey),
   });
   return tradingClient;
 }
@@ -188,11 +191,13 @@ router.get("/trading/account", requireSession, async (_req, res) => {
   try {
     const client = await getClient();
     const sdkName = "@polymarket/client";
+    const actionsName = "@polymarket/client/actions";
     const sdk: any = await import(sdkName);
+    const actions: any = await import(actionsName);
     const [orders, positions, collateral] = await Promise.all([
-      collectPages(client.listOpenOrders({ pageSize: 100 })),
-      collectPages(client.listPositions({ pageSize: 100 })),
-      client.fetchBalanceAllowance({ assetType: sdk.AssetType.COLLATERAL }),
+      collectPages(client.listOpenOrders()),
+      collectPages(client.listPositions()),
+      actions.fetchBalanceAllowance(client, { assetType: sdk.AssetType.COLLATERAL }),
     ]);
     res.set("Cache-Control", "no-store").json({
       orders,
