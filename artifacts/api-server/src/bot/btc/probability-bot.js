@@ -12,6 +12,7 @@ const POLL_MS = 500;
 const FEED_MAX_AGE_MS = 15_000;
 const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const MIN_ENTRY_PRICE = 0.02;
+const MIN_ENTRY_SECONDS_REMAINING = 120;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
 const TAKE_PROFIT_BID = 0.99;
 const TAKE_PROFIT_PAYOUT = 1;
@@ -98,7 +99,15 @@ class ProbabilityBot {
     this.volatility5m = null;
     this.probabilityUp = null;
     this.edges = { UP: null, DOWN: null };
-    this.entryFilter = { allowed: false, minimumBestAsk: MIN_ENTRY_PRICE, blockedSides: ['UP', 'DOWN'] };
+    this.entryFilter = {
+      allowed: false,
+      minimumBestAsk: MIN_ENTRY_PRICE,
+      blockedSides: ['UP', 'DOWN'],
+      minimumSecondsRemaining: MIN_ENTRY_SECONDS_REMAINING,
+      secondsRemaining: null,
+      cutoffActive: false,
+      blockedReasons: ['PRICE_FLOOR'],
+    };
     this.lastEntryFilterSignature = null;
     this.armed = { UP: true, DOWN: true };
     this.cash = STARTING_CASH;
@@ -142,7 +151,7 @@ class ProbabilityBot {
         UP: this.quote(upBook, now),
         DOWN: this.quote(downBook, now),
       };
-      this.updateEntryFilter();
+      this.updateEntryFilter(now);
       this.processPositionExits(now);
 
       const ticks = this.priceFeed.getTicks();
@@ -213,31 +222,51 @@ class ProbabilityBot {
     };
   }
 
-  updateEntryFilter() {
+  updateEntryFilter(now = this.now()) {
     const blockedSides = ['UP', 'DOWN'].filter(side => {
       const bestAsk = this.quotes[side]?.bestAsk;
       return !Number.isFinite(bestAsk) || bestAsk < MIN_ENTRY_PRICE;
     });
+    const secondsRemaining = Number.isFinite(this.market?.end)
+      ? Math.max(0, (this.market.end - now) / 1000)
+      : null;
+    const cutoffActive = Number.isFinite(secondsRemaining)
+      && secondsRemaining <= MIN_ENTRY_SECONDS_REMAINING;
+    const blockedReasons = [];
+    if (blockedSides.length) blockedReasons.push('PRICE_FLOOR');
+    if (cutoffActive) blockedReasons.push('TIME_CUTOFF');
     this.entryFilter = {
-      allowed: blockedSides.length === 0,
+      allowed: blockedReasons.length === 0,
       minimumBestAsk: MIN_ENTRY_PRICE,
       blockedSides,
+      minimumSecondsRemaining: MIN_ENTRY_SECONDS_REMAINING,
+      secondsRemaining,
+      cutoffActive,
+      blockedReasons,
     };
     return this.entryFilter;
   }
 
   processSignals(now) {
-    const filter = this.updateEntryFilter();
+    const filter = this.updateEntryFilter(now);
     if (!filter.allowed) {
       for (const side of ['UP', 'DOWN']) {
         if (this.edges[side] == null || this.edges[side] < MIN_EDGE) this.armed[side] = true;
       }
-      const signature = filter.blockedSides.join(',');
+      const signature = `${filter.blockedReasons.join(',')}:${filter.blockedSides.join(',')}`;
       if (signature !== this.lastEntryFilterSignature) {
-        this.log('SIGNAL_BLOCKED_PRICE_FLOOR', {
-          minimumBestAsk: MIN_ENTRY_PRICE,
-          blockedSides: filter.blockedSides,
-        });
+        if (filter.blockedSides.length) {
+          this.log('SIGNAL_BLOCKED_PRICE_FLOOR', {
+            minimumBestAsk: MIN_ENTRY_PRICE,
+            blockedSides: filter.blockedSides,
+          });
+        }
+        if (filter.cutoffActive) {
+          this.log('SIGNAL_BLOCKED_TIME_CUTOFF', {
+            minimumSecondsRemaining: MIN_ENTRY_SECONDS_REMAINING,
+            secondsRemaining: filter.secondsRemaining,
+          });
+        }
       }
       this.lastEntryFilterSignature = signature;
       return;
@@ -273,6 +302,8 @@ class ProbabilityBot {
       modelProbability: side === 'UP' ? this.probabilityUp : 1 - this.probabilityUp,
       openedAt: now,
       status: 'OPEN',
+      peakBid: null,
+      peakBidAt: null,
       lastOutcomeBid: null,
       lastOutcomeBidAt: null,
       realizedPnl: null,
@@ -294,6 +325,12 @@ class ProbabilityBot {
         && Number.isFinite(bid)
         && bid >= 0
         && bid <= 1;
+
+      if (now < trade.windowEnd && fresh && quote.updatedAt >= (trade.openedAt ?? 0)
+        && (trade.peakBid == null || bid > trade.peakBid)) {
+        trade.peakBid = bid;
+        trade.peakBidAt = quote.updatedAt;
+      }
 
       if (now < trade.windowEnd && fresh) {
         trade.lastOutcomeBid = bid;
@@ -396,6 +433,7 @@ class ProbabilityBot {
         minimumNetEdge: MIN_EDGE,
         takerFeeRate: TAKER_FEE_RATE,
         minimumBestAsk: MIN_ENTRY_PRICE,
+        minimumSecondsRemaining: MIN_ENTRY_SECONDS_REMAINING,
         takeProfitBid: TAKE_PROFIT_BID,
         takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
         stopLossBid: STOP_LOSS_BID,

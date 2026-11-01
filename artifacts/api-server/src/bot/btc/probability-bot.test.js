@@ -97,6 +97,32 @@ test('any best ask below $0.02 blocks both sides; $0.02 is allowed', () => {
   assert.equal(bot.trades[0].side, 'UP');
 });
 
+test('blocks new entries at 120 seconds remaining but allows them at 121 seconds', () => {
+  const bot = new ProbabilityBot({
+    now: () => 1_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.probabilityUp = 0.8;
+  bot.quotes = {
+    UP: { bestAsk: 0.70, asks: [{ price: 0.70, size: 100 }] },
+    DOWN: { bestAsk: 0.30, asks: [{ price: 0.30, size: 100 }] },
+  };
+  bot.edges = bot.calculateEdges();
+
+  bot.processSignals(180_000);
+  assert.equal(bot.trades.length, 0);
+  assert.equal(bot.entryFilter.cutoffActive, true);
+  assert.equal(bot.entryFilter.secondsRemaining, 120);
+  assert.deepEqual(bot.entryFilter.blockedReasons, ['TIME_CUTOFF']);
+
+  bot.processSignals(179_000);
+  assert.equal(bot.entryFilter.allowed, true);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].side, 'UP');
+  assert.equal(bot.snapshot().strategy.minimumSecondsRemaining, 120);
+});
+
 test('own-side bid at 0.99 takes profit and credits one dollar per share', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
@@ -122,6 +148,40 @@ test('own-side bid at 0.99 takes profit and credits one dollar per share', () =>
   assert.ok(Math.abs(bot.trades[0].realizedPnl - 54.9307) < 1e-9);
   assert.ok(Math.abs(bot.cash - 10_099.9307) < 1e-9);
   assert.equal(bot.snapshot().strategy.pollIntervalMs, 500);
+});
+
+test('tracks the highest fresh own-side bid without blocking exits inside the cutoff', () => {
+  const bot = new ProbabilityBot({
+    now: () => 1_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { id: 'market', tokens: { UP: 'up-token', DOWN: 'down-token' } };
+  bot.trades = [{
+    id: 'up-position', marketId: 'market', side: 'UP', windowEnd: 300_000,
+    shares: 100, totalCost: 45, status: 'OPEN', openedAt: 500,
+    peakBid: null, peakBidAt: null,
+  }];
+
+  bot.quotes = {
+    UP: { bestBid: 0.60, updatedAt: 1_000 },
+    DOWN: { bestBid: 0.40, updatedAt: 1_000 },
+  };
+  bot.processPositionExits(1_000);
+  assert.equal(bot.trades[0].peakBid, 0.60);
+  assert.equal(bot.trades[0].peakBidAt, 1_000);
+  assert.equal(bot.trades[0].status, 'OPEN');
+
+  bot.quotes.UP = { bestBid: 0.55, updatedAt: 1_500 };
+  bot.processPositionExits(1_500);
+  assert.equal(bot.trades[0].peakBid, 0.60);
+  assert.equal(bot.trades[0].peakBidAt, 1_000);
+
+  bot.quotes.UP = { bestBid: 0.99, updatedAt: 199_000 };
+  bot.processPositionExits(200_000);
+  assert.equal(bot.trades[0].peakBid, 0.99);
+  assert.equal(bot.trades[0].peakBidAt, 199_000);
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
 });
 
 test('own-side bid at 0.01 stops out and credits zero per share', () => {
