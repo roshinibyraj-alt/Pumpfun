@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#080d16">
+  <title>BTC 5-Minute Probability Bot</title>
+  <style>
+    :root{color-scheme:dark;--bg:#080d16;--panel:#101927;--line:#263447;--muted:#8d9bb0;--text:#edf4ff;--cyan:#51d9ef;--green:#39d99a;--red:#ff6f7e;--amber:#ffc76a}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 8% 0,#102c3a 0,transparent 32%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+    main{width:min(1180px,calc(100% - 32px));margin:0 auto;padding:28px 0 48px}.top,.top-right,.section-head,.row,.trade{display:flex;align-items:center;justify-content:space-between;gap:14px}
+    .top{padding-bottom:22px;border-bottom:1px solid var(--line)}.brand{font-size:12px;letter-spacing:.18em;font-weight:850}.subbrand,.muted,.label,small{color:var(--muted)}.subbrand{font-size:12px;margin-top:3px}
+    .badge,.pill{display:inline-flex;align-items:center;gap:8px;border:1px solid #245944;color:#9af1c9;background:#0e211c;border-radius:999px;padding:7px 11px;font:700 10px ui-monospace,monospace;letter-spacing:.08em}
+    .dot{width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 10px currentColor}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:28px 0 20px}.eyebrow{font:700 10px ui-monospace,monospace;color:var(--cyan);letter-spacing:.16em;text-transform:uppercase}
+    h1{font-size:clamp(25px,4vw,38px);letter-spacing:-.04em;line-height:1.12;margin:8px 0}.hero p{max-width:700px;color:var(--muted);margin:8px 0 0}
+    .window{text-align:right;color:var(--muted);font:11px ui-monospace,monospace}.window strong{display:block;color:var(--text);font-size:17px;margin:4px 0}
+    .error{display:none;padding:12px 14px;margin:12px 0;color:#ffd1d6;background:#27171c;border:1px solid #6f3740;border-radius:10px}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card,.panel{background:linear-gradient(145deg,#111c2b,#0e1622);border:1px solid var(--line);border-radius:14px}
+    .card{padding:16px}.label{font-size:10px;letter-spacing:.1em;text-transform:uppercase}.value{font:700 clamp(19px,2.5vw,27px) ui-monospace,monospace;letter-spacing:-.04em;margin-top:8px}.foot{font-size:11px;color:var(--muted);margin-top:5px;min-height:18px}
+    .prob-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.prob{padding:18px;border-radius:14px;background:#0f1925;border:1px solid var(--line)}.prob.up{--accent:var(--green)}.prob.down{--accent:var(--red)}
+    .prob-head{display:flex;justify-content:space-between;align-items:center;color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.prob-price{font:800 clamp(30px,5vw,48px) ui-monospace,monospace;color:var(--text);margin:8px 0 12px}
+    .bar{height:7px;border-radius:20px;background:#263345;overflow:hidden}.bar i{display:block;width:0;height:100%;background:var(--accent);border-radius:inherit;transition:width .3s}
+    .prob-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.prob-meta span{display:block;color:var(--muted);font-size:10px}.prob-meta strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
+    .panel{padding:18px;margin-top:12px}.section-head{margin-bottom:12px}.section-head h2{font-size:15px;margin:0}.section-head small{font-size:11px}
+    .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:640px}th,td{text-align:left;padding:11px 9px;border-top:1px solid #263447;font-size:12px}th{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
+    .side{font-weight:800}.side.UP,.pnl.pos{color:var(--green)}.side.DOWN,.pnl.neg{color:var(--red)}.edge-good{color:var(--green)}.edge-bad{color:var(--red)}
+    .empty{padding:24px 10px;text-align:center;color:var(--muted);border-top:1px solid var(--line)}.formula{font:11px ui-monospace,monospace;color:#bbcadb;background:#0b121c;border:1px solid #202e40;padding:12px;border-radius:9px;margin-top:10px}
+    .status{font:10px ui-monospace,monospace;color:var(--muted)}.footer{margin-top:16px;color:var(--muted);font-size:10px;line-height:1.6}
+    @media(max-width:800px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{align-items:flex-start;flex-direction:column}.window{text-align:left}.top-right{flex-wrap:wrap;justify-content:flex-end}}
+    @media(max-width:520px){main{width:min(100% - 22px,1180px);padding-top:16px}.top{align-items:flex-start}.top-right{gap:6px}.badge,.pill{padding:6px 8px;font-size:9px}.grid{gap:8px}.card{padding:12px}.prob-grid{gap:8px}.prob{padding:13px}.prob-meta{grid-template-columns:1fr 1fr}.panel{padding:13px}}
+  </style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div><div class="brand">BTC PROBABILITY BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
+    <div class="top-right"><span class="badge"><i class="dot"></i>PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
+  </header>
+  <section class="hero">
+    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement, compares it with the executable ask, and records a 100-share paper buy only when net edge crosses 5¢.</p></div>
+    <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
+  </section>
+  <div id="error" class="error"></div>
+  <section class="grid">
+    <article class="card"><div class="label">Reference price</div><div class="value" id="reference">—</div><div class="foot">Chainlink BTC/USD near window open</div></article>
+    <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
+    <article class="card"><div class="label">Expected move left</div><div class="value" id="expected">—</div><div class="foot">20 closed 5-minute candles · volatility estimate</div></article>
+    <article class="card"><div class="label">Standardized gap</div><div class="value" id="zscore">—</div><div class="foot">Signed distance ÷ expected remaining move</div></article>
+  </section>
+  <section class="prob-grid">
+    <article class="prob up"><div class="prob-head"><span>UP · MODEL PROBABILITY</span><span id="upEdge">EDGE —</span></div><div class="prob-price" id="upProb">—</div><div class="bar"><i id="upBar"></i></div><div class="prob-meta"><div><span>100-share avg ask</span><strong id="upAsk">—</strong></div><div><span>Model edge</span><strong id="upNet">—</strong></div><div><span>Signal</span><strong id="upSignal">WAIT</strong></div></div></article>
+    <article class="prob down"><div class="prob-head"><span>DOWN · MODEL PROBABILITY</span><span id="downEdge">EDGE —</span></div><div class="prob-price" id="downProb">—</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span>100-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Model edge</span><strong id="downNet">—</strong></div><div><span>Signal</span><strong id="downSignal">WAIT</strong></div></div></article>
+  </section>
+  <section class="grid" style="margin-top:12px">
+    <article class="card"><div class="label">Paper cash</div><div class="value" id="cash">—</div><div class="foot">Starting balance $10,000</div></article>
+    <article class="card"><div class="label">Realized P&amp;L</div><div class="value" id="pnl">—</div><div class="foot" id="wins">No settled signals yet</div></article>
+    <article class="card"><div class="label">Settled signals</div><div class="value" id="settled">—</div><div class="foot" id="openCount">— open positions</div></article>
+    <article class="card"><div class="label">Bot state</div><div class="value" id="feedState">—</div><div class="foot" id="updated">Waiting for first scan</div></article>
+  </section>
+  <section class="panel">
+    <div class="section-head"><h2>Paper trade history</h2><small>100 shares per signal · simulated at visible asks</small></div>
+    <div id="trades" class="table-wrap"><div class="empty">Waiting for a qualifying edge.</div></div>
+  </section>
+  <section class="panel">
+    <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
+    <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
+    <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Net edge = model probability − outcome ask − estimated fee. A 5¢ upward crossing triggers one paper buy; it rearms after the edge falls below 5¢.</div>
+  </section>
+  <p class="footer">Simulation only—no live order submission. Probabilities use a normal-CDF approximation from the previous 20 completed Binance BTC 5-minute candles; paper settlement uses the Chainlink tick nearest the window boundary (within 10 seconds), which may differ from the market’s official resolution.</p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const money=(n,d=2)=>Number.isFinite(Number(n))?'$'+Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d}):'—';
+const signed=(n,d=2)=>Number.isFinite(Number(n))?(Number(n)>=0?'+':'')+money(n,d):'—';
+const pct=n=>Number.isFinite(Number(n))?(Number(n)*100).toFixed(1)+'%':'—';
+const time=n=>Number.isFinite(Number(n))?new Date(n).toLocaleTimeString('en-AU',{timeZone:'UTC',hour12:false}):'—';
+const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function renderTrades(trades){
+ if(!trades?.length){$('trades').innerHTML='<div class="empty">No signal entries yet.</div>';return}
+ $('trades').innerHTML='<table><thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry avg</th><th>Model probability</th><th>Entry edge</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${Number(t.shares).toFixed(0)}</td><td>${money(t.entryPrice)}</td><td>${pct(t.modelProbability)}</td><td>${pct(t.edgeAtEntry)}</td><td>${safe(t.status==='OPEN'?'OPEN':t.finalOutcome||'—')}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
+}
+function renderEvents(events){
+ $('events').innerHTML=events?.length?events.slice(0,10).map(e=>`<div class="trade"><span>${safe(e.event.replaceAll('_',' '))} · ${safe(e.side||'')}</span><span class="muted">${time(e.ts)}${e.edge!=null?' · edge '+pct(e.edge):''}${e.realizedPnl!=null?' · '+signed(e.realizedPnl):''}</span></div>`).join(''):'<div class="empty">No signal activity yet.</div>';
+}
+function renderSide(side,state){
+ const probability=state.probability?.[side],edge=state.edges?.[side],ask=state.quotes?.[side]?.bestAsk;
+ $(side.toLowerCase()+'Prob').textContent=pct(probability);
+ $(side.toLowerCase()+'Bar').style.width=Number.isFinite(Number(probability))?Math.max(0,Math.min(1,Number(probability)))*100+'%':'0%';
+ $(side.toLowerCase()+'Ask').textContent=money(state.quotes?.[side]?.estimatedAverageAsk);
+ $(side.toLowerCase()+'Net').textContent=signed(edge,3);
+ $(side.toLowerCase()+'Net').className=Number(edge)>=.05?'edge-good':Number(edge)<0?'edge-bad':'';
+ $(side.toLowerCase()+'Edge').textContent='EDGE '+signed(edge,3);
+ $(side.toLowerCase()+'Signal').textContent=Number(edge)>=.05?'BUY 100':Number.isFinite(Number(edge))?'WAIT':'—';
+}
+async function poll(){
+ try{
+  const response=await fetch('/api/strategy/state',{cache:'no-store'});if(!response.ok)throw Error('API HTTP '+response.status);
+  const s=await response.json(),account=s.paperAccount||{};
+  $('error').style.display=s.error?'block':'none';$('error').textContent=s.error||'';
+  $('run').innerHTML=`<i class="dot"></i>${s.running?'SCANNER RUNNING':'SCANNER STOPPED'}`;
+  $('remaining').textContent=s.window?`${Math.ceil(s.window.secondsRemaining)} seconds`:'—';
+  $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
+  $('reference').textContent=money(s.referencePrice,2);$('spot').textContent=money(s.spotPrice,2);
+  $('gap').textContent='Difference from reference '+signed(s.priceGap,2);
+  $('expected').textContent=money(s.expectedMove,2);$('zscore').textContent=Number.isFinite(Number(s.standardizedGap))?Number(s.standardizedGap).toFixed(3):'—';
+  renderSide('UP',s);renderSide('DOWN',s);
+  $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
+  $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
+  $('settled').textContent=String(account.settled??0);$('openCount').textContent=(account.openPositions??0)+' open positions';
+  $('wins').textContent=`${account.wins??0} wins · ${account.losses??0} losses`;
+  $('feedState').textContent=s.priceFeed?.status||'—';
+  $('updated').textContent=s.statusReason|| (s.lastUpdateAt?'Updated '+time(s.lastUpdateAt):'Waiting for first scan');
+  $('feedStatus').textContent=s.priceFeed?`${s.priceFeed.source} · ${s.priceFeed.ageMs==null?'no update':(s.priceFeed.ageMs/1000).toFixed(1)+'s old'} · vol history ${s.priceFeed.history?.status||'waiting'}`:'Awaiting live data';
+  renderTrades(s.trades);renderEvents(s.events);
+ }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
+ setTimeout(poll,1000);
+}
+void poll();
+</script>
+</body>
+</html>

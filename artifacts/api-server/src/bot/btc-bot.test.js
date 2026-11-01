@@ -148,15 +148,13 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents the authenticated manual trading terminal", () => {
-  const html = fs.readFileSync(path.join(__dirname, "../../public/btc.html"), "utf8");
-  assert.match(html, /POLYMARKET TERMINAL/);
-  assert.match(html, /Available collateral/);
-  assert.match(html, /Open positions/);
-  assert.match(html, /Working orders/);
-  assert.match(html, /\/api\/trading\/account/);
-  assert.match(html, /Cancel this working order\?/);
-  assert.match(html, /Submit \$\{o\.side\} limit order/);
-  assert.match(html, /geo\.blocked===false/);
-  assert.match(html, /radial-gradient/);
+test("dashboard presents the BTC probability paper bot", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
+  assert.match(html, /BTC PROBABILITY BOT/);
+  assert.match(html, /PAPER ONLY/);
+  assert.match(html, /100 SHARES \/ SIGNAL/);
+  assert.match(html, /5¢/);
+  assert.match(html, /Expected move left/);
+  assert.match(html, /Paper trade history/);
+  assert.doesNotMatch(html, /Manual limit order/);
 });
