@@ -25,7 +25,7 @@
     <div class="badges"><span class="badge"><span class="pulse"></span>PAPER ONLY · NO LIVE ORDERS</span><span id="status" class="badge status">CONNECTING</span></div>
   </header>
   <section class="hero">
-    <div class="hero-copy"><div class="eyebrow">OPENING WINDOW DIP</div><h1>Catch the early dip.<br>Take profit at 99¢.</h1><p>During the first five seconds of each window, buy 500 shares on any side with a best ask below 40¢. A 99¢ own-side bid closes the position for a modeled $1 per share.</p></div>
+    <div class="hero-copy"><div class="eyebrow">TWO-SIDED LIMIT LADDER</div><h1>Rest orders on both sides.<br>Take profit at 80¢.</h1><p>At each market-window start, place 20-share limit buys at every cent from 40¢ down to 3¢ on UP and DOWN. Each filled position exits at an own-side bid of 80¢ or higher.</p></div>
     <div class="window-card"><div><div class="eyebrow">ACTIVE 5-MINUTE WINDOW</div><strong id="window-title">Waiting for market</strong><small id="window-slug">—</small></div><div><div class="eyebrow">TIME LEFT</div><strong class="countdown" id="countdown">--:--</strong></div></div>
   </section>
   <section class="stats">
@@ -36,14 +36,14 @@
     <article class="stat"><label>Win rate</label><strong id="winrate">—</strong></article>
   </section>
   <div id="error" class="error"></div>
-  <div class="section-title"><div><div class="eyebrow">ENTRY TRIGGERS</div><h2>Both sides, independently</h2></div><small>Buy size: 500 shares · First 5 seconds · Ask below 40¢ · TP: 99¢ → $1/share</small></div>
+  <div class="section-title"><div><div class="eyebrow">RESTING LIMIT ORDERS</div><h2>Both sides, independently</h2></div><small>20 shares per rung · 40¢ to 3¢ by 1¢ · TP: 80¢ per share</small></div>
   <section id="ladders" class="ladders"></section>
   <div class="section-title"><div><div class="eyebrow">MARKET WINDOW</div><h2>Scanner status</h2></div><small>5m · paper only</small></div>
   <section id="timeframes" class="timeframes"></section>
   <section class="panel"><h2>Open climbing positions</h2><div id="openPositions" class="table-scroll"></div></section>
   <section class="panel"><h2>Recent exits</h2><div id="closedPositions" class="table-scroll"></div></section>
   <section class="panel"><h2>Bot activity</h2><div id="events" class="events"></div></section>
-  <p class="footer">Paper fills are modeled at the observed best ask/bid and may differ from executable live fills. Remaining open shares close at market-window rollover. Restarting the service resets paper history and bankroll.</p>
+  <p class="footer">Paper limit fills are modeled at each rung price when the observed ask is at or below that limit; take-profit exits credit 80¢ per share. Remaining open shares close at market-window rollover. Restarting the service resets paper history and bankroll.</p>
 </main>
 <script>
   const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -51,21 +51,22 @@
   const stamp=x=>x?new Date(x).toLocaleTimeString():'—';
   function ladderCard(side,info,prices){
     const fired=new Set((info.triggeredRungs||[]).map(Number));
-    const levels=prices.map(price=>`<div class="level ${fired.has(price)?'done':''}"><b>${px(price)}</b><small>${fired.has(price)?'FILLED':'WAIT'}</small></div>`).join('');
-    const ask=info.bestAsk==null?'—':px(info.bestAsk),bid=info.bestBid==null?'—':px(info.bestBid),tp=px(info.takeProfitPrice??0.99);
+    const states=new Map((info.rungStates||[]).map(x=>[Number(x.price),x.status]));
+    const levels=prices.map(price=>{const status=states.get(price)||'WAIT';return `<div class="level ${status==='FILLED'?'done':''}"><b>${px(price)}</b><small>${status==='PENDING'?'RESTING':status.replaceAll('_',' ')}</small></div>`}).join('');
+    const ask=info.bestAsk==null?'—':px(info.bestAsk),bid=info.bestBid==null?'—':px(info.bestBid),tp=px(info.takeProfitPrice??0.80);
     const progress=fired.size/prices.length*100;
-    return `<article class="ladder ${side.toLowerCase()}"><div class="ladder-head"><div><div class="side-name">${side}</div><div class="muted">Best ask ${ask} · bid ${bid} · TP ${tp}</div></div><div class="price">${info.shares||0}<small> shares open</small></div></div><div class="levels">${levels}</div><div class="ladder-meta"><span>${fired.size ? 'Triggered' : 'Waiting'} · one entry per side</span><span>${info.openPositions||0} open entries</span></div><div class="progress"><i style="width:${progress}%"></i></div></article>`;
+    return `<article class="ladder ${side.toLowerCase()}"><div class="ladder-head"><div><div class="side-name">${side}</div><div class="muted">Best ask ${ask} · bid ${bid} · TP ${tp}</div></div><div class="price">${info.shares||0}<small> shares open</small></div></div><div class="levels">${levels}</div><div class="ladder-meta"><span>${fired.size} filled · ${info.pendingOrders||0} resting</span><span>${info.openPositions||0} open positions</span></div><div class="progress"><i style="width:${progress}%"></i></div></article>`;
   }
   function table(items,isOpen){
     if(!items.length)return `<div class="empty">${isOpen?'No open positions for the active windows.':'No exits yet.'}</div>`;
-    const heads=isOpen?['Window','Side','Entry trigger','Shares','Entry ask','Own-side bid','Unrealized P&L']:['Window','Side','Entry trigger','Shares','Entry ask','Exit bid','Realized P&L','Closed'];
+      const heads=isOpen?['Window','Side','Limit rung','Shares','Entry price','Own-side bid','Unrealized P&L']:['Window','Side','Limit rung','Shares','Entry price','Exit bid','Realized P&L','Closed'];
     const rows=items.map(p=>`<tr><td>${esc(p.timeframe||'5m')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'up':'down'}">${esc(p.side)}</td><td>${px(p.rungPrice??p.triggerPrice)}</td><td>${Number(p.shares||0).toLocaleString()}</td><td>${px(p.avgEntry)}</td>${isOpen?`<td>${p.markStatus==='LIVE'?px(p.markBid):'—'}</td><td class="${Number(p.unrealizedPnl)>=0?'positive':'negative'}">${p.unrealizedPnl==null?'—':usd(p.unrealizedPnl)}</td>`:`<td>${px(p.exitBid)}</td><td class="${Number(p.realizedPnl)>=0?'positive':'negative'}">${usd(p.realizedPnl)}</td><td>${stamp(p.settledAt)}</td>`}</tr>`).join('');
     return `<table><thead><tr>${heads.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
   }
   function timeframeCard(tf,s){
     const w=s.window||{},e=s.strategy?.entries||{},l=e.sideLadders||{};
     const remains=w.end?Math.max(0,Math.ceil((w.end-Date.now())/1000)):0;
-    return `<article class="tf-card ${tf==='15m'?'tf15':''}"><div class="tf-top"><div><div class="eyebrow">${tf} MARKET</div><h3>${esc(w.slug||'Waiting for market')}</h3></div><b class="${s.status==='scanning'||s.status==='position_open'?'online':'waiting'}">${esc(String(s.status||'waiting').replaceAll('_',' ').toUpperCase())}</b></div><div class="tf-grid"><div class="tf-metric"><small>Window time remaining</small><b>${Math.floor(remains/60)}:${String(remains%60).padStart(2,'0')}</b></div><div class="tf-metric"><small>UP ask / DOWN ask</small><b>${px(l.UP?.bestAsk)} / ${px(l.DOWN?.bestAsk)}</b></div><div class="tf-metric"><small>Opening entry rule</small><b>First 5 seconds · ask below 40¢ · 500 shares</b></div><div class="tf-metric"><small>Window paper cash</small><b>${usd(s.account?.cash)}</b></div></div></article>`;
+     return `<article class="tf-card ${tf==='15m'?'tf15':''}"><div class="tf-top"><div><div class="eyebrow">${tf} MARKET</div><h3>${esc(w.slug||'Waiting for market')}</h3></div><b class="${s.status==='scanning'||s.status==='position_open'?'online':'waiting'}">${esc(String(s.status||'waiting').replaceAll('_',' ').toUpperCase())}</b></div><div class="tf-grid"><div class="tf-metric"><small>Window time remaining</small><b>${Math.floor(remains/60)}:${String(remains%60).padStart(2,'0')}</b></div><div class="tf-metric"><small>UP ask / DOWN ask</small><b>${px(l.UP?.bestAsk)} / ${px(l.DOWN?.bestAsk)}</b></div><div class="tf-metric"><small>Entry rule</small><b>20-share limit rungs · 40¢–3¢ · 1¢ apart · TP 80¢</b></div><div class="tf-metric"><small>Window paper cash</small><b>${usd(s.account?.cash)}</b></div></div></article>`;
   }
   async function refresh(){
     try{
