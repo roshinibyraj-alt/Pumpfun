@@ -11,6 +11,7 @@ const STARTING_CASH = 10_000;
 const POLL_MS = 500;
 const FEED_MAX_AGE_MS = 15_000;
 const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
+const MIN_ENTRY_PRICE = 0.02;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
 const TAKE_PROFIT_BID = 0.99;
 const TAKE_PROFIT_PAYOUT = 1;
@@ -97,6 +98,8 @@ class ProbabilityBot {
     this.volatility5m = null;
     this.probabilityUp = null;
     this.edges = { UP: null, DOWN: null };
+    this.entryFilter = { allowed: false, minimumBestAsk: MIN_ENTRY_PRICE, blockedSides: ['UP', 'DOWN'] };
+    this.lastEntryFilterSignature = null;
     this.armed = { UP: true, DOWN: true };
     this.cash = STARTING_CASH;
     this.trades = [];
@@ -139,6 +142,7 @@ class ProbabilityBot {
         UP: this.quote(upBook, now),
         DOWN: this.quote(downBook, now),
       };
+      this.updateEntryFilter();
       this.processPositionExits(now);
 
       const ticks = this.priceFeed.getTicks();
@@ -209,7 +213,36 @@ class ProbabilityBot {
     };
   }
 
+  updateEntryFilter() {
+    const blockedSides = ['UP', 'DOWN'].filter(side => {
+      const bestAsk = this.quotes[side]?.bestAsk;
+      return !Number.isFinite(bestAsk) || bestAsk < MIN_ENTRY_PRICE;
+    });
+    this.entryFilter = {
+      allowed: blockedSides.length === 0,
+      minimumBestAsk: MIN_ENTRY_PRICE,
+      blockedSides,
+    };
+    return this.entryFilter;
+  }
+
   processSignals(now) {
+    const filter = this.updateEntryFilter();
+    if (!filter.allowed) {
+      for (const side of ['UP', 'DOWN']) {
+        if (this.edges[side] == null || this.edges[side] < MIN_EDGE) this.armed[side] = true;
+      }
+      const signature = filter.blockedSides.join(',');
+      if (signature !== this.lastEntryFilterSignature) {
+        this.log('SIGNAL_BLOCKED_PRICE_FLOOR', {
+          minimumBestAsk: MIN_ENTRY_PRICE,
+          blockedSides: filter.blockedSides,
+        });
+      }
+      this.lastEntryFilterSignature = signature;
+      return;
+    }
+    this.lastEntryFilterSignature = null;
     const candidates = ['UP', 'DOWN'].filter(side => {
       const edge = this.edges[side];
       if (edge == null || edge < MIN_EDGE) this.armed[side] = true;
@@ -362,6 +395,7 @@ class ProbabilityBot {
         sharesPerSignal: SHARES_PER_SIGNAL,
         minimumNetEdge: MIN_EDGE,
         takerFeeRate: TAKER_FEE_RATE,
+        minimumBestAsk: MIN_ENTRY_PRICE,
         takeProfitBid: TAKE_PROFIT_BID,
         takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
         stopLossBid: STOP_LOSS_BID,
@@ -379,6 +413,7 @@ class ProbabilityBot {
       standardizedGap: this.standardizedGap ?? null,
       probability: this.probabilityUp == null ? null : { UP: this.probabilityUp, DOWN: 1 - this.probabilityUp },
       edges: this.edges,
+      entryFilter: this.entryFilter,
       quotes: {
         UP: this.quotes.UP ? { bestBid: this.quotes.UP.bestBid, bestAsk: this.quotes.UP.bestAsk, midpoint: this.quotes.UP.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.UP.asks)?.averagePrice ?? null } : null,
         DOWN: this.quotes.DOWN ? { bestBid: this.quotes.DOWN.bestBid, bestAsk: this.quotes.DOWN.bestAsk, midpoint: this.quotes.DOWN.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.DOWN.asks)?.averagePrice ?? null } : null,

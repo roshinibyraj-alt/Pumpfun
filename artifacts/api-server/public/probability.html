@@ -37,7 +37,7 @@
     <div class="top-right"><span class="badge"><i class="dot"></i>PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement, compares it with the executable ask, and records a 100-share paper buy only when net edge crosses 5¢. Positions exit on their own token bid: 99¢ credits $1 gross per share; 1¢ credits $0 gross. Entry and exit taker fees are included. The bot checks every 500 ms.</p></div>
+    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement, compares it with the executable ask, and records a 100-share paper buy only when net edge crosses 5¢. No trades occur if either outcome’s best ask is below 2¢. Positions exit on their own token bid: 99¢ credits $1 gross per share; 1¢ credits $0 gross. Entry and exit taker fees are included. The bot checks every 500 ms.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
@@ -92,7 +92,7 @@ function renderSide(side,state){
  $(side.toLowerCase()+'Net').textContent=signed(edge,3);
  $(side.toLowerCase()+'Net').className=Number(edge)>=.05?'edge-good':Number(edge)<0?'edge-bad':'';
  $(side.toLowerCase()+'Edge').textContent='EDGE '+signed(edge,3);
-  $(side.toLowerCase()+'Signal').textContent=isNumeric(edge)&&Number(edge)>=.05?'BUY 100':isNumeric(edge)?'WAIT':'—';
+   $(side.toLowerCase()+'Signal').textContent=state.entryFilter?.allowed===false?'BLOCKED':isNumeric(edge)&&Number(edge)>=.05?'BUY 100':isNumeric(edge)?'WAIT':'—';
 }
 async function poll(){
  try{

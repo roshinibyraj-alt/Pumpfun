@@ -71,6 +71,32 @@ test('one 100-share paper buy fires at an edge crossing and rearms after it clea
   assert.equal(bot.trades.length, 2);
 });
 
+test('any best ask below $0.02 blocks both sides; $0.02 is allowed', () => {
+  const bot = new ProbabilityBot({
+    now: () => 1_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.probabilityUp = 0.8;
+  bot.quotes = {
+    UP: { bestAsk: 0.02, asks: [{ price: 0.02, size: 100 }] },
+    DOWN: { bestAsk: 0.01, asks: [{ price: 0.01, size: 100 }] },
+  };
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(1_000);
+
+  assert.equal(bot.trades.length, 0);
+  assert.deepEqual(bot.entryFilter.blockedSides, ['DOWN']);
+
+  bot.quotes.DOWN = { bestAsk: 0.02, asks: [{ price: 0.02, size: 100 }] };
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(2_000);
+
+  assert.equal(bot.entryFilter.allowed, true);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].side, 'UP');
+});
+
 test('own-side bid at 0.99 takes profit and credits one dollar per share', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
