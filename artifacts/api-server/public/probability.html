@@ -37,7 +37,7 @@
     <div class="top-right"><span class="badge"><i class="dot"></i>PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement, compares it with the executable ask, and records a 100-share paper buy only when net edge crosses 5¢.</p></div>
+    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement, compares it with the executable ask, and records a 100-share paper buy only when net edge crosses 5¢. Positions exit on their own token bid: 99¢ earns $1 per share; 1¢ loses the full share value.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
@@ -66,7 +66,7 @@
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
     <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Net edge = model probability − outcome ask − estimated fee. A 5¢ upward crossing triggers one paper buy; it rearms after the edge falls below 5¢.</div>
   </section>
-  <p class="footer">Simulation only—no live order submission. Probabilities use a normal-CDF approximation from the previous 20 completed Binance BTC 5-minute candles; paper settlement uses the Chainlink tick nearest the window boundary (within 10 seconds), which may differ from the market’s official resolution.</p>
+  <p class="footer">Simulation only—no live order submission. Probabilities use a normal-CDF approximation from the previous 20 completed Binance BTC 5-minute candles. Position exits use the fresh own-side CLOB best bid: $0.99 credits $1.00 per share, and $0.01 credits $0.00. Any still-open position at window close is marked at its last own-side bid; BTC reference prices do not decide paper P&amp;L.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -76,9 +76,10 @@ const signed=(n,d=2)=>isNumeric(n)?(Number(n)>=0?'+':'')+money(n,d):'—';
 const pct=n=>isNumeric(n)?(Number(n)*100).toFixed(1)+'%':'—';
 const time=n=>isNumeric(n)?new Date(n).toLocaleTimeString('en-AU',{timeZone:'UTC',hour12:false}):'—';
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const resultLabel=t=>t.status==='OPEN'?'OPEN':t.finalOutcome==='TAKE_PROFIT'?'TP · $1.00':t.finalOutcome==='STOP_LOSS'?'SL · $0.00':t.finalOutcome==='WINDOW_PRICE_EXIT'?'WINDOW · '+money(t.exitPrice):t.finalOutcome||'—';
 function renderTrades(trades){
  if(!trades?.length){$('trades').innerHTML='<div class="empty">No signal entries yet.</div>';return}
- $('trades').innerHTML='<table><thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry avg</th><th>Model probability</th><th>Entry edge</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${Number(t.shares).toFixed(0)}</td><td>${money(t.entryPrice)}</td><td>${pct(t.modelProbability)}</td><td>${pct(t.edgeAtEntry)}</td><td>${safe(t.status==='OPEN'?'OPEN':t.finalOutcome||'—')}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
+ $('trades').innerHTML='<table><thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry avg</th><th>Model probability</th><th>Entry edge</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${Number(t.shares).toFixed(0)}</td><td>${money(t.entryPrice)}</td><td>${pct(t.modelProbability)}</td><td>${pct(t.edgeAtEntry)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
 }
 function renderEvents(events){
  $('events').innerHTML=events?.length?events.slice(0,10).map(e=>`<div class="trade"><span>${safe(e.event.replaceAll('_',' '))} · ${safe(e.side||'')}</span><span class="muted">${time(e.ts)}${e.edge!=null?' · edge '+pct(e.edge):''}${e.realizedPnl!=null?' · '+signed(e.realizedPnl):''}</span></div>`).join(''):'<div class="empty">No signal activity yet.</div>';

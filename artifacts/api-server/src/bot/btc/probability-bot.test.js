@@ -70,3 +70,121 @@ test('one 100-share paper buy fires at an edge crossing and rearms after it clea
   bot.processSignals(3_000);
   assert.equal(bot.trades.length, 2);
 });
+
+test('own-side bid at 0.99 takes profit and credits one dollar per share', () => {
+  const bot = new ProbabilityBot({
+    now: () => 1_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { id: 'market', tokens: { UP: 'up-token', DOWN: 'down-token' } };
+  bot.quotes = {
+    UP: { bestBid: 0.99, updatedAt: 1_000 },
+    DOWN: { bestBid: 0.50, updatedAt: 1_000 },
+  };
+  bot.trades = [{
+    id: 'up-position', marketId: 'market', side: 'UP', windowEnd: 300_000,
+    shares: 100, totalCost: 45, status: 'OPEN',
+  }];
+
+  bot.processPositionExits(1_000);
+
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
+  assert.equal(bot.trades[0].closePrice, 1);
+  assert.equal(bot.trades[0].realizedPnl, 55);
+  assert.equal(bot.cash, 10_100);
+});
+
+test('own-side bid at 0.01 stops out and credits zero per share', () => {
+  const bot = new ProbabilityBot({
+    now: () => 1_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { id: 'market', tokens: { UP: 'up-token', DOWN: 'down-token' } };
+  bot.quotes = {
+    UP: { bestBid: 0.01, updatedAt: 1_000 },
+    DOWN: { bestBid: 0.99, updatedAt: 1_000 },
+  };
+  bot.trades = [{
+    id: 'up-position', marketId: 'market', side: 'UP', windowEnd: 300_000,
+    shares: 100, totalCost: 45, status: 'OPEN',
+  }];
+
+  bot.processPositionExits(1_000);
+
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].finalOutcome, 'STOP_LOSS');
+  assert.equal(bot.trades[0].closePrice, 0);
+  assert.equal(bot.trades[0].realizedPnl, -45);
+  assert.equal(bot.cash, 10_000);
+});
+
+test('missing or stale own-side bids do not trigger exits', () => {
+  const bot = new ProbabilityBot({
+    now: () => 10_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { id: 'market', tokens: { UP: 'up-token', DOWN: 'down-token' } };
+  bot.quotes = {
+    UP: { bestBid: null, updatedAt: 10_000 },
+    DOWN: { bestBid: 0.01, updatedAt: 4_999 },
+  };
+  bot.trades = [
+    { id: 'missing', marketId: 'market', side: 'UP', windowEnd: 300_000, shares: 100, totalCost: 45, status: 'OPEN' },
+    { id: 'stale', marketId: 'market', side: 'DOWN', windowEnd: 300_000, shares: 100, totalCost: 45, status: 'OPEN' },
+  ];
+
+  bot.processPositionExits(10_000);
+
+  assert.ok(bot.trades.every(trade => trade.status === 'OPEN'));
+  assert.equal(bot.cash, 10_000);
+});
+
+test('window-end paper mark uses the last own-side token bid, not BTC reference', () => {
+  const bot = new ProbabilityBot({
+    now: () => 300_100,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { id: 'next-market', tokens: { UP: 'next-up', DOWN: 'next-down' } };
+  bot.trades = [{
+    id: 'expired-up', marketId: 'old-market', side: 'UP', windowEnd: 300_000,
+    shares: 100, totalCost: 45, status: 'OPEN', lastOutcomeBid: 0.64, lastOutcomeBidAt: 299_000,
+  }];
+
+  bot.processPositionExits(300_100);
+
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].finalOutcome, 'WINDOW_PRICE_EXIT');
+  assert.equal(bot.trades[0].closePrice, 0.64);
+  assert.equal(bot.trades[0].realizedPnl, 19);
+  assert.equal(bot.cash, 10_064);
+});
+
+test('CLOB exits run even when the Chainlink reference feed is unavailable', async () => {
+  const bot = new ProbabilityBot({
+    now: () => 1_000,
+    fetchMarket: async () => ({
+      id: 'market', start: 0, end: 300_000, title: 'BTC Up or Down',
+      tokens: { UP: 'up-token', DOWN: 'down-token' },
+    }),
+    fetchBook: async tokenId => tokenId === 'up-token'
+      ? { bids: [{ price: 0.99, size: 100 }], asks: [] }
+      : { bids: [{ price: 0.50, size: 100 }], asks: [] },
+    priceFeed: {
+      start() {},
+      getTicks() { return []; },
+      snapshot() { return { status: 'connecting', ageMs: Infinity }; },
+    },
+  });
+  bot.trades = [{
+    id: 'up-position', marketId: 'market', side: 'UP', windowEnd: 300_000,
+    shares: 100, totalCost: 45, status: 'OPEN',
+  }];
+
+  await bot.tick();
+
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
+  assert.equal(bot.trades[0].realizedPnl, 55);
+  assert.match(bot.error, /Chainlink/);
+});

@@ -11,6 +11,11 @@ const STARTING_CASH = 10_000;
 const POLL_MS = 1000;
 const FEED_MAX_AGE_MS = 15_000;
 const ENTRY_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
+const EXIT_QUOTE_MAX_AGE_MS = 5000;
+const TAKE_PROFIT_BID = 0.99;
+const TAKE_PROFIT_PAYOUT = 1;
+const STOP_LOSS_BID = 0.01;
+const STOP_LOSS_PAYOUT = 0;
 
 function parseLevels(levels, direction) {
   return (Array.isArray(levels) ? levels : [])
@@ -114,10 +119,21 @@ class ProbabilityBot {
         if (this.market?.start !== start) this.market = null;
       }
       if (!this.market) {
+        this.processPositionExits(now);
         this.error = 'Waiting for the exact BTC 5-minute UP/DOWN market.';
         this.lastUpdateAt = now;
         return;
       }
+
+      const [upBook, downBook] = await Promise.all([
+        this.fetchBook(this.market.tokens.UP),
+        this.fetchBook(this.market.tokens.DOWN),
+      ]);
+      this.quotes = {
+        UP: this.quote(upBook, now),
+        DOWN: this.quote(downBook, now),
+      };
+      this.processPositionExits(now);
 
       const ticks = this.priceFeed.getTicks();
       const snapshot = this.priceFeed.snapshot();
@@ -139,16 +155,6 @@ class ProbabilityBot {
           ? 'Waiting for at least ten completed five-minute BTC candles.'
           : 'Model and market data are live.';
 
-      const [upBook, downBook] = await Promise.all([
-        this.fetchBook(this.market.tokens.UP),
-        this.fetchBook(this.market.tokens.DOWN),
-      ]);
-      this.quotes = {
-        UP: this.quote(upBook, now),
-        DOWN: this.quote(downBook, now),
-      };
-      this.settleExpiredTrades(ticks);
-
       const secondsRemaining = Math.max(0, (this.market.end - now) / 1000);
       this.probabilityUp = this.referencePrice && this.latestPrice && this.volatility5m
         ? probabilityUp({ openPrice: this.referencePrice, spotPrice: this.latestPrice, secondsRemaining, volatility5m: this.volatility5m })
@@ -164,6 +170,7 @@ class ProbabilityBot {
       this.error = null;
       this.lastUpdateAt = now;
     } catch (error) {
+      this.processPositionExits(this.now());
       this.error = error?.message || 'BTC probability scan failed.';
       this.statusReason = this.error;
       this.lastUpdateAt = this.now();
@@ -212,6 +219,8 @@ class ProbabilityBot {
     }
     const trade = {
       id: `paper-${this.market.start}-${side}-${now}`,
+      marketId: this.market.id,
+      tokenId: this.market.tokens?.[side] ?? null,
       windowStart: this.market.start,
       windowEnd: this.market.end,
       marketTitle: this.market.title,
@@ -225,6 +234,8 @@ class ProbabilityBot {
       modelProbability: side === 'UP' ? this.probabilityUp : 1 - this.probabilityUp,
       openedAt: now,
       status: 'OPEN',
+      lastOutcomeBid: null,
+      lastOutcomeBidAt: null,
       realizedPnl: null,
     };
     this.cash -= fill.totalCost;
@@ -233,28 +244,64 @@ class ProbabilityBot {
     this.log('PAPER_BUY', { side, shares: SHARES_PER_SIGNAL, price: fill.averagePrice, edge: this.edges[side] });
   }
 
-  settleExpiredTrades(ticks) {
+  processPositionExits(now) {
     for (const trade of this.trades) {
-      if (trade.status !== 'OPEN' || this.now() < trade.windowEnd) continue;
-      const closeTick = ticks
-        .filter(tick => Math.abs(tick.ts - trade.windowEnd) <= 10_000)
-        .sort((a, b) => Math.abs(a.ts - trade.windowEnd) - Math.abs(b.ts - trade.windowEnd))[0];
-      const openTick = ticks
-        .filter(tick => Math.abs(tick.ts - trade.windowStart) <= 10_000)
-        .sort((a, b) => Math.abs(a.ts - trade.windowStart) - Math.abs(b.ts - trade.windowStart))[0];
-      if (!closeTick || !openTick) continue;
-      const outcome = closeTick.price >= openTick.price ? 'UP' : 'DOWN';
-      const payout = outcome === trade.side ? trade.shares : 0;
-      trade.status = 'SETTLED';
-      trade.finalOutcome = outcome;
-      trade.openPrice = openTick.price;
-      trade.closePrice = closeTick.price;
-      trade.settlementSource = 'Chainlink tick nearest window close (±10s)';
-      trade.realizedPnl = payout - trade.totalCost;
-      trade.settledAt = this.now();
-      this.cash += payout;
-      this.log('PAPER_SETTLED', { side: trade.side, outcome, realizedPnl: trade.realizedPnl });
+      if (trade.status !== 'OPEN') continue;
+      const quote = trade.marketId === this.market?.id ? this.quotes[trade.side] : null;
+      const bid = quote?.bestBid == null ? NaN : Number(quote.bestBid);
+      const fresh = Number.isFinite(quote?.updatedAt)
+        && now >= quote.updatedAt
+        && now - quote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS
+        && Number.isFinite(bid)
+        && bid >= 0
+        && bid <= 1;
+
+      if (now < trade.windowEnd && fresh) {
+        trade.lastOutcomeBid = bid;
+        trade.lastOutcomeBidAt = quote.updatedAt;
+        if (bid >= TAKE_PROFIT_BID) {
+          this.closeTrade(trade, TAKE_PROFIT_PAYOUT, trade.shares * TAKE_PROFIT_PAYOUT, 'TAKE_PROFIT', 'Own-side best bid reached $0.99; credited $1.00 per share.', now);
+        } else if (bid <= STOP_LOSS_BID) {
+          this.closeTrade(trade, STOP_LOSS_PAYOUT, STOP_LOSS_PAYOUT, 'STOP_LOSS', 'Own-side best bid reached $0.01; credited $0.00 per share.', now);
+        }
+        continue;
+      }
+
+      if (now < trade.windowEnd) continue;
+      const closeQuoteFresh = Number.isFinite(trade.lastOutcomeBid)
+        && Number.isFinite(trade.lastOutcomeBidAt)
+        && trade.lastOutcomeBidAt <= trade.windowEnd
+        && trade.windowEnd - trade.lastOutcomeBidAt <= EXIT_QUOTE_MAX_AGE_MS;
+      if (closeQuoteFresh) {
+        const payout = trade.shares * trade.lastOutcomeBid;
+        this.closeTrade(
+          trade,
+          trade.lastOutcomeBid,
+          payout,
+          'WINDOW_PRICE_EXIT',
+          'Window ended; marked at the last own-side best bid before close.',
+          now,
+        );
+      }
     }
+  }
+
+  closeTrade(trade, exitPrice, payout, outcome, settlementSource, now) {
+    trade.status = 'SETTLED';
+    trade.finalOutcome = outcome;
+    trade.closePrice = exitPrice;
+    trade.exitPrice = exitPrice;
+    trade.settlementSource = settlementSource;
+    trade.realizedPnl = payout - trade.totalCost;
+    trade.settledAt = now;
+    this.cash += payout;
+    this.log('PAPER_EXIT', {
+      side: trade.side,
+      outcome,
+      exitPrice,
+      payout,
+      realizedPnl: trade.realizedPnl,
+    });
   }
 
   start() {
@@ -295,7 +342,17 @@ class ProbabilityBot {
       lastUpdateAt: this.lastUpdateAt,
       error: this.error,
       statusReason: this.statusReason,
-      strategy: { timeframe: '5m', sharesPerSignal: SHARES_PER_SIGNAL, minimumNetEdge: MIN_EDGE, model: '20 closed 5-minute log-return volatility; normal-CDF probability estimate' },
+      strategy: {
+        timeframe: '5m',
+        sharesPerSignal: SHARES_PER_SIGNAL,
+        minimumNetEdge: MIN_EDGE,
+        takeProfitBid: TAKE_PROFIT_BID,
+        takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
+        stopLossBid: STOP_LOSS_BID,
+        stopLossPayoutPerShare: STOP_LOSS_PAYOUT,
+        model: '20 closed 5-minute log-return volatility; normal-CDF probability estimate',
+        exitModel: 'Own-side CLOB best bid; expiry mark uses the last own-side bid, not BTC reference.',
+      },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
       referencePrice: this.referencePrice,
       spotPrice: this.latestPrice,
