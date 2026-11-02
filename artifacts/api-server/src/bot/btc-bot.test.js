@@ -156,6 +156,8 @@ test("dashboard presents the fixed two-candle MACD paper policy without old mode
   assert.match(html, /MACD.*histogram/i);
   assert.match(html, /shrinking red/i);
   assert.match(html, /shrinking green/i);
+  assert.match(html, /SOLID RED: DOWN/i);
+  assert.match(html, /SOLID GREEN locks UP/i);
   assert.match(html, /12\/26\/9/);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
   assert.match(html, /120 through 290 seconds/);

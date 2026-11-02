@@ -27,8 +27,10 @@ test('fixed-policy replay matches all 18 timed buys and exact own-side fee-adjus
 
 test('replay skips nonqualifying pairs and never uses old reversal-policy samples', () => {
   assert.equal(simulateWindow(samples('SHRINKING_RED', 'SOLID_GREEN')).trades, 0);
-  const old = samples().map(s => ({ ...s, pullback: { method: 'macd-1m-12-26-9-reversal-sweep-v2' } }));
-  assert.equal(simulateWindow(old), null);
+  for (const method of ['macd-1m-12-26-9-reversal-sweep-v2', 'macd-1m-12-26-9-window-pair-v1']) {
+    const old = samples().map(s => ({ ...s, pullback: { method } }));
+    assert.equal(simulateWindow(old), null, method);
+  }
 });
 
 test('replay requires a real timely closing mark; never invents data for an open lot', () => {

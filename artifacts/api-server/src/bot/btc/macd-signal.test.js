@@ -30,12 +30,19 @@ test('MACD EMA seeds and analytic linear-series values remain standard 12/26/9',
 test('all 25 classification pairs enforce only the four requested transitions', () => {
   const states = ['SOLID_RED', 'SHRINKING_RED', 'SOLID_GREEN', 'SHRINKING_GREEN', 'NEUTRAL'];
   for (const first of states) for (const second of states) {
-    const expected = first === 'SOLID_RED' && ['SHRINKING_RED', 'SOLID_GREEN'].includes(second)
-      ? 'UP' : first === 'SOLID_GREEN' && ['SHRINKING_GREEN', 'SOLID_RED'].includes(second) ? 'DOWN' : null;
+    const expected = first === 'SOLID_RED' && ['SHRINKING_RED', 'SOLID_GREEN', 'SOLID_RED'].includes(second)
+      ? second === 'SOLID_RED' ? 'DOWN' : 'UP'
+      : first === 'SOLID_GREEN' && ['SHRINKING_GREEN', 'SOLID_RED', 'SOLID_GREEN'].includes(second)
+        ? second === 'SOLID_GREEN' ? 'UP' : 'DOWN' : null;
     const result = windowSignal(pair(first, second), START, START + 120000);
     assert.equal(result.side, expected, first + ' -> ' + second);
     assert.equal(result.status, expected ? 'LOCKED' : 'SKIP_WINDOW');
   }
+});
+
+test('both solid same-color opening pairs choose the newly requested direction', () => {
+  assert.equal(windowSignal(pair('SOLID_GREEN', 'SOLID_GREEN'), START, START + 120000).side, 'UP');
+  assert.equal(windowSignal(pair('SOLID_RED', 'SOLID_RED'), START, START + 120000).side, 'DOWN');
 });
 
 test('forming, stale, missing and wrong-window candles cannot choose a side', () => {
