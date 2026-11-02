@@ -3,6 +3,7 @@
 const config = require('./config');
 const marketData = require('./wick-market-data');
 const { feed } = require('./chainlink-price-feed');
+const { detectPullback } = require('./pullback-signal');
 
 const WINDOW_MS = 5 * 60 * 1000;
 const SHARES_PER_SIGNAL = 100;
@@ -20,6 +21,15 @@ const TAKE_PROFIT_BID = 0.99;
 const TAKE_PROFIT_PAYOUT = 1;
 const STOP_LOSS_BID = 0.01;
 const STOP_LOSS_PAYOUT = 0;
+const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
+  openingDelaySeconds: OPENING_DELAY_SECONDS,
+  minimumNetEdge: MIN_EDGE,
+  lowPriceThreshold: LOW_PRICE_THRESHOLD,
+  lowPriceMinimumNetEdge: LOW_PRICE_MIN_EDGE,
+  volatilityMultiplier: 1,
+  sharesPerSignal: SHARES_PER_SIGNAL,
+  sideMode: 'best-edge',
+});
 
 function parseLevels(levels, direction) {
   return (Array.isArray(levels) ? levels : [])
@@ -84,7 +94,15 @@ function simulateBuy(asks, shares = SHARES_PER_SIGNAL) {
 }
 
 class ProbabilityBot {
-  constructor({ now = Date.now, fetchMarket = marketData.getBtcMarket, fetchBook = marketData.getBook, priceFeed = feed } = {}) {
+  constructor({
+    now = Date.now,
+    fetchMarket = marketData.getBtcMarket,
+    fetchBook = marketData.getBook,
+    priceFeed = feed,
+    learningStore = null,
+    choosePaperSettings = null,
+    strategySettings = {},
+  } = {}) {
     this.now = now;
     this.fetchMarket = fetchMarket;
     this.fetchBook = fetchBook;
@@ -117,6 +135,20 @@ class ProbabilityBot {
     this.cash = STARTING_CASH;
     this.trades = [];
     this.events = [];
+    this.learningStore = learningStore;
+    this.choosePaperSettings = choosePaperSettings;
+    this.strategySettings = { ...DEFAULT_STRATEGY_SETTINGS, ...strategySettings };
+    this.persistenceQueue = Promise.resolve();
+    this.persistenceError = null;
+    this.lastSampledAt = null;
+    this.lastTunedWindowStart = null;
+    this.pullback = null;
+    this.learningStatus = {
+      enabled: Boolean(learningStore && choosePaperSettings),
+      mode: learningStore && choosePaperSettings ? 'collecting' : 'disabled',
+      completedWindows: 0,
+      lastEvaluation: null,
+    };
     this.error = null;
     this.statusReason = 'Starting price and market feeds.';
     this.lastUpdateAt = null;
@@ -125,8 +157,74 @@ class ProbabilityBot {
   }
 
   log(event, details = {}) {
-    this.events.unshift({ ts: this.now(), event, ...details });
+    const ts = this.now();
+    this.events.unshift({ ts, event, ...details });
     this.events.length = Math.min(this.events.length, 60);
+    if (this.learningStore) this.queuePersistence(() => this.learningStore.recordEvent({
+      ts, windowStart: this.market?.start, event, details,
+    }));
+  }
+
+  queuePersistence(operation) {
+    this.persistenceQueue = this.persistenceQueue.then(async () => {
+      if (!this.persistenceError) await operation();
+    }).catch(error => {
+      this.persistenceError = error?.message || 'Learning storage write failed.';
+      this.learningStatus = { ...this.learningStatus, mode: 'storage-error', error: this.persistenceError };
+    });
+  }
+
+  async captureLearningSample(now) {
+    if (!this.learningStore || !this.market) return;
+    const ts = Math.floor(now / 2000) * 2000;
+    if (ts === this.lastSampledAt) return;
+    this.lastSampledAt = ts;
+    const sample = {
+      ts, windowStart: this.market.start, windowEnd: this.market.end,
+      secondsSinceOpen: Math.max(0, (now - this.market.start) / 1000),
+      secondsRemaining: Math.max(0, (this.market.end - now) / 1000),
+      referencePrice: this.referencePrice, spotPrice: this.latestPrice,
+      volatility5m: this.volatility5m, probabilityUp: this.probabilityUp,
+      edges: this.edges, pullback: this.pullback,
+      quotes: Object.fromEntries(['UP', 'DOWN'].map(side => {
+        const quote = this.quotes[side];
+        return [side, quote ? {
+          bestBid: quote.bestBid, bestAsk: quote.bestAsk, asks: quote.asks.slice(0, 12),
+        } : null];
+      })),
+    };
+    this.queuePersistence(() => this.learningStore.recordSample(sample));
+  }
+
+  async maybeTune(now) {
+    if (!this.learningStore || !this.choosePaperSettings || !this.market
+      || this.lastTunedWindowStart === this.market.start) return;
+    this.lastTunedWindowStart = this.market.start;
+    try {
+      await this.persistenceQueue;
+      const windows = await this.learningStore.getCompletedWindows(now);
+      const result = this.choosePaperSettings(windows, this.strategySettings);
+      await this.learningStore.saveTuning(result, now, this.market.start);
+      this.learningStatus = {
+        enabled: true,
+        mode: result.applied ? 'auto-tuned-paper' : 'collecting',
+        completedWindows: result.windows,
+        lastEvaluation: { ...result, settings: undefined },
+      };
+      if (result.applied) {
+        const previousSettings = this.strategySettings;
+        this.strategySettings = { ...result.settings };
+        this.log('PAPER_TUNING_APPLIED', {
+          previousSettings, settings: this.strategySettings,
+          windowsEvaluated: result.windows, baseline: result.baseline, selected: result.selected,
+        });
+      } else {
+        this.log('PAPER_TUNING_HELD', { reason: result.reason, windowsEvaluated: result.windows });
+      }
+    } catch (error) {
+      this.persistenceError = error?.message || 'Learning evaluation failed.';
+      this.learningStatus = { ...this.learningStatus, mode: 'storage-error', error: this.persistenceError };
+    }
   }
 
   async tick() {
@@ -172,6 +270,7 @@ class ProbabilityBot {
       this.referencePrice = referenceTick?.price ?? null;
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
+      this.pullback = detectPullback(ticks, now, this.volatility5m);
       this.statusReason = !referenceTick
         ? 'Waiting for the next five-minute boundary to capture its Chainlink opening reference.'
         : !this.volatility5m
@@ -180,16 +279,23 @@ class ProbabilityBot {
 
       const secondsRemaining = Math.max(0, (this.market.end - now) / 1000);
       this.probabilityUp = this.referencePrice && this.latestPrice && this.volatility5m
-        ? probabilityUp({ openPrice: this.referencePrice, spotPrice: this.latestPrice, secondsRemaining, volatility5m: this.volatility5m })
+        ? probabilityUp({
+          openPrice: this.referencePrice,
+          spotPrice: this.latestPrice,
+          secondsRemaining,
+          volatility5m: this.volatility5m * this.strategySettings.volatilityMultiplier,
+        })
         : null;
       this.expectedMove = this.latestPrice && this.volatility5m
-        ? this.latestPrice * this.volatility5m * Math.sqrt(secondsRemaining / 300)
+        ? this.latestPrice * this.volatility5m * this.strategySettings.volatilityMultiplier * Math.sqrt(secondsRemaining / 300)
         : null;
       this.standardizedGap = this.referencePrice && this.latestPrice && this.volatility5m && secondsRemaining > 0
-        ? Math.log(this.latestPrice / this.referencePrice) / (this.volatility5m * Math.sqrt(secondsRemaining / 300))
+        ? Math.log(this.latestPrice / this.referencePrice) / (this.volatility5m * this.strategySettings.volatilityMultiplier * Math.sqrt(secondsRemaining / 300))
         : null;
       this.edges = this.calculateEdges();
       if (this.probabilityUp != null && secondsRemaining > 0) this.processSignals(now);
+      await this.captureLearningSample(now);
+      await this.maybeTune(now);
       this.error = null;
       this.lastUpdateAt = now;
     } catch (error) {
@@ -218,11 +324,11 @@ class ProbabilityBot {
 
   calculateEdges() {
     if (this.probabilityUp == null) return { UP: null, DOWN: null };
-    const upFill = simulateBuy(this.quotes.UP?.asks);
-    const downFill = simulateBuy(this.quotes.DOWN?.asks);
+    const upFill = simulateBuy(this.quotes.UP?.asks, this.strategySettings.sharesPerSignal);
+    const downFill = simulateBuy(this.quotes.DOWN?.asks, this.strategySettings.sharesPerSignal);
     return {
-      UP: upFill ? this.probabilityUp - upFill.totalCost / SHARES_PER_SIGNAL : null,
-      DOWN: downFill ? (1 - this.probabilityUp) - downFill.totalCost / SHARES_PER_SIGNAL : null,
+      UP: upFill ? this.probabilityUp - upFill.totalCost / this.strategySettings.sharesPerSignal : null,
+      DOWN: downFill ? (1 - this.probabilityUp) - downFill.totalCost / this.strategySettings.sharesPerSignal : null,
     };
   }
 
@@ -238,7 +344,7 @@ class ProbabilityBot {
       ? Math.max(0, (this.market.end - now) / 1000)
       : null;
     const openingDelayActive = Number.isFinite(secondsSinceOpen)
-      && secondsSinceOpen < OPENING_DELAY_SECONDS;
+      && secondsSinceOpen < this.strategySettings.openingDelaySeconds;
     const blockedReasons = [];
     if (blockedSides.length) blockedReasons.push('PRICE_FLOOR');
     if (openingDelayActive) blockedReasons.push('OPENING_DELAY');
@@ -246,7 +352,7 @@ class ProbabilityBot {
       allowed: blockedReasons.length === 0,
       minimumBestAsk: MIN_ENTRY_PRICE,
       blockedSides,
-      openingDelaySeconds: OPENING_DELAY_SECONDS,
+      openingDelaySeconds: this.strategySettings.openingDelaySeconds,
       secondsSinceOpen,
       openingDelayActive,
       secondsRemaining,
@@ -260,10 +366,10 @@ class ProbabilityBot {
     if (!filter.allowed) {
       if (!filter.openingDelayActive) {
         for (const side of ['UP', 'DOWN']) {
-          const fill = simulateBuy(this.quotes[side]?.asks);
+          const fill = simulateBuy(this.quotes[side]?.asks, this.strategySettings.sharesPerSignal);
           const entryPrice = fill?.averagePrice ?? this.quotes[side]?.bestAsk;
-          const threshold = Number.isFinite(entryPrice) && entryPrice < LOW_PRICE_THRESHOLD
-            ? LOW_PRICE_MIN_EDGE : MIN_EDGE;
+          const threshold = Number.isFinite(entryPrice) && entryPrice < this.strategySettings.lowPriceThreshold
+            ? this.strategySettings.lowPriceMinimumNetEdge : this.strategySettings.minimumNetEdge;
           if (this.edges[side] == null || this.edges[side] < threshold) this.armed[side] = true;
         }
       }
@@ -277,7 +383,7 @@ class ProbabilityBot {
         }
         if (filter.openingDelayActive) {
           this.log('SIGNAL_BLOCKED_OPENING_DELAY', {
-            openingDelaySeconds: OPENING_DELAY_SECONDS,
+            openingDelaySeconds: this.strategySettings.openingDelaySeconds,
             secondsSinceOpen: filter.secondsSinceOpen,
           });
         }
@@ -287,15 +393,18 @@ class ProbabilityBot {
     }
     this.lastEntryFilterSignature = null;
     const fills = {
-      UP: simulateBuy(this.quotes.UP?.asks),
-      DOWN: simulateBuy(this.quotes.DOWN?.asks),
+      UP: simulateBuy(this.quotes.UP?.asks, this.strategySettings.sharesPerSignal),
+      DOWN: simulateBuy(this.quotes.DOWN?.asks, this.strategySettings.sharesPerSignal),
     };
     this.requiredNetEdge = Object.fromEntries(['UP', 'DOWN'].map(side => {
       const entryPrice = fills[side]?.averagePrice ?? this.quotes[side]?.bestAsk;
-      return [side, Number.isFinite(entryPrice) && entryPrice < LOW_PRICE_THRESHOLD
-        ? LOW_PRICE_MIN_EDGE : MIN_EDGE];
+      return [side, Number.isFinite(entryPrice) && entryPrice < this.strategySettings.lowPriceThreshold
+        ? this.strategySettings.lowPriceMinimumNetEdge : this.strategySettings.minimumNetEdge];
     }));
-    const candidates = ['UP', 'DOWN'].filter(side => {
+    const candidates = ['UP', 'DOWN']
+      .filter(side => this.strategySettings.sideMode !== 'pullback'
+        || this.pullback?.side === side)
+      .filter(side => {
       const edge = this.edges[side];
       const threshold = this.requiredNetEdge[side];
       if (edge == null || edge < threshold) this.armed[side] = true;
@@ -317,7 +426,7 @@ class ProbabilityBot {
       windowEnd: this.market.end,
       marketTitle: this.market.title,
       side,
-      shares: SHARES_PER_SIGNAL,
+      shares: this.strategySettings.sharesPerSignal,
       entryPrice: fill.averagePrice,
       cost: fill.cost,
       fees: fill.fees,
@@ -338,7 +447,7 @@ class ProbabilityBot {
     let retainedSettled = 0;
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     this.log('PAPER_BUY', {
-      side, shares: SHARES_PER_SIGNAL, price: fill.averagePrice,
+      side, shares: this.strategySettings.sharesPerSignal, price: fill.averagePrice,
       edge: this.edges[side], requiredNetEdge: this.requiredNetEdge[side],
     });
   }
@@ -490,13 +599,15 @@ class ProbabilityBot {
       strategy: {
         timeframe: '5m',
         pollIntervalMs: POLL_MS,
-        sharesPerSignal: SHARES_PER_SIGNAL,
-        minimumNetEdge: MIN_EDGE,
-        lowPriceThreshold: LOW_PRICE_THRESHOLD,
-        lowPriceMinimumNetEdge: LOW_PRICE_MIN_EDGE,
+        sharesPerSignal: this.strategySettings.sharesPerSignal,
+        minimumNetEdge: this.strategySettings.minimumNetEdge,
+        lowPriceThreshold: this.strategySettings.lowPriceThreshold,
+        lowPriceMinimumNetEdge: this.strategySettings.lowPriceMinimumNetEdge,
         takerFeeRate: TAKER_FEE_RATE,
         minimumBestAsk: MIN_ENTRY_PRICE,
-        openingDelaySeconds: OPENING_DELAY_SECONDS,
+        openingDelaySeconds: this.strategySettings.openingDelaySeconds,
+        volatilityMultiplier: this.strategySettings.volatilityMultiplier,
+        sideMode: this.strategySettings.sideMode,
         takeProfitBid: TAKE_PROFIT_BID,
         takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
         stopLossBid: STOP_LOSS_BID,
@@ -517,8 +628,8 @@ class ProbabilityBot {
       requiredNetEdge: this.requiredNetEdge,
       entryFilter: this.entryFilter,
       quotes: {
-        UP: this.quotes.UP ? { bestBid: this.quotes.UP.bestBid, bestAsk: this.quotes.UP.bestAsk, midpoint: this.quotes.UP.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.UP.asks)?.averagePrice ?? null } : null,
-        DOWN: this.quotes.DOWN ? { bestBid: this.quotes.DOWN.bestBid, bestAsk: this.quotes.DOWN.bestAsk, midpoint: this.quotes.DOWN.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.DOWN.asks)?.averagePrice ?? null } : null,
+        UP: this.quotes.UP ? { bestBid: this.quotes.UP.bestBid, bestAsk: this.quotes.UP.bestAsk, midpoint: this.quotes.UP.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.UP.asks, this.strategySettings.sharesPerSignal)?.averagePrice ?? null } : null,
+        DOWN: this.quotes.DOWN ? { bestBid: this.quotes.DOWN.bestBid, bestAsk: this.quotes.DOWN.bestAsk, midpoint: this.quotes.DOWN.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.DOWN.asks, this.strategySettings.sharesPerSignal)?.averagePrice ?? null } : null,
       },
       paperAccount: {
         startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl, wins, losses,
@@ -526,6 +637,11 @@ class ProbabilityBot {
       },
       trades: this.trades.slice(0, 50),
       events: this.events,
+      pullback: this.pullback,
+      learning: {
+        ...this.learningStatus,
+        persistenceStatus: this.persistenceError ? 'error' : this.learningStore ? 'connected' : 'disabled',
+      },
       priceFeed: ticks,
     };
   }

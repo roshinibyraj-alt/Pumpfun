@@ -21,24 +21,24 @@
     .prob-head{display:flex;justify-content:space-between;align-items:center;color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.prob-price{font:800 clamp(30px,5vw,48px) ui-monospace,monospace;color:var(--text);margin:8px 0 12px}
     .bar{height:7px;border-radius:20px;background:#263345;overflow:hidden}.bar i{display:block;width:0;height:100%;background:var(--accent);border-radius:inherit;transition:width .3s}
     .prob-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.prob-meta span{display:block;color:var(--muted);font-size:10px}.prob-meta strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
-.position-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.position-card{padding:16px;border-radius:14px;background:#0f1925;border:1px solid var(--line)}.position-card.up{--accent:var(--green)}.position-card.down{--accent:var(--red)}.position-title{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.position-shares{font:800 28px ui-monospace,monospace;margin:7px 0 12px}.position-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.position-metrics span{display:block;color:var(--muted);font-size:10px}.position-metrics strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
+     .position-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.position-card{padding:16px;border-radius:14px;background:#0f1925;border:1px solid var(--line)}.position-card.up{--accent:var(--green)}.position-card.down{--accent:var(--red)}.position-title{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.position-shares{font:800 28px ui-monospace,monospace;margin:7px 0 12px}.position-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.position-metrics span{display:block;color:var(--muted);font-size:10px}.position-metrics strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
     .panel{padding:18px;margin-top:12px}.section-head{margin-bottom:12px}.section-head h2{font-size:15px;margin:0}.section-head small{font-size:11px}
     .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:640px}th,td{text-align:left;padding:11px 9px;border-top:1px solid #263447;font-size:12px}th{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
     .side{font-weight:800}.side.UP,.pnl.pos{color:var(--green)}.side.DOWN,.pnl.neg{color:var(--red)}.edge-good{color:var(--green)}.edge-bad{color:var(--red)}
     .empty{padding:24px 10px;text-align:center;color:var(--muted);border-top:1px solid var(--line)}.formula{font:11px ui-monospace,monospace;color:#bbcadb;background:#0b121c;border:1px solid #202e40;padding:12px;border-radius:9px;margin-top:10px}
     .status{font:10px ui-monospace,monospace;color:var(--muted)}.footer{margin-top:16px;color:var(--muted);font-size:10px;line-height:1.6}
     @media(max-width:800px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{align-items:flex-start;flex-direction:column}.window{text-align:left}.top-right{flex-wrap:wrap;justify-content:flex-end}}
-    @media(max-width:520px){main{width:min(100% - 22px,1180px);padding-top:16px}.top{align-items:flex-start}.top-right{gap:6px}.badge,.pill{padding:6px 8px;font-size:9px}.grid{gap:8px}.card{padding:12px}.prob-grid,.position-grid{gap:8px}.prob,.position-card{padding:13px}.prob-meta{grid-template-columns:1fr 1fr}.panel{padding:13px}}
+     @media(max-width:520px){main{width:min(100% - 22px,1180px);padding-top:16px}.top{align-items:flex-start}.top-right{gap:6px}.badge,.pill{padding:6px 8px;font-size:9px}.grid{gap:8px}.card{padding:12px}.prob-grid,.position-grid{gap:8px}.prob,.position-card{padding:13px}.prob-meta{grid-template-columns:1fr 1fr}.position-metrics{grid-template-columns:1fr 1fr}.panel{padding:13px}}
   </style>
 </head>
 <body>
 <main>
   <header class="top">
     <div><div class="brand">BTC PROBABILITY BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
-    <div class="top-right"><span class="badge"><i class="dot"></i>PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
+    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement and compares it with the executable ask. The bot waits 30 seconds after each window opens, then buys 100 shares when net edge reaches 5¢; if the 100-share average ask is below 25¢, it requires 10¢ edge. It skips both sides if either best ask is below 2¢. Positions exit on their own token bid: 99¢ credits $1 gross per share; 1¢ credits $0 gross. Entry and exit taker fees are included. The bot tracks peak bids and checks every 500 ms.</p></div>
+    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Paper-only strategy compares estimated probability with executable asks. It tests bounded timing, edge, volatility, sizing, side-selection, and confirmed pullback variants against held-out historical windows. Changes apply only after sufficient data and a regression gate; live orders remain disabled.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
@@ -67,6 +67,10 @@
     <div id="trades" class="table-wrap"><div class="empty">Waiting for a qualifying edge.</div></div>
   </section>
   <section class="panel">
+    <div class="section-head"><h2>Paper learning &amp; regression</h2><small id="learningStatus">Connecting to persistent learning log</small></div>
+    <div id="learningSummary" class="empty">Waiting for learning service.</div>
+  </section>
+  <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
      <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Net edge = model probability − outcome ask − estimated fee. After a 30-second opening delay, a 5¢ upward crossing triggers a paper buy, or 10¢ when the 100-share average ask is below 25¢. Each side rearms after its edge falls below its applicable threshold.</div>
@@ -89,6 +93,16 @@ function renderTrades(trades){
 function renderEvents(events){
  $('events').innerHTML=events?.length?events.slice(0,10).map(e=>`<div class="trade"><span>${safe(e.event.replaceAll('_',' '))} · ${safe(e.side||'')}</span><span class="muted">${time(e.ts)}${e.edge!=null?' · edge '+pct(e.edge):''}${e.realizedPnl!=null?' · '+signed(e.realizedPnl):''}</span></div>`).join(''):'<div class="empty">No signal activity yet.</div>';
 }
+async function pollLearning(){
+ try{
+  const response=await fetch('/api/strategy/learning',{cache:'no-store'});
+  if(!response.ok)throw Error('Learning API HTTP '+response.status);
+  const state=await response.json(),latest=state.tuningRuns?.[0]?.result;
+  $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
+  $('learningSummary').innerHTML=`<div class="trade"><span>Active paper settings</span><span class="muted">${safe(JSON.stringify(state.settings||{}))}</span></div><div class="trade"><span>Latest evaluation</span><span class="muted">${safe(latest?.reason||'Collecting data')} · ${Number(latest?.windows||0)} windows${latest?.applied?' · settings updated':''}</span></div><div class="trade"><span>Confirmed pullback mode</span><span class="muted">${safe(latest?.settings?.sideMode||state.settings?.sideMode||'best-edge')} · UP after a fall, DOWN after a rise</span></div>`;
+ }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
+ setTimeout(pollLearning,10000);
+}
 function renderSide(side,state){
  const probability=state.probability?.[side],edge=state.edges?.[side],ask=state.quotes?.[side]?.bestAsk;
  $(side.toLowerCase()+'Prob').textContent=pct(probability);
@@ -97,8 +111,10 @@ function renderSide(side,state){
  $(side.toLowerCase()+'Net').textContent=signed(edge,3);
  $(side.toLowerCase()+'Net').className=Number(edge)>=.05?'edge-good':Number(edge)<0?'edge-bad':'';
  $(side.toLowerCase()+'Edge').textContent='EDGE '+signed(edge,3);
-  const required=Number(state.requiredNetEdge?.[side]??(Number(state.quotes?.[side]?.estimatedAverageAsk)<.25?.10:.05));
-  $(side.toLowerCase()+'Signal').textContent=state.entryFilter?.allowed===false?'BLOCKED':isNumeric(edge)&&Number(edge)>=required?'BUY 100':isNumeric(edge)?'WAIT':'—';
+  const strategy=state.strategy||{},mode=String(strategy.sideMode||'best-edge').toLowerCase();
+  const required=Number(state.requiredNetEdge?.[side]??(Number(state.quotes?.[side]?.estimatedAverageAsk)<Number(strategy.lowPriceThreshold??.25)?Number(strategy.lowPriceMinimumNetEdge??.10):Number(strategy.minimumNetEdge??.05)));
+  const sideAllowed=mode==='best-edge'||(mode==='up-only'&&side==='UP')||(mode==='down-only'&&side==='DOWN')||(mode==='pullback'&&state.pullback?.side===side);
+  $(side.toLowerCase()+'Signal').textContent=state.entryFilter?.allowed===false?'BLOCKED':!sideAllowed?(mode==='pullback'?'WAIT PULLBACK':'SIDE FILTER'):isNumeric(edge)&&Number(edge)>=required?`BUY ${Number(strategy.sharesPerSignal??100)}`:isNumeric(edge)?'WAIT':'—';
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
@@ -120,12 +136,13 @@ async function poll(){
   const s=await response.json(),account=s.paperAccount||{};
   $('error').style.display=s.error?'block':'none';$('error').textContent=s.error||'';
   $('run').innerHTML=`<i class="dot"></i>${s.running?'SCANNER RUNNING':'SCANNER STOPPED'}`;
+   $('strategyBadge').textContent=`PAPER ONLY · ${s.strategy?.sharesPerSignal??100} SHARES / SIGNAL`;
   $('remaining').textContent=s.window?`${Math.ceil(s.window.secondsRemaining)} seconds`:'—';
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
   $('reference').textContent=money(s.referencePrice,2);$('spot').textContent=money(s.spotPrice,2);
   $('gap').textContent='Difference from reference '+signed(s.priceGap,2);
    $('expected').textContent=money(s.expectedMove,2);$('zscore').textContent=isNumeric(s.standardizedGap)?Number(s.standardizedGap).toFixed(3):'—';
-  renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);
+   renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
   $('settled').textContent=String(account.settled??0);$('openCount').textContent=(account.openPositions??0)+' open positions';
@@ -137,7 +154,7 @@ async function poll(){
  }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
  setTimeout(poll,1000);
 }
-void poll();
+void poll();void pollLearning();
 </script>
 </body>
 </html>
