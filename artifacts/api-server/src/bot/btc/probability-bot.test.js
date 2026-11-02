@@ -97,7 +97,7 @@ test('any best ask below $0.02 blocks both sides; $0.02 is allowed', () => {
   assert.equal(bot.trades[0].side, 'UP');
 });
 
-test('blocks new entries at 120 seconds remaining but allows them at 121 seconds', () => {
+test('blocks entries for the first 30 seconds of a window, then allows them', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -110,20 +110,75 @@ test('blocks new entries at 120 seconds remaining but allows them at 121 seconds
   };
   bot.edges = bot.calculateEdges();
 
-  bot.processSignals(180_000);
+  bot.processSignals(29_999);
   assert.equal(bot.trades.length, 0);
-  assert.equal(bot.entryFilter.cutoffActive, true);
-  assert.equal(bot.entryFilter.secondsRemaining, 120);
-  assert.deepEqual(bot.entryFilter.blockedReasons, ['TIME_CUTOFF']);
+  assert.equal(bot.entryFilter.openingDelayActive, true);
+  assert.equal(bot.entryFilter.secondsSinceOpen, 29.999);
+  assert.deepEqual(bot.entryFilter.blockedReasons, ['OPENING_DELAY']);
 
-  bot.processSignals(179_000);
+  bot.processSignals(30_000);
   assert.equal(bot.entryFilter.allowed, true);
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].side, 'UP');
-  assert.equal(bot.snapshot().strategy.minimumSecondsRemaining, 120);
+  assert.equal(bot.snapshot().strategy.openingDelaySeconds, 30);
 });
 
-test('own-side bid at 0.99 takes profit and credits one dollar per share', () => {
+test('requires 10 percent net edge when the executable average ask is below $0.25', () => {
+  const bot = new ProbabilityBot({
+    now: () => 30_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.quotes = {
+    UP: { bestAsk: 0.20, asks: [{ price: 0.20, size: 100 }] },
+    DOWN: { bestAsk: 0.80, asks: [{ price: 0.80, size: 100 }] },
+  };
+  bot.probabilityUp = 0.27;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(30_000);
+  assert.equal(bot.requiredNetEdge.UP, 0.10);
+  assert.ok(bot.edges.UP > 0.05 && bot.edges.UP < 0.10);
+  assert.equal(bot.trades.length, 0);
+
+  bot.probabilityUp = 0.33;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(31_000);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].requiredNetEdge, 0.10);
+});
+
+ test('returns independent open-share, average-cost, and live P&L summaries for each side', () => {
+  const bot = new ProbabilityBot({
+    now: () => 10_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { id: 'market', start: 0, end: 300_000 };
+  bot.quotes = {
+    UP: { bestBid: 0.60, updatedAt: 10_000 },
+    DOWN: { bestBid: 0.35, updatedAt: 10_000 },
+  };
+  bot.trades = [
+    { id: 'up-a', marketId: 'market', side: 'UP', shares: 100, totalCost: 45.10, status: 'OPEN' },
+    { id: 'up-b', marketId: 'market', side: 'UP', shares: 100, totalCost: 50.10, status: 'OPEN' },
+    { id: 'down-a', marketId: 'market', side: 'DOWN', shares: 100, totalCost: 40.10, status: 'OPEN' },
+    { id: 'up-closed', marketId: 'old', side: 'UP', shares: 100, totalCost: 30, status: 'SETTLED', realizedPnl: 5 },
+  ];
+
+  const positions = bot.snapshot().paperAccount.positions;
+  assert.equal(positions.UP.shares, 200);
+  assert.equal(positions.UP.costBasis, 95.2);
+  assert.ok(Math.abs(positions.UP.averageCost - 0.476) < 1e-9);
+  assert.equal(positions.UP.bestBid, 0.60);
+  assert.ok(positions.UP.unrealizedPnl > 21.3);
+  assert.equal(positions.UP.realizedPnl, 5);
+  assert.equal(positions.DOWN.shares, 100);
+  assert.equal(positions.DOWN.averageCost, 0.401);
+  assert.equal(positions.DOWN.bestBid, 0.35);
+  assert.ok(positions.DOWN.unrealizedPnl < -5);
+  assert.equal(positions.DOWN.realizedPnl, 0);
+});
+
+ test('own-side bid at 0.99 takes profit and credits one dollar per share', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },

@@ -7,12 +7,14 @@ const { feed } = require('./chainlink-price-feed');
 const WINDOW_MS = 5 * 60 * 1000;
 const SHARES_PER_SIGNAL = 100;
 const MIN_EDGE = 0.05;
+const LOW_PRICE_THRESHOLD = 0.25;
+const LOW_PRICE_MIN_EDGE = 0.10;
 const STARTING_CASH = 10_000;
 const POLL_MS = 500;
 const FEED_MAX_AGE_MS = 15_000;
 const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const MIN_ENTRY_PRICE = 0.02;
-const MIN_ENTRY_SECONDS_REMAINING = 120;
+const OPENING_DELAY_SECONDS = 30;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
 const TAKE_PROFIT_BID = 0.99;
 const TAKE_PROFIT_PAYOUT = 1;
@@ -103,11 +105,13 @@ class ProbabilityBot {
       allowed: false,
       minimumBestAsk: MIN_ENTRY_PRICE,
       blockedSides: ['UP', 'DOWN'],
-      minimumSecondsRemaining: MIN_ENTRY_SECONDS_REMAINING,
+      openingDelaySeconds: OPENING_DELAY_SECONDS,
+      secondsSinceOpen: null,
+      openingDelayActive: false,
       secondsRemaining: null,
-      cutoffActive: false,
       blockedReasons: ['PRICE_FLOOR'],
     };
+    this.requiredNetEdge = { UP: MIN_EDGE, DOWN: MIN_EDGE };
     this.lastEntryFilterSignature = null;
     this.armed = { UP: true, DOWN: true };
     this.cash = STARTING_CASH;
@@ -227,21 +231,25 @@ class ProbabilityBot {
       const bestAsk = this.quotes[side]?.bestAsk;
       return !Number.isFinite(bestAsk) || bestAsk < MIN_ENTRY_PRICE;
     });
+    const secondsSinceOpen = Number.isFinite(this.market?.start)
+      ? Math.max(0, (now - this.market.start) / 1000)
+      : null;
     const secondsRemaining = Number.isFinite(this.market?.end)
       ? Math.max(0, (this.market.end - now) / 1000)
       : null;
-    const cutoffActive = Number.isFinite(secondsRemaining)
-      && secondsRemaining <= MIN_ENTRY_SECONDS_REMAINING;
+    const openingDelayActive = Number.isFinite(secondsSinceOpen)
+      && secondsSinceOpen < OPENING_DELAY_SECONDS;
     const blockedReasons = [];
     if (blockedSides.length) blockedReasons.push('PRICE_FLOOR');
-    if (cutoffActive) blockedReasons.push('TIME_CUTOFF');
+    if (openingDelayActive) blockedReasons.push('OPENING_DELAY');
     this.entryFilter = {
       allowed: blockedReasons.length === 0,
       minimumBestAsk: MIN_ENTRY_PRICE,
       blockedSides,
-      minimumSecondsRemaining: MIN_ENTRY_SECONDS_REMAINING,
+      openingDelaySeconds: OPENING_DELAY_SECONDS,
+      secondsSinceOpen,
+      openingDelayActive,
       secondsRemaining,
-      cutoffActive,
       blockedReasons,
     };
     return this.entryFilter;
@@ -250,8 +258,14 @@ class ProbabilityBot {
   processSignals(now) {
     const filter = this.updateEntryFilter(now);
     if (!filter.allowed) {
-      for (const side of ['UP', 'DOWN']) {
-        if (this.edges[side] == null || this.edges[side] < MIN_EDGE) this.armed[side] = true;
+      if (!filter.openingDelayActive) {
+        for (const side of ['UP', 'DOWN']) {
+          const fill = simulateBuy(this.quotes[side]?.asks);
+          const entryPrice = fill?.averagePrice ?? this.quotes[side]?.bestAsk;
+          const threshold = Number.isFinite(entryPrice) && entryPrice < LOW_PRICE_THRESHOLD
+            ? LOW_PRICE_MIN_EDGE : MIN_EDGE;
+          if (this.edges[side] == null || this.edges[side] < threshold) this.armed[side] = true;
+        }
       }
       const signature = `${filter.blockedReasons.join(',')}:${filter.blockedSides.join(',')}`;
       if (signature !== this.lastEntryFilterSignature) {
@@ -261,10 +275,10 @@ class ProbabilityBot {
             blockedSides: filter.blockedSides,
           });
         }
-        if (filter.cutoffActive) {
-          this.log('SIGNAL_BLOCKED_TIME_CUTOFF', {
-            minimumSecondsRemaining: MIN_ENTRY_SECONDS_REMAINING,
-            secondsRemaining: filter.secondsRemaining,
+        if (filter.openingDelayActive) {
+          this.log('SIGNAL_BLOCKED_OPENING_DELAY', {
+            openingDelaySeconds: OPENING_DELAY_SECONDS,
+            secondsSinceOpen: filter.secondsSinceOpen,
           });
         }
       }
@@ -272,15 +286,25 @@ class ProbabilityBot {
       return;
     }
     this.lastEntryFilterSignature = null;
+    const fills = {
+      UP: simulateBuy(this.quotes.UP?.asks),
+      DOWN: simulateBuy(this.quotes.DOWN?.asks),
+    };
+    this.requiredNetEdge = Object.fromEntries(['UP', 'DOWN'].map(side => {
+      const entryPrice = fills[side]?.averagePrice ?? this.quotes[side]?.bestAsk;
+      return [side, Number.isFinite(entryPrice) && entryPrice < LOW_PRICE_THRESHOLD
+        ? LOW_PRICE_MIN_EDGE : MIN_EDGE];
+    }));
     const candidates = ['UP', 'DOWN'].filter(side => {
       const edge = this.edges[side];
-      if (edge == null || edge < MIN_EDGE) this.armed[side] = true;
-      return edge != null && edge >= MIN_EDGE && this.armed[side];
+      const threshold = this.requiredNetEdge[side];
+      if (edge == null || edge < threshold) this.armed[side] = true;
+      return edge != null && edge >= threshold && this.armed[side];
     }).sort((a, b) => this.edges[b] - this.edges[a]);
     if (!candidates.length) return;
     const side = candidates[0];
     this.armed[side] = false;
-    const fill = simulateBuy(this.quotes[side]?.asks);
+    const fill = fills[side];
     if (!fill || fill.totalCost > this.cash) {
       this.log('SIGNAL_SKIPPED', { side, edge: this.edges[side], reason: !fill ? 'Insufficient visible ask depth for 100 shares' : 'Insufficient paper cash' });
       return;
@@ -299,6 +323,7 @@ class ProbabilityBot {
       fees: fill.fees,
       totalCost: fill.totalCost,
       edgeAtEntry: this.edges[side],
+      requiredNetEdge: this.requiredNetEdge[side],
       modelProbability: side === 'UP' ? this.probabilityUp : 1 - this.probabilityUp,
       openedAt: now,
       status: 'OPEN',
@@ -311,7 +336,10 @@ class ProbabilityBot {
     this.cash -= fill.totalCost;
     this.trades.unshift(trade);
     this.trades.length = Math.min(this.trades.length, 200);
-    this.log('PAPER_BUY', { side, shares: SHARES_PER_SIGNAL, price: fill.averagePrice, edge: this.edges[side] });
+    this.log('PAPER_BUY', {
+      side, shares: SHARES_PER_SIGNAL, price: fill.averagePrice,
+      edge: this.edges[side], requiredNetEdge: this.requiredNetEdge[side],
+    });
   }
 
   processPositionExits(now) {
@@ -417,7 +445,39 @@ class ProbabilityBot {
     const wins = settled.filter(trade => trade.realizedPnl > 0).length;
     const losses = settled.filter(trade => trade.realizedPnl < 0).length;
     const realizedPnl = settled.reduce((sum, trade) => sum + trade.realizedPnl, 0);
-    const openCost = this.trades.filter(trade => trade.status === 'OPEN').reduce((sum, trade) => sum + trade.totalCost, 0);
+    const openTrades = this.trades.filter(trade => trade.status === 'OPEN');
+    const openCost = openTrades.reduce((sum, trade) => sum + trade.totalCost, 0);
+    const positions = Object.fromEntries(['UP', 'DOWN'].map(side => {
+      const sideOpenTrades = openTrades.filter(trade => trade.side === side);
+      const shares = sideOpenTrades.reduce((sum, trade) => sum + trade.shares, 0);
+      const costBasis = sideOpenTrades.reduce((sum, trade) => sum + trade.totalCost, 0);
+      const currentQuote = this.market ? this.quotes[side] : null;
+      const bid = currentQuote?.bestBid;
+      const quoteFresh = Number.isFinite(currentQuote?.updatedAt)
+        && now >= currentQuote.updatedAt
+        && now - currentQuote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS
+        && Number.isFinite(bid)
+        && bid >= 0
+        && bid <= 1
+        && sideOpenTrades.every(trade => trade.marketId === this.market?.id);
+      const markedValue = quoteFresh
+        ? sideOpenTrades.reduce((sum, trade) => sum
+          + trade.shares * bid
+          - estimateTakerFee(bid, trade.shares), 0)
+        : null;
+      const sideRealizedPnl = settled
+        .filter(trade => trade.side === side)
+        .reduce((sum, trade) => sum + trade.realizedPnl, 0);
+      return [side, {
+        shares,
+        costBasis,
+        averageCost: shares > 0 ? costBasis / shares : null,
+        bestBid: quoteFresh ? bid : null,
+        markedValue,
+        unrealizedPnl: markedValue == null ? null : markedValue - costBasis,
+        realizedPnl: sideRealizedPnl,
+      }];
+    }));
     const ticks = (() => { try { return this.priceFeed.snapshot(); } catch { return null; } })();
     return {
       mode: 'PAPER ONLY',
@@ -431,9 +491,11 @@ class ProbabilityBot {
         pollIntervalMs: POLL_MS,
         sharesPerSignal: SHARES_PER_SIGNAL,
         minimumNetEdge: MIN_EDGE,
+        lowPriceThreshold: LOW_PRICE_THRESHOLD,
+        lowPriceMinimumNetEdge: LOW_PRICE_MIN_EDGE,
         takerFeeRate: TAKER_FEE_RATE,
         minimumBestAsk: MIN_ENTRY_PRICE,
-        minimumSecondsRemaining: MIN_ENTRY_SECONDS_REMAINING,
+        openingDelaySeconds: OPENING_DELAY_SECONDS,
         takeProfitBid: TAKE_PROFIT_BID,
         takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
         stopLossBid: STOP_LOSS_BID,
@@ -451,12 +513,16 @@ class ProbabilityBot {
       standardizedGap: this.standardizedGap ?? null,
       probability: this.probabilityUp == null ? null : { UP: this.probabilityUp, DOWN: 1 - this.probabilityUp },
       edges: this.edges,
+      requiredNetEdge: this.requiredNetEdge,
       entryFilter: this.entryFilter,
       quotes: {
         UP: this.quotes.UP ? { bestBid: this.quotes.UP.bestBid, bestAsk: this.quotes.UP.bestAsk, midpoint: this.quotes.UP.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.UP.asks)?.averagePrice ?? null } : null,
         DOWN: this.quotes.DOWN ? { bestBid: this.quotes.DOWN.bestBid, bestAsk: this.quotes.DOWN.bestAsk, midpoint: this.quotes.DOWN.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.DOWN.asks)?.averagePrice ?? null } : null,
       },
-      paperAccount: { startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl, wins, losses, settled: settled.length, openPositions: this.trades.filter(trade => trade.status === 'OPEN').length },
+      paperAccount: {
+        startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl, wins, losses,
+        settled: settled.length, openPositions: openTrades.length, positions,
+      },
       trades: this.trades.slice(0, 50),
       events: this.events,
       priceFeed: ticks,

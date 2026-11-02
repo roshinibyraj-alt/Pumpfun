@@ -21,13 +21,14 @@
     .prob-head{display:flex;justify-content:space-between;align-items:center;color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.prob-price{font:800 clamp(30px,5vw,48px) ui-monospace,monospace;color:var(--text);margin:8px 0 12px}
     .bar{height:7px;border-radius:20px;background:#263345;overflow:hidden}.bar i{display:block;width:0;height:100%;background:var(--accent);border-radius:inherit;transition:width .3s}
     .prob-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.prob-meta span{display:block;color:var(--muted);font-size:10px}.prob-meta strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
+.position-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.position-card{padding:16px;border-radius:14px;background:#0f1925;border:1px solid var(--line)}.position-card.up{--accent:var(--green)}.position-card.down{--accent:var(--red)}.position-title{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.position-shares{font:800 28px ui-monospace,monospace;margin:7px 0 12px}.position-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.position-metrics span{display:block;color:var(--muted);font-size:10px}.position-metrics strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
     .panel{padding:18px;margin-top:12px}.section-head{margin-bottom:12px}.section-head h2{font-size:15px;margin:0}.section-head small{font-size:11px}
     .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:640px}th,td{text-align:left;padding:11px 9px;border-top:1px solid #263447;font-size:12px}th{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
     .side{font-weight:800}.side.UP,.pnl.pos{color:var(--green)}.side.DOWN,.pnl.neg{color:var(--red)}.edge-good{color:var(--green)}.edge-bad{color:var(--red)}
     .empty{padding:24px 10px;text-align:center;color:var(--muted);border-top:1px solid var(--line)}.formula{font:11px ui-monospace,monospace;color:#bbcadb;background:#0b121c;border:1px solid #202e40;padding:12px;border-radius:9px;margin-top:10px}
     .status{font:10px ui-monospace,monospace;color:var(--muted)}.footer{margin-top:16px;color:var(--muted);font-size:10px;line-height:1.6}
     @media(max-width:800px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{align-items:flex-start;flex-direction:column}.window{text-align:left}.top-right{flex-wrap:wrap;justify-content:flex-end}}
-    @media(max-width:520px){main{width:min(100% - 22px,1180px);padding-top:16px}.top{align-items:flex-start}.top-right{gap:6px}.badge,.pill{padding:6px 8px;font-size:9px}.grid{gap:8px}.card{padding:12px}.prob-grid{gap:8px}.prob{padding:13px}.prob-meta{grid-template-columns:1fr 1fr}.panel{padding:13px}}
+    @media(max-width:520px){main{width:min(100% - 22px,1180px);padding-top:16px}.top{align-items:flex-start}.top-right{gap:6px}.badge,.pill{padding:6px 8px;font-size:9px}.grid{gap:8px}.card{padding:12px}.prob-grid,.position-grid{gap:8px}.prob,.position-card{padding:13px}.prob-meta{grid-template-columns:1fr 1fr}.panel{padding:13px}}
   </style>
 </head>
 <body>
@@ -37,7 +38,7 @@
     <div class="top-right"><span class="badge"><i class="dot"></i>PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement, compares it with the executable ask, and records a 100-share paper buy only when net edge crosses 5¢. No trades occur if either outcome’s best ask is below 2¢ or 120 seconds or less remain. Positions exit on their own token bid: 99¢ credits $1 gross per share; 1¢ credits $0 gross. Entry and exit taker fees are included. The bot tracks each position’s peak bid and checks every 500 ms.</p></div>
+    <div><div class="eyebrow">VOLATILITY-NORMALIZED SIGNAL</div><h1>Probability follows distance and time.</h1><p>Model estimates each outcome’s chance at settlement and compares it with the executable ask. The bot waits 30 seconds after each window opens, then buys 100 shares when net edge reaches 5¢; if the 100-share average ask is below 25¢, it requires 10¢ edge. It skips both sides if either best ask is below 2¢. Positions exit on their own token bid: 99¢ credits $1 gross per share; 1¢ credits $0 gross. Entry and exit taker fees are included. The bot tracks peak bids and checks every 500 ms.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
@@ -57,6 +58,10 @@
     <article class="card"><div class="label">Settled signals</div><div class="value" id="settled">—</div><div class="foot" id="openCount">— open positions</div></article>
     <article class="card"><div class="label">Bot state</div><div class="value" id="feedState">—</div><div class="foot" id="updated">Waiting for first scan</div></article>
   </section>
+  <section class="position-grid" aria-label="Open paper positions by side">
+    <article class="position-card up"><div class="position-title">UP · ACCUMULATED POSITION</div><div class="position-shares" id="upShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="upAverageCost">—</strong></div><div><span>Unrealized P&amp;L</span><strong id="upUnrealized">—</strong></div><div><span>Realized P&amp;L</span><strong id="upRealized">—</strong></div><div><span>Open cost basis</span><strong id="upCostBasis">—</strong></div><div><span>Live best bid</span><strong id="upMarkBid">—</strong></div><div><span>Marked value</span><strong id="upMarkedValue">—</strong></div></div></article>
+    <article class="position-card down"><div class="position-title">DOWN · ACCUMULATED POSITION</div><div class="position-shares" id="downShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="downAverageCost">—</strong></div><div><span>Unrealized P&amp;L</span><strong id="downUnrealized">—</strong></div><div><span>Realized P&amp;L</span><strong id="downRealized">—</strong></div><div><span>Open cost basis</span><strong id="downCostBasis">—</strong></div><div><span>Live best bid</span><strong id="downMarkBid">—</strong></div><div><span>Marked value</span><strong id="downMarkedValue">—</strong></div></div></article>
+  </section>
   <section class="panel">
     <div class="section-head"><h2>Paper trade history</h2><small>100 shares per signal · simulated at visible asks</small></div>
     <div id="trades" class="table-wrap"><div class="empty">Waiting for a qualifying edge.</div></div>
@@ -64,7 +69,7 @@
   <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-     <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Net edge = model probability − outcome ask − estimated fee. A 5¢ upward crossing triggers one paper buy; it rearms after the edge falls below 5¢. New entries stop with 120 seconds remaining; existing positions continue to exit normally.</div>
+     <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Net edge = model probability − outcome ask − estimated fee. After a 30-second opening delay, a 5¢ upward crossing triggers a paper buy, or 10¢ when the 100-share average ask is below 25¢. Each side rearms after its edge falls below its applicable threshold.</div>
   </section>
   <p class="footer">Simulation only—no live order submission. Probabilities use a normal-CDF approximation from the previous 20 completed Binance BTC 5-minute candles. Position exits use the fresh own-side CLOB best bid: $0.99 credits $1.00 gross per share, and $0.01 credits $0.00 gross. The configured Polymarket taker-fee formula is applied to entries and exits. Any still-open position at window close is marked at its last own-side bid; BTC reference prices do not decide paper P&amp;L.</p>
 </main>
@@ -92,7 +97,22 @@ function renderSide(side,state){
  $(side.toLowerCase()+'Net').textContent=signed(edge,3);
  $(side.toLowerCase()+'Net').className=Number(edge)>=.05?'edge-good':Number(edge)<0?'edge-bad':'';
  $(side.toLowerCase()+'Edge').textContent='EDGE '+signed(edge,3);
-   $(side.toLowerCase()+'Signal').textContent=state.entryFilter?.allowed===false?'BLOCKED':isNumeric(edge)&&Number(edge)>=.05?'BUY 100':isNumeric(edge)?'WAIT':'—';
+  const required=Number(state.requiredNetEdge?.[side]??(Number(state.quotes?.[side]?.estimatedAverageAsk)<.25?.10:.05));
+  $(side.toLowerCase()+'Signal').textContent=state.entryFilter?.allowed===false?'BLOCKED':isNumeric(edge)&&Number(edge)>=required?'BUY 100':isNumeric(edge)?'WAIT':'—';
+}
+function renderPositions(positions){
+ for(const side of ['UP','DOWN']){
+  const p=positions?.[side]||{},prefix=side.toLowerCase();
+  $(prefix+'Shares').textContent=`${Number(p.shares||0).toLocaleString()} shares`;
+  $(prefix+'AverageCost').textContent=money(p.averageCost,4);
+  $(prefix+'Unrealized').textContent=signed(p.unrealizedPnl);
+  $(prefix+'Realized').textContent=signed(p.realizedPnl);
+  $(prefix+'CostBasis').textContent=money(p.costBasis);
+  $(prefix+'MarkBid').textContent=money(p.bestBid,4);
+  $(prefix+'MarkedValue').textContent=money(p.markedValue);
+  $(prefix+'Unrealized').className=p.unrealizedPnl==null?'':Number(p.unrealizedPnl)>=0?'pnl pos':'pnl neg';
+  $(prefix+'Realized').className=Number(p.realizedPnl)>=0?'pnl pos':'pnl neg';
+ }
 }
 async function poll(){
  try{
@@ -105,7 +125,7 @@ async function poll(){
   $('reference').textContent=money(s.referencePrice,2);$('spot').textContent=money(s.spotPrice,2);
   $('gap').textContent='Difference from reference '+signed(s.priceGap,2);
    $('expected').textContent=money(s.expectedMove,2);$('zscore').textContent=isNumeric(s.standardizedGap)?Number(s.standardizedGap).toFixed(3):'—';
-  renderSide('UP',s);renderSide('DOWN',s);
+  renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
   $('settled').textContent=String(account.settled??0);$('openCount').textContent=(account.openPositions??0)+' open positions';
