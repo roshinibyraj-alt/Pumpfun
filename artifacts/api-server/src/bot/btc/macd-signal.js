@@ -1,6 +1,6 @@
 'use strict';
 
-const METHOD = 'macd-1m-12-26-9-reversal-sweep-v2';
+const METHOD = 'macd-1m-12-26-9-window-pair-v1';
 const FAST = 12;
 const SLOW = 26;
 const SIGNAL = 9;
@@ -77,4 +77,24 @@ function detectMacdHistogram(candles, now) {
   };
 }
 
-module.exports = { METHOD, classifyHistogram, detectMacdHistogram, ema };
+// Only the first two fully closed candles of this exact market can choose direction.
+function windowSignal(signal, start, now) {
+  const bars = signal?.chart?.bars ?? [];
+  const first = bars.find(b => b.start === start && b.end === start + 60_000 && b.end <= now);
+  const second = bars.find(b => b.start === start + 60_000 && b.end === start + 120_000 && b.end <= now);
+  if (now < start + 120_000) return { status: 'OBSERVING', side: null, minute1: first ?? null };
+  if (signal?.status !== 'READY') return { status: 'WAITING_HISTORY', side: null };
+  if (!first || !second) return { status: 'WAITING_HISTORY', side: null };
+  const up = first.classification === 'SOLID_RED'
+    && ['SHRINKING_RED', 'SOLID_GREEN'].includes(second.classification);
+  const down = first.classification === 'SOLID_GREEN'
+    && ['SHRINKING_GREEN', 'SOLID_RED'].includes(second.classification);
+  return {
+    status: up || down ? 'LOCKED' : 'SKIP_WINDOW',
+    side: up ? 'UP' : down ? 'DOWN' : null,
+    minute1: { ...first }, minute2: { ...second },
+    signalAt: second.end,
+  };
+}
+
+module.exports = { METHOD, classifyHistogram, detectMacdHistogram, windowSignal, ema };

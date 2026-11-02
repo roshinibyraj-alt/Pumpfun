@@ -26,13 +26,9 @@ const { DEFAULT_SETTINGS, choosePaperSettings } = require("./bot/btc/learning-en
 const router: IRouter = Router();
 const learningStore = new LearningStore(pool);
 await learningStore.initialize(DEFAULT_SETTINGS);
-const strategySettings = await learningStore.loadSettings(DEFAULT_SETTINGS);
-const activeSide = await learningStore.loadPullbackBias();
 const bot = new ProbabilityBot({
   learningStore,
   choosePaperSettings,
-  strategySettings,
-  activeSide,
 });
 bot.start();
 
@@ -41,7 +37,13 @@ router.get("/strategy/state", (_req, res) => {
 });
 
 router.get("/strategy/learning", async (_req, res) => {
-  res.set("Cache-Control", "no-store").json(await learningStore.getState());
+  const state = await learningStore.getState() as Record<string, unknown>;
+  res.set("Cache-Control", "no-store").json({
+    ...state,
+    mode: "logging-only-fixed-policy",
+    settings: DEFAULT_SETTINGS,
+    tuningEnabled: false,
+  });
 });
 
 export default router;

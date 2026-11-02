@@ -3,21 +3,23 @@
 const config = require('./config');
 const marketData = require('./wick-market-data');
 const { feed } = require('./chainlink-price-feed');
-const { detectMacdHistogram } = require('./macd-signal');
-const { sweepBook } = require('./book-sweep');
+const { detectMacdHistogram, windowSignal } = require('./macd-signal');
 const { TAKE_PROFIT_BID, STOP_LOSS_BID, thresholdExit, recoverExpiredPositions } = require('./position-exits');
 
 const WINDOW_MS = 5 * 60 * 1000;
-const SHARES_PER_SIGNAL = 100;
+const SHARES_PER_SIGNAL = 50;
 const MIN_EDGE = 0.05;
 const LOW_PRICE_THRESHOLD = 0.25;
 const LOW_PRICE_MIN_EDGE = 0.10;
 const STARTING_CASH = 10_000;
 const POLL_MS = 500;
-const FEED_MAX_AGE_MS = 15_000;
 const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const MIN_ENTRY_PRICE = 0.02;
-const OPENING_DELAY_SECONDS = 0;
+const OPENING_DELAY_SECONDS = 120;
+const ENTRY_INTERVAL_MS = 10_000;
+const LAST_ENTRY_SECONDS = 290;
+// Permit normal polling/network jitter, but never catch up missed slots in a burst.
+const SLOT_GRACE_MS = 1000;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
 const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   openingDelaySeconds: OPENING_DELAY_SECONDS,
@@ -26,7 +28,7 @@ const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   lowPriceMinimumNetEdge: LOW_PRICE_MIN_EDGE,
   volatilityMultiplier: 1,
   sharesPerSignal: SHARES_PER_SIGNAL,
-  sideMode: 'pullback',
+  sideMode: 'window-macd',
 });
 
 function parseLevels(levels, direction) {
@@ -138,13 +140,9 @@ class ProbabilityBot {
     this.trades = [];
     this.events = [];
     this.learningStore = learningStore;
+    // Stored adaptive settings and persisted direction must not override this fixed policy.
     this.choosePaperSettings = choosePaperSettings;
-    this.strategySettings = {
-      ...DEFAULT_STRATEGY_SETTINGS,
-      ...strategySettings,
-      openingDelaySeconds: 0,
-      sideMode: 'pullback',
-    };
+    this.strategySettings = { ...DEFAULT_STRATEGY_SETTINGS };
     this.persistenceQueue = Promise.resolve();
     this.persistenceError = null;
     this.lastSampledAt = null;
@@ -152,15 +150,17 @@ class ProbabilityBot {
     this.pullback = null;
     this.macd = null;
     this.pendingReversal = null;
-    this.activeSide = activeSide === 'UP' || activeSide === 'DOWN' ? activeSide : null;
-    this.activeSignalReason = this.activeSide ? 'PERSISTED_BIAS' : null;
+    this.activeSide = null;
+    this.activeSignalReason = null;
+    this.windowDecision = { status: 'OBSERVING', side: null };
+    this.lastEntrySlot = -1;
     this.entrySequence = 0;
     this.entryWindowStart = null;
     this.handledClosedSignals = new Set();
     this.lastLiveSignal = null;
     this.learningStatus = {
-      enabled: Boolean(learningStore && choosePaperSettings),
-      mode: learningStore && choosePaperSettings ? 'collecting' : 'disabled',
+      enabled: false,
+      mode: learningStore ? 'logging-only-fixed-policy' : 'disabled',
       completedWindows: 0,
       lastEvaluation: null,
     };
@@ -210,6 +210,7 @@ class ProbabilityBot {
         timeframe: '1m',
       } : null,
       activeSide: this.activeSide,
+      windowDecision: this.windowDecision,
       macd: this.macd ? {
         method: this.macd.method, status: this.macd.status,
         latestHistogram: this.macd.latestHistogram, previousHistogram: this.macd.previousHistogram,
@@ -219,6 +220,7 @@ class ProbabilityBot {
         const quote = this.learningQuotes?.[side] ?? this.quotes[side];
         return [side, quote ? {
           bestBid: quote.bestBid, bestAsk: quote.bestAsk, asks: quote.asks, bids: quote.bids,
+          updatedAt: quote.updatedAt,
         } : null];
       })),
     };
@@ -235,21 +237,14 @@ class ProbabilityBot {
       const result = this.choosePaperSettings(windows, this.strategySettings);
       await this.learningStore.saveTuning(result, now, this.market.start);
       this.learningStatus = {
-        enabled: true,
-        mode: result.applied ? 'auto-tuned-paper' : 'collecting',
+        enabled: false,
+        mode: 'logging-only-fixed-policy',
         completedWindows: result.windows,
         lastEvaluation: { ...result, settings: undefined },
       };
-      if (result.applied) {
-        const previousSettings = this.strategySettings;
-        this.strategySettings = { ...result.settings };
-        this.log('PAPER_TUNING_APPLIED', {
-          previousSettings, settings: this.strategySettings,
-          windowsEvaluated: result.windows, baseline: result.baseline, selected: result.selected,
-        });
-      } else {
-        this.log('PAPER_TUNING_HELD', { reason: result.reason, windowsEvaluated: result.windows });
-      }
+      this.log('PAPER_REGRESSION_EVALUATED', {
+        reason: result.reason, windowsEvaluated: result.windows, baseline: result.baseline,
+      });
     } catch (error) {
       this.persistenceError = error?.message || 'Learning evaluation failed.';
       this.learningStatus = { ...this.learningStatus, mode: 'storage-error', error: this.persistenceError };
@@ -264,6 +259,7 @@ class ProbabilityBot {
       this.processPositionExits(now);
       await recoverExpiredPositions(this, now);
       const start = Math.floor(now / WINDOW_MS) * WINDOW_MS;
+      this.beginMarketWindow(start);
       if (!this.market || this.market.start !== start || now - this.marketFetchedAt >= 10_000) {
         this.market = await this.fetchMarket(start, WINDOW_MS);
         this.marketFetchedAt = now;
@@ -288,13 +284,7 @@ class ProbabilityBot {
       this.updateEntryFilter(now);
       this.processPositionExits(now);
 
-      const ticks = this.priceFeed.getTicks();
-      const snapshot = this.priceFeed.snapshot();
-      if (!ticks.length || snapshot.status !== 'live' || snapshot.ageMs > FEED_MAX_AGE_MS) {
-        throw new Error('Waiting for a fresh Polymarket Chainlink BTC/USD price.');
-      }
-      const candleHistory = this.priceFeed.getHistoricalCandles();
-      this.volatility5m = estimateLogReturnVolatility(candleHistory);
+      const ticks = this.priceFeed.getTicks?.() ?? [];
       const referenceTick = ticks
         .filter(tick => Math.abs(tick.ts - start) <= 10_000)
         .sort((a, b) => Math.abs(a.ts - start) - Math.abs(b.ts - start))[0];
@@ -310,40 +300,27 @@ class ProbabilityBot {
         detectedSide: detectedPullback.side,
         side: this.activeSide,
         activeSignalReason: this.activeSignalReason,
-        regime: this.activeSide ? `ACTIVE_${this.activeSide}` : 'WAITING_MACD',
+        regime: this.windowDecision.status,
+        windowDecision: this.windowDecision,
       };
       this.pullback = this.macd; // Existing learning/storage contract; never a trendline detector.
-      this.processOppositeSignalExits(now);
-      this.statusReason = !referenceTick
-        ? 'Waiting for the next five-minute boundary to capture its Chainlink opening reference.'
-        : !this.volatility5m
-          ? 'Waiting for enough completed five-minute BTC candles.'
-          : 'Model and market data are live.';
-
-      const secondsRemaining = Math.max(0, (this.market.end - now) / 1000);
-      this.probabilityUp = this.referencePrice && this.latestPrice && this.volatility5m
-        ? probabilityUp({
-          openPrice: this.referencePrice,
-          spotPrice: this.latestPrice,
-          secondsRemaining,
-          volatility5m: this.volatility5m * this.strategySettings.volatilityMultiplier,
-        })
-        : null;
-      this.expectedMove = this.latestPrice && this.volatility5m
-        ? this.latestPrice * this.volatility5m * this.strategySettings.volatilityMultiplier * Math.sqrt(secondsRemaining / 300)
-        : null;
-      this.standardizedGap = this.referencePrice && this.latestPrice && this.volatility5m && secondsRemaining > 0
-        ? Math.log(this.latestPrice / this.referencePrice) / (this.volatility5m * this.strategySettings.volatilityMultiplier * Math.sqrt(secondsRemaining / 300))
-        : null;
-      this.edges = this.calculateEdges();
-      if (this.probabilityUp != null && secondsRemaining > 0) this.processSignals(now);
-      await this.captureLearningSample(now);
+      this.statusReason = this.windowDecision.status === 'OBSERVING'
+        ? 'Observing minute 1 and minute 2; no entries before 120 seconds.'
+        : this.windowDecision.status === 'SKIP_WINDOW'
+          ? 'The first two histogram bars did not qualify; skipping this window.'
+          : this.activeSide
+            ? `Locked ${this.activeSide}; 50-share entries every 10 seconds from 120 through 290 seconds.`
+            : 'Waiting for the exact first two closed one-minute histogram bars.';
+      this.probabilityUp = null;
+      this.edges = { UP: null, DOWN: null };
+      this.processSignals(this.now());
+      await this.captureLearningSample(this.now());
       await this.maybeTune(now);
       this.error = null;
       this.lastUpdateAt = now;
     } catch (error) {
       this.processPositionExits(this.now());
-      this.error = error?.message || 'BTC probability scan failed.';
+      this.error = error?.message || 'BTC window MACD scan failed.';
       this.statusReason = this.error;
       this.lastUpdateAt = this.now();
     } finally {
@@ -367,16 +344,7 @@ class ProbabilityBot {
   }
 
   calculateEdges() {
-    if (this.probabilityUp == null) return { UP: null, DOWN: null };
-    const fillFor = side => this.pendingReversal && this.pendingReversal.marketId === this.market?.id && this.pendingReversal.side === side
-      ? sweepBook(this.quotes[side]?.asks, this.pendingReversal.shares, 'buy')
-      : simulateBuy(this.quotes[side]?.asks, this.strategySettings.sharesPerSignal);
-    const upFill = fillFor('UP');
-    const downFill = fillFor('DOWN');
-    return {
-      UP: upFill ? this.probabilityUp - upFill.totalCost / upFill.shares : null,
-      DOWN: downFill ? (1 - this.probabilityUp) - downFill.totalCost / downFill.shares : null,
-    };
+    return { UP: null, DOWN: null };
   }
 
   updateEntryFilter(now = this.now()) {
@@ -409,128 +377,52 @@ class ProbabilityBot {
   }
 
   applyPullbackSignal(signal) {
-    const isLive = signal?.signalSource === 'LIVE_TOUCH';
-    const liveKey = isLive ? `${signal.side}:${signal.signalReason}` : null;
-    const repeatedLive = liveKey && liveKey === this.lastLiveSignal;
-    this.lastLiveSignal = liveKey;
-    if (!['UP', 'DOWN'].includes(signal?.side) || repeatedLive) return;
-    if (signal.signalSource === 'CLOSED_CANDLE') {
-      const key = `${signal.method}:${signal.signalReason}:${signal.signalAt}`;
-      if (this.handledClosedSignals.has(key)) return;
-      this.handledClosedSignals.add(key);
-      if (this.handledClosedSignals.size > 200) {
-        this.handledClosedSignals.delete(this.handledClosedSignals.values().next().value);
-      }
+    this.beginMarketWindow();
+    if (!this.market || ['LOCKED', 'SKIP_WINDOW'].includes(this.windowDecision.status)) return;
+    const decision = windowSignal(signal, this.market.start, this.now());
+    this.windowDecision = decision;
+    this.activeSide = decision.side;
+    this.activeSignalReason = decision.side ? 'WINDOW_MINUTE_2_PATTERN' : null;
+    if (['LOCKED', 'SKIP_WINDOW'].includes(decision.status)) {
+      this.log('WINDOW_MACD_DECIDED', { ...decision, method: signal.method });
     }
-    if (signal.side === this.activeSide) return;
-    const previousSide = this.activeSide;
-    this.activeSide = signal.side;
-    if (this.pendingReversal?.side !== this.activeSide) this.pendingReversal = null;
-    this.armed[this.activeSide] = true;
-    this.activeSignalReason = signal.signalReason ?? null;
-    this.log('PULLBACK_BIAS_CHANGED', {
-      previousSide, side: this.activeSide, signalReason: this.activeSignalReason,
-      method: signal.method, signalAt: signal.signalAt,
-      histogram: signal.latestHistogram, previousHistogram: signal.previousHistogram,
-    });
   }
 
-  beginMarketWindow() {
-    if (!this.market || this.entryWindowStart === this.market.start) return;
-    const previousWindowStart = this.entryWindowStart;
-    this.entryWindowStart = this.market.start;
-    // An unfilled reversal quantity belongs to its original outcome tokens, never the next market.
+  beginMarketWindow(start = this.market?.start) {
+    if (!Number.isFinite(start) || this.entryWindowStart === start) return;
+    this.entryWindowStart = start;
     this.pendingReversal = null;
-    // Entry eligibility is window-scoped; direction and signal deduplication are not.
-    // No fresh histogram change is required, and TP/SL never clears direction.
-    this.armed = { UP: true, DOWN: true };
-    if (previousWindowStart !== null && this.activeSide) {
-      this.log('PULLBACK_BIAS_CARRIED', {
-        previousWindowStart, windowStart: this.market.start,
-        side: this.activeSide, signalReason: this.activeSignalReason,
-      });
-    }
+    this.activeSide = null;
+    this.activeSignalReason = null;
+    this.windowDecision = { status: 'OBSERVING', side: null };
+    this.lastEntrySlot = -1;
+    this.macd = null;
+    this.pullback = null;
+    this.log('WINDOW_MACD_RESET', { windowStart: start });
   }
 
   processSignals(now) {
     this.beginMarketWindow();
-    if (this.pullback && !Object.hasOwn(this.pullback, 'detectedSide')) {
-      this.applyPullbackSignal(this.pullback);
-    }
-    this.processOppositeSignalExits(now);
+    const schedule = this.entrySchedule(now);
+    if (!this.activeSide || !schedule.due) return;
+    // Exactly one attempt per slot, including failures; no every-poll retries or catch-up buys.
+    this.lastEntrySlot = schedule.slot;
     const filter = this.updateEntryFilter(now);
     if (!filter.allowed) {
-      if (!filter.openingDelayActive) {
-        for (const side of ['UP', 'DOWN']) {
-          const fill = simulateBuy(this.quotes[side]?.asks, this.strategySettings.sharesPerSignal);
-          const entryPrice = fill?.averagePrice ?? this.quotes[side]?.bestAsk;
-          const threshold = Number.isFinite(entryPrice) && entryPrice < this.strategySettings.lowPriceThreshold
-            ? this.strategySettings.lowPriceMinimumNetEdge : this.strategySettings.minimumNetEdge;
-          if (Number.isFinite(this.edges[side]) && this.edges[side] < threshold) this.armed[side] = true;
-        }
-      }
-      const signature = `${filter.blockedReasons.join(',')}:${filter.blockedSides.join(',')}`;
-      if (signature !== this.lastEntryFilterSignature) {
-        if (filter.blockedSides.length) {
-          this.log('SIGNAL_BLOCKED_PRICE_FLOOR', {
-            minimumBestAsk: MIN_ENTRY_PRICE,
-            blockedSides: filter.blockedSides,
-          });
-        }
-        if (filter.openingDelayActive) {
-          this.log('SIGNAL_BLOCKED_OPENING_DELAY', {
-            openingDelaySeconds: this.strategySettings.openingDelaySeconds,
-            secondsSinceOpen: filter.secondsSinceOpen,
-          });
-        }
-      }
-      this.lastEntryFilterSignature = signature;
+      this.log('SCHEDULED_ENTRY_SKIPPED', { slot: schedule.slot, reason: filter.blockedReasons.join(',') });
       return;
     }
-    this.lastEntryFilterSignature = null;
-    const fills = {
-      UP: this.entryFill('UP'),
-      DOWN: this.entryFill('DOWN'),
-    };
-    this.requiredNetEdge = Object.fromEntries(['UP', 'DOWN'].map(side => {
-      const entryPrice = fills[side]?.averagePrice ?? this.quotes[side]?.bestAsk;
-      return [side, Number.isFinite(entryPrice) && entryPrice < this.strategySettings.lowPriceThreshold
-        ? this.strategySettings.lowPriceMinimumNetEdge : this.strategySettings.minimumNetEdge];
-    }));
-    for (const side of ['UP', 'DOWN']) {
-      if (Number.isFinite(this.edges[side]) && this.edges[side] < this.requiredNetEdge[side]) {
-        this.armed[side] = true;
-      }
-    }
-    const hasOpposingOpenPosition = side => this.trades.some(trade =>
-      trade.status === 'OPEN' && trade.marketId === this.market?.id && trade.side !== side);
-    const candidates = ['UP', 'DOWN']
-      .filter(side => this.strategySettings.sideMode === 'best-edge'
-        || this.strategySettings.sideMode === `${side}-only`
-        || (this.strategySettings.sideMode === 'pullback'
-          && this.activeSide === side))
-      .filter(side => {
-      const edge = this.edges[side];
-      const threshold = this.requiredNetEdge[side];
-      const matchedReversal = this.pendingReversal
-        && this.pendingReversal.marketId === this.market?.id
-        && this.pendingReversal.side === side && this.pendingReversal.shares > 1e-8;
-      return (matchedReversal || (edge != null && edge >= threshold && this.armed[side]))
-        && !hasOpposingOpenPosition(side);
-    }).sort((a, b) => this.edges[b] - this.edges[a]);
-    if (!candidates.length) return;
-    const side = candidates[0];
-    const fill = fills[side];
+    const side = this.activeSide;
+    const quote = this.quotes[side];
+    const fresh = Number.isFinite(quote?.updatedAt) && now >= quote.updatedAt
+      && now - quote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS;
+    const fill = fresh ? this.entryFill(side) : null;
     if (!fill || fill.totalCost > this.cash) {
-      this.log('SIGNAL_SKIPPED', { side, edge: this.edges[side], reason: !fill ? 'Insufficient visible ask depth for 100 shares' : 'Insufficient paper cash' });
+      this.log('SCHEDULED_ENTRY_SKIPPED', {
+        side, slot: schedule.slot,
+        reason: !fresh ? 'Stale book' : !fill ? 'Insufficient visible ask depth for 50 shares' : 'Insufficient paper cash',
+      });
       return;
-    }
-    this.armed[side] = false;
-    const reversal = this.pendingReversal && this.pendingReversal.marketId === this.market?.id && this.pendingReversal.side === side;
-    if (reversal) {
-      this.pendingReversal.shares = Math.max(0, this.pendingReversal.shares - fill.shares);
-      this.quotes[side].asks = fill.remainingLevels;
-      if (this.pendingReversal.shares <= 1e-8) this.pendingReversal = null;
     }
     const trade = {
       id: `paper-${this.market.start}-${side}-${now}-${++this.entrySequence}`,
@@ -541,15 +433,16 @@ class ProbabilityBot {
       marketTitle: this.market.title,
       side,
       shares: fill.shares,
-      entryKind: reversal ? 'MATCHED_REVERSAL' : 'NORMAL',
-      edgeGateBypassed: Boolean(reversal),
+      entryKind: 'SCHEDULED_MACD',
+      scheduledAt: schedule.scheduledAt,
+      entrySlot: schedule.slot,
       entryPrice: fill.averagePrice,
       cost: fill.cost,
       fees: fill.fees,
       totalCost: fill.totalCost,
-      edgeAtEntry: this.edges[side],
-      requiredNetEdge: this.requiredNetEdge[side],
-      modelProbability: side === 'UP' ? this.probabilityUp : 1 - this.probabilityUp,
+      edgeAtEntry: null,
+      requiredNetEdge: null,
+      modelProbability: null,
       openedAt: now,
       status: 'OPEN',
       peakBid: null,
@@ -564,17 +457,29 @@ class ProbabilityBot {
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     this.log('PAPER_BUY', {
       tradeId: trade.id,
-      entryKind: trade.entryKind, edgeGateBypassed: trade.edgeGateBypassed,
+      entryKind: trade.entryKind, scheduledAt: trade.scheduledAt, slot: trade.entrySlot,
       side, shares: fill.shares, price: fill.averagePrice,
-      modelProbability: trade.modelProbability,
-      edge: this.edges[side], requiredNetEdge: this.requiredNetEdge[side],
     });
   }
 
   entryFill(side) {
-    return this.pendingReversal && this.pendingReversal.marketId === this.market?.id && this.pendingReversal.side === side
-      ? sweepBook(this.quotes[side]?.asks, this.pendingReversal.shares, 'buy')
-      : simulateBuy(this.quotes[side]?.asks, this.strategySettings.sharesPerSignal);
+    return simulateBuy(this.quotes[side]?.asks, SHARES_PER_SIGNAL);
+  }
+
+  entrySchedule(now = this.now()) {
+    const start = this.market?.start;
+    if (!Number.isFinite(start)) return { due: false, nextEntryAt: null };
+    const first = start + OPENING_DELAY_SECONDS * 1000;
+    const last = start + LAST_ENTRY_SECONDS * 1000;
+    const slot = Math.floor((now - first) / ENTRY_INTERVAL_MS);
+    const scheduledAt = first + slot * ENTRY_INTERVAL_MS;
+    const due = slot >= 0 && slot <= 17 && slot > this.lastEntrySlot
+      && now < scheduledAt + SLOT_GRACE_MS && now < this.market.end;
+    const nextSlot = Math.max(0, slot + (slot <= this.lastEntrySlot || now >= scheduledAt + SLOT_GRACE_MS ? 1 : 0));
+    const nextEntryAt = first + nextSlot * ENTRY_INTERVAL_MS;
+    return { due, slot, scheduledAt, nextEntryAt: nextEntryAt <= last ? nextEntryAt : null,
+      firstEntryAt: first, lastEntryAt: last, intervalSeconds: 10, maxEntries: 18,
+      lastAttemptedSlot: this.lastEntrySlot };
   }
 
   processPositionExits(now) {
@@ -628,42 +533,7 @@ class ProbabilityBot {
   }
 
   processOppositeSignalExits(now) {
-    if (!this.activeSide || !this.market) return;
-    const oldSide = this.activeSide === 'UP' ? 'DOWN' : 'UP';
-    const trades = this.trades.filter(t => t.status === 'OPEN'
-      && t.marketId === this.market.id && t.side === oldSide);
-    if (!trades.length) return;
-    const quote = this.quotes[oldSide];
-    if (!Number.isFinite(quote?.updatedAt) || now < quote.updatedAt
-      || now - quote.updatedAt > EXIT_QUOTE_MAX_AGE_MS) return;
-    const execution = sweepBook(quote.bids, trades.reduce((sum, t) => sum + t.shares, 0), 'sell');
-    if (!execution) return;
-    quote.bids = execution.remainingLevels;
-    let remaining = execution.shares;
-    for (const trade of trades) {
-      const shares = Math.min(trade.shares, remaining);
-      if (shares <= 1e-8) break;
-      remaining -= shares;
-      let sold = trade;
-      if (shares < trade.shares - 1e-8) {
-        const fraction = shares / trade.shares;
-        sold = { ...trade, id: `${trade.id}-partial-${++this.entrySequence}`, shares };
-        for (const field of ['cost', 'fees', 'totalCost']) {
-          sold[field] = Number(trade[field] ?? 0) * fraction;
-          trade[field] = Number(trade[field] ?? 0) - sold[field];
-        }
-        trade.shares -= shares;
-        this.trades.unshift(sold);
-      }
-      this.closeTrade(
-        sold, execution.averagePrice, shares * execution.averagePrice, 'OPPOSITE_SIGNAL',
-        `Opposite ${this.activeSide} MACD signal; swept actual ${oldSide} bids at VWAP, less per-level fees.`,
-        now, execution.averagePrice, execution.fees * shares / execution.shares,
-      );
-    }
-    const pending = this.pendingReversal?.marketId === this.market.id
-      && this.pendingReversal.side === this.activeSide ? this.pendingReversal.shares : 0;
-    this.pendingReversal = { marketId: this.market.id, side: this.activeSide, shares: pending + execution.shares };
+    // Deliberately disabled: only TP, SL and original-market expiry handling may sell.
   }
 
   closeTrade(trade, exitPrice, payout, outcome, settlementSource, now, feeExecutionPrice, executionFees) {
@@ -770,9 +640,9 @@ class ProbabilityBot {
         timeframe: '5m',
         pollIntervalMs: POLL_MS,
         sharesPerSignal: this.strategySettings.sharesPerSignal,
-        minimumNetEdge: this.strategySettings.minimumNetEdge,
+        minimumNetEdge: null,
         lowPriceThreshold: this.strategySettings.lowPriceThreshold,
-        lowPriceMinimumNetEdge: this.strategySettings.lowPriceMinimumNetEdge,
+        lowPriceMinimumNetEdge: null,
         takerFeeRate: TAKER_FEE_RATE,
         minimumBestAsk: MIN_ENTRY_PRICE,
         openingDelaySeconds: this.strategySettings.openingDelaySeconds,
@@ -782,11 +652,15 @@ class ProbabilityBot {
         takeProfitPayoutPerShare: 1,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: 0,
-        reversalBypassesNetEdge: true,
-        signalPersistence: 'Carry MACD direction across windows; only a new closed 1m histogram signal changes it. TP/SL does not clear direction.',
-        entryModel: 'Carry MACD direction across windows. Normal entries retain net-edge gates and edge-reset cadence. Matched reversals bypass net-edge checks and target actual shares sold, sweeping available asks; cash, price-floor and real-depth checks remain active.',
-        model: '15 closed 5-minute candles for probability volatility; closed 1-minute MACD histogram (12,26,9) for direction; normal-CDF probability estimate',
-        exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. Opposite MACD signals sweep actual old-side bids and target the sold share count on the opposite side. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
+        probabilityModelEnabled: false,
+        reversalsEnabled: false,
+        entryIntervalSeconds: 10,
+        lastEntrySeconds: LAST_ENTRY_SECONDS,
+        maxEntriesPerWindow: 18,
+        signalPersistence: 'Reset each window. Minute 1 and minute 2 choose one locked direction; later bars never flip it.',
+        entryModel: '50 shares every 10 seconds from 120 through 290 seconds (18 scheduled slots). No probability or edge gate; no catch-up bursts. Cash, price-floor, fresh-book and real-depth checks remain active.',
+        model: 'Closed 1-minute MACD (12,26,9): solid red then shrinking red/solid green selects UP; solid green then shrinking green/solid red selects DOWN; otherwise skip.',
+        exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
       referencePrice: this.referencePrice,
@@ -798,7 +672,7 @@ class ProbabilityBot {
       standardizedGap: this.standardizedGap ?? null,
       probability: this.probabilityUp == null ? null : { UP: this.probabilityUp, DOWN: 1 - this.probabilityUp },
       edges: this.edges,
-      requiredNetEdge: this.requiredNetEdge,
+      requiredNetEdge: { UP: null, DOWN: null },
       entryArmed: { ...this.armed },
       entryFilter: this.entryFilter,
       quotes: {
@@ -816,6 +690,8 @@ class ProbabilityBot {
       macd: this.macd,
       pendingReversal: this.pendingReversal ? { ...this.pendingReversal } : null,
       activeSide: this.activeSide,
+      windowDecision: this.windowDecision,
+      entrySchedule: this.entrySchedule(now),
       learning: {
         ...this.learningStatus,
         persistenceStatus: this.persistenceError ? 'error' : this.learningStore ? 'connected' : 'disabled',
@@ -825,4 +701,4 @@ class ProbabilityBot {
   }
 }
 
-module.exports = { ProbabilityBot, probabilityUp, estimateLogReturnVolatility, normalCdf, simulateBuy };
+module.exports = { ProbabilityBot, probabilityUp, estimateLogReturnVolatility, normalCdf, simulateBuy, DEFAULT_STRATEGY_SETTINGS };

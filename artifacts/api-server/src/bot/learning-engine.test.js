@@ -1,106 +1,45 @@
 'use strict';
-
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { DEFAULT_SETTINGS, choosePaperSettings, simulateWindow } = require('./btc/learning-engine');
 const { METHOD } = require('./btc/macd-signal');
-const { DEFAULT_SETTINGS, MIN_CLOSED_WINDOWS, choosePaperSettings, simulateWindow } = require('./btc/learning-engine');
+const { pair, START } = require('./btc/window-test-fixture.cjs');
 
-test('replay keeps edge-reset cadence and matches total sold shares when reversing', () => {
-  const samples = Array.from({ length: 20 }, (_, i) => ({
-    ts: i * 2000, secondsSinceOpen: i * 2, secondsRemaining: 300 - i * 2,
-    referencePrice: 100, spotPrice: 100, volatility5m: 0.005,
-    pullback: { method: METHOD, side: i < 10 ? 'UP' : 'DOWN' },
-    quotes: Object.fromEntries(['UP', 'DOWN'].map(side => {
-      const price = i === (side === 'UP' ? 5 : 15) ? .55 : .3;
-      return [side, { bestAsk: price, bestBid: .35,
-        bids: [{ price: .35, size: 1000 }], asks: [{ price, size: 500 }] }];
-    })),
+function samples(first = 'SOLID_RED', second = 'SHRINKING_RED') {
+  const bars = pair(first, second).chart.bars;
+  return Array.from({ length: 600 }, (_, i) => ({
+    ts: START + i * 500, windowStart: START,
+    pullback: { method: METHOD },
+    windowDecision: i < 240 ? null : { minute1: bars[0], minute2: bars[1] },
+    quotes: Object.fromEntries(['UP', 'DOWN'].map(side => [side, {
+      bestAsk: .5, bestBid: .4, updatedAt: START + i * 500,
+      asks: [{ price: .5, size: 5000 }], bids: [{ price: .4, size: 5000 }],
+    }])),
   }));
-  const result = simulateWindow(samples, DEFAULT_SETTINGS);
-  assert.equal(result.trades, 4);
-  // Two100-share UP entries, a matched200-share DOWN reversal, then one100-share add.
-  assert.ok(Math.abs(result.pnl - 9.6875) < 1e-8);
-  assert.ok(Math.abs(result.finalCash - 10_009.6875) < 1e-8);
+}
+
+test('fixed-policy replay matches all 18 timed buys and exact own-side fee-adjusted P&L', () => {
+  const result = simulateWindow(samples());
+  assert.equal(result.trades, 18);
+  assert.ok(Math.abs(result.pnl - (-120.87)) < 1e-8);
+  assert.ok(Math.abs(result.finalCash - (10000 + result.pnl)) < 1e-8);
 });
 
-test('replay takes profit without rearming a continuously qualifying edge', () => {
-  const samples = Array.from({ length: 20 }, (_, i) => ({
-    ts: i * 500, secondsSinceOpen: i / 2, secondsRemaining: 300 - i / 2,
-    referencePrice: 100, spotPrice: 100, volatility5m: 0.005,
-    pullback: { method: METHOD, side: 'UP' },
-    quotes: {
-      UP: { bestAsk: .3, bestBid: i === 19 ? .4 : i < 10 ? .99 : .01, asks: [{ price: .3, size: 100 }] },
-      DOWN: { bestAsk: .7, bestBid: .6, asks: [{ price: .7, size: 100 }] },
-    },
-  }));
-  const result = simulateWindow(samples, DEFAULT_SETTINGS);
-  assert.equal(result.trades, 1);
-  assert.ok(Math.abs(result.pnl - 68.4607) < 1e-8);
+test('replay skips nonqualifying pairs and never uses old reversal-policy samples', () => {
+  assert.equal(simulateWindow(samples('SHRINKING_RED', 'SOLID_GREEN')).trades, 0);
+  const old = samples().map(s => ({ ...s, pullback: { method: 'macd-1m-12-26-9-reversal-sweep-v2' } }));
+  assert.equal(simulateWindow(old), null);
 });
 
-test('replay also bypasses negative edge only for a matched reversal', () => {
-  const samples = Array.from({ length: 20 }, (_, i) => ({
-    ts: i * 1000, secondsSinceOpen: i, secondsRemaining: 300 - i,
-    referencePrice: 100, spotPrice: 100, volatility5m: .005,
-    pullback: { method: METHOD, side: i < 10 ? 'UP' : 'DOWN' },
-    quotes: {
-      UP: { bestAsk: .3, bestBid: .35, asks: [{ price: .3, size: 1000 }], bids: [{ price: .35, size: 1000 }] },
-      DOWN: { bestAsk: .8, bestBid: .4, asks: [{ price: .8, size: 1000 }], bids: [{ price: .4, size: 1000 }] },
-    },
-  }));
-  const result = simulateWindow(samples, DEFAULT_SETTINGS);
-  assert.equal(result.trades, 2);
-  assert.ok(Math.abs(result.pnl - (-40.8625)) < 1e-8);
+test('replay requires a real timely closing mark; never invents data for an open lot', () => {
+  assert.equal(simulateWindow(samples().slice(0, 400)), null);
 });
 
-test('auto-tuner holds current settings until enough closed windows exist', () => {
-  const windows = Array.from({ length: MIN_CLOSED_WINDOWS - 1 }, (_, i) => ({
-    windowStart: i * 300_000, samples: [],
-  }));
-  const result = choosePaperSettings(windows, DEFAULT_SETTINGS);
+test('regression reports fixed-policy results but never applies adaptive sizes or timing', () => {
+  const result = choosePaperSettings([{ windowStart: START, samples: samples() }], { sharesPerSignal: 999 });
   assert.equal(result.applied, false);
-  assert.equal(result.reason, 'INSUFFICIENT_HISTORY');
-  assert.deepEqual(result.settings, DEFAULT_SETTINGS);
-});
-
-test('auto-tuner excludes all previous trendline execution policies', () => {
-  const windows = Array.from({ length: 15 }, (_, i) => ({
-    windowStart: i * 300_000,
-    samples: Array.from({ length: 20 }, () => ({
-      pullback: { method: i % 2 ? 'macd-1m-12-26-9-reversal-sweep-v1' : 'swing50-1m-edge-reset-tpsl-v8', side: 'UP' },
-    })),
-  }));
-  const result = choosePaperSettings(windows, DEFAULT_SETTINGS);
-  assert.equal(result.applied, false);
-  assert.equal(result.reason, 'INSUFFICIENT_HISTORY');
-  assert.equal(result.windows, 0);
-});
-
-test('auto-tuner evaluates only the latest15 MACD windows in chronological order', () => {
-  const windows = Array.from({ length: 20 }, (_, windowIndex) => {
-    const losingWindow = windowIndex % 2 === 0;
-    const samples = Array.from({ length: 20 }, (_, index) => {
-      const secondsSinceOpen = index * 15;
-      const secondsRemaining = 300 - secondsSinceOpen;
-      const zScore = index % 2 === 0 ? (losingWindow ? .06 : .13) : 0;
-      const spotPrice = 100 * Math.exp(zScore * .005 * Math.sqrt(secondsRemaining / 300));
-      const finalBid = index === 19 ? (losingWindow ? .01 : .99) : .45;
-      return {
-        ts: windowIndex * 300_000 + secondsSinceOpen * 1000,
-        secondsSinceOpen, secondsRemaining, referencePrice: 100, spotPrice, volatility5m: .005,
-        pullback: { method: METHOD, side: 'UP' },
-        quotes: Object.fromEntries(['UP', 'DOWN'].map(side => [side, {
-          bestAsk: .45, bestBid: finalBid,
-          asks: [{ price: .45, size: 100 }], bids: [{ price: finalBid, size: 100 }],
-        }])),
-      };
-    });
-    return { windowStart: windowIndex * 300_000, samples };
-  });
-  const result = choosePaperSettings(windows, DEFAULT_SETTINGS);
-  assert.equal(result.applied, true);
-  assert.equal(result.reason, 'HOLDOUT_IMPROVEMENT');
-  assert.equal(result.windows, 15);
-  assert.ok(result.baseline.tradeCount >= 10);
-  assert.ok(result.selected.averagePnlPerWindow > result.baseline.averagePnlPerWindow);
+  assert.equal(result.settings.sharesPerSignal, 50);
+  assert.equal(DEFAULT_SETTINGS.openingDelaySeconds, 120);
+  assert.equal(result.windows, 1);
+  assert.equal(result.baseline.trades, 18);
 });

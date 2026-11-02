@@ -148,23 +148,61 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents the BTC probability paper bot", () => {
+test("dashboard presents the fixed two-candle MACD paper policy without old model gates", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
-  assert.match(html, /BTC PROBABILITY BOT/);
+  assert.match(html, /BTC MACD PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
-  assert.match(html, /100 SHARES \/ SIGNAL/);
+  assert.match(html, /50 SHARES \/ 10 SECONDS/);
   assert.match(html, /MACD.*histogram/i);
   assert.match(html, /shrinking red/i);
   assert.match(html, /shrinking green/i);
   assert.match(html, /12\/26\/9/);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
-  assert.match(html, /staying above threshold does not trigger repeated buys/);
-  assert.match(html, /WAIT EDGE RESET/);
-  assert.match(html, /TP: own-side bid at \$0.99/);
-  assert.match(html, /SL: own-side bid at \$0.01/);
+  assert.match(html, /120 through 290 seconds/);
+  assert.match(html, /No probability model/);
+  assert.match(html, /no flips or reversals/);
+  assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
+  assert.match(html, /TP: own-side bid ≥ \$0.99/);
+  assert.match(html, /SL: bid ≤ \$0.01/);
   assert.match(html, /AWAITING SETTLEMENT/);
-  assert.match(html, /no opening delay/);
-  assert.match(html, /Expected move left/);
+  assert.match(html, /Minute 1 histogram/);
+  assert.match(html, /Minute 2 histogram/);
   assert.match(html, /Paper trade history/);
   assert.doesNotMatch(html, /Manual limit order/);
+});
+
+test("dashboard renders locked, skipped and observing states without probability or reversal dependencies", () => {
+  const vm = require("node:vm");
+  const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
+  const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m => [m[1], { style: {} }]));
+  const context = {
+    document: { getElementById(id) { assert.ok(elements[id], "Unknown element " + id); return elements[id]; } },
+    window: {}, fetch: () => new Promise(() => {}), setTimeout() {},
+  };
+  vm.createContext(context);
+  for (const script of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) {
+    vm.runInContext(script[1], context);
+  }
+  const state = {
+    activeSide: "UP", windowDecision: { status: "LOCKED" },
+    entrySchedule: { nextEntryAt: 130000, due: true }, entryFilter: { allowed: true },
+    quotes: { UP: { estimatedAverageAsk: .5 } },
+  };
+  context.renderSide("UP", state);
+  context.renderSide("DOWN", state);
+  assert.equal(elements.upProb.textContent, "LOCKED");
+  assert.equal(elements.downProb.textContent, "OFF");
+  assert.equal(elements.upSignal.textContent, "ENTRY SLOT");
+  context.renderTrend(state);
+  context.renderPositions({});
+  context.renderTrades([{ side: "UP", shares: 50, openedAt: 120000, scheduledAt: 120000, status: "OPEN" }]);
+  assert.match(elements.trades.innerHTML, /Scheduled/);
+  assert.doesNotMatch(elements.trades.innerHTML, /Model probability/);
+  state.activeSide = null;
+  state.windowDecision.status = "SKIP_WINDOW";
+  context.renderSide("UP", state);
+  assert.equal(elements.upProb.textContent, "SKIP");
+  state.windowDecision.status = "OBSERVING";
+  context.renderSide("UP", state);
+  assert.equal(elements.upProb.textContent, "WAIT");
 });

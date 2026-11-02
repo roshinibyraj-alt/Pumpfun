@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080d16">
-  <title>BTC 5-Minute Probability Bot</title>
+  <title>BTC 5-Minute MACD Paper Bot</title>
   <style>
     :root{color-scheme:dark;--bg:#080d16;--panel:#101927;--line:#263447;--muted:#8d9bb0;--text:#edf4ff;--cyan:#51d9ef;--green:#39d99a;--red:#ff6f7e;--amber:#ffc76a}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 8% 0,#102c3a 0,transparent 32%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
@@ -35,29 +35,29 @@
 <body>
 <main>
   <header class="top">
-    <div><div class="brand">BTC PROBABILITY BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
-    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
+    <div><div class="brand">BTC MACD PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
+    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 50 SHARES / 10 SECONDS</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">MACD 12/26/9 HISTOGRAM SIGNAL</div><h1>One-minute MACD, persistent direction.</h1><p>Paper signals use the standard 12/26/9 MACD histogram on closed one-minute candles only. Shrinking red or solid green sets UP; shrinking green or solid red sets DOWN; zero or unchanged bars hold the current bias across five-minute windows. An opposite signal sells the old side, then targets the same sold share count on the new side without a net-edge gate. Normal entries keep their existing gates; cash checks remain active and live orders stay disabled.</p></div>
+    <div><div class="eyebrow">MACD 12/26/9 · TWO-CANDLE WINDOW SIGNAL</div><h1>Observe two minutes. Lock one side.</h1><p>Each five-minute window starts without a signal. Minute 1 solid red followed by minute 2 shrinking red or solid green locks UP. Minute 1 solid green followed by minute 2 shrinking green or solid red locks DOWN. Otherwise skip the window. Buy 50 shares every 10 seconds from 120 through 290 seconds. No probability model, no edge gate, no flips or reversals. Cash, real liquidity and existing TP/SL still apply.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid">
-    <article class="card"><div class="label">Reference price</div><div class="value" id="reference">—</div><div class="foot">Chainlink BTC/USD near window open</div></article>
+    <article class="card"><div class="label">Minute 1 histogram</div><div class="value" id="reference" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">First closed minute of this window</div></article>
     <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
-    <article class="card"><div class="label">Expected move left</div><div class="value" id="expected">—</div><div class="foot">15 closed 5-minute candles · volatility estimate</div></article>
-    <article class="card"><div class="label">Standardized gap</div><div class="value" id="zscore">—</div><div class="foot">Signed distance ÷ expected remaining move</div></article>
+    <article class="card"><div class="label">Minute 2 histogram</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Decides direction when it closes at 120s</div></article>
+    <article class="card"><div class="label">Next scheduled entry · UTC</div><div class="value" id="zscore">—</div><div class="foot">120s, 130s, …, 290s · maximum 18 entries</div></article>
   </section>
   <section class="prob-grid">
-    <article class="prob up"><div class="prob-head"><span>UP · MODEL PROBABILITY</span><span id="upEdge">EDGE —</span></div><div class="prob-price" id="upProb">—</div><div class="bar"><i id="upBar"></i></div><div class="prob-meta"><div><span id="upAskLabel">100-share avg ask</span><strong id="upAsk">—</strong></div><div><span>Model edge</span><strong id="upNet">—</strong></div><div><span>Signal</span><strong id="upSignal">WAIT</strong></div></div></article>
-    <article class="prob down"><div class="prob-head"><span>DOWN · MODEL PROBABILITY</span><span id="downEdge">EDGE —</span></div><div class="prob-price" id="downProb">—</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">100-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Model edge</span><strong id="downNet">—</strong></div><div><span>Signal</span><strong id="downSignal">WAIT</strong></div></div></article>
+    <article class="prob up"><div class="prob-head"><span>UP · WINDOW DIRECTION</span><span id="upEdge">50 / 10s</span></div><div class="prob-price" id="upProb">WAIT</div><div class="bar"><i id="upBar"></i></div><div class="prob-meta"><div><span id="upAskLabel">50-share avg ask</span><strong id="upAsk">—</strong></div><div><span>Window decision</span><strong id="upNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="upSignal">WAIT</strong></div></div></article>
+    <article class="prob down"><div class="prob-head"><span>DOWN · WINDOW DIRECTION</span><span id="downEdge">50 / 10s</span></div><div class="prob-price" id="downProb">WAIT</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">50-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Window decision</span><strong id="downNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="downSignal">WAIT</strong></div></div></article>
   </section>
   <section class="panel">
     <div class="section-head"><h2>MACD histogram · 12/26/9 · last 50 closed 1m bars</h2><small id="trendStatus">Waiting for MACD history</small></div>
     <div class="macd-head"><div><span>Active direction</span><strong id="macdDir" class="dir-NONE">—</strong></div><div><span>Latest histogram</span><strong id="macdVal">—</strong></div><div><span>Classification</span><strong id="macdClass" style="font-size:clamp(13px,1.6vw,17px)">—</strong></div><div><span>Status</span><strong id="macdStatus" style="font-size:clamp(13px,1.6vw,17px)">—</strong></div></div>
     <div id="trendChart" class="trend-chart"><div class="empty">Waiting for closed one-minute candles to compute MACD 12/26/9.</div></div>
-    <div class="trend-legend"><span><i style="background:#39d99a"></i>Solid green · UP</span><span><i style="background:#1f6b4f"></i>Shrinking green · DOWN</span><span><i style="background:#ff6f7e"></i>Solid red · DOWN</span><span><i style="background:#7a3540"></i>Shrinking red · UP</span><span id="macdLast">Last closed bar —</span></div>
+    <div class="trend-legend"><span><i style="background:#39d99a"></i>Solid green</span><span><i style="background:#1f6b4f"></i>Shrinking green</span><span><i style="background:#ff6f7e"></i>Solid red</span><span><i style="background:#7a3540"></i>Shrinking red</span><span id="macdLast">Last closed bar —</span></div>
   </section>
   <section class="grid" style="margin-top:12px">
     <article class="card"><div class="label">Paper cash</div><div class="value" id="cash">—</div><div class="foot">Starting balance $10,000</div></article>
@@ -70,8 +70,8 @@
     <article class="position-card down"><div class="position-title">DOWN · ACCUMULATED POSITION</div><div class="position-shares" id="downShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="downAverageCost">—</strong></div><div><span>Unrealized P&amp;L</span><strong id="downUnrealized">—</strong></div><div><span>Realized P&amp;L</span><strong id="downRealized">—</strong></div><div><span>Open cost basis</span><strong id="downCostBasis">—</strong></div><div><span>Live best bid</span><strong id="downMarkBid">—</strong></div><div><span>Marked value</span><strong id="downMarkedValue">—</strong></div></div></article>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>Paper trade history</h2><small>Adaptive share size · simulated at visible asks</small></div>
-    <div id="trades" class="table-wrap"><div class="empty">Waiting for a qualifying edge.</div></div>
+    <div class="section-head"><h2>Paper trade history</h2><small>Fixed 50 shares · scheduled every 10 seconds</small></div>
+    <div id="trades" class="table-wrap"><div class="empty">Waiting for a qualifying two-candle pattern.</div></div>
   </section>
   <section class="panel">
     <div class="section-head"><h2>Paper learning &amp; regression</h2><small id="learningStatus">Connecting to persistent learning log</small></div>
@@ -80,9 +80,9 @@
   <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-     <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Model probability is logged without a minimum probability filter. MACD = EMA12 − EMA26 of closed 1m closes; signal = EMA9 of MACD; histogram = MACD − signal. Shrinking red (negative, rising) or solid green (positive, rising) sets UP. Shrinking green (positive, falling) or solid red (negative, falling) sets DOWN. Zero or unchanged histogram holds the bias. Direction persists until an opposite signal. Normal entries retain the net-edge gate and edge-reset cadence: staying above threshold does not trigger repeated buys. An opposite signal sells all old-side shares by sweeping actual bids, then targets the sold share quantity on the opposite side by sweeping asks. Matched reversals bypass the net-edge gate; cash, price-floor and actual-depth checks remain active. Any real unfilled remainder stays pending within that market; no synthetic liquidity. TP: own-side bid at $0.99 or above credits $1.00 per share; SL: own-side bid at $0.01 or below credits $0.00, before fees. Expiry uses a fresh closing bid; otherwise the bot retries the original market for a current token bid or confirmed final payout. Missing data is shown as AWAITING SETTLEMENT, never an invented fill. MACD uses up to 50 closed one-minute bars, never the forming bar; probability volatility still uses 15 five-minute candles. There is no opening delay.</div>
+     <div class="formula">MACD = EMA12 − EMA26 of closed 1m closes; signal = EMA9 of MACD; histogram = MACD − signal. Only the first two closed minutes in this exact window choose direction. Minute 1 SOLID RED → minute 2 SHRINKING RED or SOLID GREEN: UP. Minute 1 SOLID GREEN → minute 2 SHRINKING GREEN or SOLID RED: DOWN. All other pairs skip the window. Direction locks until expiry and resets next window. Scheduled buys: 50 shares at 120, 130, …, 290 seconds, maximum 900 shares if all 18 entries fill. Normal scan jitter up to one second is allowed; missed or blocked slots are skipped, never accumulated or retried in a burst. No probability model, edge gate, opposite-signal selling or matched reversals. Cash, existing $0.02 price-floor checks, fresh quotes and real visible depth remain required. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. Expiry and original-market recovery remain unchanged. Regression logs cannot change this fixed sizing or schedule.</div>
   </section>
-  <p class="footer">Simulation only—no live order submission. Probability volatility uses the latest 15 completed five-minute candles. Direction signals use the standard 12/26/9 MACD histogram on closed one-minute candles only. The last direction persists across windows and restarts until an opposite signal. On reversal, open opposing positions are sold by sweeping actual own-side CLOB bids, less taker fees; opposite entries still need the existing entry gates. Repeated polling does not add duplicate entries. The tuning gate evaluates the latest 15 completed five-minute market windows using the current signal method and matching reversal exits. Existing $0.99/$0.01 exits and window-end own-side bid marks remain unchanged.</p>
+  <p class="footer">Paper only—no live orders. Each five-minute window independently observes its first two closed one-minute MACD bars. No signal carry-over, no intra-window flips and no probability model. Exactly one entry attempt per scheduled slot; real liquidity and paper cash are required. Persistent learning logs and compatible fixed-policy regression remain available, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -95,7 +95,7 @@ const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'
 const resultLabel=t=>t.status==='OPEN'?(t.settlementStatus==='AWAITING_SETTLEMENT'?'AWAITING SETTLEMENT':'OPEN'):t.finalOutcome==='TAKE_PROFIT'?'TP · $1.00':t.finalOutcome==='STOP_LOSS'?'SL · $0.00':['WINDOW_PRICE_EXIT','WINDOW_RECOVERY_EXIT'].includes(t.finalOutcome)?'WINDOW · '+money(t.exitPrice):t.finalOutcome==='MARKET_RESOLUTION'?'RESOLVED · '+money(t.exitPrice):t.finalOutcome||'—';
 function renderTrades(trades){
   if(!trades?.length){$('trades').innerHTML='<div class="empty">No signal entries yet.</div>';return}
-  $('trades').innerHTML='<table><thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry avg</th><th>Peak bid</th><th>Model probability</th><th>Entry edge</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${Number(t.shares).toFixed(0)}</td><td>${money(t.entryPrice)}</td><td>${money(t.peakBid)}<div class="muted">${time(t.peakBidAt)}</div></td><td>${pct(t.modelProbability)}</td><td>${pct(t.edgeAtEntry)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
+  $('trades').innerHTML='<table><thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry avg</th><th>Peak bid</th><th>Scheduled · UTC</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${Number(t.shares).toFixed(0)}</td><td>${money(t.entryPrice)}</td><td>${money(t.peakBid)}<div class="muted">${time(t.peakBidAt)}</div></td><td>${time(t.scheduledAt)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
 }
 function renderEvents(events){
  $('events').innerHTML=events?.length?events.slice(0,10).map(e=>`<div class="trade"><span>${safe(e.event.replaceAll('_',' '))} · ${safe(e.side||'')}</span><span class="muted">${time(e.ts)}${e.edge!=null?' · edge '+pct(e.edge):''}${e.realizedPnl!=null?' · '+signed(e.realizedPnl):''}</span></div>`).join(''):'<div class="empty">No signal activity yet.</div>';
@@ -106,26 +106,20 @@ async function pollLearning(){
   if(!response.ok)throw Error('Learning API HTTP '+response.status);
   const state=await response.json(),latest=state.tuningRuns?.[0]?.result;
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
-   $('learningSummary').innerHTML=`<div class="trade"><span>Active paper settings</span><span class="muted">${safe(JSON.stringify(window.latestStrategyState?.strategy||state.settings||{}))}</span></div><div class="trade"><span>Latest evaluation</span><span class="muted">${safe(latest?.reason||'Collecting data')} · ${Number(latest?.windows||0)} windows${latest?.applied?' · settings updated':''}</span></div><div class="trade"><span>Side selection</span><span class="muted">MACD 12/26/9 on closed 1m · shrinking red / solid green → UP · shrinking green / solid red → DOWN · zero/unchanged holds · sell before reversal</span></div>`;
+    const evaluation=window.latestStrategyState?.learning?.lastEvaluation;
+    $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">50 shares / 10 seconds · 120–290s · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting new two-candle policy samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Side selection</span><span class="muted">First two closed 1m bars only · direction locked for this window · no reversals</span></div>`;
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
 function renderSide(side,state){
- const probability=state.probability?.[side],edge=state.edges?.[side],ask=state.quotes?.[side]?.bestAsk;
- $(side.toLowerCase()+'Prob').textContent=pct(probability);
-  $(side.toLowerCase()+'Bar').style.width=isNumeric(probability)?Math.max(0,Math.min(1,Number(probability)))*100+'%':'0%';
+ const active=state.activeSide===side,prefix=side.toLowerCase(),decision=state.windowDecision||{},schedule=state.entrySchedule||{};
+ $(prefix+'Prob').textContent=active?'LOCKED':state.activeSide?'OFF':decision.status==='SKIP_WINDOW'?'SKIP':'WAIT';
+ $(prefix+'Bar').style.width=active?'100%':'0%';
  $(side.toLowerCase()+'Ask').textContent=money(state.quotes?.[side]?.estimatedAverageAsk);
- $(side.toLowerCase()+'AskLabel').textContent=`${state.strategy?.sharesPerSignal??100}-share avg ask`;
- $(side.toLowerCase()+'Net').textContent=signed(edge,3);
- $(side.toLowerCase()+'Net').className=Number(edge)>=.05?'edge-good':Number(edge)<0?'edge-bad':'';
- $(side.toLowerCase()+'Edge').textContent='EDGE '+signed(edge,3);
-  const strategy=state.strategy||{},mode=String(strategy.sideMode||'best-edge').toLowerCase();
-  const required=Number(state.requiredNetEdge?.[side]??(Number(state.quotes?.[side]?.estimatedAverageAsk)<Number(strategy.lowPriceThreshold??.25)?Number(strategy.lowPriceMinimumNetEdge??.10):Number(strategy.minimumNetEdge??.05)));
-    const activeSide=state.activeSide??state.macd?.side??state.pullback?.side;
-    const pend=state.pendingReversal,qty=pend&&pend.side===side&&isNumeric(pend.shares)?Number(pend.shares):Number(strategy.sharesPerSignal??100);
-    $(side.toLowerCase()+'AskLabel').textContent=`${qty}-share avg ask${pend&&pend.side===side?' · reversal':''}`;
-   const sideAllowed=mode==='best-edge'||(mode==='up-only'&&side==='UP')||(mode==='down-only'&&side==='DOWN')||(mode==='pullback'&&activeSide===side);
-    $(side.toLowerCase()+'Signal').textContent=state.entryFilter?.allowed===false?'BLOCKED':!sideAllowed?(mode==='pullback'?(activeSide?'OPPOSITE BIAS':'WAIT SIGNAL'):'SIDE FILTER'):pend&&pend.side===side?`REVERSE PENDING ${qty}`:state.entryArmed?.[side]===false?'WAIT EDGE RESET':isNumeric(edge)&&Number(edge)>=required?`BUY ${qty}`:isNumeric(edge)?'WAIT':'—';
+ $(prefix+'AskLabel').textContent='50-share avg ask';
+ $(prefix+'Net').textContent=String(decision.status||'OBSERVING').replace(/_/g,' ');
+ $(prefix+'Edge').textContent='50 / 10s';
+ $(prefix+'Signal').textContent=!active?'NO ENTRY':!schedule.nextEntryAt?'ENTRIES FINISHED':state.entryFilter?.allowed===false?'BLOCKED':schedule.due?'ENTRY SLOT':'NEXT '+time(schedule.nextEntryAt);
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
@@ -152,7 +146,7 @@ function renderTrend(state){
  const last=bars.length?bars[bars.length-1]:null;
  $('macdLast').textContent='Last closed bar '+(last?time(last.end)+' UTC':'—');
  const reason=(m.activeSignalReason||'').replace(/_/g,' ');
- $('trendStatus').textContent=`${m.timeframe||'1m'} · ${m.fastPeriod??12}/${m.slowPeriod??26}/${m.signalPeriod??9} · ${st.replace(/_/g,' ')}${m.signalAt?' · signal '+time(m.signalAt):''}${reason?' · '+reason:''}${state.pendingReversal?' · pending reversal '+state.pendingReversal.side+' '+state.pendingReversal.shares:''}`;
+  $('trendStatus').textContent=`1m · 12/26/9 · ${st.replace(/_/g,' ')} · ${(state.windowDecision?.status||'OBSERVING').replace(/_/g,' ')}${reason?' · '+reason:''}`;
  if(!bars.length){$('trendChart').innerHTML='<div class="empty">'+(st==='STALE'?'MACD history is stale; no bars shown.':st==='INVALID_HISTORY'?'Candle history invalid; MACD unavailable.':'Waiting for enough closed one-minute candles to compute MACD 12/26/9.')+'</div>';return}
  const W=1000,H=260,L=60,R=990,T=14,B=246,mid=(T+B)/2;
  const mx=Math.max(...bars.map(b=>Math.abs(Number(b.histogram))))||1;
@@ -169,12 +163,13 @@ async function poll(){
    const s=await response.json(),account=s.paperAccount||{};window.latestStrategyState=s;
   $('error').style.display=s.error?'block':'none';$('error').textContent=s.error||'';
   $('run').innerHTML=`<i class="dot"></i>${s.running?'SCANNER RUNNING':'SCANNER STOPPED'}`;
-   $('strategyBadge').textContent=`PAPER ONLY · ${s.strategy?.sharesPerSignal??100} SHARES / SIGNAL`;
+   $('strategyBadge').textContent='PAPER ONLY · 50 SHARES / 10 SECONDS';
   $('remaining').textContent=s.window?`${Math.ceil(s.window.secondsRemaining)} seconds`:'—';
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
-  $('reference').textContent=money(s.referencePrice,2);$('spot').textContent=money(s.spotPrice,2);
-  $('gap').textContent='Difference from reference '+signed(s.priceGap,2);
-   $('expected').textContent=money(s.expectedMove,2);$('zscore').textContent=isNumeric(s.standardizedGap)?Number(s.standardizedGap).toFixed(3):'—';
+  $('reference').textContent=String(s.windowDecision?.minute1?.classification||'WAIT').replace(/_/g,' ');$('spot').textContent=money(s.spotPrice,2);
+  $('gap').textContent='Informational only · no probability model';
+   $('expected').textContent=String(s.windowDecision?.minute2?.classification||'WAIT').replace(/_/g,' ');
+   $('zscore').textContent=s.activeSide&&s.entrySchedule?.nextEntryAt?time(s.entrySchedule.nextEntryAt):s.windowDecision?.status==='SKIP_WINDOW'?'SKIP':'—';
    renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);renderTrend(s);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
@@ -182,7 +177,7 @@ async function poll(){
   $('wins').textContent=`${account.wins??0} wins · ${account.losses??0} losses`;
   $('feedState').textContent=s.priceFeed?.status||'—';
   $('updated').textContent=s.statusReason|| (s.lastUpdateAt?'Updated '+time(s.lastUpdateAt):'Waiting for first scan');
-  $('feedStatus').textContent=s.priceFeed?`${s.priceFeed.source} · ${s.priceFeed.ageMs==null?'no update':(s.priceFeed.ageMs/1000).toFixed(1)+'s old'} · vol history ${s.priceFeed.history?.status||'waiting'}`:'Awaiting live data';
+ $('feedStatus').textContent=s.priceFeed?`${s.priceFeed.source} · ${s.priceFeed.ageMs==null?'no update':(s.priceFeed.ageMs/1000).toFixed(1)+'s old'} · closed 1m MACD history`:'Awaiting live data';
   renderTrades(s.trades);renderEvents(s.events);
  }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
  setTimeout(poll,1000);
