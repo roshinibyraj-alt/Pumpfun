@@ -335,7 +335,8 @@ class ProbabilityBot {
     };
     this.cash -= fill.totalCost;
     this.trades.unshift(trade);
-    this.trades.length = Math.min(this.trades.length, 200);
+    let retainedSettled = 0;
+    this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     this.log('PAPER_BUY', {
       side, shares: SHARES_PER_SIGNAL, price: fill.averagePrice,
       edge: this.edges[side], requiredNetEdge: this.requiredNetEdge[side],

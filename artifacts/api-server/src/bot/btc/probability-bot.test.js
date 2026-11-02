@@ -178,6 +178,29 @@ test('requires 10 percent net edge when the executable average ask is below $0.2
   assert.equal(positions.DOWN.realizedPnl, 0);
 });
 
+ test('keeps every open share in the side totals after the trade-history limit', () => {
+  const bot = new ProbabilityBot({
+    now: () => 30_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { id: 'market', start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.probabilityUp = 0.8;
+  bot.quotes = {
+    UP: { bestAsk: 0.70, asks: [{ price: 0.70, size: 100 }] },
+    DOWN: { bestAsk: 0.30, asks: [{ price: 0.30, size: 100 }] },
+  };
+  bot.edges = bot.calculateEdges();
+  bot.trades = Array.from({ length: 200 }, (_, index) => ({
+    id: `open-${index}`, marketId: 'market', side: 'UP', shares: 100,
+    totalCost: 70, status: 'OPEN',
+  }));
+
+  bot.processSignals(30_000);
+
+  assert.equal(bot.trades.filter(trade => trade.status === 'OPEN').length, 201);
+  assert.equal(bot.snapshot().paperAccount.positions.UP.shares, 20_100);
+});
+
  test('own-side bid at 0.99 takes profit and credits one dollar per share', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
@@ -205,7 +228,7 @@ test('requires 10 percent net edge when the executable average ask is below $0.2
   assert.equal(bot.snapshot().strategy.pollIntervalMs, 500);
 });
 
-test('tracks the highest fresh own-side bid without blocking exits inside the cutoff', () => {
+test('tracks the highest fresh own-side bid while exits remain active', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
