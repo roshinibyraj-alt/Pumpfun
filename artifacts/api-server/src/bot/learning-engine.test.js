@@ -9,40 +9,40 @@ const {
   choosePaperSettings,
 } = require('./btc/learning-engine');
 
-test('detects a confirmed retracement after a sustained BTC rise', () => {
-  const pullback = detectPullback([
-    { ts: 0, price: 100_000 },
-    { ts: 15_000, price: 100_020 },
-    { ts: 20_000, price: 100_025 },
-    { ts: 30_000, price: 100_060 },
-    { ts: 40_000, price: 100_035 },
-  ], 40_000, 0.001);
+function candlesFromCloses(closes, now = closes.length * 300_000) {
+  return closes.map((close, index) => ({
+    start: index * 300_000,
+    end: (index + 1) * 300_000,
+    open: index ? closes[index - 1] : close,
+    high: Math.max(index ? closes[index - 1] : close, close) + 2,
+    low: Math.min(index ? closes[index - 1] : close, close) - 2,
+    close,
+  })).filter(candle => candle.end <= now);
+}
+
+test('detects a confirmed retracement from the rolling 15 closed candles after a rise', () => {
+  const closes = Array.from({ length: 12 }, (_, index) => 100_000 + index * 6)
+    .concat([100_060, 100_050, 100_040]);
+  const pullback = detectPullback(candlesFromCloses(closes), 15 * 300_000, 0.0001);
   assert.equal(pullback.side, 'DOWN');
   assert.equal(pullback.regime, 'PULLBACK_AFTER_RISE');
   assert.ok(pullback.retracementRatio >= 0.35);
+  assert.equal(pullback.lookbackCandles, 15);
 });
 
-test('detects an upward reversal after a sustained BTC fall', () => {
-  const pullback = detectPullback([
-    { ts: 0, price: 100_000 },
-    { ts: 15_000, price: 99_980 },
-    { ts: 20_000, price: 99_975 },
-    { ts: 30_000, price: 99_940 },
-    { ts: 40_000, price: 99_965 },
-  ], 40_000, 0.001);
+test('detects an upward pullback after a decline in the rolling candle window', () => {
+  const closes = Array.from({ length: 12 }, (_, index) => 100_000 - index * 6)
+    .concat([99_950, 99_960, 99_970]);
+  const pullback = detectPullback(candlesFromCloses(closes), 15 * 300_000, 0.0001);
   assert.equal(pullback.side, 'UP');
   assert.equal(pullback.regime, 'PULLBACK_AFTER_FALL');
 });
 
-test('does not signal on a small move or too few ticks', () => {
-  assert.equal(detectPullback([{ ts: 1_000, price: 100_000 }], 1_000, 0.001), null);
-  assert.equal(detectPullback([
-    { ts: 0, price: 100_000 },
-    { ts: 15_000, price: 100_005 },
-    { ts: 30_000, price: 100_008 },
-    { ts: 40_000, price: 100_004 },
-    { ts: 45_000, price: 100_003 },
-  ], 45_000, 0.001), null);
+test('does not signal without 15 completed candles or on a small move', () => {
+  const small = Array.from({ length: 15 }, (_, index) => 100_000 + index);
+  assert.equal(detectPullback(candlesFromCloses(small), 15 * 300_000, 0.001), null);
+  assert.equal(detectPullback(candlesFromCloses(small.slice(0, 14)), 14 * 300_000, 0.001), null);
+  assert.equal(detectPullback(candlesFromCloses(small, 14 * 300_000), 14 * 300_000, 0.001), null);
 });
 
 test('auto-tuner holds current settings until enough closed windows exist', () => {
@@ -56,13 +56,13 @@ test('auto-tuner holds current settings until enough closed windows exist', () =
   assert.deepEqual(result.settings, DEFAULT_SETTINGS);
 });
 
-test('auto-tuner accepts a threshold only when it improves chronological holdout results', () => {
-  const windows = Array.from({ length: 100 }, (_, windowIndex) => {
+test('auto-tuner evaluates only the latest 15 completed windows in chronological order', () => {
+  const windows = Array.from({ length: 20 }, (_, windowIndex) => {
     const losingWindow = windowIndex % 2 === 0;
-    const zScore = losingWindow ? 0.06 : 0.13;
     const samples = Array.from({ length: 20 }, (_, index) => {
       const secondsSinceOpen = index * 15;
       const secondsRemaining = 300 - secondsSinceOpen;
+      const zScore = index % 2 === 0 ? (losingWindow ? 0.06 : 0.13) : 0;
       const spotPrice = 100 * Math.exp(zScore * 0.005 * Math.sqrt(secondsRemaining / 300));
       const finalBid = index === 19 ? (losingWindow ? 0.01 : 0.99) : 0.45;
       return {
@@ -85,6 +85,7 @@ test('auto-tuner accepts a threshold only when it improves chronological holdout
   const result = choosePaperSettings(windows, DEFAULT_SETTINGS);
   assert.equal(result.applied, true);
   assert.equal(result.reason, 'HOLDOUT_IMPROVEMENT');
+  assert.equal(result.windows, 15);
   assert.equal(result.settings.minimumNetEdge, 0.07);
   assert.ok(result.selected.averagePnlPerWindow > result.baseline.averagePnlPerWindow);
 });

@@ -5,6 +5,7 @@ const SYMBOL = 'btc/usd';
 const MAX_AGE_MS = 15_000;
 const RETAIN_MS = 60 * 60 * 1000;
 const HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100';
+const HISTORY_REFRESH_MS = 60_000;
 
 class ChainlinkPriceFeed {
   constructor({ WebSocketImpl = globalThis.WebSocket, now = Date.now, fetchImpl = globalThis.fetch } = {}) {
@@ -17,6 +18,7 @@ class ChainlinkPriceFeed {
     this.historyStatus = 'waiting';
     this.historyError = null;
     this.historyRetryTimer = null;
+    this.historyRefreshTimer = null;
     this.socket = null;
     this.started = false;
     this.status = 'starting';
@@ -30,12 +32,24 @@ class ChainlinkPriceFeed {
     if (this.started) return;
     this.started = true;
     void this.loadHistoricalCandles();
+    this.scheduleHistoryRefresh();
     if (typeof this.WebSocketImpl !== 'function') {
       this.status = 'unsupported';
       this.error = 'Node.js WebSocket support is required (Node 22 or newer)';
       return;
     }
     this.connect();
+  }
+
+  scheduleHistoryRefresh() {
+    clearTimeout(this.historyRefreshTimer);
+    if (!this.started) return;
+    this.historyRefreshTimer = setTimeout(async () => {
+      this.historyRefreshTimer = null;
+      await this.loadHistoricalCandles();
+      this.scheduleHistoryRefresh();
+    }, HISTORY_REFRESH_MS);
+    this.historyRefreshTimer.unref?.();
   }
 
   async loadHistoricalCandles() {
@@ -237,6 +251,8 @@ class ChainlinkPriceFeed {
     this.reconnectTimer = null;
     clearTimeout(this.historyRetryTimer);
     this.historyRetryTimer = null;
+    clearTimeout(this.historyRefreshTimer);
+    this.historyRefreshTimer = null;
     const socket = this.socket;
     this.socket = null;
     if (socket) socket.close();

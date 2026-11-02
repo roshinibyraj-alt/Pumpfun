@@ -7,25 +7,26 @@ const DEFAULT_SETTINGS = Object.freeze({
   minimumNetEdge: 0.05,
   lowPriceThreshold: 0.25,
   lowPriceMinimumNetEdge: 0.10,
+  minimumSideProbability: 0.50,
   volatilityMultiplier: 1,
   sharesPerSignal: 100,
   sideMode: 'best-edge',
 });
 
-const MIN_CLOSED_WINDOWS = 100;
-const MAX_CLOSED_WINDOWS = 400;
+const MIN_CLOSED_WINDOWS = 15;
+const MAX_CLOSED_WINDOWS = 15;
 const TAKER_FEE_RATE = 0.07;
 const CANDIDATES = Object.freeze([
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 45, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 60, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.07, lowPriceMinimumNetEdge: 0.12, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 0.9, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1.1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 50, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'UP-only' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'DOWN-only' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'pullback' },
+  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, minimumSideProbability: 0.50, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
+  { openingDelaySeconds: 45, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, minimumSideProbability: 0.50, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
+  { openingDelaySeconds: 60, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, minimumSideProbability: 0.50, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
+  { openingDelaySeconds: 30, minimumNetEdge: 0.07, lowPriceMinimumNetEdge: 0.12, minimumSideProbability: 0.50, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
+  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, minimumSideProbability: 0.50, volatilityMultiplier: 0.9, sharesPerSignal: 100, sideMode: 'best-edge' },
+  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, minimumSideProbability: 0.50, volatilityMultiplier: 1.1, sharesPerSignal: 100, sideMode: 'best-edge' },
+  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, minimumSideProbability: 0.50, volatilityMultiplier: 1, sharesPerSignal: 50, sideMode: 'best-edge' },
+  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, minimumSideProbability: 0.50, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'UP-only' },
+  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, minimumSideProbability: 0.50, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'DOWN-only' },
+  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, minimumSideProbability: 0.50, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'pullback' },
 ]);
 
 function simulateWindow(windowSamples, settings) {
@@ -79,6 +80,7 @@ function simulateWindow(windowSamples, settings) {
       const fill = simulateBuy(sample.quotes?.[side]?.asks, settings.sharesPerSignal);
       if (!fill) return null;
       const probability = side === 'UP' ? pUp : 1 - pUp;
+      if (probability < settings.minimumSideProbability) return null;
       const edge = probability - fill.totalCost / settings.sharesPerSignal;
       const threshold = fill.averagePrice < settings.lowPriceThreshold
         ? settings.lowPriceMinimumNetEdge : settings.minimumNetEdge;
@@ -156,7 +158,7 @@ function choosePaperSettings(windows, currentSettings = DEFAULT_SETTINGS) {
   const training = chronological.slice(0, split);
   const holdout = chronological.slice(split);
   const baseline = scoreWindows(holdout, currentSettings);
-  if (!baseline || holdout.length < 20) {
+  if (!baseline || holdout.length < 5) {
     return { applied: false, reason: 'INSUFFICIENT_HOLDOUT', windows: chronological.length, settings: currentSettings };
   }
 

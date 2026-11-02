@@ -1,60 +1,71 @@
 'use strict';
 
-function detectPullback(ticks, now, volatility5m) {
-  if (!Array.isArray(ticks) || !Number.isFinite(now)
-    || !Number.isFinite(volatility5m) || volatility5m <= 0) return null;
-  const recent = ticks.filter(tick => Number.isFinite(tick?.ts)
-    && Number.isFinite(tick?.price)
-    && tick.price > 0
-    && tick.ts >= now - 60_000
-    && tick.ts <= now)
-    .sort((a, b) => a.ts - b.ts);
-  if (recent.length < 5) return null;
+const LOOKBACK_CANDLES = 15;
+const TREND_CANDLES = 12;
 
-  const base = recent[0];
-  const latest = recent[recent.length - 1];
-  const expectedMove = base.price * volatility5m * Math.sqrt(60 / 300);
-  const minimumImpulse = Math.max(expectedMove * 0.6, base.price * 0.00008);
-  let high = base;
-  let low = base;
-  for (const tick of recent.slice(1)) {
-    if (tick.price > high.price) high = tick;
-    if (tick.price < low.price) low = tick;
+function regressionSlope(values) {
+  const count = values.length;
+  if (count < 2) return null;
+  const meanX = (count - 1) / 2;
+  const meanY = values.reduce((sum, value) => sum + value, 0) / count;
+  let covariance = 0;
+  let varianceX = 0;
+  for (let index = 0; index < count; index++) {
+    covariance += (index - meanX) * (values[index] - meanY);
+    varianceX += (index - meanX) ** 2;
   }
+  return varianceX > 0 ? covariance / varianceX : null;
+}
 
-  const highImpulse = high.price - base.price;
-  const highRetracement = high.price - latest.price;
-  if (highImpulse >= minimumImpulse
-    && high.ts - base.ts >= 10_000
-    && now - high.ts >= 2_000
-    && now - high.ts <= 45_000
-    && highRetracement >= highImpulse * 0.35) {
+function detectPullback(candles, now, volatility5m) {
+  if (!Array.isArray(candles) || !Number.isFinite(now)
+    || !Number.isFinite(volatility5m) || volatility5m <= 0) return null;
+  const recent = candles.filter(candle => Number.isFinite(candle?.start)
+    && Number.isFinite(candle?.end)
+    && candle.end <= now
+    && [candle.open, candle.high, candle.low, candle.close]
+      .every(value => Number.isFinite(value) && value > 0))
+    .sort((a, b) => a.start - b.start)
+    .slice(-LOOKBACK_CANDLES);
+  if (recent.length < LOOKBACK_CANDLES) return null;
+
+  // Fit the earlier 12 closes, then compare the final 3 closed candles against that trend.
+  const trendCloses = recent.slice(0, TREND_CANDLES).map(candle => candle.close);
+  const base = trendCloses[0];
+  const slope = regressionSlope(trendCloses);
+  if (!Number.isFinite(slope)) return null;
+  const trendMove = slope * (trendCloses.length - 1);
+  const recentMove = recent.at(-1).close - recent[TREND_CANDLES - 1].close;
+  const expectedMove = base * volatility5m * Math.sqrt(TREND_CANDLES);
+  const minimumImpulse = Math.max(expectedMove * 0.6, base * 0.00008);
+  const retracementRatio = Math.abs(trendMove) > 0
+    ? Math.abs(recentMove) / Math.abs(trendMove) : 0;
+
+  if (trendMove >= minimumImpulse && recentMove <= -Math.abs(trendMove) * 0.35) {
     return {
       side: 'DOWN',
       regime: 'PULLBACK_AFTER_RISE',
-      impulseMove: highImpulse,
-      retracementMove: highRetracement,
-      retracementRatio: highRetracement / highImpulse,
+      impulseMove: trendMove,
+      retracementMove: -recentMove,
+      retracementRatio,
       expectedMove,
-      extremeAt: high.ts,
+      lookbackCandles: LOOKBACK_CANDLES,
+      trendSlopePerCandle: slope,
+      extremeAt: recent[TREND_CANDLES - 1].end,
     };
   }
 
-  const lowImpulse = base.price - low.price;
-  const lowRetracement = latest.price - low.price;
-  if (lowImpulse >= minimumImpulse
-    && low.ts - base.ts >= 10_000
-    && now - low.ts >= 2_000
-    && now - low.ts <= 45_000
-    && lowRetracement >= lowImpulse * 0.35) {
+  if (trendMove <= -minimumImpulse && recentMove >= Math.abs(trendMove) * 0.35) {
     return {
       side: 'UP',
       regime: 'PULLBACK_AFTER_FALL',
-      impulseMove: lowImpulse,
-      retracementMove: lowRetracement,
-      retracementRatio: lowRetracement / lowImpulse,
+      impulseMove: Math.abs(trendMove),
+      retracementMove: recentMove,
+      retracementRatio,
       expectedMove,
-      extremeAt: low.ts,
+      lookbackCandles: LOOKBACK_CANDLES,
+      trendSlopePerCandle: slope,
+      extremeAt: recent[TREND_CANDLES - 1].end,
     };
   }
   return null;

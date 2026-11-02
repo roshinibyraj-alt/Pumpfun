@@ -26,6 +26,7 @@ const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   minimumNetEdge: MIN_EDGE,
   lowPriceThreshold: LOW_PRICE_THRESHOLD,
   lowPriceMinimumNetEdge: LOW_PRICE_MIN_EDGE,
+  minimumSideProbability: 0.50,
   volatilityMultiplier: 1,
   sharesPerSignal: SHARES_PER_SIGNAL,
   sideMode: 'best-edge',
@@ -48,10 +49,10 @@ function normalCdf(value) {
   return value >= 0 ? 1 - tail : tail;
 }
 
-function estimateLogReturnVolatility(candles, count = 20) {
+function estimateLogReturnVolatility(candles, count = 15) {
   const closes = (Array.isArray(candles) ? candles : [])
     .filter(candle => Number.isFinite(Number(candle.close)) && Number(candle.close) > 0)
-    .slice(-count - 1)
+    .slice(-count)
     .map(candle => Number(candle.close));
   const returns = closes.slice(1).map((close, index) => Math.log(close / closes[index]))
     .filter(Number.isFinite);
@@ -270,11 +271,11 @@ class ProbabilityBot {
       this.referencePrice = referenceTick?.price ?? null;
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
-      this.pullback = detectPullback(ticks, now, this.volatility5m);
+      this.pullback = detectPullback(candleHistory, now, this.volatility5m);
       this.statusReason = !referenceTick
         ? 'Waiting for the next five-minute boundary to capture its Chainlink opening reference.'
         : !this.volatility5m
-          ? 'Waiting for at least ten completed five-minute BTC candles.'
+          ? 'Waiting for at least fifteen completed five-minute BTC candles.'
           : 'Model and market data are live.';
 
       const secondsRemaining = Math.max(0, (this.market.end - now) / 1000);
@@ -402,9 +403,12 @@ class ProbabilityBot {
         ? this.strategySettings.lowPriceMinimumNetEdge : this.strategySettings.minimumNetEdge];
     }));
     const candidates = ['UP', 'DOWN']
-      .filter(side => this.strategySettings.sideMode !== 'pullback'
-        || this.pullback?.side === side)
+      .filter(side => this.strategySettings.sideMode === 'best-edge'
+        || this.strategySettings.sideMode === `${side}-only`
+        || (this.strategySettings.sideMode === 'pullback' && this.pullback?.side === side))
       .filter(side => {
+      const sideProbability = side === 'UP' ? this.probabilityUp : 1 - this.probabilityUp;
+      if (sideProbability < this.strategySettings.minimumSideProbability) return false;
       const edge = this.edges[side];
       const threshold = this.requiredNetEdge[side];
       if (edge == null || edge < threshold) this.armed[side] = true;
@@ -433,6 +437,7 @@ class ProbabilityBot {
       totalCost: fill.totalCost,
       edgeAtEntry: this.edges[side],
       requiredNetEdge: this.requiredNetEdge[side],
+      minimumSideProbability: this.strategySettings.minimumSideProbability,
       modelProbability: side === 'UP' ? this.probabilityUp : 1 - this.probabilityUp,
       openedAt: now,
       status: 'OPEN',
@@ -447,8 +452,11 @@ class ProbabilityBot {
     let retainedSettled = 0;
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     this.log('PAPER_BUY', {
+      tradeId: trade.id,
       side, shares: this.strategySettings.sharesPerSignal, price: fill.averagePrice,
+      modelProbability: trade.modelProbability,
       edge: this.edges[side], requiredNetEdge: this.requiredNetEdge[side],
+      minimumSideProbability: this.strategySettings.minimumSideProbability,
     });
   }
 
@@ -516,6 +524,9 @@ class ProbabilityBot {
     trade.settledAt = now;
     this.cash += netPayout;
     this.log('PAPER_EXIT', {
+      tradeId: trade.id,
+      modelProbability: trade.modelProbability,
+      entryPrice: trade.entryPrice,
       side: trade.side,
       outcome,
       exitPrice,
@@ -601,6 +612,7 @@ class ProbabilityBot {
         pollIntervalMs: POLL_MS,
         sharesPerSignal: this.strategySettings.sharesPerSignal,
         minimumNetEdge: this.strategySettings.minimumNetEdge,
+        minimumSideProbability: this.strategySettings.minimumSideProbability,
         lowPriceThreshold: this.strategySettings.lowPriceThreshold,
         lowPriceMinimumNetEdge: this.strategySettings.lowPriceMinimumNetEdge,
         takerFeeRate: TAKER_FEE_RATE,
@@ -612,7 +624,7 @@ class ProbabilityBot {
         takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: STOP_LOSS_PAYOUT,
-        model: '20 closed 5-minute log-return volatility; normal-CDF probability estimate',
+        model: '15 closed 5-minute BTC candles for volatility and pullback regression; normal-CDF probability estimate',
         exitModel: 'Own-side CLOB best bid; all exits deduct the configured taker fee; expiry mark uses the last own-side bid, not BTC reference.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,

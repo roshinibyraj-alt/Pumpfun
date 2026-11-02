@@ -26,11 +26,11 @@ test('probability remains near one half when BTC is at the reference', () => {
   }) - 0.5) < 1e-7);
 });
 
-test('volatility requires at least ten completed returns', () => {
+test('volatility uses only the latest fifteen closed five-minute candles', () => {
   const short = Array.from({ length: 9 }, (_, i) => ({ close: 100 + i }));
   const long = Array.from({ length: 21 }, (_, i) => ({ close: 100 + i + (i % 2) }));
   assert.equal(estimateLogReturnVolatility(short), null);
-  assert.ok(estimateLogReturnVolatility(long) > 0);
+  assert.equal(estimateLogReturnVolatility(long), estimateLogReturnVolatility(long.slice(-15)));
 });
 
 test('paper buy sweeps asks and rejects insufficient visible depth', () => {
@@ -49,7 +49,7 @@ test('one 100-share paper buy fires at an edge crossing and rearms after it clea
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
   });
-  bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.market = { start: -30_000, end: 300_000, title: 'BTC Up or Down' };
   bot.probabilityUp = 0.8;
   bot.quotes = {
     UP: { bestAsk: 0.70, asks: [{ price: 0.70, size: 100 }] },
@@ -76,7 +76,7 @@ test('any best ask below $0.02 blocks both sides; $0.02 is allowed', () => {
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
   });
-  bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.market = { start: -30_000, end: 300_000, title: 'BTC Up or Down' };
   bot.probabilityUp = 0.8;
   bot.quotes = {
     UP: { bestAsk: 0.02, asks: [{ price: 0.02, size: 100 }] },
@@ -127,6 +127,7 @@ test('requires 10 percent net edge when the executable average ask is below $0.2
   const bot = new ProbabilityBot({
     now: () => 30_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+    strategySettings: { sideMode: 'UP-only' },
   });
   bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
   bot.quotes = {
@@ -140,14 +141,38 @@ test('requires 10 percent net edge when the executable average ask is below $0.2
   assert.ok(bot.edges.UP > 0.05 && bot.edges.UP < 0.10);
   assert.equal(bot.trades.length, 0);
 
-  bot.probabilityUp = 0.33;
+  bot.probabilityUp = 0.52;
   bot.edges = bot.calculateEdges();
   bot.processSignals(31_000);
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].requiredNetEdge, 0.10);
 });
 
- test('returns independent open-share, average-cost, and live P&L summaries for each side', () => {
+test('blocks a positive-edge paper buy when the selected side probability is below 50%', () => {
+  const bot = new ProbabilityBot({
+    now: () => 30_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+    strategySettings: { sideMode: 'UP-only' },
+  });
+  bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.quotes = {
+    UP: { bestAsk: 0.30, asks: [{ price: 0.30, size: 100 }] },
+    DOWN: { bestAsk: 0.30, asks: [{ price: 0.30, size: 100 }] },
+  };
+
+  bot.probabilityUp = 0.49;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(30_000);
+  assert.equal(bot.trades.length, 0);
+
+  bot.probabilityUp = 0.50;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(31_000);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].modelProbability, 0.5);
+});
+
+test('returns independent open-share, average-cost, and live P&L summaries for each side', () => {
   const bot = new ProbabilityBot({
     now: () => 10_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -178,7 +203,7 @@ test('requires 10 percent net edge when the executable average ask is below $0.2
   assert.equal(positions.DOWN.realizedPnl, 0);
 });
 
- test('keeps every open share in the side totals after the trade-history limit', () => {
+test('keeps every open share in the side totals after the trade-history limit', () => {
   const bot = new ProbabilityBot({
     now: () => 30_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -201,7 +226,7 @@ test('requires 10 percent net edge when the executable average ask is below $0.2
   assert.equal(bot.snapshot().paperAccount.positions.UP.shares, 20_100);
 });
 
- test('own-side bid at 0.99 takes profit and credits one dollar per share', () => {
+test('own-side bid at 0.99 takes profit and credits one dollar per share', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
