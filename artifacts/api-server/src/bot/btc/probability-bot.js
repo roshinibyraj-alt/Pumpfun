@@ -4,6 +4,7 @@ const config = require('./config');
 const marketData = require('./wick-market-data');
 const { feed } = require('./chainlink-price-feed');
 const { detectPullback } = require('./pullback-signal');
+const { TAKE_PROFIT_BID, STOP_LOSS_BID, thresholdExit, recoverExpiredPositions } = require('./position-exits');
 
 const WINDOW_MS = 5 * 60 * 1000;
 const SHARES_PER_SIGNAL = 100;
@@ -94,6 +95,7 @@ class ProbabilityBot {
     now = Date.now,
     fetchMarket = marketData.getBtcMarket,
     fetchBook = marketData.getBook,
+    fetchMarketDetails = marketData.getMarket,
     priceFeed = feed,
     learningStore = null,
     choosePaperSettings = null,
@@ -103,6 +105,8 @@ class ProbabilityBot {
     this.now = now;
     this.fetchMarket = fetchMarket;
     this.fetchBook = fetchBook;
+    this.fetchMarketDetails = fetchMarketDetails;
+    this.expiryRecoveryAt = new Map();
     this.priceFeed = priceFeed;
     this.running = false;
     this.timer = null;
@@ -249,6 +253,8 @@ class ProbabilityBot {
     this.busy = true;
     try {
       const now = this.now();
+      this.processPositionExits(now);
+      await recoverExpiredPositions(this, now);
       const start = Math.floor(now / WINDOW_MS) * WINDOW_MS;
       if (!this.market || this.market.start !== start || now - this.marketFetchedAt >= 10_000) {
         this.market = await this.fetchMarket(start, WINDOW_MS);
@@ -299,7 +305,7 @@ class ProbabilityBot {
         activeSignalReason: this.activeSignalReason,
         regime: this.activeSide ? `ACTIVE_${this.activeSide}` : detectedPullback.regime,
       } : this.activeSide ? {
-        method: 'swing50-1m-edge-reset-v7',
+        method: 'swing50-1m-edge-reset-tpsl-v8',
         side: this.activeSide,
         detectedSide: null,
         signalReason: null,
@@ -558,6 +564,12 @@ class ProbabilityBot {
       if (now < trade.windowEnd && fresh) {
         trade.lastOutcomeBid = bid;
         trade.lastOutcomeBidAt = quote.updatedAt;
+        const exit = thresholdExit(bid);
+        if (exit) {
+          this.closeTrade(trade, exit.price, trade.shares * exit.price, exit.outcome,
+            `Own-side bid reached the ${exit.outcome === 'TAKE_PROFIT' ? '$0.99 TP' : '$0.01 SL'}; credited $${exit.price.toFixed(2)} per share before fees.`,
+            now, bid);
+        }
         continue;
       }
 
@@ -606,6 +618,8 @@ class ProbabilityBot {
     const exitFees = estimateTakerFee(feeExecutionPrice, trade.shares);
     const netPayout = payout - exitFees;
     trade.status = 'SETTLED';
+    trade.settlementStatus = 'SETTLED';
+    trade.settlementError = null;
     trade.finalOutcome = outcome;
     trade.closePrice = exitPrice;
     trade.exitPrice = exitPrice;
@@ -712,13 +726,13 @@ class ProbabilityBot {
         openingDelaySeconds: this.strategySettings.openingDelaySeconds,
         volatilityMultiplier: this.strategySettings.volatilityMultiplier,
         sideMode: this.strategySettings.sideMode,
-        takeProfitBid: null,
-        takeProfitPayoutPerShare: null,
-        stopLossBid: null,
-        stopLossPayoutPerShare: null,
+        takeProfitBid: TAKE_PROFIT_BID,
+        takeProfitPayoutPerShare: 1,
+        stopLossBid: STOP_LOSS_BID,
+        stopLossPayoutPerShare: 0,
         entryModel: 'Enter when the active side first qualifies in a window. After a fill, wait for its net edge to fall below threshold and qualify again. A new window or opposite bias permits a fresh gated entry.',
         model: '15 closed 5-minute candles for probability volatility; 50 closed 1-minute candles for persistent swing signals; normal-CDF probability estimate',
-        exitModel: 'Sell all opposing current-market paper positions on an opposite swing signal at fresh own-side bids; no take-profit or stop-loss exits. Expiry still marks at the last own-side bid. All exits deduct taker fees.',
+        exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. Opposite signals sell all old-side positions at fresh bids. Expiry uses a fresh closing bid, or retries the original market for a current bid or confirmed final payout; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
       referencePrice: this.referencePrice,
@@ -740,6 +754,7 @@ class ProbabilityBot {
       paperAccount: {
         startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl, wins, losses,
         settled: settled.length, openPositions: openTrades.length, positions,
+        awaitingSettlement: openTrades.filter(trade => trade.settlementStatus === 'AWAITING_SETTLEMENT').length,
       },
       trades: this.trades.slice(0, 50),
       events: this.events,

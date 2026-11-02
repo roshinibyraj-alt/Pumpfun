@@ -26,7 +26,7 @@ test('regression replay adds only after edge resets and sells all on reversal', 
   assert.ok(Math.abs(result.pnl - 7.75) < 1e-8);
 });
 
-test('regression replay holds accumulated positions through extreme bids until expiry', () => {
+test('regression replay takes profit without rearming a continuously qualifying edge', () => {
   const samples = Array.from({ length: 20 }, (_, i) => ({
     ts: i * 500, secondsSinceOpen: i / 2, secondsRemaining: 300 - i / 2,
     referencePrice: 100, spotPrice: 100, volatility5m: 0.005,
@@ -38,7 +38,7 @@ test('regression replay holds accumulated positions through extreme bids until e
   }));
   const result = simulateWindow(samples, DEFAULT_SETTINGS);
   assert.equal(result.trades, 1);
-  assert.ok(Math.abs(result.pnl - 6.85) < 1e-8);
+  assert.ok(Math.abs(result.pnl - 68.4607) < 1e-8);
 });
 
 function candlesFromCloses(closes, now = closes.length * 300_000) {
@@ -174,10 +174,10 @@ test('auto-tuner holds current settings until enough closed windows exist', () =
   assert.deepEqual(result.settings, DEFAULT_SETTINGS);
 });
 
-test('auto-tuner ignores windows logged with the previous single-entry execution rule', () => {
+test('auto-tuner ignores windows logged without the restored TP and SL policy', () => {
   const windows = Array.from({ length: 15 }, (_, index) => ({
     windowStart: index * 300_000,
-    samples: Array.from({ length: 20 }, () => ({ pullback: { method: 'swing50-1m-accumulate-v6', side: 'UP' } })),
+    samples: Array.from({ length: 20 }, () => ({ pullback: { method: 'swing50-1m-edge-reset-v7', side: 'UP' } })),
   }));
   const result = choosePaperSettings(windows, DEFAULT_SETTINGS);
   assert.equal(result.applied, false);
@@ -201,7 +201,7 @@ test('auto-tuner evaluates only the latest 15 completed windows in chronological
         referencePrice: 100,
         spotPrice,
         volatility5m: 0.005,
-        pullback: { method: 'swing50-1m-edge-reset-v7', side: 'UP' },
+        pullback: { method: 'swing50-1m-edge-reset-tpsl-v8', side: 'UP' },
         quotes: {
           UP: { bestAsk: 0.45, bestBid: finalBid, asks: [{ price: 0.45, size: 100 }] },
           DOWN: { bestAsk: 0.45, bestBid: finalBid, asks: [{ price: 0.45, size: 100 }] },

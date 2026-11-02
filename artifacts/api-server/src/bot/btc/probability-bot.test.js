@@ -346,7 +346,7 @@ test('keeps every open share in the side totals after the trade-history limit', 
   assert.equal(bot.snapshot().paperAccount.positions.UP.shares, 20_100);
 });
 
-test('own-side bid at 0.99 keeps the position open without take-profit', () => {
+test('own-side bid at 0.99 takes profit at one dollar per share before fees', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -363,10 +363,15 @@ test('own-side bid at 0.99 keeps the position open without take-profit', () => {
 
   bot.processPositionExits(1_000);
 
-  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
+  assert.equal(bot.trades[0].closePrice, 1);
+  assert.equal(bot.trades[0].grossPayout, 100);
+  assert.ok(Math.abs(bot.trades[0].exitFees - 0.0693) < 1e-9);
+  assert.ok(Math.abs(bot.trades[0].realizedPnl - 54.9307) < 1e-9);
   assert.equal(bot.trades[0].peakBid, 0.99);
-  assert.equal(bot.cash, 10_000);
-  assert.equal(bot.snapshot().strategy.takeProfitBid, null);
+  assert.ok(Math.abs(bot.cash - 10_099.9307) < 1e-9);
+  assert.equal(bot.snapshot().strategy.takeProfitBid, 0.99);
   assert.equal(bot.snapshot().strategy.pollIntervalMs, 500);
 });
 
@@ -400,10 +405,11 @@ test('tracks the highest fresh own-side bid while exits remain active', () => {
   bot.processPositionExits(200_000);
   assert.equal(bot.trades[0].peakBid, 0.99);
   assert.equal(bot.trades[0].peakBidAt, 199_000);
-  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
 });
 
-test('own-side bid at 0.01 keeps the position open without stop-loss', () => {
+test('own-side bid at 0.01 stops out at zero per share before fees', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -420,10 +426,14 @@ test('own-side bid at 0.01 keeps the position open without stop-loss', () => {
 
   bot.processPositionExits(1_000);
 
-  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].finalOutcome, 'STOP_LOSS');
+  assert.equal(bot.trades[0].closePrice, 0);
   assert.equal(bot.trades[0].lastOutcomeBid, 0.01);
-  assert.equal(bot.cash, 10_000);
-  assert.equal(bot.snapshot().strategy.stopLossBid, null);
+  assert.ok(Math.abs(bot.trades[0].exitFees - 0.0693) < 1e-9);
+  assert.ok(Math.abs(bot.trades[0].realizedPnl + 45.0693) < 1e-9);
+  assert.ok(Math.abs(bot.cash - 9_999.9307) < 1e-9);
+  assert.equal(bot.snapshot().strategy.stopLossBid, 0.01);
 });
 
 test('missing or stale own-side bids do not trigger exits', () => {
@@ -469,7 +479,7 @@ test('window-end paper mark uses the last own-side token bid, not BTC reference'
   assert.ok(Math.abs(bot.cash - 10_062.3872) < 1e-9);
 });
 
-test('CLOB bid tracking continues without early exits when the reference feed is unavailable', async () => {
+test('CLOB TP exits run even when the reference feed is unavailable', async () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     fetchMarket: async () => ({
@@ -492,7 +502,9 @@ test('CLOB bid tracking continues without early exits when the reference feed is
 
   await bot.tick();
 
-  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
+  assert.ok(Math.abs(bot.trades[0].realizedPnl - 54.9307) < 1e-9);
   assert.equal(bot.trades[0].peakBid, 0.99);
   assert.match(bot.error, /Chainlink/);
 });

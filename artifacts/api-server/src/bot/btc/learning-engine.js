@@ -1,6 +1,7 @@
 'use strict';
 
 const { probabilityUp, simulateBuy } = require('./probability-bot');
+const { thresholdExit } = require('./position-exits');
 
 const DEFAULT_SETTINGS = Object.freeze({
   openingDelaySeconds: 0,
@@ -45,8 +46,9 @@ function simulateWindow(windowSamples, settings) {
       const oppositeSignal = settings.sideMode === 'pullback'
         && activeSide != null
         && activeSide !== trade.side;
-      if (oppositeSignal) {
-        const payout = trade.shares * bid;
+      const exit = thresholdExit(bid);
+      if (exit || oppositeSignal) {
+        const payout = trade.shares * (exit?.price ?? bid);
         const fee = TAKER_FEE_RATE * bid * (1 - bid) * trade.shares;
         const pnl = payout - fee - trade.totalCost;
         cash += payout - fee;
@@ -150,7 +152,7 @@ function choosePaperSettings(windows, currentSettings = DEFAULT_SETTINGS) {
     .map(window => ({
       ...window,
       samples: Array.isArray(window.samples)
-        ? window.samples.filter(sample => sample.pullback?.method === 'swing50-1m-edge-reset-v7')
+        ? window.samples.filter(sample => sample.pullback?.method === 'swing50-1m-edge-reset-tpsl-v8')
         : [],
     }))
     .filter(window => window.samples.length >= 20)

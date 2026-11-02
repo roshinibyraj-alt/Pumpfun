@@ -117,7 +117,7 @@ function detectPullback(candles, now, volatility5m, livePrice = null, previousLi
   const currentPrice = Number.isFinite(livePrice) ? livePrice : null;
 
   return {
-    method: 'swing50-1m-edge-reset-v7',
+    method: 'swing50-1m-edge-reset-tpsl-v8',
     side,
     signalReason,
     signalSource: signalReason?.includes('TRENDLINE_TOUCH') ? 'LIVE_TOUCH' : signalReason ? 'CLOSED_CANDLE' : null,

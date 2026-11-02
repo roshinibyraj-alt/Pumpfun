@@ -90,6 +90,6 @@ test('tick takes trend candles from the one-minute series while keeping probabil
   assert.equal(bot.error, null);
   assert.equal(bot.pullback.chart.candles.length, 50);
   assert.equal(bot.pullback.chart.candles[1].start - bot.pullback.chart.candles[0].start, 60_000);
-  assert.equal(bot.pullback.method, 'swing50-1m-edge-reset-v7');
+  assert.equal(bot.pullback.method, 'swing50-1m-edge-reset-tpsl-v8');
   assert.equal(bot.volatility5m, estimateLogReturnVolatility(fiveMinutes));
 });

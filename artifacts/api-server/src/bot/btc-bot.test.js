@@ -157,7 +157,9 @@ test("dashboard presents the BTC probability paper bot", () => {
   assert.match(html, /sell before reversal/);
   assert.match(html, /staying above threshold does not trigger repeated buys/);
   assert.match(html, /WAIT EDGE RESET/);
-  assert.match(html, /No take-profit or stop-loss exits/);
+  assert.match(html, /TP: own-side bid at \$0.99/);
+  assert.match(html, /SL: own-side bid at \$0.01/);
+  assert.match(html, /AWAITING SETTLEMENT/);
   assert.match(html, /no opening delay/);
   assert.match(html, /Expected move left/);
   assert.match(html, /Paper trade history/);
