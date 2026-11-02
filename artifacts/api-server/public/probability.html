@@ -39,7 +39,7 @@
     <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">SWING-STRUCTURE SIGNAL</div><h1>Trend context, confirmed breaks.</h1><p>Paper-only strategy uses the last 50 closed five-minute candles for trend and swing structure. Trendline touches can act live; HH/LL breakouts require a completed five-minute candle. Market and net-edge checks still apply; live orders remain disabled.</p></div>
+    <div><div class="eyebrow">SWING-STRUCTURE SIGNAL</div><h1>One-minute signals, persistent direction.</h1><p>Paper signals use 50 completed one-minute candles. A touch or closed one-minute breakout sets the trading direction across five-minute market windows. An opposite signal sells the old side before a gated opposite entry. Market and net-edge checks remain unchanged; live orders stay disabled.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
@@ -54,8 +54,8 @@
     <article class="prob down"><div class="prob-head"><span>DOWN · MODEL PROBABILITY</span><span id="downEdge">EDGE —</span></div><div class="prob-price" id="downProb">—</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">100-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Model edge</span><strong id="downNet">—</strong></div><div><span>Signal</span><strong id="downSignal">WAIT</strong></div></div></article>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>BTC trendline · last 50 closed candles</h2><small id="trendStatus">Waiting for candle history</small></div>
-    <div id="trendChart" class="trend-chart"><div class="empty">Waiting for 50 completed five-minute candles.</div></div>
+    <div class="section-head"><h2>BTC trendline · last 50 closed one-minute candles</h2><small id="trendStatus">Waiting for candle history</small></div>
+    <div id="trendChart" class="trend-chart"><div class="empty">Waiting for 50 completed one-minute candles.</div></div>
     <div class="trend-legend"><span><i style="background:var(--cyan)"></i>50-candle trendline</span><span><i style="background:var(--green)"></i>Higher swing</span><span><i style="background:var(--red)"></i>Lower swing</span><span><i style="background:var(--amber)"></i>Live BTC price</span></div>
   </section>
   <section class="grid" style="margin-top:12px">
@@ -79,9 +79,9 @@
   <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-     <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Model probability is logged but has no minimum entry filter. A closed five-minute candle above the latest higher high selects UP; a close below the latest lower low selects DOWN. Live lower-low/higher-high trendline touches can signal a reversal. The signal can act as soon as market data is ready—there is no opening delay. Positive net edge, visible order-book depth, and market-price checks still apply. Trend context uses 50 closed candles; volatility uses the latest 15.</div>
+     <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Model probability is logged without a minimum probability filter. A closed one-minute candle above HH sets UP; below LL sets DOWN. LL trendline touch/rejection sets UP; HH touch/rejection sets DOWN. Direction persists until an opposite signal. The bot attempts one entry per active direction per window and can reverse intra-window, subject to the unchanged net-edge, price, depth and cash gates. Trend context uses 50 one-minute candles; probability volatility still uses 15 five-minute candles. There is no opening delay.</div>
   </section>
-  <p class="footer">Simulation only—no live order submission. Probabilities use a normal-CDF approximation with volatility from the latest 15 completed Binance BTC 5-minute candles. Trend structure uses the last 50 closed candles: a lower-low trendline touch selects UP, a higher-high touch selects DOWN, a closed-candle higher-high break selects UP, and a closed-candle lower-low break selects DOWN. If a live touch is missed, a closed candle whose wick touches the line and closes back across it can confirm the reversal. Signals may change within a window; a flip adds the opposite paper position without closing the existing one. Paper entries have no additional opening delay. The tuning gate evaluates the latest 15 completed five-minute windows chronologically and only uses samples tagged with the current swing method. Position exits use the fresh own-side CLOB best bid: $0.99 credits $1.00 gross per share, and $0.01 credits $0.00 gross. The configured Polymarket taker-fee formula is applied to entries and exits. Any still-open position at window close is marked at its last own-side bid; BTC reference prices do not decide paper P&amp;L.</p>
+  <p class="footer">Simulation only—no live order submission. Probability volatility uses the latest 15 completed five-minute candles. Trend signals use the last 50 completed one-minute candles, with live touches and close-confirmed breakouts or missed-touch rejections. The last direction persists across windows and restarts until an opposite signal. On reversal, open opposing positions are sold at their fresh own-side CLOB best bid, less taker fees; opposite entries still need the existing entry gates. Repeated polling does not add duplicate entries. The tuning gate evaluates the latest 15 completed five-minute market windows using the current signal method and matching reversal exits. Existing $0.99/$0.01 exits and window-end own-side bid marks remain unchanged.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -105,7 +105,7 @@ async function pollLearning(){
   if(!response.ok)throw Error('Learning API HTTP '+response.status);
   const state=await response.json(),latest=state.tuningRuns?.[0]?.result;
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
-   $('learningSummary').innerHTML=`<div class="trade"><span>Active paper settings</span><span class="muted">${safe(JSON.stringify(window.latestStrategyState?.strategy||state.settings||{}))}</span></div><div class="trade"><span>Latest evaluation</span><span class="muted">${safe(latest?.reason||'Collecting data')} · ${Number(latest?.windows||0)} windows${latest?.applied?' · settings updated':''}</span></div><div class="trade"><span>Side selection</span><span class="muted">LL touch/rejection → UP · HH touch/rejection → DOWN · closed HH → UP · closed LL → DOWN · flips add the opposite position</span></div>`;
+   $('learningSummary').innerHTML=`<div class="trade"><span>Active paper settings</span><span class="muted">${safe(JSON.stringify(window.latestStrategyState?.strategy||state.settings||{}))}</span></div><div class="trade"><span>Latest evaluation</span><span class="muted">${safe(latest?.reason||'Collecting data')} · ${Number(latest?.windows||0)} windows${latest?.applied?' · settings updated':''}</span></div><div class="trade"><span>Side selection</span><span class="muted">50 × 1m candles · LL touch/rejection → UP · HH touch/rejection → DOWN · closed HH → UP · closed LL → DOWN · persistent bias · sell before reversal</span></div>`;
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -139,7 +139,7 @@ function renderPositions(positions){
 }
 function renderTrend(state){
  const view=state?.pullback?.chart,candles=view?.candles||[];
- if(candles.length<50){$('trendStatus').textContent='Waiting for 50 closed candles';$('trendChart').innerHTML='<div class="empty">Waiting for 50 completed five-minute candles.</div>';return}
+ if(candles.length<50){$('trendStatus').textContent=`${state.activeSide||'WAIT'} · waiting for 50 closed 1m candles`;$('trendChart').innerHTML='<div class="empty">Waiting for 50 completed one-minute candles.</div>';return}
  const width=1000,height=220,left=28,right=980,top=14,bottom=190;
  const values=candles.flatMap(c=>[Number(c.high),Number(c.low)]).concat([Number(view.trendline?.start),Number(view.trendline?.end),Number(view.currentPrice)]).filter(Number.isFinite);
  let min=Math.min(...values),max=Math.max(...values);if(max===min){min-=1;max+=1}const pad=(max-min)*.06;min-=pad;max+=pad;
@@ -148,9 +148,9 @@ function renderTrend(state){
  const pivots=[...(view.swingHighs||[]).map(p=>({...p,type:'high'})),...(view.swingLows||[]).map(p=>({...p,type:'low'}))].map(p=>`<circle cx="${x(p.index)}" cy="${y(Number(p.price))}" r="3.2" fill="${p.type==='high'?'#39d99a':'#ff6f7e'}"/>`).join('');
  const current=Number(view.currentPrice),liveLine=Number.isFinite(current)?`<line x1="${left}" x2="${right}" y1="${y(current)}" y2="${y(current)}" stroke="#ffc76a" stroke-dasharray="5 5" stroke-width="1.2"/>`:'';
  const trend=state.pullback||{};
-  const reason=trend.signalReason?.replace(/_/g,' ')||'waiting for live trendline touch or closed-candle HH/LL break';
+  const reason=(trend.signalReason||trend.activeSignalReason)?.replace(/_/g,' ')||'waiting for first touch or closed 1m breakout';
   $('trendStatus').textContent=`${trend.trendDirection||'MIXED'} · ${trend.structure||'swing points pending'} · ${trend.side||'WAIT'} · ${reason}`;
- $('trendChart').innerHTML=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Fifty five-minute BTC candles, swing points, and trendline"><line x1="${left}" x2="${right}" y1="${bottom}" y2="${bottom}" stroke="#263447"/>${marks}<line x1="${left}" x2="${right}" y1="${y(Number(view.trendline?.start))}" y2="${y(Number(view.trendline?.end))}" stroke="#51d9ef" stroke-width="2" stroke-dasharray="7 4"/>${pivots}${liveLine}</svg>`;
+ $('trendChart').innerHTML=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Fifty one-minute BTC candles, swing points, and trendline"><line x1="${left}" x2="${right}" y1="${bottom}" y2="${bottom}" stroke="#263447"/>${marks}<line x1="${left}" x2="${right}" y1="${y(Number(view.trendline?.start))}" y2="${y(Number(view.trendline?.end))}" stroke="#51d9ef" stroke-width="2" stroke-dasharray="7 4"/>${pivots}${liveLine}</svg>`;
 }
 
 async function poll(){

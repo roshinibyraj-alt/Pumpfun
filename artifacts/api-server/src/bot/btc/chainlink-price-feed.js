@@ -5,6 +5,7 @@ const SYMBOL = 'btc/usd';
 const MAX_AGE_MS = 15_000;
 const RETAIN_MS = 60 * 60 * 1000;
 const HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100';
+const MINUTE_HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=100';
 const HISTORY_REFRESH_MS = 60_000;
 
 class ChainlinkPriceFeed {
@@ -15,8 +16,11 @@ class ChainlinkPriceFeed {
     this.ticks = [];
     this.minuteBars = new Map();
     this.historicalCandles = [];
+    this.historicalMinuteCandles = [];
     this.historyStatus = 'waiting';
+    this.minuteHistoryStatus = 'waiting';
     this.historyError = null;
+    this.minuteHistoryError = null;
     this.historyRetryTimer = null;
     this.historyRefreshTimer = null;
     this.socket = null;
@@ -32,6 +36,7 @@ class ChainlinkPriceFeed {
     if (this.started) return;
     this.started = true;
     void this.loadHistoricalCandles();
+    void this.loadHistoricalMinuteCandles();
     this.scheduleHistoryRefresh();
     if (typeof this.WebSocketImpl !== 'function') {
       this.status = 'unsupported';
@@ -46,9 +51,9 @@ class ChainlinkPriceFeed {
     if (!this.started) return;
     this.historyRefreshTimer = setTimeout(async () => {
       this.historyRefreshTimer = null;
-      await this.loadHistoricalCandles();
+      await Promise.all([this.loadHistoricalCandles(), this.loadHistoricalMinuteCandles()]);
       this.scheduleHistoryRefresh();
-    }, HISTORY_REFRESH_MS);
+    }, Math.max(1000, HISTORY_REFRESH_MS - (this.now() % HISTORY_REFRESH_MS) + 1000));
     this.historyRefreshTimer.unref?.();
   }
 
@@ -94,8 +99,47 @@ class ChainlinkPriceFeed {
     }
   }
 
+  async loadHistoricalMinuteCandles() {
+    if (typeof this.fetchImpl !== 'function') {
+      this.minuteHistoryStatus = 'error';
+      this.minuteHistoryError = 'Fetch is unavailable for Binance history';
+      return;
+    }
+    this.minuteHistoryStatus = 'loading';
+    try {
+      const response = await this.fetchImpl(MINUTE_HISTORY_URL, { signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error(`Binance one-minute history request failed (${response.status})`);
+      const rows = await response.json();
+      const now = this.now();
+      this.historicalMinuteCandles = (Array.isArray(rows) ? rows : []).flatMap(row => {
+        const start = Number(row?.[0]);
+        const closeTime = Number(row?.[6]);
+        const open = Number(row?.[1]);
+        const high = Number(row?.[2]);
+        const low = Number(row?.[3]);
+        const close = Number(row?.[4]);
+        if (!Number.isFinite(start) || !Number.isFinite(closeTime) || start + 60_000 > now ||
+            ![open, high, low, close].every(value => Number.isFinite(value) && value > 0)) return [];
+        return [{
+          start, end: start + 60_000, open, high, low, close,
+          color: close > open ? 'GREEN' : close < open ? 'RED' : 'DOJI',
+          source: 'BINANCE_1M_HISTORY',
+        }];
+      });
+      this.minuteHistoryStatus = this.historicalMinuteCandles.length ? 'ready' : 'empty';
+      this.minuteHistoryError = null;
+    } catch (error) {
+      this.minuteHistoryStatus = 'error';
+      this.minuteHistoryError = error?.message || 'Binance one-minute history request failed';
+    }
+  }
+
   getHistoricalCandles() {
     return this.historicalCandles.map(candle => ({ ...candle }));
+  }
+
+  getHistoricalMinuteCandles() {
+    return this.historicalMinuteCandles.map(candle => ({ ...candle }));
   }
 
   connect() {
@@ -242,6 +286,12 @@ class ChainlinkPriceFeed {
         candles: this.historicalCandles.length,
         error: this.historyError,
       },
+        minuteHistory: {
+          source: 'Binance BTCUSDT 1-minute candles (trend signals)',
+          status: this.minuteHistoryStatus,
+          candles: this.historicalMinuteCandles.length,
+          error: this.minuteHistoryError,
+        },
     };
   }
 

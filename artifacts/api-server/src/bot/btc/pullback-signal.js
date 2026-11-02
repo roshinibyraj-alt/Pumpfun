@@ -52,6 +52,8 @@ function detectPullback(candles, now, volatility5m, livePrice = null, previousLi
     .sort((a, b) => a.start - b.start)
     .slice(-LOOKBACK_CANDLES);
   if (recent.length < LOOKBACK_CANDLES) return null;
+  // Keep the previous bias, but never create a new signal from stale candle history.
+  if (now - recent.at(-1).end > 90_000) return null;
 
   const closes = recent.map(candle => candle.close);
   const slope = regressionSlope(closes);
@@ -115,9 +117,12 @@ function detectPullback(candles, now, volatility5m, livePrice = null, previousLi
   const currentPrice = Number.isFinite(livePrice) ? livePrice : null;
 
   return {
-    method: 'swing50-touch-rejection-v4',
+    method: 'swing50-1m-persistent-flip-v5',
     side,
     signalReason,
+    signalSource: signalReason?.includes('TRENDLINE_TOUCH') ? 'LIVE_TOUCH' : signalReason ? 'CLOSED_CANDLE' : null,
+    signalAt: signalReason && !signalReason.includes('TRENDLINE_TOUCH') ? latestClosed.end : null,
+    candleTimeframe: '1m',
     crossed: Boolean(crossedUp || crossedDown),
     regime: signalReason ?? `WAITING_${trendDirection}`,
     trendDirection,

@@ -31,14 +31,18 @@ function simulateWindow(windowSamples, settings) {
   let tradeCount = 0;
   let open = [];
   const armed = { UP: true, DOWN: true };
+  let lastEnteredSide = null;
   const ending = samples[samples.length - 1];
 
   for (const sample of samples) {
     for (const trade of open) {
       const bid = sample.quotes?.[trade.side]?.bestBid;
       if (!Number.isFinite(bid)) continue;
-      if (bid >= 0.99 || bid <= 0.01) {
-        const payout = bid >= 0.99 ? trade.shares : 0;
+      const oppositeSignal = settings.sideMode === 'pullback'
+        && ['UP', 'DOWN'].includes(sample.pullback?.side)
+        && sample.pullback.side !== trade.side;
+      if (bid >= 0.99 || bid <= 0.01 || oppositeSignal) {
+        const payout = bid >= 0.99 ? trade.shares : bid <= 0.01 ? 0 : trade.shares * bid;
         const fee = TAKER_FEE_RATE * bid * (1 - bid) * trade.shares;
         const pnl = payout - fee - trade.totalCost;
         cash += payout - fee;
@@ -78,7 +82,10 @@ function simulateWindow(windowSamples, settings) {
       const threshold = fill.averagePrice < settings.lowPriceThreshold
         ? settings.lowPriceMinimumNetEdge : settings.minimumNetEdge;
       return { side, fill, edge, threshold };
-    }).filter(candidate => candidate && candidate.edge >= candidate.threshold && armed[candidate.side])
+    }).filter(candidate => candidate && candidate.edge >= candidate.threshold
+      && (settings.sideMode === 'pullback'
+        ? lastEnteredSide !== candidate.side && !open.some(trade => trade.side !== candidate.side)
+        : armed[candidate.side]))
       .sort((a, b) => b.edge - a.edge);
 
     for (const side of ['UP', 'DOWN']) {
@@ -97,6 +104,7 @@ function simulateWindow(windowSamples, settings) {
     armed[selected.side] = false;
     if (cash < selected.fill.totalCost) continue;
     cash -= selected.fill.totalCost;
+    lastEnteredSide = selected.side;
     tradeCount += 1;
     open.push({
       side: selected.side,
@@ -143,7 +151,7 @@ function choosePaperSettings(windows, currentSettings = DEFAULT_SETTINGS) {
     .map(window => ({
       ...window,
       samples: Array.isArray(window.samples)
-        ? window.samples.filter(sample => sample.pullback?.method === 'swing50-touch-rejection-v4')
+        ? window.samples.filter(sample => sample.pullback?.method === 'swing50-1m-persistent-flip-v5')
         : [],
     }))
     .filter(window => window.samples.length >= 20)

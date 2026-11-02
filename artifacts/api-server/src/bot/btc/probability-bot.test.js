@@ -44,7 +44,7 @@ test('paper buy sweeps asks and rejects insufficient visible depth', () => {
   assert.equal(simulateBuy([{ price: 0.4, size: 99 }], 100), null);
 });
 
-test('one 100-share paper buy fires at an edge crossing and rearms after it clears', () => {
+test('bias enters once per window and can enter again next window without a new touch', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -69,10 +69,15 @@ test('one 100-share paper buy fires at an edge crossing and rearms after it clea
   bot.probabilityUp = 0.8;
   bot.edges = bot.calculateEdges();
   bot.processSignals(3_000);
+  assert.equal(bot.trades.length, 1);
+  bot.pullback = { side: null };
+  bot.market = { start: 300_000, end: 600_000, title: 'Next window' };
+  bot.processSignals(301_000);
   assert.equal(bot.trades.length, 2);
+  assert.equal(bot.activeSide, 'UP');
 });
 
-test('a new opposite signal opens the other side without closing the first position', () => {
+test('an opposite signal sells the old position before opening the other side', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -87,18 +92,23 @@ test('a new opposite signal opens the other side without closing the first posit
   bot.edges = bot.calculateEdges();
   bot.processSignals(1_000);
 
+  bot.quotes.UP.bestBid = 0.65;
+  bot.quotes.UP.updatedAt = 2_000;
   bot.pullback = { side: 'DOWN' };
   bot.probabilityUp = 0.4;
   bot.edges = bot.calculateEdges();
   bot.processSignals(2_000);
 
   assert.deepEqual(bot.trades.map(trade => [trade.side, trade.status]), [
-    ['UP', 'OPEN'],
     ['DOWN', 'OPEN'],
+    ['UP', 'SETTLED'],
   ]);
+  assert.equal(bot.trades[1].finalOutcome, 'OPPOSITE_SIGNAL');
+  assert.equal(bot.trades[1].grossPayout, 65);
+  assert.ok(bot.trades[1].exitFees > 0);
 });
 
-test('a side rearms when its edge falls while no pullback side is active', () => {
+test('a transient missing signal preserves bias without duplicating an entry', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -123,8 +133,8 @@ test('a side rearms when its edge falls while no pullback side is active', () =>
   bot.edges = bot.calculateEdges();
   bot.processSignals(3_000);
 
-  assert.equal(bot.trades.length, 2);
-  assert.equal(bot.trades[1].side, 'UP');
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.activeSide, 'UP');
 });
 
 test('any best ask below $0.02 blocks both sides; $0.02 is allowed', () => {

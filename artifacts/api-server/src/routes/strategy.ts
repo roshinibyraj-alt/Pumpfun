@@ -14,6 +14,7 @@ const { LearningStore } = require("./bot/btc/learning-store.js") as {
   LearningStore: new (pool: unknown) => {
     initialize: (defaults: Record<string, unknown>) => Promise<void>;
     loadSettings: (defaults: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    loadPullbackBias: () => Promise<"UP" | "DOWN" | null>;
     getState: () => Promise<unknown>;
   };
 };
@@ -26,10 +27,12 @@ const router: IRouter = Router();
 const learningStore = new LearningStore(pool);
 await learningStore.initialize(DEFAULT_SETTINGS);
 const strategySettings = await learningStore.loadSettings(DEFAULT_SETTINGS);
+const activeSide = await learningStore.loadPullbackBias();
 const bot = new ProbabilityBot({
   learningStore,
   choosePaperSettings,
   strategySettings,
+  activeSide,
 });
 bot.start();
 

@@ -102,6 +102,7 @@ class ProbabilityBot {
     learningStore = null,
     choosePaperSettings = null,
     strategySettings = {},
+    activeSide = null,
   } = {}) {
     this.now = now;
     this.fetchMarket = fetchMarket;
@@ -148,6 +149,12 @@ class ProbabilityBot {
     this.lastSampledAt = null;
     this.lastTunedWindowStart = null;
     this.pullback = null;
+    this.activeSide = activeSide === 'UP' || activeSide === 'DOWN' ? activeSide : null;
+    this.activeSignalReason = this.activeSide ? 'PERSISTED_BIAS' : null;
+    this.entryWindowStart = null;
+    this.lastEnteredSideInWindow = null;
+    this.handledClosedSignals = new Set();
+    this.lastLiveSignal = null;
     this.learningStatus = {
       enabled: Boolean(learningStore && choosePaperSettings),
       mode: learningStore && choosePaperSettings ? 'collecting' : 'disabled',
@@ -194,8 +201,12 @@ class ProbabilityBot {
       pullback: this.pullback ? {
         method: this.pullback.method,
         side: this.pullback.side,
+        signalSide: this.pullback.detectedSide,
         regime: this.pullback.regime,
+        activeSignalReason: this.pullback.activeSignalReason,
+        timeframe: '1m',
       } : null,
+      activeSide: this.activeSide,
       quotes: Object.fromEntries(['UP', 'DOWN'].map(side => {
         const quote = this.quotes[side];
         return [side, quote ? {
@@ -254,6 +265,10 @@ class ProbabilityBot {
         this.lastUpdateAt = now;
         return;
       }
+      if (this.entryWindowStart !== this.market.start) {
+        this.entryWindowStart = this.market.start;
+        this.lastEnteredSideInWindow = null;
+      }
 
       const [upBook, downBook] = await Promise.all([
         this.fetchBook(this.market.tokens.UP),
@@ -281,9 +296,30 @@ class ProbabilityBot {
       this.referencePrice = referenceTick?.price ?? null;
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
-      this.pullback = detectPullback(
-        candleHistory, now, this.volatility5m, this.latestPrice, previousLivePrice,
+      const minuteCandles = this.priceFeed.getHistoricalMinuteCandles?.() ?? [];
+      const detectedPullback = detectPullback(
+        minuteCandles, now, this.volatility5m, this.latestPrice, previousLivePrice,
       );
+      this.applyPullbackSignal(detectedPullback);
+      this.pullback = detectedPullback ? {
+        ...detectedPullback,
+        detectedSide: detectedPullback.side,
+        side: this.activeSide,
+        activeSignalReason: this.activeSignalReason,
+        regime: this.activeSide ? `ACTIVE_${this.activeSide}` : detectedPullback.regime,
+      } : this.activeSide ? {
+        method: 'swing50-1m-persistent-flip-v5',
+        side: this.activeSide,
+        detectedSide: null,
+        signalReason: null,
+        activeSignalReason: this.activeSignalReason,
+        regime: `ACTIVE_${this.activeSide}`,
+        trendDirection: null,
+        structure: 'WAITING_FOR_1M_HISTORY',
+        lookbackCandles: 50,
+        chart: { candles: [], trendline: null, swingHighs: [], swingLows: [], currentPrice: this.latestPrice },
+      } : null;
+      this.processOppositeSignalExits(now);
       this.statusReason = !referenceTick
         ? 'Waiting for the next five-minute boundary to capture its Chainlink opening reference.'
         : !this.volatility5m
@@ -374,7 +410,40 @@ class ProbabilityBot {
     return this.entryFilter;
   }
 
+  applyPullbackSignal(signal) {
+    const isLive = signal?.signalSource === 'LIVE_TOUCH';
+    const liveKey = isLive ? `${signal.side}:${signal.signalReason}` : null;
+    const repeatedLive = liveKey && liveKey === this.lastLiveSignal;
+    this.lastLiveSignal = liveKey;
+    if (!['UP', 'DOWN'].includes(signal?.side) || repeatedLive) return;
+    if (signal.signalSource === 'CLOSED_CANDLE') {
+      const key = `${signal.method}:${signal.signalReason}:${signal.signalAt}`;
+      if (this.handledClosedSignals.has(key)) return;
+      this.handledClosedSignals.add(key);
+      if (this.handledClosedSignals.size > 200) {
+        this.handledClosedSignals.delete(this.handledClosedSignals.values().next().value);
+      }
+    }
+    if (signal.side === this.activeSide) return;
+    const previousSide = this.activeSide;
+    this.activeSide = signal.side;
+    this.activeSignalReason = signal.signalReason ?? null;
+    this.lastEnteredSideInWindow = null;
+    this.log('PULLBACK_BIAS_CHANGED', {
+      previousSide, side: this.activeSide, signalReason: this.activeSignalReason,
+      method: signal.method, lookbackCandles: signal.lookbackCandles,
+    });
+  }
+
   processSignals(now) {
+    if (this.market && this.entryWindowStart !== this.market.start) {
+      this.entryWindowStart = this.market.start;
+      this.lastEnteredSideInWindow = null;
+    }
+    if (this.pullback && !Object.hasOwn(this.pullback, 'detectedSide')) {
+      this.applyPullbackSignal(this.pullback);
+    }
+    this.processOppositeSignalExits(now);
     const filter = this.updateEntryFilter(now);
     if (!filter.allowed) {
       if (!filter.openingDelayActive) {
@@ -419,14 +488,20 @@ class ProbabilityBot {
         this.armed[side] = true;
       }
     }
+    const hasOpposingOpenPosition = side => this.trades.some(trade =>
+      trade.status === 'OPEN' && trade.marketId === this.market?.id && trade.side !== side);
     const candidates = ['UP', 'DOWN']
       .filter(side => this.strategySettings.sideMode === 'best-edge'
         || this.strategySettings.sideMode === `${side}-only`
-        || (this.strategySettings.sideMode === 'pullback' && this.pullback?.side === side))
+        || (this.strategySettings.sideMode === 'pullback'
+          && this.activeSide === side
+          && this.lastEnteredSideInWindow !== side))
       .filter(side => {
       const edge = this.edges[side];
       const threshold = this.requiredNetEdge[side];
-      return edge != null && edge >= threshold && this.armed[side];
+      return edge != null && edge >= threshold
+        && (this.strategySettings.sideMode === 'pullback' || this.armed[side])
+        && !hasOpposingOpenPosition(side);
     }).sort((a, b) => this.edges[b] - this.edges[a]);
     if (!candidates.length) return;
     const side = candidates[0];
@@ -462,6 +537,7 @@ class ProbabilityBot {
     };
     this.cash -= fill.totalCost;
     this.trades.unshift(trade);
+    this.lastEnteredSideInWindow = side;
     let retainedSettled = 0;
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     this.log('PAPER_BUY', {
@@ -518,6 +594,27 @@ class ProbabilityBot {
           trade.lastOutcomeBid,
         );
       }
+    }
+  }
+
+  processOppositeSignalExits(now) {
+    if (!this.activeSide || !this.market) return;
+    for (const trade of this.trades) {
+      if (trade.status !== 'OPEN' || trade.marketId !== this.market.id || trade.side === this.activeSide) continue;
+      const quote = this.quotes[trade.side];
+      const bid = quote?.bestBid == null ? NaN : Number(quote.bestBid);
+      const fresh = Number.isFinite(quote?.updatedAt)
+        && now >= quote.updatedAt
+        && now - quote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS
+        && Number.isFinite(bid) && bid >= 0 && bid <= 1;
+      if (!fresh) continue;
+      trade.lastOutcomeBid = bid;
+      trade.lastOutcomeBidAt = quote.updatedAt;
+      this.closeTrade(
+        trade, bid, trade.shares * bid, 'OPPOSITE_SIGNAL',
+        `Opposite ${this.activeSide} swing signal; sold at the ${trade.side} best bid, less taker fee.`,
+        now, bid,
+      );
     }
   }
 
@@ -635,7 +732,7 @@ class ProbabilityBot {
         takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: STOP_LOSS_PAYOUT,
-        model: '15 closed 5-minute candles for volatility; 50-candle swing structure and trendline breakouts; normal-CDF probability estimate',
+        model: '15 closed 5-minute candles for probability volatility; 50 closed 1-minute candles for persistent swing signals; normal-CDF probability estimate',
         exitModel: 'Own-side CLOB best bid; all exits deduct the configured taker fee; expiry mark uses the last own-side bid, not BTC reference.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
@@ -661,6 +758,7 @@ class ProbabilityBot {
       trades: this.trades.slice(0, 50),
       events: this.events,
       pullback: this.pullback,
+      activeSide: this.activeSide,
       learning: {
         ...this.learningStatus,
         persistenceStatus: this.persistenceError ? 'error' : this.learningStore ? 'connected' : 'disabled',

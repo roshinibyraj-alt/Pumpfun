@@ -71,6 +71,18 @@ class LearningStore {
     return { ...defaultSettings, ...(result.rows[0]?.settings ?? {}) };
   }
 
+  async loadPullbackBias() {
+    const result = await this.pool.query(
+      `SELECT details->>'side' AS side
+       FROM btc_paper_events
+       WHERE event = 'PULLBACK_BIAS_CHANGED'
+         AND details->>'side' IN ('UP', 'DOWN')
+       ORDER BY id DESC
+       LIMIT 1`,
+    );
+    return result.rows[0]?.side ?? null;
+  }
+
   async recordEvent({ ts, windowStart, event, details }) {
     await this.pool.query(
       `INSERT INTO btc_paper_events (ts, window_start, event, details)
