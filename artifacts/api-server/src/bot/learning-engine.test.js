@@ -20,29 +20,41 @@ function candlesFromCloses(closes, now = closes.length * 300_000) {
   })).filter(candle => candle.end <= now);
 }
 
-test('detects a confirmed retracement from the rolling 15 closed candles after a rise', () => {
-  const closes = Array.from({ length: 12 }, (_, index) => 100_000 + index * 6)
-    .concat([100_060, 100_050, 100_040]);
-  const pullback = detectPullback(candlesFromCloses(closes), 15 * 300_000, 0.0001);
-  assert.equal(pullback.side, 'DOWN');
-  assert.equal(pullback.regime, 'PULLBACK_AFTER_RISE');
-  assert.ok(pullback.retracementRatio >= 0.35);
-  assert.equal(pullback.lookbackCandles, 15);
+test('50-candle HH/HL structure chooses UP after a live swing-high breakout', () => {
+  const closes = Array.from({ length: 50 }, (_, index) =>
+    100_000 + index * 5 + [0, 50, 10, -40][index % 4]);
+  const candles = candlesFromCloses(closes);
+  const state = detectPullback(candles, 50 * 300_000, 0.0001);
+  assert.equal(state.lookbackCandles, 50);
+  assert.equal(state.trendDirection, 'UPTREND');
+  assert.equal(state.structure, 'HH / HL');
+  const breakout = detectPullback(candles, 50 * 300_000, 0.0001,
+    state.breakoutLevels.UP + 10, state.breakoutLevels.UP - 10);
+  assert.equal(breakout.side, 'UP');
+  assert.equal(breakout.crossed, true);
+  assert.equal(breakout.regime, 'HIGHER_HIGH_BREAKOUT');
 });
 
-test('detects an upward pullback after a decline in the rolling candle window', () => {
-  const closes = Array.from({ length: 12 }, (_, index) => 100_000 - index * 6)
-    .concat([99_950, 99_960, 99_970]);
-  const pullback = detectPullback(candlesFromCloses(closes), 15 * 300_000, 0.0001);
-  assert.equal(pullback.side, 'UP');
-  assert.equal(pullback.regime, 'PULLBACK_AFTER_FALL');
+test('50-candle LH/LL structure chooses DOWN after a live swing-low breakout', () => {
+  const closes = Array.from({ length: 50 }, (_, index) =>
+    100_000 - index * 5 + [0, 50, 10, -40][index % 4]);
+  const candles = candlesFromCloses(closes);
+  const state = detectPullback(candles, 50 * 300_000, 0.0001);
+  assert.equal(state.trendDirection, 'DOWNTREND');
+  assert.equal(state.structure, 'LH / LL');
+  const breakout = detectPullback(candles, 50 * 300_000, 0.0001,
+    state.breakoutLevels.DOWN - 10, state.breakoutLevels.DOWN + 10);
+  assert.equal(breakout.side, 'DOWN');
+  assert.equal(breakout.crossed, true);
+  assert.equal(breakout.regime, 'LOWER_LOW_BREAKOUT');
 });
 
-test('does not signal without 15 completed candles or on a small move', () => {
-  const small = Array.from({ length: 15 }, (_, index) => 100_000 + index);
-  assert.equal(detectPullback(candlesFromCloses(small), 15 * 300_000, 0.001), null);
-  assert.equal(detectPullback(candlesFromCloses(small.slice(0, 14)), 14 * 300_000, 0.001), null);
-  assert.equal(detectPullback(candlesFromCloses(small, 14 * 300_000), 14 * 300_000, 0.001), null);
+test('waits when swing structure is mixed or fewer than 50 candles are closed', () => {
+  const flat = Array.from({ length: 50 }, () => 100_000);
+  const mixed = detectPullback(candlesFromCloses(flat), 50 * 300_000, 0.0001, 100_000, 99_999);
+  assert.equal(mixed.trendDirection, 'MIXED');
+  assert.equal(mixed.side, null);
+  assert.equal(detectPullback(candlesFromCloses(flat.slice(0, 49)), 49 * 300_000, 0.0001), null);
 });
 
 test('auto-tuner holds current settings until enough closed windows exist', () => {
@@ -54,6 +66,17 @@ test('auto-tuner holds current settings until enough closed windows exist', () =
   assert.equal(result.applied, false);
   assert.equal(result.reason, 'INSUFFICIENT_HISTORY');
   assert.deepEqual(result.settings, DEFAULT_SETTINGS);
+});
+
+test('auto-tuner ignores windows logged with the previous pullback rule', () => {
+  const windows = Array.from({ length: 15 }, (_, index) => ({
+    windowStart: index * 300_000,
+    samples: Array.from({ length: 20 }, () => ({ pullback: { side: 'UP' } })),
+  }));
+  const result = choosePaperSettings(windows, DEFAULT_SETTINGS);
+  assert.equal(result.applied, false);
+  assert.equal(result.reason, 'INSUFFICIENT_HISTORY');
+  assert.equal(result.windows, 0);
 });
 
 test('auto-tuner evaluates only the latest 15 completed windows in chronological order', () => {
@@ -72,7 +95,7 @@ test('auto-tuner evaluates only the latest 15 completed windows in chronological
         referencePrice: 100,
         spotPrice,
         volatility5m: 0.005,
-        pullback: null,
+        pullback: { method: 'swing50-live-cross-v1', side: 'UP' },
         quotes: {
           UP: { bestAsk: 0.45, bestBid: finalBid, asks: [{ price: 0.45, size: 100 }] },
           DOWN: { bestAsk: 0.45, bestBid: finalBid, asks: [{ price: 0.45, size: 100 }] },

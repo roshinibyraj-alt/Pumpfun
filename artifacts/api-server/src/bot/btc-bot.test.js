@@ -153,7 +153,8 @@ test("dashboard presents the BTC probability paper bot", () => {
   assert.match(html, /BTC PROBABILITY BOT/);
   assert.match(html, /PAPER ONLY/);
   assert.match(html, /100 SHARES \/ SIGNAL/);
-  assert.match(html, /5¢/);
+  assert.match(html, /last 50 closed candles/);
+  assert.match(html, /no opening delay/);
   assert.match(html, /Expected move left/);
   assert.match(html, /Paper trade history/);
   assert.doesNotMatch(html, /Manual limit order/);

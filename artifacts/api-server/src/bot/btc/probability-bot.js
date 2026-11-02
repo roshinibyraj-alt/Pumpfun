@@ -15,7 +15,7 @@ const POLL_MS = 500;
 const FEED_MAX_AGE_MS = 15_000;
 const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const MIN_ENTRY_PRICE = 0.02;
-const OPENING_DELAY_SECONDS = 30;
+const OPENING_DELAY_SECONDS = 0;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
 const TAKE_PROFIT_BID = 0.99;
 const TAKE_PROFIT_PAYOUT = 1;
@@ -28,7 +28,7 @@ const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   lowPriceMinimumNetEdge: LOW_PRICE_MIN_EDGE,
   volatilityMultiplier: 1,
   sharesPerSignal: SHARES_PER_SIGNAL,
-  sideMode: 'best-edge',
+  sideMode: 'pullback',
 });
 
 function parseLevels(levels, direction) {
@@ -137,7 +137,12 @@ class ProbabilityBot {
     this.events = [];
     this.learningStore = learningStore;
     this.choosePaperSettings = choosePaperSettings;
-    this.strategySettings = { ...DEFAULT_STRATEGY_SETTINGS, ...strategySettings };
+    this.strategySettings = {
+      ...DEFAULT_STRATEGY_SETTINGS,
+      ...strategySettings,
+      openingDelaySeconds: 0,
+      sideMode: 'pullback',
+    };
     this.persistenceQueue = Promise.resolve();
     this.persistenceError = null;
     this.lastSampledAt = null;
@@ -185,7 +190,12 @@ class ProbabilityBot {
       secondsRemaining: Math.max(0, (this.market.end - now) / 1000),
       referencePrice: this.referencePrice, spotPrice: this.latestPrice,
       volatility5m: this.volatility5m, probabilityUp: this.probabilityUp,
-      edges: this.edges, pullback: this.pullback,
+      edges: this.edges,
+      pullback: this.pullback ? {
+        method: this.pullback.method,
+        side: this.pullback.side,
+        regime: this.pullback.regime,
+      } : null,
       quotes: Object.fromEntries(['UP', 'DOWN'].map(side => {
         const quote = this.quotes[side];
         return [side, quote ? {
@@ -266,15 +276,18 @@ class ProbabilityBot {
       const referenceTick = ticks
         .filter(tick => Math.abs(tick.ts - start) <= 10_000)
         .sort((a, b) => Math.abs(a.ts - start) - Math.abs(b.ts - start))[0];
+      const previousLivePrice = this.latestPrice;
       const latestTick = ticks[ticks.length - 1];
       this.referencePrice = referenceTick?.price ?? null;
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
-      this.pullback = detectPullback(candleHistory, now, this.volatility5m);
+      this.pullback = detectPullback(
+        candleHistory, now, this.volatility5m, this.latestPrice, previousLivePrice,
+      );
       this.statusReason = !referenceTick
         ? 'Waiting for the next five-minute boundary to capture its Chainlink opening reference.'
         : !this.volatility5m
-          ? 'Waiting for at least fifteen completed five-minute BTC candles.'
+          ? 'Waiting for enough completed five-minute BTC candles.'
           : 'Model and market data are live.';
 
       const secondsRemaining = Math.max(0, (this.market.end - now) / 1000);
@@ -618,7 +631,7 @@ class ProbabilityBot {
         takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: STOP_LOSS_PAYOUT,
-        model: '15 closed 5-minute BTC candles for volatility and pullback regression; normal-CDF probability estimate',
+        model: '15 closed 5-minute candles for volatility; 50-candle swing structure and trendline breakouts; normal-CDF probability estimate',
         exitModel: 'Own-side CLOB best bid; all exits deduct the configured taker fee; expiry mark uses the last own-side bid, not BTC reference.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,

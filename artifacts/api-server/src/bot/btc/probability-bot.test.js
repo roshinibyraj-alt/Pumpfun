@@ -50,6 +50,7 @@ test('one 100-share paper buy fires at an edge crossing and rearms after it clea
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
   });
   bot.market = { start: -30_000, end: 300_000, title: 'BTC Up or Down' };
+  bot.pullback = { side: 'UP' };
   bot.probabilityUp = 0.8;
   bot.quotes = {
     UP: { bestAsk: 0.70, asks: [{ price: 0.70, size: 100 }] },
@@ -77,6 +78,7 @@ test('any best ask below $0.02 blocks both sides; $0.02 is allowed', () => {
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
   });
   bot.market = { start: -30_000, end: 300_000, title: 'BTC Up or Down' };
+  bot.pullback = { side: 'UP' };
   bot.probabilityUp = 0.8;
   bot.quotes = {
     UP: { bestAsk: 0.02, asks: [{ price: 0.02, size: 100 }] },
@@ -97,12 +99,13 @@ test('any best ask below $0.02 blocks both sides; $0.02 is allowed', () => {
   assert.equal(bot.trades[0].side, 'UP');
 });
 
-test('blocks entries for the first 30 seconds of a window, then allows them', () => {
+test('allows a confirmed signal immediately with no opening delay', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
   });
   bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.pullback = { side: 'UP' };
   bot.probabilityUp = 0.8;
   bot.quotes = {
     UP: { bestAsk: 0.70, asks: [{ price: 0.70, size: 100 }] },
@@ -110,17 +113,12 @@ test('blocks entries for the first 30 seconds of a window, then allows them', ()
   };
   bot.edges = bot.calculateEdges();
 
-  bot.processSignals(29_999);
-  assert.equal(bot.trades.length, 0);
-  assert.equal(bot.entryFilter.openingDelayActive, true);
-  assert.equal(bot.entryFilter.secondsSinceOpen, 29.999);
-  assert.deepEqual(bot.entryFilter.blockedReasons, ['OPENING_DELAY']);
-
-  bot.processSignals(30_000);
+  bot.processSignals(1_000);
   assert.equal(bot.entryFilter.allowed, true);
+  assert.equal(bot.entryFilter.openingDelayActive, false);
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].side, 'UP');
-  assert.equal(bot.snapshot().strategy.openingDelaySeconds, 30);
+  assert.equal(bot.snapshot().strategy.openingDelaySeconds, 0);
 });
 
 test('requires 10 percent net edge when the executable average ask is below $0.25', () => {
@@ -130,6 +128,7 @@ test('requires 10 percent net edge when the executable average ask is below $0.2
     strategySettings: { sideMode: 'UP-only' },
   });
   bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.pullback = { side: 'UP' };
   bot.quotes = {
     UP: { bestAsk: 0.20, asks: [{ price: 0.20, size: 100 }] },
     DOWN: { bestAsk: 0.80, asks: [{ price: 0.80, size: 100 }] },
@@ -155,6 +154,7 @@ test('allows a positive-edge paper buy below 50% and keeps logging its probabili
     strategySettings: { sideMode: 'UP-only' },
   });
   bot.market = { start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.pullback = { side: 'UP' };
   bot.quotes = {
     UP: { bestAsk: 0.30, asks: [{ price: 0.30, size: 100 }] },
     DOWN: { bestAsk: 0.30, asks: [{ price: 0.30, size: 100 }] },
@@ -204,6 +204,7 @@ test('keeps every open share in the side totals after the trade-history limit', 
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
   });
   bot.market = { id: 'market', start: 0, end: 300_000, title: 'BTC Up or Down' };
+  bot.pullback = { side: 'UP' };
   bot.probabilityUp = 0.8;
   bot.quotes = {
     UP: { bestAsk: 0.70, asks: [{ price: 0.70, size: 100 }] },

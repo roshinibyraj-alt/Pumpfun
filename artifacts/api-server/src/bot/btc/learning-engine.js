@@ -3,29 +3,24 @@
 const { probabilityUp, simulateBuy } = require('./probability-bot');
 
 const DEFAULT_SETTINGS = Object.freeze({
-  openingDelaySeconds: 30,
+  openingDelaySeconds: 0,
   minimumNetEdge: 0.05,
   lowPriceThreshold: 0.25,
   lowPriceMinimumNetEdge: 0.10,
   volatilityMultiplier: 1,
   sharesPerSignal: 100,
-  sideMode: 'best-edge',
+  sideMode: 'pullback',
 });
 
 const MIN_CLOSED_WINDOWS = 15;
 const MAX_CLOSED_WINDOWS = 15;
 const TAKER_FEE_RATE = 0.07;
 const CANDIDATES = Object.freeze([
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 45, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 60, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.07, lowPriceMinimumNetEdge: 0.12, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 0.9, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1.1, sharesPerSignal: 100, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 50, sideMode: 'best-edge' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'UP-only' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'DOWN-only' },
-  { openingDelaySeconds: 30, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'pullback' },
+  { openingDelaySeconds: 0, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'pullback' },
+  { openingDelaySeconds: 0, minimumNetEdge: 0.07, lowPriceMinimumNetEdge: 0.12, volatilityMultiplier: 1, sharesPerSignal: 100, sideMode: 'pullback' },
+  { openingDelaySeconds: 0, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 0.9, sharesPerSignal: 100, sideMode: 'pullback' },
+  { openingDelaySeconds: 0, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1.1, sharesPerSignal: 100, sideMode: 'pullback' },
+  { openingDelaySeconds: 0, minimumNetEdge: 0.05, lowPriceMinimumNetEdge: 0.10, volatilityMultiplier: 1, sharesPerSignal: 50, sideMode: 'pullback' },
 ]);
 
 function simulateWindow(windowSamples, settings) {
@@ -145,7 +140,13 @@ function scoreWindows(windows, settings) {
 
 function choosePaperSettings(windows, currentSettings = DEFAULT_SETTINGS) {
   const chronological = [...windows]
-    .filter(window => Array.isArray(window.samples) && window.samples.length >= 20)
+    .map(window => ({
+      ...window,
+      samples: Array.isArray(window.samples)
+        ? window.samples.filter(sample => sample.pullback?.method === 'swing50-live-cross-v1')
+        : [],
+    }))
+    .filter(window => window.samples.length >= 20)
     .sort((a, b) => a.windowStart - b.windowStart)
     .slice(-MAX_CLOSED_WINDOWS);
   if (chronological.length < MIN_CLOSED_WINDOWS) {

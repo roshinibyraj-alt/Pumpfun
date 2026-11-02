@@ -1,7 +1,7 @@
 'use strict';
 
-const LOOKBACK_CANDLES = 15;
-const TREND_CANDLES = 12;
+const LOOKBACK_CANDLES = 50;
+const PIVOT_RADIUS = 2;
 
 function regressionSlope(values) {
   const count = values.length;
@@ -17,7 +17,31 @@ function regressionSlope(values) {
   return varianceX > 0 ? covariance / varianceX : null;
 }
 
-function detectPullback(candles, now, volatility5m) {
+function findPivots(candles, field, kind) {
+  const pivots = [];
+  for (let index = PIVOT_RADIUS; index < candles.length - PIVOT_RADIUS; index++) {
+    const value = candles[index][field];
+    const neighbors = [];
+    for (let offset = 1; offset <= PIVOT_RADIUS; offset++) {
+      neighbors.push(candles[index - offset][field], candles[index + offset][field]);
+    }
+    const isPivot = kind === 'high'
+      ? neighbors.every(neighbor => value >= neighbor) && neighbors.some(neighbor => value > neighbor)
+      : neighbors.every(neighbor => value <= neighbor) && neighbors.some(neighbor => value < neighbor);
+    if (isPivot) {
+      const pivot = { index, price: value, ts: candles[index].end };
+      const previous = pivots.at(-1);
+      if (previous && index - previous.index <= PIVOT_RADIUS) {
+        if (kind === 'high' ? value >= previous.price : value <= previous.price) pivots[pivots.length - 1] = pivot;
+      } else {
+        pivots.push(pivot);
+      }
+    }
+  }
+  return pivots;
+}
+
+function detectPullback(candles, now, volatility5m, livePrice = null, previousLivePrice = null) {
   if (!Array.isArray(candles) || !Number.isFinite(now)
     || !Number.isFinite(volatility5m) || volatility5m <= 0) return null;
   const recent = candles.filter(candle => Number.isFinite(candle?.start)
@@ -29,46 +53,61 @@ function detectPullback(candles, now, volatility5m) {
     .slice(-LOOKBACK_CANDLES);
   if (recent.length < LOOKBACK_CANDLES) return null;
 
-  // Fit the earlier 12 closes, then compare the final 3 closed candles against that trend.
-  const trendCloses = recent.slice(0, TREND_CANDLES).map(candle => candle.close);
-  const base = trendCloses[0];
-  const slope = regressionSlope(trendCloses);
+  const closes = recent.map(candle => candle.close);
+  const slope = regressionSlope(closes);
   if (!Number.isFinite(slope)) return null;
-  const trendMove = slope * (trendCloses.length - 1);
-  const recentMove = recent.at(-1).close - recent[TREND_CANDLES - 1].close;
-  const expectedMove = base * volatility5m * Math.sqrt(TREND_CANDLES);
-  const minimumImpulse = Math.max(expectedMove * 0.6, base * 0.00008);
-  const retracementRatio = Math.abs(trendMove) > 0
-    ? Math.abs(recentMove) / Math.abs(trendMove) : 0;
+  const highs = findPivots(recent, 'high', 'high');
+  const lows = findPivots(recent, 'low', 'low');
+  const lastTwoHighs = highs.slice(-2);
+  const lastTwoLows = lows.slice(-2);
+  const haveStructure = lastTwoHighs.length === 2 && lastTwoLows.length === 2;
+  const tolerance = recent.at(-1).close * 0.00002;
+  const higherHighs = haveStructure && lastTwoHighs[1].price > lastTwoHighs[0].price + tolerance;
+  const higherLows = haveStructure && lastTwoLows[1].price > lastTwoLows[0].price + tolerance;
+  const lowerHighs = haveStructure && lastTwoHighs[1].price < lastTwoHighs[0].price - tolerance;
+  const lowerLows = haveStructure && lastTwoLows[1].price < lastTwoLows[0].price - tolerance;
+  const trendDirection = higherHighs && higherLows && slope > 0
+    ? 'UPTREND'
+    : lowerHighs && lowerLows && slope < 0 ? 'DOWNTREND' : 'MIXED';
+  const meanClose = closes.reduce((sum, value) => sum + value, 0) / closes.length;
+  const meanIndex = (LOOKBACK_CANDLES - 1) / 2;
+  const lineStart = meanClose - slope * meanIndex;
+  const lineEnd = meanClose + slope * meanIndex;
+  const buffer = Math.max(recent.at(-1).close * volatility5m * 0.1, recent.at(-1).close * 0.00002);
+  const upLevel = Math.max(lastTwoHighs.at(-1)?.price ?? -Infinity, lineEnd) + buffer;
+  const downLevel = Math.min(lastTwoLows.at(-1)?.price ?? Infinity, lineEnd) - buffer;
+  const liveValid = Number.isFinite(livePrice) && Number.isFinite(previousLivePrice);
+  const crossedUp = liveValid && previousLivePrice <= upLevel && livePrice > upLevel;
+  const crossedDown = liveValid && previousLivePrice >= downLevel && livePrice < downLevel;
+  const side = crossedUp || (Number.isFinite(livePrice) && livePrice > upLevel)
+    ? 'UP'
+    : crossedDown || (Number.isFinite(livePrice) && livePrice < downLevel) ? 'DOWN' : null;
+  const currentPrice = Number.isFinite(livePrice) ? livePrice : null;
 
-  if (trendMove >= minimumImpulse && recentMove <= -Math.abs(trendMove) * 0.35) {
-    return {
-      side: 'DOWN',
-      regime: 'PULLBACK_AFTER_RISE',
-      impulseMove: trendMove,
-      retracementMove: -recentMove,
-      retracementRatio,
-      expectedMove,
-      lookbackCandles: LOOKBACK_CANDLES,
-      trendSlopePerCandle: slope,
-      extremeAt: recent[TREND_CANDLES - 1].end,
-    };
-  }
-
-  if (trendMove <= -minimumImpulse && recentMove >= Math.abs(trendMove) * 0.35) {
-    return {
-      side: 'UP',
-      regime: 'PULLBACK_AFTER_FALL',
-      impulseMove: Math.abs(trendMove),
-      retracementMove: recentMove,
-      retracementRatio,
-      expectedMove,
-      lookbackCandles: LOOKBACK_CANDLES,
-      trendSlopePerCandle: slope,
-      extremeAt: recent[TREND_CANDLES - 1].end,
-    };
-  }
-  return null;
+  return {
+    method: 'swing50-live-cross-v1',
+    side,
+    crossed: Boolean(crossedUp || crossedDown),
+    regime: side === 'UP'
+      ? trendDirection === 'UPTREND' ? 'HIGHER_HIGH_BREAKOUT' : 'TRENDLINE_BREAKOUT_UP'
+      : side === 'DOWN'
+        ? trendDirection === 'DOWNTREND' ? 'LOWER_LOW_BREAKOUT' : 'TRENDLINE_BREAKOUT_DOWN'
+        : `WAITING_${trendDirection}`,
+    trendDirection,
+    structure: haveStructure
+      ? `${higherHighs ? 'HH' : lowerHighs ? 'LH' : '—'} / ${higherLows ? 'HL' : lowerLows ? 'LL' : '—'}`
+      : 'WAITING_FOR_SWINGS',
+    lookbackCandles: LOOKBACK_CANDLES,
+    trendSlopePerCandle: slope,
+    breakoutLevels: { UP: upLevel, DOWN: downLevel },
+    chart: {
+      candles: recent.map(({ start, open, high, low, close }) => ({ start, open, high, low, close })),
+      trendline: { start: lineStart, end: lineEnd },
+      swingHighs: highs,
+      swingLows: lows,
+      currentPrice,
+    },
+  };
 }
 
 module.exports = { detectPullback };
