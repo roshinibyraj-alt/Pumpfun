@@ -148,7 +148,7 @@ test('requires 10 percent net edge when the executable average ask is below $0.2
   assert.equal(bot.trades[0].requiredNetEdge, 0.10);
 });
 
-test('blocks a positive-edge paper buy when the selected side probability is below 50%', () => {
+test('allows a positive-edge paper buy below 50% and keeps logging its probability', () => {
   const bot = new ProbabilityBot({
     now: () => 30_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -163,13 +163,8 @@ test('blocks a positive-edge paper buy when the selected side probability is bel
   bot.probabilityUp = 0.49;
   bot.edges = bot.calculateEdges();
   bot.processSignals(30_000);
-  assert.equal(bot.trades.length, 0);
-
-  bot.probabilityUp = 0.50;
-  bot.edges = bot.calculateEdges();
-  bot.processSignals(31_000);
   assert.equal(bot.trades.length, 1);
-  assert.equal(bot.trades[0].modelProbability, 0.5);
+  assert.equal(bot.trades[0].modelProbability, 0.49);
 });
 
 test('returns independent open-share, average-cost, and live P&L summaries for each side', () => {

@@ -26,7 +26,6 @@ const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   minimumNetEdge: MIN_EDGE,
   lowPriceThreshold: LOW_PRICE_THRESHOLD,
   lowPriceMinimumNetEdge: LOW_PRICE_MIN_EDGE,
-  minimumSideProbability: 0.50,
   volatilityMultiplier: 1,
   sharesPerSignal: SHARES_PER_SIGNAL,
   sideMode: 'best-edge',
@@ -407,8 +406,6 @@ class ProbabilityBot {
         || this.strategySettings.sideMode === `${side}-only`
         || (this.strategySettings.sideMode === 'pullback' && this.pullback?.side === side))
       .filter(side => {
-      const sideProbability = side === 'UP' ? this.probabilityUp : 1 - this.probabilityUp;
-      if (sideProbability < this.strategySettings.minimumSideProbability) return false;
       const edge = this.edges[side];
       const threshold = this.requiredNetEdge[side];
       if (edge == null || edge < threshold) this.armed[side] = true;
@@ -437,7 +434,6 @@ class ProbabilityBot {
       totalCost: fill.totalCost,
       edgeAtEntry: this.edges[side],
       requiredNetEdge: this.requiredNetEdge[side],
-      minimumSideProbability: this.strategySettings.minimumSideProbability,
       modelProbability: side === 'UP' ? this.probabilityUp : 1 - this.probabilityUp,
       openedAt: now,
       status: 'OPEN',
@@ -456,7 +452,6 @@ class ProbabilityBot {
       side, shares: this.strategySettings.sharesPerSignal, price: fill.averagePrice,
       modelProbability: trade.modelProbability,
       edge: this.edges[side], requiredNetEdge: this.requiredNetEdge[side],
-      minimumSideProbability: this.strategySettings.minimumSideProbability,
     });
   }
 
@@ -612,7 +607,6 @@ class ProbabilityBot {
         pollIntervalMs: POLL_MS,
         sharesPerSignal: this.strategySettings.sharesPerSignal,
         minimumNetEdge: this.strategySettings.minimumNetEdge,
-        minimumSideProbability: this.strategySettings.minimumSideProbability,
         lowPriceThreshold: this.strategySettings.lowPriceThreshold,
         lowPriceMinimumNetEdge: this.strategySettings.lowPriceMinimumNetEdge,
         takerFeeRate: TAKER_FEE_RATE,
