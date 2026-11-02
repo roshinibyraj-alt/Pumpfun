@@ -148,6 +148,7 @@ class ProbabilityBot {
     this.activeSide = activeSide === 'UP' || activeSide === 'DOWN' ? activeSide : null;
     this.activeSignalReason = this.activeSide ? 'PERSISTED_BIAS' : null;
     this.entrySequence = 0;
+    this.entryWindowStart = null;
     this.handledClosedSignals = new Set();
     this.lastLiveSignal = null;
     this.learningStatus = {
@@ -298,7 +299,7 @@ class ProbabilityBot {
         activeSignalReason: this.activeSignalReason,
         regime: this.activeSide ? `ACTIVE_${this.activeSide}` : detectedPullback.regime,
       } : this.activeSide ? {
-        method: 'swing50-1m-accumulate-v6',
+        method: 'swing50-1m-edge-reset-v7',
         side: this.activeSide,
         detectedSide: null,
         signalReason: null,
@@ -417,6 +418,7 @@ class ProbabilityBot {
     if (signal.side === this.activeSide) return;
     const previousSide = this.activeSide;
     this.activeSide = signal.side;
+    this.armed[this.activeSide] = true;
     this.activeSignalReason = signal.signalReason ?? null;
     this.log('PULLBACK_BIAS_CHANGED', {
       previousSide, side: this.activeSide, signalReason: this.activeSignalReason,
@@ -425,6 +427,10 @@ class ProbabilityBot {
   }
 
   processSignals(now) {
+    if (this.market && this.entryWindowStart !== this.market.start) {
+      this.entryWindowStart = this.market.start;
+      this.armed = { UP: true, DOWN: true };
+    }
     if (this.pullback && !Object.hasOwn(this.pullback, 'detectedSide')) {
       this.applyPullbackSignal(this.pullback);
     }
@@ -437,7 +443,7 @@ class ProbabilityBot {
           const entryPrice = fill?.averagePrice ?? this.quotes[side]?.bestAsk;
           const threshold = Number.isFinite(entryPrice) && entryPrice < this.strategySettings.lowPriceThreshold
             ? this.strategySettings.lowPriceMinimumNetEdge : this.strategySettings.minimumNetEdge;
-          if (this.edges[side] == null || this.edges[side] < threshold) this.armed[side] = true;
+          if (Number.isFinite(this.edges[side]) && this.edges[side] < threshold) this.armed[side] = true;
         }
       }
       const signature = `${filter.blockedReasons.join(',')}:${filter.blockedSides.join(',')}`;
@@ -469,7 +475,7 @@ class ProbabilityBot {
         ? this.strategySettings.lowPriceMinimumNetEdge : this.strategySettings.minimumNetEdge];
     }));
     for (const side of ['UP', 'DOWN']) {
-      if (this.edges[side] == null || this.edges[side] < this.requiredNetEdge[side]) {
+      if (Number.isFinite(this.edges[side]) && this.edges[side] < this.requiredNetEdge[side]) {
         this.armed[side] = true;
       }
     }
@@ -484,17 +490,17 @@ class ProbabilityBot {
       const edge = this.edges[side];
       const threshold = this.requiredNetEdge[side];
       return edge != null && edge >= threshold
-        && (this.strategySettings.sideMode === 'pullback' || this.armed[side])
+        && this.armed[side]
         && !hasOpposingOpenPosition(side);
     }).sort((a, b) => this.edges[b] - this.edges[a]);
     if (!candidates.length) return;
     const side = candidates[0];
-    this.armed[side] = false;
     const fill = fills[side];
     if (!fill || fill.totalCost > this.cash) {
       this.log('SIGNAL_SKIPPED', { side, edge: this.edges[side], reason: !fill ? 'Insufficient visible ask depth for 100 shares' : 'Insufficient paper cash' });
       return;
     }
+    this.armed[side] = false;
     const trade = {
       id: `paper-${this.market.start}-${side}-${now}-${++this.entrySequence}`,
       marketId: this.market.id,
@@ -710,7 +716,7 @@ class ProbabilityBot {
         takeProfitPayoutPerShare: null,
         stopLossBid: null,
         stopLossPayoutPerShare: null,
-        entryModel: 'One new paper entry per eligible scan, including repeated same-side entries in the same window; no per-window entry cap.',
+        entryModel: 'Enter when the active side first qualifies in a window. After a fill, wait for its net edge to fall below threshold and qualify again. A new window or opposite bias permits a fresh gated entry.',
         model: '15 closed 5-minute candles for probability volatility; 50 closed 1-minute candles for persistent swing signals; normal-CDF probability estimate',
         exitModel: 'Sell all opposing current-market paper positions on an opposite swing signal at fresh own-side bids; no take-profit or stop-loss exits. Expiry still marks at the last own-side bid. All exits deduct taker fees.',
       },
@@ -725,6 +731,7 @@ class ProbabilityBot {
       probability: this.probabilityUp == null ? null : { UP: this.probabilityUp, DOWN: 1 - this.probabilityUp },
       edges: this.edges,
       requiredNetEdge: this.requiredNetEdge,
+      entryArmed: { ...this.armed },
       entryFilter: this.entryFilter,
       quotes: {
         UP: this.quotes.UP ? { bestBid: this.quotes.UP.bestBid, bestAsk: this.quotes.UP.bestAsk, midpoint: this.quotes.UP.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.UP.asks, this.strategySettings.sharesPerSignal)?.averagePrice ?? null } : null,

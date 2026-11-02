@@ -31,15 +31,20 @@ function simulateWindow(windowSamples, settings) {
   let tradeCount = 0;
   let open = [];
   const armed = { UP: true, DOWN: true };
+  let activeSide = null;
   const ending = samples[samples.length - 1];
 
   for (const sample of samples) {
+    if (['UP', 'DOWN'].includes(sample.pullback?.side) && sample.pullback.side !== activeSide) {
+      activeSide = sample.pullback.side;
+      armed[activeSide] = true;
+    }
     for (const trade of open) {
       const bid = sample.quotes?.[trade.side]?.bestBid;
       if (!Number.isFinite(bid)) continue;
       const oppositeSignal = settings.sideMode === 'pullback'
-        && ['UP', 'DOWN'].includes(sample.pullback?.side)
-        && sample.pullback.side !== trade.side;
+        && activeSide != null
+        && activeSide !== trade.side;
       if (oppositeSignal) {
         const payout = trade.shares * bid;
         const fee = TAKER_FEE_RATE * bid * (1 - bid) * trade.shares;
@@ -66,6 +71,14 @@ function simulateWindow(windowSamples, settings) {
       volatility5m: sample.volatility5m * settings.volatilityMultiplier,
     });
     if (!Number.isFinite(pUp)) continue;
+    for (const side of ['UP', 'DOWN']) {
+      const sideFill = simulateBuy(sample.quotes?.[side]?.asks, settings.sharesPerSignal);
+      if (!sideFill) continue;
+      const threshold = sideFill.averagePrice < settings.lowPriceThreshold
+        ? settings.lowPriceMinimumNetEdge : settings.minimumNetEdge;
+      const sideProbability = side === 'UP' ? pUp : 1 - pUp;
+      if (sideProbability - sideFill.totalCost / settings.sharesPerSignal < threshold) armed[side] = true;
+    }
     if (['UP', 'DOWN'].some(side => {
       const ask = sample.quotes?.[side]?.bestAsk;
       return Number.isFinite(ask) && ask < 0.02;
@@ -73,7 +86,7 @@ function simulateWindow(windowSamples, settings) {
 
     const candidates = ['UP', 'DOWN'].filter(side => settings.sideMode === 'best-edge'
       || settings.sideMode === `${side}-only`
-      || (settings.sideMode === 'pullback' && sample.pullback?.side === side)).map(side => {
+      || (settings.sideMode === 'pullback' && activeSide === side)).map(side => {
       const fill = simulateBuy(sample.quotes?.[side]?.asks, settings.sharesPerSignal);
       if (!fill) return null;
       const probability = side === 'UP' ? pUp : 1 - pUp;
@@ -82,26 +95,14 @@ function simulateWindow(windowSamples, settings) {
         ? settings.lowPriceMinimumNetEdge : settings.minimumNetEdge;
       return { side, fill, edge, threshold };
     }).filter(candidate => candidate && candidate.edge >= candidate.threshold
-      && (settings.sideMode === 'pullback'
-        ? !open.some(trade => trade.side !== candidate.side)
-        : armed[candidate.side]))
+      && armed[candidate.side]
+      && !open.some(trade => trade.side !== candidate.side))
       .sort((a, b) => b.edge - a.edge);
-
-    for (const side of ['UP', 'DOWN']) {
-      const bestAsk = sample.quotes?.[side]?.bestAsk;
-      if (Number.isFinite(bestAsk) && bestAsk < 0.02) continue;
-      const sideProbability = side === 'UP' ? pUp : 1 - pUp;
-      const sideFill = simulateBuy(sample.quotes?.[side]?.asks, settings.sharesPerSignal);
-      if (!sideFill) continue;
-      const threshold = sideFill.averagePrice < settings.lowPriceThreshold
-        ? settings.lowPriceMinimumNetEdge : settings.minimumNetEdge;
-      if (sideProbability - sideFill.totalCost / settings.sharesPerSignal < threshold) armed[side] = true;
-    }
 
     const selected = candidates[0];
     if (!selected) continue;
-    armed[selected.side] = false;
     if (cash < selected.fill.totalCost) continue;
+    armed[selected.side] = false;
     cash -= selected.fill.totalCost;
     tradeCount += 1;
     open.push({
@@ -149,7 +150,7 @@ function choosePaperSettings(windows, currentSettings = DEFAULT_SETTINGS) {
     .map(window => ({
       ...window,
       samples: Array.isArray(window.samples)
-        ? window.samples.filter(sample => sample.pullback?.method === 'swing50-1m-accumulate-v6')
+        ? window.samples.filter(sample => sample.pullback?.method === 'swing50-1m-edge-reset-v7')
         : [],
     }))
     .filter(window => window.samples.length >= 20)

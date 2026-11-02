@@ -44,7 +44,7 @@ test('paper buy sweeps asks and rejects insufficient visible depth', () => {
   assert.equal(simulateBuy([{ price: 0.4, size: 99 }], 100), null);
 });
 
-test('bias repeatedly enters in the same window while edge passes and continues next window', () => {
+test('continuous qualifying edge buys once; a real edge reset or new window permits another entry', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -58,37 +58,49 @@ test('bias repeatedly enters in the same window while edge passes and continues 
   };
   bot.edges = bot.calculateEdges();
   bot.processSignals(1_000);
-  bot.processSignals(1_000);
-  assert.equal(bot.trades.length, 2);
-  assert.equal(new Set(bot.trades.map(trade => trade.id)).size, 2);
+  for (let i = 1; i <= 20; i++) bot.processSignals(1_000 + i * 25);
+  assert.equal(bot.trades.length, 1);
+  bot.edges.UP = null;
+  bot.processSignals(1_600);
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(1_700);
+  assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].side, 'UP');
   assert.equal(bot.trades[0].shares, 100);
 
   bot.probabilityUp = 0.70;
   bot.edges = bot.calculateEdges();
   bot.processSignals(2_000);
-  assert.equal(bot.trades.length, 2);
+  assert.equal(bot.trades.length, 1);
   bot.probabilityUp = 0.8;
   bot.edges = bot.calculateEdges();
   bot.processSignals(3_000);
-  assert.equal(bot.trades.length, 3);
+  assert.equal(bot.trades.length, 2);
   bot.pullback = { side: null };
   bot.market = { start: 300_000, end: 600_000, title: 'Next window' };
   bot.processSignals(301_000);
-  assert.equal(bot.trades.length, 4);
+  assert.equal(bot.trades.length, 3);
   assert.equal(bot.activeSide, 'UP');
   assert.ok(bot.trades.every(trade => trade.status === 'OPEN'));
 
+  bot.probabilityUp = 0.70;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(301_250);
+  bot.probabilityUp = 0.8;
+  bot.edges = bot.calculateEdges();
   bot.cash = 0;
   bot.processSignals(301_500);
-  assert.equal(bot.trades.length, 4);
+  assert.equal(bot.trades.length, 3);
+  assert.equal(bot.armed.UP, true);
   bot.cash = 10_000;
   bot.quotes.UP.asks = [{ price: 0.70, size: 99 }];
   bot.processSignals(302_000);
-  assert.equal(bot.trades.length, 4);
+  assert.equal(bot.trades.length, 3);
   bot.quotes.UP.asks = [{ price: 0.70, size: 100 }];
   bot.processSignals(302_500);
-  assert.equal(bot.trades.length, 5);
+  assert.equal(bot.trades.length, 4);
+  assert.equal(new Set(bot.trades.map(trade => trade.id)).size, 4);
+  assert.equal(bot.snapshot().entryArmed.UP, false);
 });
 
 test('an opposite signal sells all accumulated positions before opening the other side', () => {
@@ -105,6 +117,11 @@ test('an opposite signal sells all accumulated positions before opening the othe
   };
   bot.edges = bot.calculateEdges();
   bot.processSignals(1_000);
+  bot.probabilityUp = 0.70;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(1_250);
+  bot.probabilityUp = 0.8;
+  bot.edges = bot.calculateEdges();
   bot.processSignals(1_500);
 
   bot.quotes.UP.bestBid = 0.65;
@@ -123,6 +140,17 @@ test('an opposite signal sells all accumulated positions before opening the othe
   assert.equal(bot.trades[1].grossPayout, 65);
   assert.ok(bot.trades[1].exitFees > 0);
   assert.ok(bot.trades.slice(1).every(trade => trade.finalOutcome === 'OPPOSITE_SIGNAL'));
+
+  bot.quotes.DOWN.bestBid = 0.35;
+  bot.quotes.DOWN.updatedAt = 3_000;
+  bot.pullback = { side: 'UP' };
+  bot.probabilityUp = 0.8;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(3_000);
+  assert.equal(bot.trades.length, 4);
+  assert.equal(bot.trades[0].side, 'UP');
+  assert.equal(bot.trades.filter(trade => trade.status === 'OPEN').length, 1);
+  assert.equal(bot.trades[1].finalOutcome, 'OPPOSITE_SIGNAL');
 });
 
 test('a transient missing signal preserves bias and keeps accumulating eligible entries', () => {
