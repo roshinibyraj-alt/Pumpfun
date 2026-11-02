@@ -44,7 +44,7 @@ test('paper buy sweeps asks and rejects insufficient visible depth', () => {
   assert.equal(simulateBuy([{ price: 0.4, size: 99 }], 100), null);
 });
 
-test('bias enters once per window and can enter again next window without a new touch', () => {
+test('bias repeatedly enters in the same window while edge passes and continues next window', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -59,25 +59,39 @@ test('bias enters once per window and can enter again next window without a new 
   bot.edges = bot.calculateEdges();
   bot.processSignals(1_000);
   bot.processSignals(1_000);
-  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades.length, 2);
+  assert.equal(new Set(bot.trades.map(trade => trade.id)).size, 2);
   assert.equal(bot.trades[0].side, 'UP');
   assert.equal(bot.trades[0].shares, 100);
 
   bot.probabilityUp = 0.70;
   bot.edges = bot.calculateEdges();
   bot.processSignals(2_000);
+  assert.equal(bot.trades.length, 2);
   bot.probabilityUp = 0.8;
   bot.edges = bot.calculateEdges();
   bot.processSignals(3_000);
-  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades.length, 3);
   bot.pullback = { side: null };
   bot.market = { start: 300_000, end: 600_000, title: 'Next window' };
   bot.processSignals(301_000);
-  assert.equal(bot.trades.length, 2);
+  assert.equal(bot.trades.length, 4);
   assert.equal(bot.activeSide, 'UP');
+  assert.ok(bot.trades.every(trade => trade.status === 'OPEN'));
+
+  bot.cash = 0;
+  bot.processSignals(301_500);
+  assert.equal(bot.trades.length, 4);
+  bot.cash = 10_000;
+  bot.quotes.UP.asks = [{ price: 0.70, size: 99 }];
+  bot.processSignals(302_000);
+  assert.equal(bot.trades.length, 4);
+  bot.quotes.UP.asks = [{ price: 0.70, size: 100 }];
+  bot.processSignals(302_500);
+  assert.equal(bot.trades.length, 5);
 });
 
-test('an opposite signal sells the old position before opening the other side', () => {
+test('an opposite signal sells all accumulated positions before opening the other side', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -91,6 +105,7 @@ test('an opposite signal sells the old position before opening the other side', 
   };
   bot.edges = bot.calculateEdges();
   bot.processSignals(1_000);
+  bot.processSignals(1_500);
 
   bot.quotes.UP.bestBid = 0.65;
   bot.quotes.UP.updatedAt = 2_000;
@@ -102,13 +117,15 @@ test('an opposite signal sells the old position before opening the other side', 
   assert.deepEqual(bot.trades.map(trade => [trade.side, trade.status]), [
     ['DOWN', 'OPEN'],
     ['UP', 'SETTLED'],
+    ['UP', 'SETTLED'],
   ]);
   assert.equal(bot.trades[1].finalOutcome, 'OPPOSITE_SIGNAL');
   assert.equal(bot.trades[1].grossPayout, 65);
   assert.ok(bot.trades[1].exitFees > 0);
+  assert.ok(bot.trades.slice(1).every(trade => trade.finalOutcome === 'OPPOSITE_SIGNAL'));
 });
 
-test('a transient missing signal preserves bias without duplicating an entry', () => {
+test('a transient missing signal preserves bias and keeps accumulating eligible entries', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -133,8 +150,22 @@ test('a transient missing signal preserves bias without duplicating an entry', (
   bot.edges = bot.calculateEdges();
   bot.processSignals(3_000);
 
-  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades.length, 2);
   assert.equal(bot.activeSide, 'UP');
+});
+
+test('learning samples follow the 500ms repeated-entry scan cadence', async () => {
+  const samples = [];
+  const bot = new ProbabilityBot({
+    learningStore: { recordSample: async sample => samples.push(sample) },
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { start: 0, end: 300_000 };
+  await bot.captureLearningSample(1_000);
+  await bot.captureLearningSample(1_250);
+  await bot.captureLearningSample(1_500);
+  await bot.persistenceQueue;
+  assert.deepEqual(samples.map(sample => sample.ts), [1_000, 1_500]);
 });
 
 test('any best ask below $0.02 blocks both sides; $0.02 is allowed', () => {
@@ -287,7 +318,7 @@ test('keeps every open share in the side totals after the trade-history limit', 
   assert.equal(bot.snapshot().paperAccount.positions.UP.shares, 20_100);
 });
 
-test('own-side bid at 0.99 takes profit and credits one dollar per share', () => {
+test('own-side bid at 0.99 keeps the position open without take-profit', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -304,13 +335,10 @@ test('own-side bid at 0.99 takes profit and credits one dollar per share', () =>
 
   bot.processPositionExits(1_000);
 
-  assert.equal(bot.trades[0].status, 'SETTLED');
-  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
-  assert.equal(bot.trades[0].closePrice, 1);
-  assert.equal(bot.trades[0].grossPayout, 100);
-  assert.ok(Math.abs(bot.trades[0].exitFees - 0.0693) < 1e-9);
-  assert.ok(Math.abs(bot.trades[0].realizedPnl - 54.9307) < 1e-9);
-  assert.ok(Math.abs(bot.cash - 10_099.9307) < 1e-9);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].peakBid, 0.99);
+  assert.equal(bot.cash, 10_000);
+  assert.equal(bot.snapshot().strategy.takeProfitBid, null);
   assert.equal(bot.snapshot().strategy.pollIntervalMs, 500);
 });
 
@@ -344,11 +372,10 @@ test('tracks the highest fresh own-side bid while exits remain active', () => {
   bot.processPositionExits(200_000);
   assert.equal(bot.trades[0].peakBid, 0.99);
   assert.equal(bot.trades[0].peakBidAt, 199_000);
-  assert.equal(bot.trades[0].status, 'SETTLED');
-  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
+  assert.equal(bot.trades[0].status, 'OPEN');
 });
 
-test('own-side bid at 0.01 stops out and credits zero per share', () => {
+test('own-side bid at 0.01 keeps the position open without stop-loss', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
@@ -365,13 +392,10 @@ test('own-side bid at 0.01 stops out and credits zero per share', () => {
 
   bot.processPositionExits(1_000);
 
-  assert.equal(bot.trades[0].status, 'SETTLED');
-  assert.equal(bot.trades[0].finalOutcome, 'STOP_LOSS');
-  assert.equal(bot.trades[0].closePrice, 0);
-  assert.equal(bot.trades[0].grossPayout, 0);
-  assert.ok(Math.abs(bot.trades[0].exitFees - 0.0693) < 1e-9);
-  assert.ok(Math.abs(bot.trades[0].realizedPnl + 45.0693) < 1e-9);
-  assert.ok(Math.abs(bot.cash - 9_999.9307) < 1e-9);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].lastOutcomeBid, 0.01);
+  assert.equal(bot.cash, 10_000);
+  assert.equal(bot.snapshot().strategy.stopLossBid, null);
 });
 
 test('missing or stale own-side bids do not trigger exits', () => {
@@ -417,7 +441,7 @@ test('window-end paper mark uses the last own-side token bid, not BTC reference'
   assert.ok(Math.abs(bot.cash - 10_062.3872) < 1e-9);
 });
 
-test('CLOB exits run even when the Chainlink reference feed is unavailable', async () => {
+test('CLOB bid tracking continues without early exits when the reference feed is unavailable', async () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,
     fetchMarket: async () => ({
@@ -440,8 +464,7 @@ test('CLOB exits run even when the Chainlink reference feed is unavailable', asy
 
   await bot.tick();
 
-  assert.equal(bot.trades[0].status, 'SETTLED');
-  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
-  assert.ok(Math.abs(bot.trades[0].realizedPnl - 54.9307) < 1e-9);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].peakBid, 0.99);
   assert.match(bot.error, /Chainlink/);
 });

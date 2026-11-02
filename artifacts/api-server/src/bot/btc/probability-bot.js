@@ -17,10 +17,6 @@ const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const MIN_ENTRY_PRICE = 0.02;
 const OPENING_DELAY_SECONDS = 0;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
-const TAKE_PROFIT_BID = 0.99;
-const TAKE_PROFIT_PAYOUT = 1;
-const STOP_LOSS_BID = 0.01;
-const STOP_LOSS_PAYOUT = 0;
 const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   openingDelaySeconds: OPENING_DELAY_SECONDS,
   minimumNetEdge: MIN_EDGE,
@@ -151,8 +147,7 @@ class ProbabilityBot {
     this.pullback = null;
     this.activeSide = activeSide === 'UP' || activeSide === 'DOWN' ? activeSide : null;
     this.activeSignalReason = this.activeSide ? 'PERSISTED_BIAS' : null;
-    this.entryWindowStart = null;
-    this.lastEnteredSideInWindow = null;
+    this.entrySequence = 0;
     this.handledClosedSignals = new Set();
     this.lastLiveSignal = null;
     this.learningStatus = {
@@ -188,7 +183,7 @@ class ProbabilityBot {
 
   async captureLearningSample(now) {
     if (!this.learningStore || !this.market) return;
-    const ts = Math.floor(now / 2000) * 2000;
+    const ts = Math.floor(now / POLL_MS) * POLL_MS;
     if (ts === this.lastSampledAt) return;
     this.lastSampledAt = ts;
     const sample = {
@@ -265,11 +260,6 @@ class ProbabilityBot {
         this.lastUpdateAt = now;
         return;
       }
-      if (this.entryWindowStart !== this.market.start) {
-        this.entryWindowStart = this.market.start;
-        this.lastEnteredSideInWindow = null;
-      }
-
       const [upBook, downBook] = await Promise.all([
         this.fetchBook(this.market.tokens.UP),
         this.fetchBook(this.market.tokens.DOWN),
@@ -308,7 +298,7 @@ class ProbabilityBot {
         activeSignalReason: this.activeSignalReason,
         regime: this.activeSide ? `ACTIVE_${this.activeSide}` : detectedPullback.regime,
       } : this.activeSide ? {
-        method: 'swing50-1m-persistent-flip-v5',
+        method: 'swing50-1m-accumulate-v6',
         side: this.activeSide,
         detectedSide: null,
         signalReason: null,
@@ -428,7 +418,6 @@ class ProbabilityBot {
     const previousSide = this.activeSide;
     this.activeSide = signal.side;
     this.activeSignalReason = signal.signalReason ?? null;
-    this.lastEnteredSideInWindow = null;
     this.log('PULLBACK_BIAS_CHANGED', {
       previousSide, side: this.activeSide, signalReason: this.activeSignalReason,
       method: signal.method, lookbackCandles: signal.lookbackCandles,
@@ -436,10 +425,6 @@ class ProbabilityBot {
   }
 
   processSignals(now) {
-    if (this.market && this.entryWindowStart !== this.market.start) {
-      this.entryWindowStart = this.market.start;
-      this.lastEnteredSideInWindow = null;
-    }
     if (this.pullback && !Object.hasOwn(this.pullback, 'detectedSide')) {
       this.applyPullbackSignal(this.pullback);
     }
@@ -494,8 +479,7 @@ class ProbabilityBot {
       .filter(side => this.strategySettings.sideMode === 'best-edge'
         || this.strategySettings.sideMode === `${side}-only`
         || (this.strategySettings.sideMode === 'pullback'
-          && this.activeSide === side
-          && this.lastEnteredSideInWindow !== side))
+          && this.activeSide === side))
       .filter(side => {
       const edge = this.edges[side];
       const threshold = this.requiredNetEdge[side];
@@ -512,7 +496,7 @@ class ProbabilityBot {
       return;
     }
     const trade = {
-      id: `paper-${this.market.start}-${side}-${now}`,
+      id: `paper-${this.market.start}-${side}-${now}-${++this.entrySequence}`,
       marketId: this.market.id,
       tokenId: this.market.tokens?.[side] ?? null,
       windowStart: this.market.start,
@@ -537,7 +521,6 @@ class ProbabilityBot {
     };
     this.cash -= fill.totalCost;
     this.trades.unshift(trade);
-    this.lastEnteredSideInWindow = side;
     let retainedSettled = 0;
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     this.log('PAPER_BUY', {
@@ -569,11 +552,6 @@ class ProbabilityBot {
       if (now < trade.windowEnd && fresh) {
         trade.lastOutcomeBid = bid;
         trade.lastOutcomeBidAt = quote.updatedAt;
-        if (bid >= TAKE_PROFIT_BID) {
-          this.closeTrade(trade, TAKE_PROFIT_PAYOUT, trade.shares * TAKE_PROFIT_PAYOUT, 'TAKE_PROFIT', 'Own-side best bid reached $0.99; credited $1.00 per share before fees.', now, bid);
-        } else if (bid <= STOP_LOSS_BID) {
-          this.closeTrade(trade, STOP_LOSS_PAYOUT, STOP_LOSS_PAYOUT, 'STOP_LOSS', 'Own-side best bid reached $0.01; credited $0.00 per share before fees.', now, bid);
-        }
         continue;
       }
 
@@ -728,12 +706,13 @@ class ProbabilityBot {
         openingDelaySeconds: this.strategySettings.openingDelaySeconds,
         volatilityMultiplier: this.strategySettings.volatilityMultiplier,
         sideMode: this.strategySettings.sideMode,
-        takeProfitBid: TAKE_PROFIT_BID,
-        takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT,
-        stopLossBid: STOP_LOSS_BID,
-        stopLossPayoutPerShare: STOP_LOSS_PAYOUT,
+        takeProfitBid: null,
+        takeProfitPayoutPerShare: null,
+        stopLossBid: null,
+        stopLossPayoutPerShare: null,
+        entryModel: 'One new paper entry per eligible scan, including repeated same-side entries in the same window; no per-window entry cap.',
         model: '15 closed 5-minute candles for probability volatility; 50 closed 1-minute candles for persistent swing signals; normal-CDF probability estimate',
-        exitModel: 'Own-side CLOB best bid; all exits deduct the configured taker fee; expiry mark uses the last own-side bid, not BTC reference.',
+        exitModel: 'Sell all opposing current-market paper positions on an opposite swing signal at fresh own-side bids; no take-profit or stop-loss exits. Expiry still marks at the last own-side bid. All exits deduct taker fees.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
       referencePrice: this.referencePrice,
