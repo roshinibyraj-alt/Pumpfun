@@ -267,6 +267,7 @@ class ProbabilityBot {
         this.lastUpdateAt = now;
         return;
       }
+      this.beginMarketWindow();
       const [upBook, downBook] = await Promise.all([
         this.fetchBook(this.market.tokens.UP),
         this.fetchBook(this.market.tokens.DOWN),
@@ -432,11 +433,23 @@ class ProbabilityBot {
     });
   }
 
-  processSignals(now) {
-    if (this.market && this.entryWindowStart !== this.market.start) {
-      this.entryWindowStart = this.market.start;
-      this.armed = { UP: true, DOWN: true };
+  beginMarketWindow() {
+    if (!this.market || this.entryWindowStart === this.market.start) return;
+    const previousWindowStart = this.entryWindowStart;
+    this.entryWindowStart = this.market.start;
+    // Entry eligibility is window-scoped; direction and signal deduplication are not.
+    // No new touch is required, and TP/SL must never clear the active direction.
+    this.armed = { UP: true, DOWN: true };
+    if (previousWindowStart !== null && this.activeSide) {
+      this.log('PULLBACK_BIAS_CARRIED', {
+        previousWindowStart, windowStart: this.market.start,
+        side: this.activeSide, signalReason: this.activeSignalReason,
+      });
     }
+  }
+
+  processSignals(now) {
+    this.beginMarketWindow();
     if (this.pullback && !Object.hasOwn(this.pullback, 'detectedSide')) {
       this.applyPullbackSignal(this.pullback);
     }
@@ -730,7 +743,8 @@ class ProbabilityBot {
         takeProfitPayoutPerShare: 1,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: 0,
-        entryModel: 'Enter when the active side first qualifies in a window. After a fill, wait for its net edge to fall below threshold and qualify again. A new window or opposite bias permits a fresh gated entry.',
+        signalPersistence: 'Carry the active Up/Down signal into every new window without a fresh touch. Only an opposite touch, rejection or confirmed closed-candle breakout changes direction; TP/SL does not clear it.',
+        entryModel: 'Carry the active side across windows and enter when it first qualifies; no fresh touch is required. After a fill, wait for its net edge to fall below threshold and qualify again. A new window or opposite bias permits a fresh gated entry.',
         model: '15 closed 5-minute candles for probability volatility; 50 closed 1-minute candles for persistent swing signals; normal-CDF probability estimate',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. Opposite signals sell all old-side positions at fresh bids. Expiry uses a fresh closing bid, or retries the original market for a current bid or confirmed final payout; unavailable data remains explicitly pending.',
       },

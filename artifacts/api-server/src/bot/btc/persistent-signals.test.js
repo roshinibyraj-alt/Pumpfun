@@ -8,6 +8,103 @@ const { detectPullback } = require('./pullback-signal');
 
 const quietFeed = { start() {}, snapshot() { return { status: 'live', ageMs: 0 }; } };
 
+for (const side of ['UP', 'DOWN']) {
+  test(`${side} carries across full scan windows with no fresh touch, retains edge-reset gates, and reverses on an opposite signal`, async () => {
+    let now = 300_001;
+    const bot = new ProbabilityBot({
+      now: () => now,
+      fetchMarket: async start => ({
+        id: `market-${start}`, start, end: start + 300_000,
+        tokens: { UP: `u-${start}`, DOWN: `d-${start}` },
+      }),
+      fetchMarketDetails: async () => null,
+      fetchBook: async () => ({
+        bids: [{ price: 0.4, size: 1000 }], asks: [{ price: 0.4, size: 1000 }],
+      }),
+      priceFeed: {
+        ...quietFeed,
+        getTicks: () => [{ ts: Math.floor(now / 300_000) * 300_000, price: 100_000 },
+          { ts: now, price: 100_000 }],
+        getHistoricalCandles: () => Array.from({ length: 20 }, (_, i) => ({
+          close: 100_000 + i * 9 + (i % 2) * 10,
+        })),
+        getHistoricalMinuteCandles: () => [], // No new touch or breakout in either window.
+      },
+    });
+    bot.applyPullbackSignal({ side, signalSource: 'LIVE_TOUCH', signalReason: 'INITIAL_TOUCH' });
+    await bot.tick();
+    assert.equal(bot.error, null);
+    assert.equal(bot.trades.length, 1);
+    assert.equal(bot.trades[0].side, side);
+    assert.equal(bot.armed[side], false);
+    now = 600_001;
+    await bot.tick();
+    assert.equal(bot.error, null);
+    assert.equal(bot.activeSide, side);
+    assert.equal(bot.activeSignalReason, 'INITIAL_TOUCH');
+    assert.equal(bot.pullback.detectedSide, null);
+    assert.equal(bot.pullback.side, side);
+    assert.equal(bot.trades.filter(t => t.windowStart === 600_000).length, 1);
+    assert.equal(bot.trades[0].side, side);
+    now += 1000;
+    await bot.tick();
+    assert.equal(bot.trades.filter(t => t.windowStart === 600_000).length, 1);
+    const carryEvents = bot.events.filter(e => e.event === 'PULLBACK_BIAS_CARRIED');
+    assert.equal(carryEvents.length, 1);
+    assert.equal(carryEvents[0].side, side);
+    const opposite = side === 'UP' ? 'DOWN' : 'UP';
+    bot.applyPullbackSignal({
+      method: 'test', side: opposite, signalSource: 'CLOSED_CANDLE',
+      signalReason: 'CONFIRMED_OPPOSITE_BREAKOUT', signalAt: now,
+    });
+    bot.processSignals(now);
+    assert.equal(bot.activeSide, opposite);
+    assert.equal(bot.trades[0].side, opposite);
+    assert.equal(bot.trades.find(t => t.windowStart === 600_000 && t.side === side).finalOutcome, 'OPPOSITE_SIGNAL');
+  });
+}
+
+for (const [bid, outcome] of [[0.99, 'TAKE_PROFIT'], [0.01, 'STOP_LOSS']]) {
+  test(`${outcome} closes a position without clearing its signal or rearming a same-window entry`, () => {
+    const bot = new ProbabilityBot({ priceFeed: quietFeed, activeSide: 'UP' });
+    bot.market = { id: 'market', start: 0, end: 300_000 };
+    bot.beginMarketWindow();
+    bot.armed.UP = false;
+    bot.trades = [{
+      id: 'position', marketId: 'market', side: 'UP', windowEnd: 300_000,
+      openedAt: 0, shares: 100, totalCost: 40, status: 'OPEN',
+    }];
+    bot.quotes.UP = { bestBid: bid, updatedAt: 1_000 };
+    bot.processPositionExits(1_000);
+    assert.equal(bot.trades[0].finalOutcome, outcome);
+    assert.equal(bot.activeSide, 'UP');
+    assert.equal(bot.armed.UP, false);
+    bot.market = { id: 'next', start: 300_000, end: 600_000 };
+    bot.beginMarketWindow();
+    assert.equal(bot.activeSide, 'UP');
+    assert.equal(bot.armed.UP, true);
+  });
+}
+
+test('a window transition carries bias even while the opening reference is unavailable', async () => {
+  const bot = new ProbabilityBot({
+    now: () => 650_000, activeSide: 'DOWN',
+    fetchMarket: async start => ({ id: 'next', start, end: start + 300_000, tokens: { UP: 'u', DOWN: 'd' } }),
+    fetchBook: async () => ({ bids: [{ price: 0.4, size: 100 }], asks: [{ price: 0.4, size: 100 }] }),
+    priceFeed: { ...quietFeed, getTicks: () => [{ ts: 650_000, price: 100_000 }],
+      getHistoricalCandles: () => [], getHistoricalMinuteCandles: () => [] },
+  });
+  bot.entryWindowStart = 300_000;
+  bot.armed.DOWN = false;
+  await bot.tick();
+  assert.equal(bot.error, null);
+  assert.equal(bot.entryWindowStart, 600_000);
+  assert.equal(bot.activeSide, 'DOWN');
+  assert.equal(bot.armed.DOWN, true);
+  assert.equal(bot.trades.length, 0); // Carrying a signal never bypasses model-data gates.
+  assert.match(bot.statusReason, /opening reference/);
+});
+
 test('stale one-minute candle history cannot issue a new direction', () => {
   const candles = Array.from({ length: 50 }, (_, i) => ({
     start: i * 60_000, end: (i + 1) * 60_000,

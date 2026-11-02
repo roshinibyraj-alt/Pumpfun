@@ -120,8 +120,9 @@ function renderSide(side,state){
  $(side.toLowerCase()+'Edge').textContent='EDGE '+signed(edge,3);
   const strategy=state.strategy||{},mode=String(strategy.sideMode||'best-edge').toLowerCase();
   const required=Number(state.requiredNetEdge?.[side]??(Number(state.quotes?.[side]?.estimatedAverageAsk)<Number(strategy.lowPriceThreshold??.25)?Number(strategy.lowPriceMinimumNetEdge??.10):Number(strategy.minimumNetEdge??.05)));
-   const sideAllowed=mode==='best-edge'||(mode==='up-only'&&side==='UP')||(mode==='down-only'&&side==='DOWN')||(mode==='pullback'&&state.pullback?.side===side);
-    $(side.toLowerCase()+'Signal').textContent=state.entryFilter?.allowed===false?'BLOCKED':!sideAllowed?(mode==='pullback'?'WAIT PULLBACK':'SIDE FILTER'):state.entryArmed?.[side]===false?'WAIT EDGE RESET':isNumeric(edge)&&Number(edge)>=required?`BUY ${Number(strategy.sharesPerSignal??100)}`:isNumeric(edge)?'WAIT':'—';
+   const activeSide=state.activeSide??state.pullback?.side;
+   const sideAllowed=mode==='best-edge'||(mode==='up-only'&&side==='UP')||(mode==='down-only'&&side==='DOWN')||(mode==='pullback'&&activeSide===side);
+    $(side.toLowerCase()+'Signal').textContent=state.entryFilter?.allowed===false?'BLOCKED':!sideAllowed?(mode==='pullback'?(activeSide?'OPPOSITE BIAS':'WAIT SIGNAL'):'SIDE FILTER'):state.entryArmed?.[side]===false?'WAIT EDGE RESET':isNumeric(edge)&&Number(edge)>=required?`BUY ${Number(strategy.sharesPerSignal??100)}`:isNumeric(edge)?'WAIT':'—';
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
