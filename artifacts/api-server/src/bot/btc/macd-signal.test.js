@@ -96,6 +96,7 @@ test('reversal aggregates old-side shares and buys that exact quantity, not defa
 
 test('partial ask liquidity fills only actual shares and leaves exactly the remaining reversal pending', () => {
   const bot = reversalBot();
+  bot.probabilityUp = .9; // Both partial reversal fills must bypass negative net edge.
   bot.quotes.DOWN.asks = [{ price: .2, size: 120 }];
   bot.processOppositeSignalExits(1_000);
   bot.edges = bot.calculateEdges();
@@ -132,15 +133,10 @@ test('partial bid liquidity preserves the remaining old position and cannot fabr
   assert.equal(bot.trades.filter(t => t.finalOutcome === 'OPPOSITE_SIGNAL').reduce((n, t) => n + t.shares, 0), 400);
 });
 
-test('cash and edge gates still block matched reversals without losing the target', () => {
+test('cash still blocks a matched reversal without losing its target even when edge is bypassed', () => {
   const bot = reversalBot();
   bot.processOppositeSignalExits(1_000);
   bot.probabilityUp = .9;
-  bot.edges = bot.calculateEdges();
-  bot.processSignals(1_000);
-  assert.equal(bot.pendingReversal.shares, 400);
-  assert.equal(bot.trades.length, 1);
-  bot.probabilityUp = .1;
   bot.edges = bot.calculateEdges();
   bot.cash = 1;
   bot.processSignals(1_000);
@@ -150,4 +146,35 @@ test('cash and edge gates still block matched reversals without losing the targe
   bot.beginMarketWindow();
   assert.equal(bot.pendingReversal, null);
   assert.equal(bot.activeSide, 'DOWN');
+});
+
+for (const probabilityUp of [.9, .63]) {
+  test(`matched reversal buys all400 sold shares at sub-threshold edge with UP probability${probabilityUp}`, () => {
+    const bot = reversalBot();
+    bot.processOppositeSignalExits(1_000);
+    bot.probabilityUp = probabilityUp;
+    bot.edges = bot.calculateEdges();
+    assert.ok(bot.edges.DOWN < .05);
+    bot.armed.DOWN = false;
+    bot.processSignals(1_000);
+    assert.equal(bot.pendingReversal, null);
+    assert.equal(bot.trades[0].side, 'DOWN');
+    assert.equal(bot.trades[0].shares, 400);
+    assert.equal(bot.trades[0].edgeGateBypassed, true);
+    assert.equal(bot.trades[0].entryKind, 'MATCHED_REVERSAL');
+    bot.quotes.DOWN.asks = [{ price: .3, size: 1000 }];
+    bot.edges = bot.calculateEdges();
+    bot.processSignals(2_000);
+    assert.equal(bot.trades.length, 2); // No pending target: ordinary negative-edge entries still blocked.
+  });
+}
+
+test('ordinary entries cannot use the reversal exemption without shares actually sold', () => {
+  const bot = reversalBot();
+  bot.trades = [];
+  bot.probabilityUp = .9;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(1_000);
+  assert.equal(bot.trades.length, 0);
+  assert.equal(bot.pendingReversal, null);
 });

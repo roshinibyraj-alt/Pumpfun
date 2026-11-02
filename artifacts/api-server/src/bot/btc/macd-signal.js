@@ -1,6 +1,6 @@
 'use strict';
 
-const METHOD = 'macd-1m-12-26-9-reversal-sweep-v1';
+const METHOD = 'macd-1m-12-26-9-reversal-sweep-v2';
 const FAST = 12;
 const SLOW = 26;
 const SIGNAL = 9;

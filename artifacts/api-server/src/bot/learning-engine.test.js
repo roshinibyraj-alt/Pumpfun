@@ -38,6 +38,21 @@ test('replay takes profit without rearming a continuously qualifying edge', () =
   assert.ok(Math.abs(result.pnl - 68.4607) < 1e-8);
 });
 
+test('replay also bypasses negative edge only for a matched reversal', () => {
+  const samples = Array.from({ length: 20 }, (_, i) => ({
+    ts: i * 1000, secondsSinceOpen: i, secondsRemaining: 300 - i,
+    referencePrice: 100, spotPrice: 100, volatility5m: .005,
+    pullback: { method: METHOD, side: i < 10 ? 'UP' : 'DOWN' },
+    quotes: {
+      UP: { bestAsk: .3, bestBid: .35, asks: [{ price: .3, size: 1000 }], bids: [{ price: .35, size: 1000 }] },
+      DOWN: { bestAsk: .8, bestBid: .4, asks: [{ price: .8, size: 1000 }], bids: [{ price: .4, size: 1000 }] },
+    },
+  }));
+  const result = simulateWindow(samples, DEFAULT_SETTINGS);
+  assert.equal(result.trades, 2);
+  assert.ok(Math.abs(result.pnl - (-40.8625)) < 1e-8);
+});
+
 test('auto-tuner holds current settings until enough closed windows exist', () => {
   const windows = Array.from({ length: MIN_CLOSED_WINDOWS - 1 }, (_, i) => ({
     windowStart: i * 300_000, samples: [],
@@ -52,7 +67,7 @@ test('auto-tuner excludes all previous trendline execution policies', () => {
   const windows = Array.from({ length: 15 }, (_, i) => ({
     windowStart: i * 300_000,
     samples: Array.from({ length: 20 }, () => ({
-      pullback: { method: 'swing50-1m-edge-reset-tpsl-v8', side: 'UP' },
+      pullback: { method: i % 2 ? 'macd-1m-12-26-9-reversal-sweep-v1' : 'swing50-1m-edge-reset-tpsl-v8', side: 'UP' },
     })),
   }));
   const result = choosePaperSettings(windows, DEFAULT_SETTINGS);

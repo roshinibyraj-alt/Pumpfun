@@ -512,9 +512,10 @@ class ProbabilityBot {
       .filter(side => {
       const edge = this.edges[side];
       const threshold = this.requiredNetEdge[side];
-      return edge != null && edge >= threshold
-        && (this.armed[side] || (this.pendingReversal && this.pendingReversal.marketId === this.market?.id
-          && this.pendingReversal.side === side))
+      const matchedReversal = this.pendingReversal
+        && this.pendingReversal.marketId === this.market?.id
+        && this.pendingReversal.side === side && this.pendingReversal.shares > 1e-8;
+      return (matchedReversal || (edge != null && edge >= threshold && this.armed[side]))
         && !hasOpposingOpenPosition(side);
     }).sort((a, b) => this.edges[b] - this.edges[a]);
     if (!candidates.length) return;
@@ -541,6 +542,7 @@ class ProbabilityBot {
       side,
       shares: fill.shares,
       entryKind: reversal ? 'MATCHED_REVERSAL' : 'NORMAL',
+      edgeGateBypassed: Boolean(reversal),
       entryPrice: fill.averagePrice,
       cost: fill.cost,
       fees: fill.fees,
@@ -562,6 +564,7 @@ class ProbabilityBot {
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     this.log('PAPER_BUY', {
       tradeId: trade.id,
+      entryKind: trade.entryKind, edgeGateBypassed: trade.edgeGateBypassed,
       side, shares: fill.shares, price: fill.averagePrice,
       modelProbability: trade.modelProbability,
       edge: this.edges[side], requiredNetEdge: this.requiredNetEdge[side],
@@ -779,8 +782,9 @@ class ProbabilityBot {
         takeProfitPayoutPerShare: 1,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: 0,
+        reversalBypassesNetEdge: true,
         signalPersistence: 'Carry MACD direction across windows; only a new closed 1m histogram signal changes it. TP/SL does not clear direction.',
-        entryModel: 'Carry MACD direction across windows. Normal entries retain edge-reset cadence. Reversal buys target actual shares sold, sweeping available asks; remaining quantity stays pending subject to cash and edge checks.',
+        entryModel: 'Carry MACD direction across windows. Normal entries retain net-edge gates and edge-reset cadence. Matched reversals bypass net-edge checks and target actual shares sold, sweeping available asks; cash, price-floor and real-depth checks remain active.',
         model: '15 closed 5-minute candles for probability volatility; closed 1-minute MACD histogram (12,26,9) for direction; normal-CDF probability estimate',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. Opposite MACD signals sweep actual old-side bids and target the sold share count on the opposite side. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },

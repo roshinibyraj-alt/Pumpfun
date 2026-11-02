@@ -151,7 +151,7 @@ test('a previously handled closed-candle event cannot undo a newer closed MACD r
   assert.equal(bot.activeSide, 'UP');
 });
 
-test('reversal exit waits for a fresh bid, then sells even when the opposite entry fails its edge gate', () => {
+test('reversal waits for a fresh bid, then sells and matches shares even at negative edge', () => {
   const bot = new ProbabilityBot({ priceFeed: quietFeed, activeSide: 'DOWN' });
   bot.market = { id: 'market', start: 0, end: 300_000 };
   bot.trades = [{ id: 'old', marketId: 'market', side: 'UP', status: 'OPEN',
@@ -160,15 +160,18 @@ test('reversal exit waits for a fresh bid, then sells even when the opposite ent
     UP: { bestBid: 0.4, updatedAt: -10_000, bids: [{ price: 0.4, size: 100 }], bestAsk: 0.5, asks: [{ price: 0.5, size: 100 }] },
     DOWN: { bestBid: 0.4, updatedAt: 1_000, bestAsk: 0.5, asks: [{ price: 0.5, size: 100 }] },
   };
-  bot.probabilityUp = 0.9; // DOWN entry has negative edge.
+  bot.probabilityUp = 0.9; // DOWN ordinary entries fail; matched reversals are exempt.
   bot.edges = bot.calculateEdges();
   bot.processSignals(1_000);
   assert.equal(bot.trades[0].status, 'OPEN');
   bot.quotes.UP.updatedAt = 2_000;
   bot.processSignals(2_000);
-  assert.equal(bot.trades.length, 1);
-  assert.equal(bot.trades[0].finalOutcome, 'OPPOSITE_SIGNAL');
-  assert.equal(bot.trades[0].grossPayout, 40);
+  assert.equal(bot.trades.length, 2);
+  assert.equal(bot.trades[1].finalOutcome, 'OPPOSITE_SIGNAL');
+  assert.equal(bot.trades[1].grossPayout, 40);
+  assert.equal(bot.trades[0].side, 'DOWN');
+  assert.equal(bot.trades[0].shares, 100);
+  assert.equal(bot.trades[0].edgeGateBypassed, true);
 });
 
 test('tick takes MACD candles from the one-minute series while keeping probability volatility on five-minute data', async () => {
@@ -190,7 +193,7 @@ test('tick takes MACD candles from the one-minute series while keeping probabili
   assert.equal(bot.error, null);
   assert.equal(bot.macd.chart.bars.length, 17);
   assert.equal(bot.macd.chart.bars[1].start - bot.macd.chart.bars[0].start, 60_000);
-  assert.equal(bot.macd.method, 'macd-1m-12-26-9-reversal-sweep-v1');
+  assert.equal(bot.macd.method, 'macd-1m-12-26-9-reversal-sweep-v2');
   assert.equal(bot.pullback, bot.macd);
   assert.equal(bot.volatility5m, estimateLogReturnVolatility(fiveMinutes));
 });
