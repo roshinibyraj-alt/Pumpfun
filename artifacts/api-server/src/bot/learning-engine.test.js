@@ -91,6 +91,38 @@ test('a trendline lower-low touch chooses UP and a higher-high touch chooses DOW
   assert.equal(upSignal.signalReason, 'LOWER_LOW_TRENDLINE_TOUCH');
 });
 
+test('closed-candle wick rejection recovers missed trendline touches', () => {
+  const downCloses = Array.from({ length: 50 }, (_, index) =>
+    100_000 - index * 5 + [0, 50, 10, -40][index % 4]);
+  const upCloses = Array.from({ length: 50 }, (_, index) =>
+    100_000 + index * 5 + [0, 50, 10, -40][index % 4]);
+  const now = 50 * 300_000;
+  const lowCandles = candlesFromCloses(downCloses);
+  const downState = detectPullback(lowCandles, now, 0.0001);
+  const support = downState.chart.trendline.end;
+  Object.assign(lowCandles.at(-1), {
+    low: support - 3,
+    close: support + 100,
+    high: support + 110,
+  });
+  const upSignal = detectPullback(lowCandles, now, 0.0001, support + 1_000, support + 900);
+
+  const highCandles = candlesFromCloses(upCloses);
+  const upState = detectPullback(highCandles, now, 0.0001);
+  const resistance = upState.chart.trendline.end;
+  Object.assign(highCandles.at(-1), {
+    high: resistance + 3,
+    close: resistance - 100,
+    low: resistance - 110,
+  });
+  const downSignal = detectPullback(highCandles, now, 0.0001, resistance - 1_000, resistance - 900);
+
+  assert.equal(upSignal.side, 'UP');
+  assert.equal(upSignal.signalReason, 'LOWER_LOW_CANDLE_REJECTION');
+  assert.equal(downSignal.side, 'DOWN');
+  assert.equal(downSignal.signalReason, 'HIGHER_HIGH_CANDLE_REJECTION');
+});
+
 test('waits when there is no matching touch or structure is unavailable', () => {
   const flat = Array.from({ length: 50 }, () => 100_000);
   const mixed = detectPullback(candlesFromCloses(flat), 50 * 300_000, 0.0001, 100_000, 99_999);
@@ -113,7 +145,7 @@ test('auto-tuner holds current settings until enough closed windows exist', () =
 test('auto-tuner ignores windows logged with the previous pullback rule', () => {
   const windows = Array.from({ length: 15 }, (_, index) => ({
     windowStart: index * 300_000,
-    samples: Array.from({ length: 20 }, () => ({ pullback: { method: 'swing50-touch-break-v2', side: 'UP' } })),
+    samples: Array.from({ length: 20 }, () => ({ pullback: { method: 'swing50-close-break-v3', side: 'UP' } })),
   }));
   const result = choosePaperSettings(windows, DEFAULT_SETTINGS);
   assert.equal(result.applied, false);
@@ -137,7 +169,7 @@ test('auto-tuner evaluates only the latest 15 completed windows in chronological
         referencePrice: 100,
         spotPrice,
         volatility5m: 0.005,
-        pullback: { method: 'swing50-close-break-v3', side: 'UP' },
+        pullback: { method: 'swing50-touch-rejection-v4', side: 'UP' },
         quotes: {
           UP: { bestAsk: 0.45, bestBid: finalBid, asks: [{ price: 0.45, size: 100 }] },
           DOWN: { bestAsk: 0.45, bestBid: finalBid, asks: [{ price: 0.45, size: 100 }] },

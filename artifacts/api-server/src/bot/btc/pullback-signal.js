@@ -85,8 +85,18 @@ function detectPullback(candles, now, volatility5m, livePrice = null, previousLi
   const crossedUp = confirmedUpBreak;
   const crossedDown = confirmedDownBreak;
   const atTrendline = Number.isFinite(livePrice) && Math.abs(livePrice - lineEnd) <= buffer;
-  const lowerLowTouch = atTrendline && lowerLows;
-  const higherHighTouch = atTrendline && higherHighs;
+  const lowerLowTouch = lowerLows && (
+    atTrendline
+    || (latestClosed.low <= lineEnd + buffer && latestClosed.close > lineEnd)
+  );
+  const higherHighTouch = higherHighs && (
+    atTrendline
+    || (latestClosed.high >= lineEnd - buffer && latestClosed.close < lineEnd)
+  );
+  const lowerLowRejection = lowerLowTouch && !atTrendline
+    && latestClosed.low <= lineEnd + buffer && latestClosed.close > lineEnd;
+  const higherHighRejection = higherHighTouch && !atTrendline
+    && latestClosed.high >= lineEnd - buffer && latestClosed.close < lineEnd;
   let side = null;
   let signalReason = null;
   if (confirmedUpBreak) {
@@ -95,6 +105,9 @@ function detectPullback(candles, now, volatility5m, livePrice = null, previousLi
   } else if (confirmedDownBreak) {
     side = 'DOWN';
     signalReason = 'LOWER_LOW_BREAKOUT';
+  } else if (lowerLowRejection !== higherHighRejection) {
+    side = lowerLowRejection ? 'UP' : 'DOWN';
+    signalReason = lowerLowRejection ? 'LOWER_LOW_CANDLE_REJECTION' : 'HIGHER_HIGH_CANDLE_REJECTION';
   } else if (lowerLowTouch !== higherHighTouch) {
     side = lowerLowTouch ? 'UP' : 'DOWN';
     signalReason = lowerLowTouch ? 'LOWER_LOW_TRENDLINE_TOUCH' : 'HIGHER_HIGH_TRENDLINE_TOUCH';
@@ -102,7 +115,7 @@ function detectPullback(candles, now, volatility5m, livePrice = null, previousLi
   const currentPrice = Number.isFinite(livePrice) ? livePrice : null;
 
   return {
-    method: 'swing50-close-break-v3',
+    method: 'swing50-touch-rejection-v4',
     side,
     signalReason,
     crossed: Boolean(crossedUp || crossedDown),
