@@ -659,7 +659,7 @@ class ProbabilityBot {
         maxEntriesPerWindow: 18,
         signalPersistence: 'Reset each window. Minute 1 and minute 2 choose one locked direction; later bars never flip it.',
         entryModel: '50 shares every 10 seconds from 120 through 290 seconds (18 scheduled slots). No probability or edge gate; no catch-up bursts. Cash, price-floor, fresh-book and real-depth checks remain active.',
-        model: 'Closed 1-minute MACD (12,26,9): minute 1 SOLID_RED + minute 2 SHRINKING_RED or SOLID_GREEN selects UP; SOLID_RED selects DOWN. Minute 1 SOLID_GREEN + minute 2 SOLID_GREEN selects UP; SHRINKING_GREEN or SOLID_RED selects DOWN. Other pairs skip.',
+        model: 'Closed 1-minute MACD (12,26,9): SOLID_RED→SHRINKING_RED/SOLID_GREEN and SHRINKING_RED→SHRINKING_RED select UP; SOLID_RED→SOLID_RED selects DOWN. SOLID_GREEN→SOLID_GREEN selects UP; SOLID_GREEN→SHRINKING_GREEN/SOLID_RED and SHRINKING_GREEN→SHRINKING_GREEN select DOWN. Other pairs skip.',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,

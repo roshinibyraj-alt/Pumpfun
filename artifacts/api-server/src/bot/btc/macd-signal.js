@@ -1,6 +1,6 @@
 'use strict';
 
-const METHOD = 'macd-1m-12-26-9-window-pair-v2';
+const METHOD = 'macd-1m-12-26-9-window-pair-v3';
 const FAST = 12;
 const SLOW = 26;
 const SIGNAL = 9;
@@ -87,10 +87,12 @@ function windowSignal(signal, start, now) {
   if (!first || !second) return { status: 'WAITING_HISTORY', side: null };
   const up = first.classification === 'SOLID_RED'
     && ['SHRINKING_RED', 'SOLID_GREEN'].includes(second.classification)
-    || first.classification === 'SOLID_GREEN' && second.classification === 'SOLID_GREEN';
+    || first.classification === 'SOLID_GREEN' && second.classification === 'SOLID_GREEN'
+    || first.classification === 'SHRINKING_RED' && second.classification === 'SHRINKING_RED';
   const down = first.classification === 'SOLID_GREEN'
     && ['SHRINKING_GREEN', 'SOLID_RED'].includes(second.classification)
-    || first.classification === 'SOLID_RED' && second.classification === 'SOLID_RED';
+    || first.classification === 'SOLID_RED' && second.classification === 'SOLID_RED'
+    || first.classification === 'SHRINKING_GREEN' && second.classification === 'SHRINKING_GREEN';
   return {
     status: up || down ? 'LOCKED' : 'SKIP_WINDOW',
     side: up ? 'UP' : down ? 'DOWN' : null,

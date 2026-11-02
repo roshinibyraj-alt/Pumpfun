@@ -33,7 +33,9 @@ test('all 25 classification pairs enforce only the four requested transitions', 
     const expected = first === 'SOLID_RED' && ['SHRINKING_RED', 'SOLID_GREEN', 'SOLID_RED'].includes(second)
       ? second === 'SOLID_RED' ? 'DOWN' : 'UP'
       : first === 'SOLID_GREEN' && ['SHRINKING_GREEN', 'SOLID_RED', 'SOLID_GREEN'].includes(second)
-        ? second === 'SOLID_GREEN' ? 'UP' : 'DOWN' : null;
+        ? second === 'SOLID_GREEN' ? 'UP' : 'DOWN'
+        : first === 'SHRINKING_RED' && second === 'SHRINKING_RED' ? 'UP'
+          : first === 'SHRINKING_GREEN' && second === 'SHRINKING_GREEN' ? 'DOWN' : null;
     const result = windowSignal(pair(first, second), START, START + 120000);
     assert.equal(result.side, expected, first + ' -> ' + second);
     assert.equal(result.status, expected ? 'LOCKED' : 'SKIP_WINDOW');
@@ -43,6 +45,11 @@ test('all 25 classification pairs enforce only the four requested transitions', 
 test('both solid same-color opening pairs choose the newly requested direction', () => {
   assert.equal(windowSignal(pair('SOLID_GREEN', 'SOLID_GREEN'), START, START + 120000).side, 'UP');
   assert.equal(windowSignal(pair('SOLID_RED', 'SOLID_RED'), START, START + 120000).side, 'DOWN');
+});
+
+test('two shrinking bars of the same color use the matching directional momentum', () => {
+  assert.equal(windowSignal(pair('SHRINKING_RED', 'SHRINKING_RED'), START, START + 120000).side, 'UP');
+  assert.equal(windowSignal(pair('SHRINKING_GREEN', 'SHRINKING_GREEN'), START, START + 120000).side, 'DOWN');
 });
 
 test('forming, stale, missing and wrong-window candles cannot choose a side', () => {
