@@ -72,6 +72,61 @@ test('one 100-share paper buy fires at an edge crossing and rearms after it clea
   assert.equal(bot.trades.length, 2);
 });
 
+test('a new opposite signal opens the other side without closing the first position', () => {
+  const bot = new ProbabilityBot({
+    now: () => 1_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { id: 'market', start: -30_000, end: 300_000, title: 'BTC Up or Down' };
+  bot.pullback = { side: 'UP' };
+  bot.probabilityUp = 0.8;
+  bot.quotes = {
+    UP: { bestAsk: 0.70, asks: [{ price: 0.70, size: 100 }] },
+    DOWN: { bestAsk: 0.30, asks: [{ price: 0.30, size: 100 }] },
+  };
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(1_000);
+
+  bot.pullback = { side: 'DOWN' };
+  bot.probabilityUp = 0.4;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(2_000);
+
+  assert.deepEqual(bot.trades.map(trade => [trade.side, trade.status]), [
+    ['UP', 'OPEN'],
+    ['DOWN', 'OPEN'],
+  ]);
+});
+
+test('a side rearms when its edge falls while no pullback side is active', () => {
+  const bot = new ProbabilityBot({
+    now: () => 1_000,
+    priceFeed: { start() {}, snapshot() { return { status: 'live', ageMs: 1 }; } },
+  });
+  bot.market = { id: 'market', start: -30_000, end: 300_000, title: 'BTC Up or Down' };
+  bot.pullback = { side: 'UP' };
+  bot.probabilityUp = 0.8;
+  bot.quotes = {
+    UP: { bestAsk: 0.70, asks: [{ price: 0.70, size: 100 }] },
+    DOWN: { bestAsk: 0.30, asks: [{ price: 0.30, size: 100 }] },
+  };
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(1_000);
+  assert.equal(bot.trades.length, 1);
+
+  bot.pullback = { side: null };
+  bot.probabilityUp = 0.5;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(2_000);
+  bot.pullback = { side: 'UP' };
+  bot.probabilityUp = 0.8;
+  bot.edges = bot.calculateEdges();
+  bot.processSignals(3_000);
+
+  assert.equal(bot.trades.length, 2);
+  assert.equal(bot.trades[1].side, 'UP');
+});
+
 test('any best ask below $0.02 blocks both sides; $0.02 is allowed', () => {
   const bot = new ProbabilityBot({
     now: () => 1_000,

@@ -414,6 +414,11 @@ class ProbabilityBot {
       return [side, Number.isFinite(entryPrice) && entryPrice < this.strategySettings.lowPriceThreshold
         ? this.strategySettings.lowPriceMinimumNetEdge : this.strategySettings.minimumNetEdge];
     }));
+    for (const side of ['UP', 'DOWN']) {
+      if (this.edges[side] == null || this.edges[side] < this.requiredNetEdge[side]) {
+        this.armed[side] = true;
+      }
+    }
     const candidates = ['UP', 'DOWN']
       .filter(side => this.strategySettings.sideMode === 'best-edge'
         || this.strategySettings.sideMode === `${side}-only`
@@ -421,7 +426,6 @@ class ProbabilityBot {
       .filter(side => {
       const edge = this.edges[side];
       const threshold = this.requiredNetEdge[side];
-      if (edge == null || edge < threshold) this.armed[side] = true;
       return edge != null && edge >= threshold && this.armed[side];
     }).sort((a, b) => this.edges[b] - this.edges[a]);
     if (!candidates.length) return;

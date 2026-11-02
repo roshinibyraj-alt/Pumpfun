@@ -74,25 +74,36 @@ function detectPullback(candles, now, volatility5m, livePrice = null, previousLi
   const lineStart = meanClose - slope * meanIndex;
   const lineEnd = meanClose + slope * meanIndex;
   const buffer = Math.max(recent.at(-1).close * volatility5m * 0.1, recent.at(-1).close * 0.00002);
-  const upLevel = Math.max(lastTwoHighs.at(-1)?.price ?? -Infinity, lineEnd) + buffer;
-  const downLevel = Math.min(lastTwoLows.at(-1)?.price ?? Infinity, lineEnd) - buffer;
+  const upLevel = higherHighs ? lastTwoHighs.at(-1).price + buffer : null;
+  const downLevel = lowerLows ? lastTwoLows.at(-1).price - buffer : null;
   const liveValid = Number.isFinite(livePrice) && Number.isFinite(previousLivePrice);
-  const crossedUp = liveValid && previousLivePrice <= upLevel && livePrice > upLevel;
-  const crossedDown = liveValid && previousLivePrice >= downLevel && livePrice < downLevel;
-  const side = crossedUp || (Number.isFinite(livePrice) && livePrice > upLevel)
-    ? 'UP'
-    : crossedDown || (Number.isFinite(livePrice) && livePrice < downLevel) ? 'DOWN' : null;
+  const crossedUp = higherHighs && Number.isFinite(livePrice) && livePrice > upLevel
+    && (!liveValid || previousLivePrice <= upLevel);
+  const crossedDown = lowerLows && Number.isFinite(livePrice) && livePrice < downLevel
+    && (!liveValid || previousLivePrice >= downLevel);
+  const atTrendline = Number.isFinite(livePrice) && Math.abs(livePrice - lineEnd) <= buffer;
+  const lowerLowTouch = atTrendline && lowerLows;
+  const higherHighTouch = atTrendline && higherHighs;
+  let side = null;
+  let signalReason = null;
+  if (higherHighs && Number.isFinite(livePrice) && livePrice > upLevel) {
+    side = 'UP';
+    signalReason = 'HIGHER_HIGH_BREAKOUT';
+  } else if (lowerLows && Number.isFinite(livePrice) && livePrice < downLevel) {
+    side = 'DOWN';
+    signalReason = 'LOWER_LOW_BREAKOUT';
+  } else if (lowerLowTouch !== higherHighTouch) {
+    side = lowerLowTouch ? 'UP' : 'DOWN';
+    signalReason = lowerLowTouch ? 'LOWER_LOW_TRENDLINE_TOUCH' : 'HIGHER_HIGH_TRENDLINE_TOUCH';
+  }
   const currentPrice = Number.isFinite(livePrice) ? livePrice : null;
 
   return {
-    method: 'swing50-live-cross-v1',
+    method: 'swing50-touch-break-v2',
     side,
+    signalReason,
     crossed: Boolean(crossedUp || crossedDown),
-    regime: side === 'UP'
-      ? trendDirection === 'UPTREND' ? 'HIGHER_HIGH_BREAKOUT' : 'TRENDLINE_BREAKOUT_UP'
-      : side === 'DOWN'
-        ? trendDirection === 'DOWNTREND' ? 'LOWER_LOW_BREAKOUT' : 'TRENDLINE_BREAKOUT_DOWN'
-        : `WAITING_${trendDirection}`,
+    regime: signalReason ?? `WAITING_${trendDirection}`,
     trendDirection,
     structure: haveStructure
       ? `${higherHighs ? 'HH' : lowerHighs ? 'LH' : '—'} / ${higherLows ? 'HL' : lowerLows ? 'LL' : '—'}`

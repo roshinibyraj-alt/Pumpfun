@@ -20,7 +20,7 @@ function candlesFromCloses(closes, now = closes.length * 300_000) {
   })).filter(candle => candle.end <= now);
 }
 
-test('50-candle HH/HL structure chooses UP after a live swing-high breakout', () => {
+test('50-candle HH break chooses UP on a live crossing', () => {
   const closes = Array.from({ length: 50 }, (_, index) =>
     100_000 + index * 5 + [0, 50, 10, -40][index % 4]);
   const candles = candlesFromCloses(closes);
@@ -35,7 +35,7 @@ test('50-candle HH/HL structure chooses UP after a live swing-high breakout', ()
   assert.equal(breakout.regime, 'HIGHER_HIGH_BREAKOUT');
 });
 
-test('50-candle LH/LL structure chooses DOWN after a live swing-low breakout', () => {
+test('50-candle LL break chooses DOWN on a live crossing', () => {
   const closes = Array.from({ length: 50 }, (_, index) =>
     100_000 - index * 5 + [0, 50, 10, -40][index % 4]);
   const candles = candlesFromCloses(closes);
@@ -49,7 +49,26 @@ test('50-candle LH/LL structure chooses DOWN after a live swing-low breakout', (
   assert.equal(breakout.regime, 'LOWER_LOW_BREAKOUT');
 });
 
-test('waits when swing structure is mixed or fewer than 50 candles are closed', () => {
+test('a trendline lower-low touch chooses UP and a higher-high touch chooses DOWN', () => {
+  const upCloses = Array.from({ length: 50 }, (_, index) =>
+    100_000 + index * 5 + [0, 50, 10, -40][index % 4]);
+  const downCloses = Array.from({ length: 50 }, (_, index) =>
+    100_000 - index * 5 + [0, 50, 10, -40][index % 4]);
+  const now = 50 * 300_000;
+  const upState = detectPullback(candlesFromCloses(upCloses), now, 0.0001);
+  const downState = detectPullback(candlesFromCloses(downCloses), now, 0.0001);
+  const highTouch = upState.chart.trendline.end;
+  const lowTouch = downState.chart.trendline.end;
+
+  const downSignal = detectPullback(candlesFromCloses(upCloses), now, 0.0001, highTouch, highTouch + 100);
+  const upSignal = detectPullback(candlesFromCloses(downCloses), now, 0.0001, lowTouch, lowTouch - 100);
+  assert.equal(downSignal.side, 'DOWN');
+  assert.equal(downSignal.signalReason, 'HIGHER_HIGH_TRENDLINE_TOUCH');
+  assert.equal(upSignal.side, 'UP');
+  assert.equal(upSignal.signalReason, 'LOWER_LOW_TRENDLINE_TOUCH');
+});
+
+test('waits when there is no matching touch or structure is unavailable', () => {
   const flat = Array.from({ length: 50 }, () => 100_000);
   const mixed = detectPullback(candlesFromCloses(flat), 50 * 300_000, 0.0001, 100_000, 99_999);
   assert.equal(mixed.trendDirection, 'MIXED');
@@ -71,7 +90,7 @@ test('auto-tuner holds current settings until enough closed windows exist', () =
 test('auto-tuner ignores windows logged with the previous pullback rule', () => {
   const windows = Array.from({ length: 15 }, (_, index) => ({
     windowStart: index * 300_000,
-    samples: Array.from({ length: 20 }, () => ({ pullback: { side: 'UP' } })),
+    samples: Array.from({ length: 20 }, () => ({ pullback: { method: 'swing50-live-cross-v1', side: 'UP' } })),
   }));
   const result = choosePaperSettings(windows, DEFAULT_SETTINGS);
   assert.equal(result.applied, false);
@@ -95,7 +114,7 @@ test('auto-tuner evaluates only the latest 15 completed windows in chronological
         referencePrice: 100,
         spotPrice,
         volatility5m: 0.005,
-        pullback: { method: 'swing50-live-cross-v1', side: 'UP' },
+        pullback: { method: 'swing50-touch-break-v2', side: 'UP' },
         quotes: {
           UP: { bestAsk: 0.45, bestBid: finalBid, asks: [{ price: 0.45, size: 100 }] },
           DOWN: { bestAsk: 0.45, bestBid: finalBid, asks: [{ price: 0.45, size: 100 }] },

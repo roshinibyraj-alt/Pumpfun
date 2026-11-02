@@ -143,7 +143,7 @@ function choosePaperSettings(windows, currentSettings = DEFAULT_SETTINGS) {
     .map(window => ({
       ...window,
       samples: Array.isArray(window.samples)
-        ? window.samples.filter(sample => sample.pullback?.method === 'swing50-live-cross-v1')
+        ? window.samples.filter(sample => sample.pullback?.method === 'swing50-touch-break-v2')
         : [],
     }))
     .filter(window => window.samples.length >= 20)
