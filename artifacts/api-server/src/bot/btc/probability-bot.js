@@ -3,7 +3,8 @@
 const config = require('./config');
 const marketData = require('./wick-market-data');
 const { feed } = require('./chainlink-price-feed');
-const { detectPullback } = require('./pullback-signal');
+const { detectMacdHistogram } = require('./macd-signal');
+const { sweepBook } = require('./book-sweep');
 const { TAKE_PROFIT_BID, STOP_LOSS_BID, thresholdExit, recoverExpiredPositions } = require('./position-exits');
 
 const WINDOW_MS = 5 * 60 * 1000;
@@ -149,6 +150,8 @@ class ProbabilityBot {
     this.lastSampledAt = null;
     this.lastTunedWindowStart = null;
     this.pullback = null;
+    this.macd = null;
+    this.pendingReversal = null;
     this.activeSide = activeSide === 'UP' || activeSide === 'DOWN' ? activeSide : null;
     this.activeSignalReason = this.activeSide ? 'PERSISTED_BIAS' : null;
     this.entrySequence = 0;
@@ -207,10 +210,15 @@ class ProbabilityBot {
         timeframe: '1m',
       } : null,
       activeSide: this.activeSide,
+      macd: this.macd ? {
+        method: this.macd.method, status: this.macd.status,
+        latestHistogram: this.macd.latestHistogram, previousHistogram: this.macd.previousHistogram,
+        classification: this.macd.classification, signalAt: this.macd.signalAt,
+      } : null,
       quotes: Object.fromEntries(['UP', 'DOWN'].map(side => {
-        const quote = this.quotes[side];
+        const quote = this.learningQuotes?.[side] ?? this.quotes[side];
         return [side, quote ? {
-          bestBid: quote.bestBid, bestAsk: quote.bestAsk, asks: quote.asks.slice(0, 12),
+          bestBid: quote.bestBid, bestAsk: quote.bestAsk, asks: quote.asks, bids: quote.bids,
         } : null];
       })),
     };
@@ -276,6 +284,7 @@ class ProbabilityBot {
         UP: this.quote(upBook, now),
         DOWN: this.quote(downBook, now),
       };
+      this.learningQuotes = structuredClone(this.quotes);
       this.updateEntryFilter(now);
       this.processPositionExits(now);
 
@@ -289,34 +298,21 @@ class ProbabilityBot {
       const referenceTick = ticks
         .filter(tick => Math.abs(tick.ts - start) <= 10_000)
         .sort((a, b) => Math.abs(a.ts - start) - Math.abs(b.ts - start))[0];
-      const previousLivePrice = this.latestPrice;
       const latestTick = ticks[ticks.length - 1];
       this.referencePrice = referenceTick?.price ?? null;
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
       const minuteCandles = this.priceFeed.getHistoricalMinuteCandles?.() ?? [];
-      const detectedPullback = detectPullback(
-        minuteCandles, now, this.volatility5m, this.latestPrice, previousLivePrice,
-      );
+      const detectedPullback = detectMacdHistogram(minuteCandles, now);
       this.applyPullbackSignal(detectedPullback);
-      this.pullback = detectedPullback ? {
+      this.macd = {
         ...detectedPullback,
         detectedSide: detectedPullback.side,
         side: this.activeSide,
         activeSignalReason: this.activeSignalReason,
-        regime: this.activeSide ? `ACTIVE_${this.activeSide}` : detectedPullback.regime,
-      } : this.activeSide ? {
-        method: 'swing50-1m-edge-reset-tpsl-v8',
-        side: this.activeSide,
-        detectedSide: null,
-        signalReason: null,
-        activeSignalReason: this.activeSignalReason,
-        regime: `ACTIVE_${this.activeSide}`,
-        trendDirection: null,
-        structure: 'WAITING_FOR_1M_HISTORY',
-        lookbackCandles: 50,
-        chart: { candles: [], trendline: null, swingHighs: [], swingLows: [], currentPrice: this.latestPrice },
-      } : null;
+        regime: this.activeSide ? `ACTIVE_${this.activeSide}` : 'WAITING_MACD',
+      };
+      this.pullback = this.macd; // Existing learning/storage contract; never a trendline detector.
       this.processOppositeSignalExits(now);
       this.statusReason = !referenceTick
         ? 'Waiting for the next five-minute boundary to capture its Chainlink opening reference.'
@@ -366,16 +362,20 @@ class ProbabilityBot {
       midpoint: bestBid && bestAsk ? (bestBid.price + bestAsk.price) / 2 : null,
       updatedAt,
       asks,
+      bids,
     };
   }
 
   calculateEdges() {
     if (this.probabilityUp == null) return { UP: null, DOWN: null };
-    const upFill = simulateBuy(this.quotes.UP?.asks, this.strategySettings.sharesPerSignal);
-    const downFill = simulateBuy(this.quotes.DOWN?.asks, this.strategySettings.sharesPerSignal);
+    const fillFor = side => this.pendingReversal && this.pendingReversal.marketId === this.market?.id && this.pendingReversal.side === side
+      ? sweepBook(this.quotes[side]?.asks, this.pendingReversal.shares, 'buy')
+      : simulateBuy(this.quotes[side]?.asks, this.strategySettings.sharesPerSignal);
+    const upFill = fillFor('UP');
+    const downFill = fillFor('DOWN');
     return {
-      UP: upFill ? this.probabilityUp - upFill.totalCost / this.strategySettings.sharesPerSignal : null,
-      DOWN: downFill ? (1 - this.probabilityUp) - downFill.totalCost / this.strategySettings.sharesPerSignal : null,
+      UP: upFill ? this.probabilityUp - upFill.totalCost / upFill.shares : null,
+      DOWN: downFill ? (1 - this.probabilityUp) - downFill.totalCost / downFill.shares : null,
     };
   }
 
@@ -425,11 +425,13 @@ class ProbabilityBot {
     if (signal.side === this.activeSide) return;
     const previousSide = this.activeSide;
     this.activeSide = signal.side;
+    if (this.pendingReversal?.side !== this.activeSide) this.pendingReversal = null;
     this.armed[this.activeSide] = true;
     this.activeSignalReason = signal.signalReason ?? null;
     this.log('PULLBACK_BIAS_CHANGED', {
       previousSide, side: this.activeSide, signalReason: this.activeSignalReason,
-      method: signal.method, lookbackCandles: signal.lookbackCandles,
+      method: signal.method, signalAt: signal.signalAt,
+      histogram: signal.latestHistogram, previousHistogram: signal.previousHistogram,
     });
   }
 
@@ -437,8 +439,10 @@ class ProbabilityBot {
     if (!this.market || this.entryWindowStart === this.market.start) return;
     const previousWindowStart = this.entryWindowStart;
     this.entryWindowStart = this.market.start;
+    // An unfilled reversal quantity belongs to its original outcome tokens, never the next market.
+    this.pendingReversal = null;
     // Entry eligibility is window-scoped; direction and signal deduplication are not.
-    // No new touch is required, and TP/SL must never clear the active direction.
+    // No fresh histogram change is required, and TP/SL never clears direction.
     this.armed = { UP: true, DOWN: true };
     if (previousWindowStart !== null && this.activeSide) {
       this.log('PULLBACK_BIAS_CARRIED', {
@@ -485,8 +489,8 @@ class ProbabilityBot {
     }
     this.lastEntryFilterSignature = null;
     const fills = {
-      UP: simulateBuy(this.quotes.UP?.asks, this.strategySettings.sharesPerSignal),
-      DOWN: simulateBuy(this.quotes.DOWN?.asks, this.strategySettings.sharesPerSignal),
+      UP: this.entryFill('UP'),
+      DOWN: this.entryFill('DOWN'),
     };
     this.requiredNetEdge = Object.fromEntries(['UP', 'DOWN'].map(side => {
       const entryPrice = fills[side]?.averagePrice ?? this.quotes[side]?.bestAsk;
@@ -509,7 +513,8 @@ class ProbabilityBot {
       const edge = this.edges[side];
       const threshold = this.requiredNetEdge[side];
       return edge != null && edge >= threshold
-        && this.armed[side]
+        && (this.armed[side] || (this.pendingReversal && this.pendingReversal.marketId === this.market?.id
+          && this.pendingReversal.side === side))
         && !hasOpposingOpenPosition(side);
     }).sort((a, b) => this.edges[b] - this.edges[a]);
     if (!candidates.length) return;
@@ -520,6 +525,12 @@ class ProbabilityBot {
       return;
     }
     this.armed[side] = false;
+    const reversal = this.pendingReversal && this.pendingReversal.marketId === this.market?.id && this.pendingReversal.side === side;
+    if (reversal) {
+      this.pendingReversal.shares = Math.max(0, this.pendingReversal.shares - fill.shares);
+      this.quotes[side].asks = fill.remainingLevels;
+      if (this.pendingReversal.shares <= 1e-8) this.pendingReversal = null;
+    }
     const trade = {
       id: `paper-${this.market.start}-${side}-${now}-${++this.entrySequence}`,
       marketId: this.market.id,
@@ -528,7 +539,8 @@ class ProbabilityBot {
       windowEnd: this.market.end,
       marketTitle: this.market.title,
       side,
-      shares: this.strategySettings.sharesPerSignal,
+      shares: fill.shares,
+      entryKind: reversal ? 'MATCHED_REVERSAL' : 'NORMAL',
       entryPrice: fill.averagePrice,
       cost: fill.cost,
       fees: fill.fees,
@@ -550,10 +562,16 @@ class ProbabilityBot {
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     this.log('PAPER_BUY', {
       tradeId: trade.id,
-      side, shares: this.strategySettings.sharesPerSignal, price: fill.averagePrice,
+      side, shares: fill.shares, price: fill.averagePrice,
       modelProbability: trade.modelProbability,
       edge: this.edges[side], requiredNetEdge: this.requiredNetEdge[side],
     });
+  }
+
+  entryFill(side) {
+    return this.pendingReversal && this.pendingReversal.marketId === this.market?.id && this.pendingReversal.side === side
+      ? sweepBook(this.quotes[side]?.asks, this.pendingReversal.shares, 'buy')
+      : simulateBuy(this.quotes[side]?.asks, this.strategySettings.sharesPerSignal);
   }
 
   processPositionExits(now) {
@@ -608,27 +626,45 @@ class ProbabilityBot {
 
   processOppositeSignalExits(now) {
     if (!this.activeSide || !this.market) return;
-    for (const trade of this.trades) {
-      if (trade.status !== 'OPEN' || trade.marketId !== this.market.id || trade.side === this.activeSide) continue;
-      const quote = this.quotes[trade.side];
-      const bid = quote?.bestBid == null ? NaN : Number(quote.bestBid);
-      const fresh = Number.isFinite(quote?.updatedAt)
-        && now >= quote.updatedAt
-        && now - quote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS
-        && Number.isFinite(bid) && bid >= 0 && bid <= 1;
-      if (!fresh) continue;
-      trade.lastOutcomeBid = bid;
-      trade.lastOutcomeBidAt = quote.updatedAt;
+    const oldSide = this.activeSide === 'UP' ? 'DOWN' : 'UP';
+    const trades = this.trades.filter(t => t.status === 'OPEN'
+      && t.marketId === this.market.id && t.side === oldSide);
+    if (!trades.length) return;
+    const quote = this.quotes[oldSide];
+    if (!Number.isFinite(quote?.updatedAt) || now < quote.updatedAt
+      || now - quote.updatedAt > EXIT_QUOTE_MAX_AGE_MS) return;
+    const execution = sweepBook(quote.bids, trades.reduce((sum, t) => sum + t.shares, 0), 'sell');
+    if (!execution) return;
+    quote.bids = execution.remainingLevels;
+    let remaining = execution.shares;
+    for (const trade of trades) {
+      const shares = Math.min(trade.shares, remaining);
+      if (shares <= 1e-8) break;
+      remaining -= shares;
+      let sold = trade;
+      if (shares < trade.shares - 1e-8) {
+        const fraction = shares / trade.shares;
+        sold = { ...trade, id: `${trade.id}-partial-${++this.entrySequence}`, shares };
+        for (const field of ['cost', 'fees', 'totalCost']) {
+          sold[field] = Number(trade[field] ?? 0) * fraction;
+          trade[field] = Number(trade[field] ?? 0) - sold[field];
+        }
+        trade.shares -= shares;
+        this.trades.unshift(sold);
+      }
       this.closeTrade(
-        trade, bid, trade.shares * bid, 'OPPOSITE_SIGNAL',
-        `Opposite ${this.activeSide} swing signal; sold at the ${trade.side} best bid, less taker fee.`,
-        now, bid,
+        sold, execution.averagePrice, shares * execution.averagePrice, 'OPPOSITE_SIGNAL',
+        `Opposite ${this.activeSide} MACD signal; swept actual ${oldSide} bids at VWAP, less per-level fees.`,
+        now, execution.averagePrice, execution.fees * shares / execution.shares,
       );
     }
+    const pending = this.pendingReversal?.marketId === this.market.id
+      && this.pendingReversal.side === this.activeSide ? this.pendingReversal.shares : 0;
+    this.pendingReversal = { marketId: this.market.id, side: this.activeSide, shares: pending + execution.shares };
   }
 
-  closeTrade(trade, exitPrice, payout, outcome, settlementSource, now, feeExecutionPrice) {
-    const exitFees = estimateTakerFee(feeExecutionPrice, trade.shares);
+  closeTrade(trade, exitPrice, payout, outcome, settlementSource, now, feeExecutionPrice, executionFees) {
+    const exitFees = executionFees ?? estimateTakerFee(feeExecutionPrice, trade.shares);
     const netPayout = payout - exitFees;
     trade.status = 'SETTLED';
     trade.settlementStatus = 'SETTLED';
@@ -743,10 +779,10 @@ class ProbabilityBot {
         takeProfitPayoutPerShare: 1,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: 0,
-        signalPersistence: 'Carry the active Up/Down signal into every new window without a fresh touch. Only an opposite touch, rejection or confirmed closed-candle breakout changes direction; TP/SL does not clear it.',
-        entryModel: 'Carry the active side across windows and enter when it first qualifies; no fresh touch is required. After a fill, wait for its net edge to fall below threshold and qualify again. A new window or opposite bias permits a fresh gated entry.',
-        model: '15 closed 5-minute candles for probability volatility; 50 closed 1-minute candles for persistent swing signals; normal-CDF probability estimate',
-        exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. Opposite signals sell all old-side positions at fresh bids. Expiry uses a fresh closing bid, or retries the original market for a current bid or confirmed final payout; unavailable data remains explicitly pending.',
+        signalPersistence: 'Carry MACD direction across windows; only a new closed 1m histogram signal changes it. TP/SL does not clear direction.',
+        entryModel: 'Carry MACD direction across windows. Normal entries retain edge-reset cadence. Reversal buys target actual shares sold, sweeping available asks; remaining quantity stays pending subject to cash and edge checks.',
+        model: '15 closed 5-minute candles for probability volatility; closed 1-minute MACD histogram (12,26,9) for direction; normal-CDF probability estimate',
+        exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. Opposite MACD signals sweep actual old-side bids and target the sold share count on the opposite side. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
       referencePrice: this.referencePrice,
@@ -762,8 +798,8 @@ class ProbabilityBot {
       entryArmed: { ...this.armed },
       entryFilter: this.entryFilter,
       quotes: {
-        UP: this.quotes.UP ? { bestBid: this.quotes.UP.bestBid, bestAsk: this.quotes.UP.bestAsk, midpoint: this.quotes.UP.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.UP.asks, this.strategySettings.sharesPerSignal)?.averagePrice ?? null } : null,
-        DOWN: this.quotes.DOWN ? { bestBid: this.quotes.DOWN.bestBid, bestAsk: this.quotes.DOWN.bestAsk, midpoint: this.quotes.DOWN.midpoint, estimatedAverageAsk: simulateBuy(this.quotes.DOWN.asks, this.strategySettings.sharesPerSignal)?.averagePrice ?? null } : null,
+        UP: this.quotes.UP ? { bestBid: this.quotes.UP.bestBid, bestAsk: this.quotes.UP.bestAsk, midpoint: this.quotes.UP.midpoint, estimatedAverageAsk: this.entryFill('UP')?.averagePrice ?? null } : null,
+        DOWN: this.quotes.DOWN ? { bestBid: this.quotes.DOWN.bestBid, bestAsk: this.quotes.DOWN.bestAsk, midpoint: this.quotes.DOWN.midpoint, estimatedAverageAsk: this.entryFill('DOWN')?.averagePrice ?? null } : null,
       },
       paperAccount: {
         startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl, wins, losses,
@@ -773,6 +809,8 @@ class ProbabilityBot {
       trades: this.trades.slice(0, 50),
       events: this.events,
       pullback: this.pullback,
+      macd: this.macd,
+      pendingReversal: this.pendingReversal ? { ...this.pendingReversal } : null,
       activeSide: this.activeSide,
       learning: {
         ...this.learningStatus,

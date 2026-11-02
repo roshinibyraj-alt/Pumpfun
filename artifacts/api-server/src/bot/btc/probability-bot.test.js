@@ -125,6 +125,8 @@ test('an opposite signal sells all accumulated positions before opening the othe
   bot.processSignals(1_500);
 
   bot.quotes.UP.bestBid = 0.65;
+  bot.quotes.UP.bids = [{ price: 0.65, size: 200 }];
+  bot.quotes.DOWN.asks = [{ price: 0.30, size: 200 }];
   bot.quotes.UP.updatedAt = 2_000;
   bot.pullback = { side: 'DOWN' };
   bot.probabilityUp = 0.4;
@@ -142,6 +144,8 @@ test('an opposite signal sells all accumulated positions before opening the othe
   assert.ok(bot.trades.slice(1).every(trade => trade.finalOutcome === 'OPPOSITE_SIGNAL'));
 
   bot.quotes.DOWN.bestBid = 0.35;
+  bot.quotes.DOWN.bids = [{ price: 0.35, size: 200 }];
+  bot.quotes.UP.asks = [{ price: 0.70, size: 200 }];
   bot.quotes.DOWN.updatedAt = 3_000;
   bot.pullback = { side: 'UP' };
   bot.probabilityUp = 0.8;

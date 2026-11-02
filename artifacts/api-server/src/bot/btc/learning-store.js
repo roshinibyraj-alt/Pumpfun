@@ -77,6 +77,7 @@ class LearningStore {
        FROM btc_paper_events
        WHERE event = 'PULLBACK_BIAS_CHANGED'
          AND details->>'side' IN ('UP', 'DOWN')
+         AND details->>'method' = 'macd-1m-12-26-9-reversal-sweep-v1'
        ORDER BY id DESC
        LIMIT 1`,
     );

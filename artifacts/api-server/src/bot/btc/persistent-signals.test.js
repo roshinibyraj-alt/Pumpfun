@@ -4,12 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ChainlinkPriceFeed } = require('./chainlink-price-feed');
 const { ProbabilityBot, estimateLogReturnVolatility } = require('./probability-bot');
-const { detectPullback } = require('./pullback-signal');
+const { detectMacdHistogram } = require('./macd-signal');
 
 const quietFeed = { start() {}, snapshot() { return { status: 'live', ageMs: 0 }; } };
 
 for (const side of ['UP', 'DOWN']) {
-  test(`${side} carries across full scan windows with no fresh touch, retains edge-reset gates, and reverses on an opposite signal`, async () => {
+  test(`${side} carries across full scan windows without a new MACD change, retains edge-reset gates, and reverses on an opposite signal`, async () => {
     let now = 300_001;
     const bot = new ProbabilityBot({
       now: () => now,
@@ -28,10 +28,10 @@ for (const side of ['UP', 'DOWN']) {
         getHistoricalCandles: () => Array.from({ length: 20 }, (_, i) => ({
           close: 100_000 + i * 9 + (i % 2) * 10,
         })),
-        getHistoricalMinuteCandles: () => [], // No new touch or breakout in either window.
+        getHistoricalMinuteCandles: () => [], // No new closed histogram signal in either window.
       },
     });
-    bot.applyPullbackSignal({ side, signalSource: 'LIVE_TOUCH', signalReason: 'INITIAL_TOUCH' });
+    bot.applyPullbackSignal({ side, signalSource: 'CLOSED_CANDLE', signalAt: 0, signalReason: 'INITIAL_MACD' });
     await bot.tick();
     assert.equal(bot.error, null);
     assert.equal(bot.trades.length, 1);
@@ -41,7 +41,7 @@ for (const side of ['UP', 'DOWN']) {
     await bot.tick();
     assert.equal(bot.error, null);
     assert.equal(bot.activeSide, side);
-    assert.equal(bot.activeSignalReason, 'INITIAL_TOUCH');
+    assert.equal(bot.activeSignalReason, 'INITIAL_MACD');
     assert.equal(bot.pullback.detectedSide, null);
     assert.equal(bot.pullback.side, side);
     assert.equal(bot.trades.filter(t => t.windowStart === 600_000).length, 1);
@@ -110,7 +110,9 @@ test('stale one-minute candle history cannot issue a new direction', () => {
     start: i * 60_000, end: (i + 1) * 60_000,
     open: 100_000 + i, high: 100_010 + i, low: 99_990 + i, close: 100_001 + i,
   }));
-  assert.equal(detectPullback(candles, 50 * 60_000 + 90_001, 0.001, 100_000), null);
+  const result = detectMacdHistogram(candles, 50 * 60_000 + 90_001);
+  assert.equal(result.status, 'STALE');
+  assert.equal(result.side, null);
 });
 
 test('one-minute history excludes the forming candle and leaves five-minute volatility history separate', async () => {
@@ -133,18 +135,19 @@ test('one-minute history excludes the forming candle and leaves five-minute vola
   assert.ok(urls.some(url => url.includes('interval=5m')));
 });
 
-test('a previously handled closed-candle event cannot undo a newer live reversal', () => {
+test('a previously handled closed-candle event cannot undo a newer closed MACD reversal', () => {
   const bot = new ProbabilityBot({ priceFeed: quietFeed });
-  const closed = { method: 'test', side: 'UP', signalReason: 'HIGHER_HIGH_BREAKOUT',
+  const closed = { method: 'test', side: 'UP', signalReason: 'MACD_SOLID_GREEN',
     signalSource: 'CLOSED_CANDLE', signalAt: 60_000 };
   bot.applyPullbackSignal(closed);
   assert.equal(bot.activeSide, 'UP');
-  bot.applyPullbackSignal({ side: 'DOWN', signalSource: 'LIVE_TOUCH', signalReason: 'HIGHER_HIGH_TRENDLINE_TOUCH' });
+  bot.applyPullbackSignal({ method: 'test', side: 'DOWN', signalSource: 'CLOSED_CANDLE',
+    signalAt: 120_000, signalReason: 'MACD_SHRINKING_GREEN' });
   assert.equal(bot.activeSide, 'DOWN');
   bot.applyPullbackSignal(closed);
   bot.applyPullbackSignal(null);
   assert.equal(bot.activeSide, 'DOWN');
-  bot.applyPullbackSignal({ ...closed, signalAt: 120_000 });
+  bot.applyPullbackSignal({ ...closed, signalAt: 180_000 });
   assert.equal(bot.activeSide, 'UP');
 });
 
@@ -154,7 +157,7 @@ test('reversal exit waits for a fresh bid, then sells even when the opposite ent
   bot.trades = [{ id: 'old', marketId: 'market', side: 'UP', status: 'OPEN',
     windowEnd: 300_000, shares: 100, totalCost: 50 }];
   bot.quotes = {
-    UP: { bestBid: 0.4, updatedAt: -10_000, bestAsk: 0.5, asks: [{ price: 0.5, size: 100 }] },
+    UP: { bestBid: 0.4, updatedAt: -10_000, bids: [{ price: 0.4, size: 100 }], bestAsk: 0.5, asks: [{ price: 0.5, size: 100 }] },
     DOWN: { bestBid: 0.4, updatedAt: 1_000, bestAsk: 0.5, asks: [{ price: 0.5, size: 100 }] },
   };
   bot.probabilityUp = 0.9; // DOWN entry has negative edge.
@@ -168,7 +171,7 @@ test('reversal exit waits for a fresh bid, then sells even when the opposite ent
   assert.equal(bot.trades[0].grossPayout, 40);
 });
 
-test('tick takes trend candles from the one-minute series while keeping probability volatility on five-minute data', async () => {
+test('tick takes MACD candles from the one-minute series while keeping probability volatility on five-minute data', async () => {
   const now = 15_000_000;
   const minutes = Array.from({ length: 50 }, (_, i) => {
     const close = 100_000 + i * 5 + [0, 50, 10, -40][i % 4];
@@ -185,8 +188,9 @@ test('tick takes trend candles from the one-minute series while keeping probabil
   });
   await bot.tick();
   assert.equal(bot.error, null);
-  assert.equal(bot.pullback.chart.candles.length, 50);
-  assert.equal(bot.pullback.chart.candles[1].start - bot.pullback.chart.candles[0].start, 60_000);
-  assert.equal(bot.pullback.method, 'swing50-1m-edge-reset-tpsl-v8');
+  assert.equal(bot.macd.chart.bars.length, 17);
+  assert.equal(bot.macd.chart.bars[1].start - bot.macd.chart.bars[0].start, 60_000);
+  assert.equal(bot.macd.method, 'macd-1m-12-26-9-reversal-sweep-v1');
+  assert.equal(bot.pullback, bot.macd);
   assert.equal(bot.volatility5m, estimateLogReturnVolatility(fiveMinutes));
 });
