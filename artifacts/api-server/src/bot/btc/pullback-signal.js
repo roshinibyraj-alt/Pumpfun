@@ -76,20 +76,23 @@ function detectPullback(candles, now, volatility5m, livePrice = null, previousLi
   const buffer = Math.max(recent.at(-1).close * volatility5m * 0.1, recent.at(-1).close * 0.00002);
   const upLevel = higherHighs ? lastTwoHighs.at(-1).price + buffer : null;
   const downLevel = lowerLows ? lastTwoLows.at(-1).price - buffer : null;
-  const liveValid = Number.isFinite(livePrice) && Number.isFinite(previousLivePrice);
-  const crossedUp = higherHighs && Number.isFinite(livePrice) && livePrice > upLevel
-    && (!liveValid || previousLivePrice <= upLevel);
-  const crossedDown = lowerLows && Number.isFinite(livePrice) && livePrice < downLevel
-    && (!liveValid || previousLivePrice >= downLevel);
+  const previousClosed = recent.at(-2);
+  const latestClosed = recent.at(-1);
+  const confirmedUpBreak = higherHighs
+    && previousClosed.close <= upLevel && latestClosed.close > upLevel;
+  const confirmedDownBreak = lowerLows
+    && previousClosed.close >= downLevel && latestClosed.close < downLevel;
+  const crossedUp = confirmedUpBreak;
+  const crossedDown = confirmedDownBreak;
   const atTrendline = Number.isFinite(livePrice) && Math.abs(livePrice - lineEnd) <= buffer;
   const lowerLowTouch = atTrendline && lowerLows;
   const higherHighTouch = atTrendline && higherHighs;
   let side = null;
   let signalReason = null;
-  if (higherHighs && Number.isFinite(livePrice) && livePrice > upLevel) {
+  if (confirmedUpBreak) {
     side = 'UP';
     signalReason = 'HIGHER_HIGH_BREAKOUT';
-  } else if (lowerLows && Number.isFinite(livePrice) && livePrice < downLevel) {
+  } else if (confirmedDownBreak) {
     side = 'DOWN';
     signalReason = 'LOWER_LOW_BREAKOUT';
   } else if (lowerLowTouch !== higherHighTouch) {
@@ -99,7 +102,7 @@ function detectPullback(candles, now, volatility5m, livePrice = null, previousLi
   const currentPrice = Number.isFinite(livePrice) ? livePrice : null;
 
   return {
-    method: 'swing50-touch-break-v2',
+    method: 'swing50-close-break-v3',
     side,
     signalReason,
     crossed: Boolean(crossedUp || crossedDown),

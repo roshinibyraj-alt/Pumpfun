@@ -39,7 +39,7 @@
     <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 100 SHARES / SIGNAL</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">SWING-STRUCTURE SIGNAL</div><h1>Trend context, live breakouts.</h1><p>Paper-only strategy uses the last 50 closed five-minute candles for trend and swing structure, then follows live price crossings of confirmed breakout levels. Market and net-edge checks still apply; live orders remain disabled.</p></div>
+    <div><div class="eyebrow">SWING-STRUCTURE SIGNAL</div><h1>Trend context, confirmed breaks.</h1><p>Paper-only strategy uses the last 50 closed five-minute candles for trend and swing structure. Trendline touches can act live; HH/LL breakouts require a completed five-minute candle. Market and net-edge checks still apply; live orders remain disabled.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
@@ -79,9 +79,9 @@
   <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-     <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Model probability is logged but has no minimum entry filter. A live price crossing above the latest swing high and trendline selects UP; a crossing below the latest swing low and trendline selects DOWN. The signal can act as soon as market data is ready—there is no opening delay. Positive net edge, visible order-book depth, and market-price checks still apply. Trend context uses 50 closed candles; volatility uses the latest 15.</div>
+     <div class="formula">P(UP) = Φ[ ln(BTC ÷ reference) ÷ (5-minute log-return volatility × √(seconds left ÷ 300)) ]<br>Model probability is logged but has no minimum entry filter. A closed five-minute candle above the latest higher high selects UP; a close below the latest lower low selects DOWN. Live lower-low/higher-high trendline touches can signal a reversal. The signal can act as soon as market data is ready—there is no opening delay. Positive net edge, visible order-book depth, and market-price checks still apply. Trend context uses 50 closed candles; volatility uses the latest 15.</div>
   </section>
-  <p class="footer">Simulation only—no live order submission. Probabilities use a normal-CDF approximation with volatility from the latest 15 completed Binance BTC 5-minute candles. Trend structure uses the last 50 closed candles: a lower-low trendline touch selects UP, a higher-high touch selects DOWN, a higher-high break selects UP, and a lower-low break selects DOWN. Signals may change within a window; a flip adds the opposite paper position without closing the existing one. Paper entries have no additional opening delay. The tuning gate evaluates the latest 15 completed five-minute windows chronologically and only uses samples tagged with the current swing method. Position exits use the fresh own-side CLOB best bid: $0.99 credits $1.00 gross per share, and $0.01 credits $0.00 gross. The configured Polymarket taker-fee formula is applied to entries and exits. Any still-open position at window close is marked at its last own-side bid; BTC reference prices do not decide paper P&amp;L.</p>
+  <p class="footer">Simulation only—no live order submission. Probabilities use a normal-CDF approximation with volatility from the latest 15 completed Binance BTC 5-minute candles. Trend structure uses the last 50 closed candles: a lower-low trendline touch selects UP, a higher-high touch selects DOWN, a closed-candle higher-high break selects UP, and a closed-candle lower-low break selects DOWN. Signals may change within a window; a flip adds the opposite paper position without closing the existing one. Paper entries have no additional opening delay. The tuning gate evaluates the latest 15 completed five-minute windows chronologically and only uses samples tagged with the current swing method. Position exits use the fresh own-side CLOB best bid: $0.99 credits $1.00 gross per share, and $0.01 credits $0.00 gross. The configured Polymarket taker-fee formula is applied to entries and exits. Any still-open position at window close is marked at its last own-side bid; BTC reference prices do not decide paper P&amp;L.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -105,7 +105,7 @@ async function pollLearning(){
   if(!response.ok)throw Error('Learning API HTTP '+response.status);
   const state=await response.json(),latest=state.tuningRuns?.[0]?.result;
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
-   $('learningSummary').innerHTML=`<div class="trade"><span>Active paper settings</span><span class="muted">${safe(JSON.stringify(window.latestStrategyState?.strategy||state.settings||{}))}</span></div><div class="trade"><span>Latest evaluation</span><span class="muted">${safe(latest?.reason||'Collecting data')} · ${Number(latest?.windows||0)} windows${latest?.applied?' · settings updated':''}</span></div><div class="trade"><span>Side selection</span><span class="muted">LL touch → UP · HH touch → DOWN · HH break → UP · LL break → DOWN · flips add the opposite position</span></div>`;
+   $('learningSummary').innerHTML=`<div class="trade"><span>Active paper settings</span><span class="muted">${safe(JSON.stringify(window.latestStrategyState?.strategy||state.settings||{}))}</span></div><div class="trade"><span>Latest evaluation</span><span class="muted">${safe(latest?.reason||'Collecting data')} · ${Number(latest?.windows||0)} windows${latest?.applied?' · settings updated':''}</span></div><div class="trade"><span>Side selection</span><span class="muted">LL touch → UP · HH touch → DOWN · closed HH → UP · closed LL → DOWN · flips add the opposite position</span></div>`;
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -148,7 +148,7 @@ function renderTrend(state){
  const pivots=[...(view.swingHighs||[]).map(p=>({...p,type:'high'})),...(view.swingLows||[]).map(p=>({...p,type:'low'}))].map(p=>`<circle cx="${x(p.index)}" cy="${y(Number(p.price))}" r="3.2" fill="${p.type==='high'?'#39d99a':'#ff6f7e'}"/>`).join('');
  const current=Number(view.currentPrice),liveLine=Number.isFinite(current)?`<line x1="${left}" x2="${right}" y1="${y(current)}" y2="${y(current)}" stroke="#ffc76a" stroke-dasharray="5 5" stroke-width="1.2"/>`:'';
  const trend=state.pullback||{};
-  const reason=trend.signalReason?.replace(/_/g,' ')||'waiting for trendline touch or HH/LL break';
+  const reason=trend.signalReason?.replace(/_/g,' ')||'waiting for live trendline touch or closed-candle HH/LL break';
   $('trendStatus').textContent=`${trend.trendDirection||'MIXED'} · ${trend.structure||'swing points pending'} · ${trend.side||'WAIT'} · ${reason}`;
  $('trendChart').innerHTML=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Fifty five-minute BTC candles, swing points, and trendline"><line x1="${left}" x2="${right}" y1="${bottom}" y2="${bottom}" stroke="#263447"/>${marks}<line x1="${left}" x2="${right}" y1="${y(Number(view.trendline?.start))}" y2="${y(Number(view.trendline?.end))}" stroke="#51d9ef" stroke-width="2" stroke-dasharray="7 4"/>${pivots}${liveLine}</svg>`;
 }
