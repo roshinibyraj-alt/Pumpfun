@@ -84,10 +84,10 @@ class LearningStore {
       `SELECT window_start,
               jsonb_agg(sample ORDER BY sampled_at) AS samples
        FROM btc_learning_samples
-       WHERE window_start + 300000 <= $1 - 10000
+       WHERE window_start + 300000::bigint <= $1::bigint - 10000::bigint
        GROUP BY window_start
        HAVING COUNT(*) >= 20
-          AND MAX(sampled_at) >= window_start + 285000
+           AND MAX(sampled_at) >= window_start + 285000::bigint
        ORDER BY window_start DESC
        LIMIT $2`,
       [now, limit],
@@ -141,7 +141,7 @@ class LearningStore {
         `SELECT COUNT(DISTINCT window_start)::int AS completed_windows,
                 COUNT(*)::int AS samples
          FROM btc_learning_samples
-         WHERE window_start + 300000 <= $1 - 10000`,
+          WHERE window_start + 300000::bigint <= $1::bigint - 10000::bigint`,
         [Date.now()],
       ),
       this.pool.query(
