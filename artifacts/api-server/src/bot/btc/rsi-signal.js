@@ -15,6 +15,17 @@ function rsiValue(previous) {
   return 100 - (100 / (1 + relativeStrength));
 }
 
+function detectRsiMomentumSide(history) {
+  const readings = (Array.isArray(history) ? history : [])
+    .slice(-3)
+    .map(point => Number(point?.value));
+  if (readings.length !== 3 || !readings.every(Number.isFinite)
+    || readings.some(value => value < OVERSOLD || value > OVERBOUGHT)) return null;
+  if (readings[0] < readings[1] && readings[1] < readings[2]) return 'UP';
+  if (readings[0] > readings[1] && readings[1] > readings[2]) return 'DOWN';
+  return null;
+}
+
 function detectRsiSignal(candles, now) {
   const base = {
     method: METHOD,
@@ -29,6 +40,7 @@ function detectRsiSignal(candles, now) {
     signalAt: null,
     history: [],
     lastExtreme: null,
+    momentumSide: null,
     reason: 'Waiting for 15 contiguous, closed five-minute candles.',
   };
   if (!Number.isFinite(now)) {
@@ -107,6 +119,7 @@ function detectRsiSignal(candles, now) {
   const lastExtremeSide = lastExtreme
     ? lastExtreme.value < OVERSOLD ? 'UP' : 'DOWN'
     : null;
+  const momentumSide = detectRsiMomentumSide(visibleHistory);
   return {
     ...base,
     status: 'READY',
@@ -122,14 +135,18 @@ function detectRsiSignal(candles, now) {
       bucket: lastExtreme.value < OVERSOLD ? 'OVERSOLD' : 'OVERBOUGHT',
       signalAt: lastExtreme.end,
     } : null,
+    momentumSide,
     reason: side === 'UP' ? 'RSI is below 30 (oversold).'
       : side === 'DOWN' ? 'RSI is above 70 (overbought).'
-        : lastExtreme
-          ? `RSI is neutral; the latest extreme in the last ${LOOKBACK_READINGS} readings is ${lastExtremeSide}.`
-          : `RSI is neutral with no extreme in the last ${LOOKBACK_READINGS} readings.`,
+        : momentumSide
+          ? `RSI is neutral; two consecutive closed-candle moves indicate ${momentumSide}.`
+          : lastExtreme
+            ? `RSI is neutral; the latest extreme in the last ${LOOKBACK_READINGS} readings is ${lastExtremeSide}.`
+            : `RSI is neutral with no extreme or confirmed two-step move in the last ${LOOKBACK_READINGS} readings.`,
   };
 }
 
 module.exports = {
-  METHOD, CANDLE_MS, RSI_PERIOD, OVERSOLD, OVERBOUGHT, LOOKBACK_READINGS, detectRsiSignal,
+  METHOD, CANDLE_MS, RSI_PERIOD, OVERSOLD, OVERBOUGHT, LOOKBACK_READINGS,
+  detectRsiSignal, detectRsiMomentumSide,
 };

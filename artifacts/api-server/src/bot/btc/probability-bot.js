@@ -226,6 +226,8 @@ class ProbabilityBot {
       method: this.rsi.method, timeframe: this.rsi.timeframe, period: this.rsi.period,
       status: this.rsi.status, value: this.rsi.value, bucket: this.rsi.bucket,
       side: this.rsi.side, activeSide: this.activeSide, signalAt: this.rsi.signalAt,
+      momentumSide: this.rsi.momentumSide,
+      lastExtreme: this.rsi.lastExtreme ? { ...this.rsi.lastExtreme } : null,
       oversold: this.rsi.oversold, overbought: this.rsi.overbought,
     } : null;
     this.queuePersistence(() => this.learningStore.recordSample(sample));
@@ -382,17 +384,32 @@ class ProbabilityBot {
     this.rsi = signal;
     const previousSide = this.activeSide;
     if (signal?.status === 'READY') {
-      let seededFromHistory = false;
+      let selectionSource = null;
+      let pullbackReversed = false;
       if (signal.value < signal.oversold) {
         this.activeSide = 'UP';
         this.activeSignalReason = 'RSI_OVERSOLD';
+        selectionSource = 'CURRENT_CLOSED_CANDLE';
       } else if (signal.value > signal.overbought) {
         this.activeSide = 'DOWN';
         this.activeSignalReason = 'RSI_OVERBOUGHT';
+        selectionSource = 'CURRENT_CLOSED_CANDLE';
       } else if (!this.activeSide && ['UP', 'DOWN'].includes(signal.lastExtreme?.side)) {
         this.activeSide = signal.lastExtreme.side;
         this.activeSignalReason = 'RSI_HISTORY_EXTREME';
-        seededFromHistory = true;
+        selectionSource = 'RECENT_HISTORY_EXTREME';
+      } else if (!this.activeSide && ['UP', 'DOWN'].includes(signal.momentumSide)) {
+        this.activeSide = signal.momentumSide;
+        this.activeSignalReason = 'RSI_STARTUP_MOMENTUM';
+        selectionSource = 'TWO_STEP_RSI_MOMENTUM';
+      }
+      if (signal.side == null && this.activeSide
+        && ['UP', 'DOWN'].includes(signal.momentumSide)
+        && signal.momentumSide !== this.activeSide) {
+        this.activeSide = signal.momentumSide;
+        this.activeSignalReason = 'RSI_PULLBACK_REVERSAL';
+        selectionSource = 'TWO_STEP_RSI_PULLBACK';
+        pullbackReversed = true;
       }
       const held = signal.side == null;
       this.windowDecision = {
@@ -402,21 +419,25 @@ class ProbabilityBot {
         value: signal.value,
         reason: held
           ? this.activeSide
-            ? seededFromHistory
+            ? pullbackReversed
+              ? `Two consecutive closed RSI moves confirmed a pullback; switched to ${this.activeSide} for future entries.`
+              : selectionSource === 'TWO_STEP_RSI_MOMENTUM'
+                ? `No recent extreme; two consecutive closed RSI moves selected ${this.activeSide}.`
+                : selectionSource === 'RECENT_HISTORY_EXTREME'
               ? `RSI ${signal.value.toFixed(1)} is neutral; restored ${this.activeSide} from the latest ${signal.lastExtreme.bucket} reading (${signal.lastExtreme.value.toFixed(1)}).`
               : `RSI ${signal.value.toFixed(1)}; keeping ${this.activeSide}.`
-            : 'No recent RSI extreme found; waiting for RSI to reach below 30 or above 70.'
+            : 'No recent extreme or two-step RSI move; waiting for a closed-candle signal.'
           : signal.reason,
       };
       if (previousSide !== this.activeSide && this.activeSide) {
-        const selectedReading = signal.side
-          ? { value: signal.value, bucket: signal.bucket, signalAt: signal.signalAt }
-          : signal.lastExtreme;
-        this.log('RSI_SIDE_SELECTED', {
+        const selectedReading = selectionSource === 'RECENT_HISTORY_EXTREME'
+          ? signal.lastExtreme
+          : { value: signal.value, bucket: signal.bucket, signalAt: signal.signalAt };
+        this.log(selectionSource === 'TWO_STEP_RSI_PULLBACK' ? 'RSI_PULLBACK_REVERSAL' : 'RSI_SIDE_SELECTED', {
           side: this.activeSide, previousSide, value: selectedReading?.value ?? signal.value,
           currentValue: signal.value, bucket: selectedReading?.bucket ?? signal.bucket,
           signalAt: selectedReading?.signalAt ?? signal.signalAt,
-          source: signal.side ? 'CURRENT_CLOSED_CANDLE' : 'RECENT_HISTORY',
+          source: selectionSource,
           method: RSI_METHOD,
         });
       }
@@ -705,9 +726,9 @@ class ProbabilityBot {
         entryIntervalSeconds: 10,
         lastEntrySeconds: LAST_ENTRY_SECONDS,
         maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
-        signalPersistence: 'Closed five-minute RSI(14) below 30 selects UP; above 70 selects DOWN. Between 30 and 70, keep the selected side across windows. On startup, seed from the latest extreme in the last 50 closed RSI readings; if none exists, wait for a new extreme.',
+        signalPersistence: 'Closed five-minute RSI(14) below 30 selects UP; above 70 selects DOWN. In the 30–70 band, keep the side across windows unless two consecutive RSI rises select UP or two falls select DOWN, changing only future entries. On startup, use the latest extreme in the last 50 closed RSI readings, otherwise a confirmed two-step RSI direction; wait if neither is present.',
         entryModel: `50 shares every 10 seconds from ${FIRST_ENTRY_SECONDS} through ${LAST_ENTRY_SECONDS} seconds (${MAX_ENTRIES_PER_WINDOW} scheduled slots). No price-band filter, catch-up shares, probability model or edge gate. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.`,
-        model: 'Wilder RSI(14) from closed five-minute BTC candles: below 30 selects UP, above 70 selects DOWN, and the 30–70 middle band retains the last selected side. On startup, restore the latest extreme from up to 50 closed RSI readings; if none exists, wait for a new extreme. Missing or stale candle data blocks new entries.',
+        model: 'Wilder RSI(14) from closed five-minute BTC candles: below 30 selects UP and above 70 selects DOWN. In the 30–70 band, two consecutive rises select UP and two falls select DOWN; confirmed pullbacks change future entries only. On startup, restore the latest extreme from up to 50 closed RSI readings, otherwise use the confirmed two-step direction; wait if neither exists. Missing or stale candle data blocks new entries.',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,

@@ -156,7 +156,7 @@ test("dashboard presents the closed 5-minute RSI policy without MACD or price-ba
   assert.match(html, /Wilder RSI\(14\)/i);
   assert.match(html, /RSI below 30 selects UP/i);
   assert.match(html, /RSI above 70 selects DOWN/i);
-  assert.match(html, /30 and 70 the last selected side stays active across windows/i);
+  assert.match(html, /In the 30–70 band, the bot keeps its side unless two consecutive closed RSI moves confirm a pullback/i);
   assert.match(html, /restores the latest extreme from its last 50 closed RSI readings/i);
   assert.match(html, /RSI chart · Wilder 14 · last 50 closed 5m readings/i);
   assert.match(html, /rsiChart/);

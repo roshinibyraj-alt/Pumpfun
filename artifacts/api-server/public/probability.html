@@ -39,14 +39,14 @@
     <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 50 SHARES / 10 SECONDS</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">WILDER RSI(14) · CLOSED 5-MINUTE CANDLES</div><h1>RSI extremes select the active side.</h1><p>RSI below 30 selects UP; RSI above 70 selects DOWN. Between 30 and 70 the last selected side stays active across windows. On startup in the middle band, the bot restores the latest extreme from its last 50 closed RSI readings; if none exists, it waits for a new extreme. Buy 50 shares every 10 seconds from 10 through 290 seconds, for up to 29 scheduled entries. No probability model, edge gate or price-band filter. Cash, the existing $0.02 minimum ask, fresh quotes, real liquidity and TP/SL still apply.</p></div>
+    <div><div class="eyebrow">WILDER RSI(14) · CLOSED 5-MINUTE CANDLES</div><h1>RSI signals select the active side.</h1><p>RSI below 30 selects UP; RSI above 70 selects DOWN. In the 30–70 band, the bot keeps its side unless two consecutive closed RSI moves confirm a pullback. On startup it restores the latest extreme from its last 50 closed RSI readings, or uses the same two-step direction if there is no extreme. Buy 50 shares every 10 seconds from 10 through 290 seconds, for up to 29 scheduled entries. No probability model, edge gate or price-band filter. Cash, the existing $0.02 minimum ask, fresh quotes, real liquidity and TP/SL still apply.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid">
     <article class="card"><div class="label">Latest closed 5m RSI</div><div class="value" id="reference" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Wilder RSI(14) · 30 oversold · 70 overbought</div></article>
     <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
-    <article class="card"><div class="label">Current active side</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Held until RSI reaches the opposite extreme</div></article>
+    <article class="card"><div class="label">Current active side</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Two opposite RSI moves can confirm a pullback</div></article>
     <article class="card"><div class="label">Next scheduled entry · UTC</div><div class="value" id="zscore">—</div><div class="foot">10s, 20s, …, 290s · maximum 29 entries</div></article>
   </section>
   <section class="prob-grid">
@@ -80,9 +80,9 @@
   <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-     <div class="formula">RSI(14) uses Wilder smoothing on contiguous, fully closed 5m BTC candles. RSI below 30 selects UP; RSI above 70 selects DOWN. Values from 30 through 70 keep the last selected side, including across window boundaries. On startup in the middle band, restore the latest extreme from the last 50 closed RSI readings; if none exists, wait for a new extreme. The chart and strategy use closed candles only. Missing, stale or gapped RSI history blocks new entries. Scheduled buys: 50 shares at 10, 20, …, 290 seconds, maximum 1,450 shares if all 29 entries fill. Missed or blocked slots are skipped, never accumulated or retried in a burst. No price-band filter, probability model or edge gate. The $0.02 minimum ask, cash, fresh quotes and real visible depth remain required. RSI side changes do not close existing positions. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. Expiry and original-market recovery remain unchanged. Learning logs cannot change the fixed sizing or schedule.</div>
+     <div class="formula">RSI(14) uses Wilder smoothing on contiguous, fully closed 5m BTC candles. RSI below 30 selects UP; RSI above 70 selects DOWN. In the 30–70 band, two consecutive rises select UP and two consecutive falls select DOWN; this changes future entries only. On startup, restore the latest extreme from the last 50 closed RSI readings, or use the same two-step direction if none exists. The chart and strategy use closed candles only. Missing, stale or gapped RSI history blocks new entries. Scheduled buys: 50 shares at 10, 20, …, 290 seconds, maximum 1,450 shares if all 29 entries fill. Missed or blocked slots are skipped, never accumulated or retried in a burst. No price-band filter, probability model or edge gate. The $0.02 minimum ask, cash, fresh quotes and real visible depth remain required. RSI side changes do not close existing positions. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. Expiry and original-market recovery remain unchanged. Learning logs cannot change the fixed sizing or schedule.</div>
   </section>
- <p class="footer">Paper only—no live orders. The selected RSI side carries across five-minute windows and changes only on a closed-candle RSI extreme. A fresh process scans the latest 50 closed RSI readings to restore the most recent extreme; it waits for a new extreme if none is present. Entries are scheduled from 10 through 290 seconds. Exactly one attempt per slot; real liquidity and paper cash are required. Persistent learning logs and RSI-compatible regression remain available, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
+ <p class="footer">Paper only—no live orders. RSI extremes and two-step pullbacks use closed five-minute candles. A fresh process scans the latest 50 RSI readings for the last extreme, then uses a confirmed two-step direction if none is present. Side changes affect future entries only. Entries are scheduled from 10 through 290 seconds. Exactly one attempt per slot; real liquidity and paper cash are required. Persistent learning logs and RSI-compatible regression remain available, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -107,7 +107,7 @@ async function pollLearning(){
   const state=await response.json(),latest=state.tuningRuns?.[0]?.result;
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
     const evaluation=window.latestStrategyState?.learning?.lastEvaluation;
-   $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">50 shares / 10 seconds · 10–290s · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting RSI policy samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Side selection</span><span class="muted">RSI below 30: UP · above 70: DOWN · neutral keeps last side; startup scans last 50 closed RSI readings</span></div>`;
+    $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">50 shares / 10 seconds · 10–290s · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting RSI policy samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Side selection</span><span class="muted">Below 30: UP · above 70: DOWN · in between, two consecutive RSI moves confirm direction</span></div>`;
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -160,7 +160,7 @@ function renderPositions(positions){
   $('rsiVal').textContent=value==null?'—':value.toFixed(1);
   $('rsiVal').className=value==null?'':value>=70?'dir-DOWN':value<=30?'dir-UP':'dir-NONE';
   $('rsiZone').textContent=zone.replace(/_/g,' ');
-  $('rsiStatus').textContent=r.reason||'Waiting for 15 contiguous closed five-minute BTC candles.';
+   $('rsiStatus').textContent=state.windowDecision?.reason||r.reason||'Waiting for 15 contiguous closed five-minute BTC candles.';
   $('rsiStatus').className='formula '+(st==='READY'?'st-READY':st==='STALE'||st==='INVALID_HISTORY'?'st-STALE':'st-WAITING_HISTORY');
   $('rsiLast').textContent=isNumeric(r.signalAt)?time(r.signalAt)+' UTC':'—';
   $('trendStatus').textContent=`5m · Wilder RSI(${r.period||14}) · ${st.replace(/_/g,' ')} · ${(state.windowDecision?.status||'OBSERVING').replace(/_/g,' ')}`;

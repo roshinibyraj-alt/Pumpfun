@@ -45,16 +45,44 @@ test('startup in the middle band restores the latest historical extreme', () => 
   assert.match(bot.windowDecision.reason, /restored DOWN from the latest OVERBOUGHT/);
 });
 
-test('startup waits in the middle band when no recent extreme is available', () => {
+test('startup uses the confirmed RSI slope when no recent extreme is available', () => {
   const { bot, at } = fixture();
-  bot.applyRsiSignal(rsiSignal(50));
+  bot.applyRsiSignal({ ...rsiSignal(50), momentumSide: 'UP' });
   bot.processSignals(at(10));
-  assert.equal(bot.activeSide, null);
-  assert.equal(bot.trades.length, 0);
-  bot.applyRsiSignal(rsiSignal(29));
-  bot.processSignals(at(20));
   assert.equal(bot.activeSide, 'UP');
   assert.equal(bot.trades.length, 1);
+  assert.match(bot.windowDecision.reason, /two consecutive closed RSI moves selected UP/);
+});
+
+test('a confirmed neutral-band pullback overrides the restored historical side', () => {
+  const { bot } = fixture();
+  bot.applyRsiSignal({
+    ...rsiSignal(60),
+    lastExtreme: {
+      side: 'DOWN', value: 75, bucket: 'OVERBOUGHT', signalAt: START - 600_000,
+    },
+    momentumSide: 'UP',
+  });
+  assert.equal(bot.activeSide, 'UP');
+  assert.equal(bot.windowDecision.status, 'HELD');
+  assert.match(bot.windowDecision.reason, /confirmed a pullback/);
+});
+
+test('two-step RSI pullback flips future entries without closing the existing position', () => {
+  const { bot, at } = fixture();
+  bot.applyRsiSignal(rsiSignal(20));
+  bot.processSignals(at(10));
+  const original = bot.trades[0];
+
+  bot.applyRsiSignal({ ...rsiSignal(50), momentumSide: 'DOWN' });
+  assert.equal(bot.activeSide, 'DOWN');
+  assert.match(bot.windowDecision.reason, /confirmed a pullback/);
+  assert.equal(original.status, 'OPEN');
+
+  bot.processSignals(at(20));
+  assert.equal(bot.trades.length, 2);
+  assert.ok(bot.trades.some(trade => trade.entrySlot === 1 && trade.side === 'DOWN'));
+  assert.equal(original.status, 'OPEN');
 });
 
 test('the removed 20–60¢ band no longer gates entries or queues shares', () => {

@@ -29,7 +29,7 @@ function rsiSignal(value = 20, signalAt = START) {
     method: RSI_METHOD, timeframe: '5m', status: 'READY', period: RSI_PERIOD,
     oversold: OVERSOLD, overbought: OVERBOUGHT, value,
     bucket: side === 'UP' ? 'OVERSOLD' : side === 'DOWN' ? 'OVERBOUGHT' : 'NEUTRAL',
-    side, signalAt, history: [], lastExtreme: null,
+    side, signalAt, history: [], lastExtreme: null, momentumSide: null,
   };
 }
 function fixture(options = {}) {

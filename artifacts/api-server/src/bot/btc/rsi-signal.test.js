@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  CANDLE_MS, RSI_PERIOD, OVERBOUGHT, OVERSOLD, detectRsiSignal,
+  CANDLE_MS, RSI_PERIOD, OVERBOUGHT, OVERSOLD, detectRsiMomentumSide, detectRsiSignal,
 } = require('./rsi-signal');
 
 const END = 1_800_000_000_000;
@@ -57,6 +57,13 @@ test('neutral RSI exposes the latest extreme from the 50-reading chart history',
   assert.equal(signal.lastExtreme?.bucket, 'OVERBOUGHT');
   assert.ok(signal.history.length <= 50);
   assert.equal(signal.history.at(-1).value, signal.value);
+});
+
+test('two consecutive neutral RSI changes identify a direction only inside the 30-70 band', () => {
+  assert.equal(detectRsiMomentumSide([{ value: 42 }, { value: 46 }, { value: 51 }]), 'UP');
+  assert.equal(detectRsiMomentumSide([{ value: 61 }, { value: 57 }, { value: 52 }]), 'DOWN');
+  assert.equal(detectRsiMomentumSide([{ value: 42 }, { value: 46 }, { value: 44 }]), null);
+  assert.equal(detectRsiMomentumSide([{ value: 72 }, { value: 66 }, { value: 60 }]), null);
 });
 
 test('unfinished or stale candles never drive the RSI signal', () => {
