@@ -5,6 +5,7 @@ const FAST = 12;
 const SLOW = 26;
 const SIGNAL = 9;
 const CANDLE_MS = 5 * 60_000;
+const MAX_SIGNAL_AGE_MS = CANDLE_MS + 90_000;
 
 function classifyHistogram(current, previous) {
   if (!Number.isFinite(current) || !Number.isFinite(previous) || current === 0 || current === previous) {
@@ -69,7 +70,7 @@ function detectMacdHistogram(candles, now) {
   const latest = bars.at(-1);
   const previous = bars.at(-2);
   const classified = classifyHistogram(latest.histogram, previous.histogram);
-  const stale = now - latest.end > 90_000;
+  const stale = now - latest.end > MAX_SIGNAL_AGE_MS;
   return {
     ...base, ...classified, side: stale ? null : classified.side,
     status: stale ? 'STALE' : 'READY', signalAt: latest.end,

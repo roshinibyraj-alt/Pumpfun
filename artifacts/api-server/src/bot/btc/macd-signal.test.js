@@ -23,6 +23,11 @@ test('MACD EMA seeds and analytic linear-series values remain standard 12/26/9',
   assert.equal(signal.signalAt, 80 * CANDLE_MS);
   assert.ok(Math.abs(signal.chart.bars.at(-1).macd - 7) < 1e-8);
   assert.ok(Math.abs(signal.latestHistogram) < 1e-8);
+  assert.equal(
+    detectMacdHistogram(candles, 80 * CANDLE_MS + CANDLE_MS - 1).status,
+    'READY',
+    'a closed five-minute candle remains valid until its window ends',
+  );
   assert.equal(detectMacdHistogram(candles, 83 * CANDLE_MS).status, 'STALE');
   assert.equal(detectMacdHistogram(candles.slice(0, 20), 80 * CANDLE_MS).status, 'WAITING_HISTORY');
   assert.equal(detectMacdHistogram(candles.filter((_, i) => i !== 50), 80 * CANDLE_MS).status, 'INVALID_HISTORY');
