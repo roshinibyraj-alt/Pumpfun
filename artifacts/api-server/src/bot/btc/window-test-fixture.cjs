@@ -1,7 +1,6 @@
 'use strict';
 const { ProbabilityBot } = require('./probability-bot');
 const { METHOD } = require('./macd-signal');
-const { METHOD: RSI_METHOD, RSI_PERIOD, OVERBOUGHT, OVERSOLD } = require('./rsi-signal');
 const CANDLE_MS = 5 * 60_000;
 const START = 1_800_000_000_000;
 function closedCandleSignal(classification = 'SHRINKING_RED', start = START) {
@@ -23,15 +22,6 @@ function closedCandleSignal(classification = 'SHRINKING_RED', start = START) {
     }] },
   };
 }
-function rsiSignal(value = 20, signalAt = START) {
-  const side = value < OVERSOLD ? 'UP' : value > OVERBOUGHT ? 'DOWN' : null;
-  return {
-    method: RSI_METHOD, timeframe: '5m', status: 'READY', period: RSI_PERIOD,
-    oversold: OVERSOLD, overbought: OVERBOUGHT, value,
-    bucket: side === 'UP' ? 'OVERSOLD' : side === 'DOWN' ? 'OVERBOUGHT' : 'NEUTRAL',
-    side, signalAt, history: [], lastExtreme: null, momentumSide: null,
-  };
-}
 function fixture(options = {}) {
   let now = START + 10_000;
   const bot = new ProbabilityBot({
@@ -49,4 +39,4 @@ function fixture(options = {}) {
   at(10);
   return { bot, at, closedCandleSignal, start: START };
 }
-module.exports = { START, CANDLE_MS, closedCandleSignal, rsiSignal, fixture };
+module.exports = { START, CANDLE_MS, closedCandleSignal, fixture };

@@ -153,15 +153,15 @@ test("dashboard presents hybrid setups, fallback direction, and unchanged execut
   assert.match(html, /BTC HYBRID PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
   assert.match(html, /50 SHARES \/ 10 SECONDS/);
-  assert.match(html, /Wilder RSI\(14\)/i);
   assert.match(html, /Scenario A/);
   assert.match(html, /Scenario B/);
-  assert.match(html, /directional fallback score chooses UP or DOWN/);
+  assert.match(html, /fallback uses an aligned 15m EMA200 trend/);
   assert.match(html, /15m EMA200/);
   assert.match(html, /Stoch RSI/);
   assert.match(html, /RSI\(7\) divergence/);
-  assert.match(html, /RSI telemetry · Wilder 14 · last 50 closed 5m readings/i);
-  assert.match(html, /rsiChart/);
+  assert.doesNotMatch(html, /Wilder RSI\(14\)|RSI telemetry|rsiChart|Latest closed 5m RSI/i);
+  assert.match(html, /Fallback rule/);
+  assert.match(html, /Selected signal rule/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
   assert.match(html, /10 through 290 seconds/);
@@ -172,7 +172,6 @@ test("dashboard presents hybrid setups, fallback direction, and unchanged execut
   assert.match(html, /TP: own-side bid ≥ \$0.99/);
   assert.match(html, /SL: bid ≤ \$0.01/);
   assert.match(html, /AWAITING SETTLEMENT/);
-  assert.match(html, /Latest closed 5m RSI/);
   assert.match(html, /Current active side/);
   assert.match(html, /Paper trade history/);
   assert.doesNotMatch(html, /Manual limit order/);
@@ -200,27 +199,25 @@ test("dashboard renders locked, skipped and observing states without probability
   assert.equal(elements.upProb.textContent, "LOCKED");
   assert.equal(elements.downProb.textContent, "OFF");
   assert.equal(elements.upSignal.textContent, "ENTRY SLOT");
-  state.rsi = {
-    status: "READY", value: 25, bucket: "OVERSOLD", period: 14, signalAt: 1200000,
-    reason: "RSI is below 30 (oversold).",
-    history: [{ end: 900000, value: 50 }, { end: 1200000, value: 25 }],
-  };
-  context.renderRsi(state);
-  assert.equal(elements.rsiVal.textContent, "25.0");
-  assert.equal(elements.rsiDir.textContent, "UP");
-  assert.match(elements.rsiChart.innerHTML, /role="img"/);
-  assert.match(elements.rsiChart.innerHTML, /M54\.0/);
   state.technicalSignal = {
-    status: "READY", side: "UP", setup: "FALLBACK_SCORE", confirmed: false,
-    regime: "MIXED", score: 2, reason: "Fallback score 2 selected UP.",
+    status: "READY", side: "UP", setup: "DIRECTIONAL_FALLBACK",
+    fallbackRule: "15M_EMA200_TREND", confirmed: false,
+  };
+  context.renderSignalRule(state);
+  assert.equal(elements.signalRule.textContent, "15M EMA200 TREND");
+  assert.equal(elements.signalRuleHint.textContent, "Directional fallback");
+  state.technicalSignal = {
+    status: "READY", side: "UP", setup: "DIRECTIONAL_FALLBACK",
+    fallbackRule: "15M_EMA200_TREND", confirmed: false,
+    regime: "MIXED", score: null, reason: "No named setup confirmed; 15M_EMA200_TREND selected UP.",
     indicators: { volume: { status: "READY", direction: "UP", ratio: 1.6 } },
   };
   state.windowDecision.status = "FALLBACK";
   context.renderTechnical(state);
   context.renderSide("UP", state);
   assert.equal(elements.upProb.textContent, "FALLBACK");
-  assert.equal(elements.technicalSetup.textContent, "FALLBACK SCORE");
-  assert.equal(elements.technicalScore.textContent, "2");
+  assert.equal(elements.technicalSetup.textContent, "DIRECTIONAL FALLBACK");
+  assert.equal(elements.technicalFallbackRule.textContent, "15M EMA200 TREND");
   assert.match(elements.technicalReason.textContent, /selected UP/);
   state.technicalSignal.status = "STALE";
   context.renderSide("UP", state);

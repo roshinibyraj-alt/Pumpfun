@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   detectTechnicalSignal,
+  chooseFallbackSide,
   selectScenarioSignal,
   volumeFlow,
   detectDivergence,
@@ -37,7 +38,7 @@ test('Scenario A is selected before a conflicting range signal', () => {
     rangeSignalUp: false,
     rangeSignalDown: true,
     fallbackSide: 'DOWN',
-    fallbackScore: -2,
+    fallbackRule: '15M_EMA200_TREND',
     confluenceName: 'EMA21',
   });
   assert.equal(selection.side, 'UP');
@@ -52,7 +53,7 @@ test('Scenario B selects the counter-trend side only after its range trigger', (
     rangeSignalUp: true,
     rangeSignalDown: false,
     fallbackSide: 'DOWN',
-    fallbackScore: -1,
+    fallbackRule: 'LAST_5M_CANDLE',
     targetPrice: 101.5,
     targetLabel: 'ROLLING_VWAP_20',
   });
@@ -68,11 +69,41 @@ test('fallback always returns a selected side when no setup confirms', () => {
     rangeSignalUp: false,
     rangeSignalDown: false,
     fallbackSide: 'DOWN',
-    fallbackScore: -3,
+    fallbackRule: '15M_EMA200_TREND',
   });
   assert.equal(selection.side, 'DOWN');
-  assert.equal(selection.setup, 'FALLBACK_SCORE');
+  assert.equal(selection.setup, 'DIRECTIONAL_FALLBACK');
+  assert.equal(selection.fallbackRule, '15M_EMA200_TREND');
   assert.equal(selection.confirmed, false);
+});
+
+test('fallback prioritizes aligned 15m trend, then the latest 5m candle, then prior side', () => {
+  const trend = chooseFallbackSide({
+    price15m: 101, ema200: 100, ema200Slope: 1,
+    previousSide: 'DOWN',
+    last5m: { open: 102, close: 101 },
+    last15m: { open: 99, close: 100 },
+    last1m: null,
+  });
+  assert.deepEqual(trend, { side: 'UP', tieBreak: '15M_EMA200_TREND' });
+
+  const candle = chooseFallbackSide({
+    price15m: 101, ema200: 100, ema200Slope: -1,
+    previousSide: 'DOWN',
+    last5m: { open: 100, close: 101 },
+    last15m: { open: 99, close: 100 },
+    last1m: null,
+  });
+  assert.deepEqual(candle, { side: 'UP', tieBreak: 'LAST_5M_CANDLE' });
+
+  const previous = chooseFallbackSide({
+    price15m: 100, ema200: 100, ema200Slope: 0,
+    previousSide: 'DOWN',
+    last5m: { open: 100, close: 100 },
+    last15m: { open: 100, close: 100 },
+    last1m: null,
+  });
+  assert.deepEqual(previous, { side: 'DOWN', tieBreak: 'PREVIOUS_SIDE' });
 });
 
 test('each valid window gets a deterministic side from closed candles', () => {
@@ -87,8 +118,10 @@ test('each valid window gets a deterministic side from closed candles', () => {
   });
   assert.equal(signal.status, 'READY');
   assert.ok(['UP', 'DOWN'].includes(signal.side));
-  assert.equal(signal.setup, 'FALLBACK_SCORE');
+  assert.equal(signal.setup, 'DIRECTIONAL_FALLBACK');
   assert.equal(signal.confirmed, false);
+  assert.equal(signal.score, null);
+  assert.equal(signal.fallbackRule, '15M_EMA200_TREND');
   assert.equal(signal.signalAt, Math.floor((NOW + 1_000) / (5 * 60_000)) * (5 * 60_000));
 });
 
@@ -104,8 +137,9 @@ test('fallback tie keeps the prior side when all indicator votes are neutral', (
     previousSide: 'DOWN',
   });
   assert.equal(signal.status, 'READY');
-  assert.equal(signal.score, 0);
+  assert.equal(signal.score, null);
   assert.equal(signal.side, 'DOWN');
+  assert.equal(signal.fallbackRule, 'PREVIOUS_SIDE');
   assert.equal(signal.tieBreak, 'PREVIOUS_SIDE');
 });
 
@@ -176,7 +210,7 @@ test('closed-candle indicator pipeline confirms trend pullbacks in both directio
     candles1m: minute.map(candle => ({ ...candle, takerBuyBaseVolume: candle.volume / 2 })),
     now: NOW + 1_000,
   });
-  assert.equal(noVolume.setup, 'FALLBACK_SCORE');
+  assert.equal(noVolume.setup, 'DIRECTIONAL_FALLBACK');
   assert.equal(noVolume.confirmed, false);
 });
 

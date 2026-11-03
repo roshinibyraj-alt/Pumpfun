@@ -88,7 +88,6 @@ function replay(window, variant, trailing, index) {
     if (!legacySignalLoaded && previousCandle) {
       // This endpoint replays archived decisions only; live entries use the hybrid signal.
       bot.activeSide = ['UP', 'DOWN'].includes(previousCandle.side) ? previousCandle.side : null;
-      bot.rsi = { status: 'READY', value: 50 };
       bot.marketSignal = {
         method: 'archived-window-decision-replay',
         status: bot.activeSide ? 'READY' : 'WAITING_HISTORY',
