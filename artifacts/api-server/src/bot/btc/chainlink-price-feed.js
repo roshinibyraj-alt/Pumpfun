@@ -4,6 +4,7 @@ const URL = 'wss://ws-live-data.polymarket.com';
 const SYMBOL = 'btc/usd';
 const MAX_AGE_MS = 15_000;
 const RETAIN_MS = 60 * 60 * 1000;
+const CANDLE_MS = 5 * 60_000;
 const HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100';
 const MINUTE_HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=100';
 const HISTORY_REFRESH_MS = 60_000;
@@ -23,6 +24,7 @@ class ChainlinkPriceFeed {
     this.minuteHistoryError = null;
     this.historyRetryTimer = null;
     this.historyRefreshTimer = null;
+    this.closedCandleRefreshTimer = null;
     this.socket = null;
     this.started = false;
     this.status = 'starting';
@@ -38,6 +40,7 @@ class ChainlinkPriceFeed {
     void this.loadHistoricalCandles();
     void this.loadHistoricalMinuteCandles();
     this.scheduleHistoryRefresh();
+    this.scheduleClosedCandleRefresh();
     if (typeof this.WebSocketImpl !== 'function') {
       this.status = 'unsupported';
       this.error = 'Node.js WebSocket support is required (Node 22 or newer)';
@@ -55,6 +58,19 @@ class ChainlinkPriceFeed {
       this.scheduleHistoryRefresh();
     }, Math.max(1000, HISTORY_REFRESH_MS - (this.now() % HISTORY_REFRESH_MS) + 1000));
     this.historyRefreshTimer.unref?.();
+  }
+
+  scheduleClosedCandleRefresh() {
+    clearTimeout(this.closedCandleRefreshTimer);
+    if (!this.started) return;
+    const now = this.now();
+    const nextBoundary = Math.floor(now / CANDLE_MS) * CANDLE_MS + CANDLE_MS;
+    this.closedCandleRefreshTimer = setTimeout(async () => {
+      this.closedCandleRefreshTimer = null;
+      await this.loadHistoricalCandles();
+      this.scheduleClosedCandleRefresh();
+    }, Math.max(50, nextBoundary - now + 250));
+    this.closedCandleRefreshTimer.unref?.();
   }
 
   async loadHistoricalCandles() {
@@ -281,13 +297,13 @@ class ChainlinkPriceFeed {
       minuteBars: this.minuteBars.size,
       error: this.error,
       history: {
-        source: 'Binance BTCUSDT 5-minute candles (history only)',
+        source: 'Binance BTCUSDT 5-minute candles (MACD signal)',
         status: this.historyStatus,
         candles: this.historicalCandles.length,
         error: this.historyError,
       },
         minuteHistory: {
-          source: 'Binance BTCUSDT 1-minute candles (trend signals)',
+          source: 'Binance BTCUSDT 1-minute candles (auxiliary history)',
           status: this.minuteHistoryStatus,
           candles: this.historicalMinuteCandles.length,
           error: this.minuteHistoryError,
@@ -303,6 +319,8 @@ class ChainlinkPriceFeed {
     this.historyRetryTimer = null;
     clearTimeout(this.historyRefreshTimer);
     this.historyRefreshTimer = null;
+    clearTimeout(this.closedCandleRefreshTimer);
+    this.closedCandleRefreshTimer = null;
     const socket = this.socket;
     this.socket = null;
     if (socket) socket.close();

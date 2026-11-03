@@ -6,7 +6,7 @@ const { METHOD } = require('./macd-signal');
 const DEFAULT_SETTINGS = DEFAULT_STRATEGY_SETTINGS;
 const MIN_CLOSED_WINDOWS = 15;
 
-// Replay exactly the fixed live execution policy; old probability/reversal samples are incompatible.
+// Replay exactly the fixed live execution policy; old signal-method samples are incompatible.
 function simulateWindow(windowSamples) {
   const samples = [...windowSamples].filter(s => s.pullback?.method === METHOD)
     .sort((a, b) => a.ts - b.ts);
@@ -25,8 +25,9 @@ function simulateWindow(windowSamples) {
     bot.processPositionExits(now);
     const decision = sample.windowDecision;
     bot.applyPullbackSignal({
-      method: METHOD, status: 'READY',
-      chart: { bars: [decision?.minute1, decision?.minute2].filter(Boolean) },
+      method: METHOD, timeframe: '5m', status: 'READY',
+      signalAt: decision?.previousCandle?.end,
+      chart: { bars: decision?.previousCandle ? [decision.previousCandle] : [] },
     });
     bot.processSignals(now);
   }

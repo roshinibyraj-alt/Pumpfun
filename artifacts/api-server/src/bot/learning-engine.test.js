@@ -3,14 +3,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { DEFAULT_SETTINGS, choosePaperSettings, simulateWindow } = require('./btc/learning-engine');
 const { METHOD } = require('./btc/macd-signal');
-const { pair, START } = require('./btc/window-test-fixture.cjs');
+const { closedCandleSignal, START } = require('./btc/window-test-fixture.cjs');
 
-function samples(first = 'SOLID_RED', second = 'SHRINKING_RED') {
-  const bars = pair(first, second).chart.bars;
+function samples(classification = 'SHRINKING_RED') {
+  const previousCandle = closedCandleSignal(classification).chart.bars[0];
   return Array.from({ length: 600 }, (_, i) => ({
     ts: START + i * 500, windowStart: START,
     pullback: { method: METHOD },
-    windowDecision: i < 240 ? null : { minute1: bars[0], minute2: bars[1] },
+    windowDecision: i < 2 ? null : {
+      status: previousCandle.side ? 'LOCKED' : 'SKIP_WINDOW',
+      side: previousCandle.side,
+      previousCandle,
+    },
     quotes: Object.fromEntries(['UP', 'DOWN'].map(side => [side, {
       bestAsk: .5, bestBid: .4, updatedAt: START + i * 500,
       asks: [{ price: .5, size: 5000 }], bids: [{ price: .4, size: 5000 }],
@@ -18,19 +22,20 @@ function samples(first = 'SOLID_RED', second = 'SHRINKING_RED') {
   }));
 }
 
-test('fixed-policy replay matches all 18 timed buys and exact own-side fee-adjusted P&L', () => {
+test('fixed-policy replay matches all 29 timed buys and exact own-side fee-adjusted P&L', () => {
   const result = simulateWindow(samples());
-  assert.equal(result.trades, 18);
-  assert.ok(Math.abs(result.pnl - (-120.87)) < 1e-8);
+  assert.equal(result.trades, 29);
+  assert.ok(Math.abs(result.pnl - (-194.735)) < 1e-8);
   assert.ok(Math.abs(result.finalCash - (10000 + result.pnl)) < 1e-8);
 });
 
-test('replay skips nonqualifying pairs and never uses old reversal-policy samples', () => {
-  assert.equal(simulateWindow(samples('SHRINKING_RED', 'SOLID_GREEN')).trades, 0);
+test('replay skips a neutral previous candle and never uses old policy samples', () => {
+  assert.equal(simulateWindow(samples('NEUTRAL')).trades, 0);
   for (const method of [
     'macd-1m-12-26-9-reversal-sweep-v2',
     'macd-1m-12-26-9-window-pair-v1',
     'macd-1m-12-26-9-window-pair-v2',
+    'macd-1m-12-26-9-window-pair-v3',
   ]) {
     const old = samples().map(s => ({ ...s, pullback: { method } }));
     assert.equal(simulateWindow(old), null, method);
@@ -45,7 +50,7 @@ test('regression reports fixed-policy results but never applies adaptive sizes o
   const result = choosePaperSettings([{ windowStart: START, samples: samples() }], { sharesPerSignal: 999 });
   assert.equal(result.applied, false);
   assert.equal(result.settings.sharesPerSignal, 50);
-  assert.equal(DEFAULT_SETTINGS.openingDelaySeconds, 120);
+  assert.equal(DEFAULT_SETTINGS.openingDelaySeconds, 10);
   assert.equal(result.windows, 1);
-  assert.equal(result.baseline.trades, 18);
+  assert.equal(result.baseline.trades, 29);
 });

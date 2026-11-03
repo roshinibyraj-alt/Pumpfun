@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { classifyHistogram, detectMacdHistogram, windowSignal, ema } = require('./macd-signal');
-const { pair, START } = require('./window-test-fixture.cjs');
+const { CANDLE_MS, closedCandleSignal, START } = require('./window-test-fixture.cjs');
 
 test('histogram classifications use sign and comparison with the previous bar', () => {
   for (const [value, previous, classification, side] of [
@@ -15,51 +15,48 @@ test('histogram classifications use sign and comparison with the previous bar', 
 test('MACD EMA seeds and analytic linear-series values remain standard 12/26/9', () => {
   assert.deepEqual(ema([1, 2, 3, 4], 3), [null, null, 2, 3]);
   const candles = Array.from({ length: 80 }, (_, i) => ({
-    start: i * 60000, end: (i + 1) * 60000, close: 100 + i,
+    start: i * CANDLE_MS, end: (i + 1) * CANDLE_MS, close: 100 + i,
   }));
-  const signal = detectMacdHistogram(candles, 80 * 60000);
+  const signal = detectMacdHistogram(candles, 80 * CANDLE_MS);
   assert.equal(signal.status, 'READY');
+  assert.equal(signal.timeframe, '5m');
+  assert.equal(signal.signalAt, 80 * CANDLE_MS);
   assert.ok(Math.abs(signal.chart.bars.at(-1).macd - 7) < 1e-8);
   assert.ok(Math.abs(signal.latestHistogram) < 1e-8);
-  assert.equal(detectMacdHistogram(candles, 83 * 60000).status, 'STALE');
-  assert.equal(detectMacdHistogram(candles.slice(0, 20), 80 * 60000).status, 'WAITING_HISTORY');
-  assert.equal(detectMacdHistogram(candles.filter((_, i) => i !== 50), 80 * 60000).status, 'INVALID_HISTORY');
-  assert.equal(detectMacdHistogram([...candles, { start: 80 * 60000, end: 81 * 60000, close: 10000 }], 80 * 60000).latestHistogram, signal.latestHistogram);
+  assert.equal(detectMacdHistogram(candles, 83 * CANDLE_MS).status, 'STALE');
+  assert.equal(detectMacdHistogram(candles.slice(0, 20), 80 * CANDLE_MS).status, 'WAITING_HISTORY');
+  assert.equal(detectMacdHistogram(candles.filter((_, i) => i !== 50), 80 * CANDLE_MS).status, 'INVALID_HISTORY');
+  assert.equal(detectMacdHistogram([...candles, {
+    start: 80 * CANDLE_MS, end: 81 * CANDLE_MS, close: 10000,
+  }], 80 * CANDLE_MS).latestHistogram, signal.latestHistogram);
 });
 
-test('all 25 classification pairs enforce only the four requested transitions', () => {
-  const states = ['SOLID_RED', 'SHRINKING_RED', 'SOLID_GREEN', 'SHRINKING_GREEN', 'NEUTRAL'];
-  for (const first of states) for (const second of states) {
-    const expected = first === 'SOLID_RED' && ['SHRINKING_RED', 'SOLID_GREEN', 'SOLID_RED'].includes(second)
-      ? second === 'SOLID_RED' ? 'DOWN' : 'UP'
-      : first === 'SOLID_GREEN' && ['SHRINKING_GREEN', 'SOLID_RED', 'SOLID_GREEN'].includes(second)
-        ? second === 'SOLID_GREEN' ? 'UP' : 'DOWN'
-        : first === 'SHRINKING_RED' && second === 'SHRINKING_RED' ? 'UP'
-          : first === 'SHRINKING_GREEN' && second === 'SHRINKING_GREEN' ? 'DOWN' : null;
-    const result = windowSignal(pair(first, second), START, START + 120000);
-    assert.equal(result.side, expected, first + ' -> ' + second);
-    assert.equal(result.status, expected ? 'LOCKED' : 'SKIP_WINDOW');
+test('one prior closed 5-minute candle selects direction from its classification', () => {
+  for (const [classification, expected] of [
+    ['SOLID_RED', 'DOWN'], ['SHRINKING_RED', 'UP'],
+    ['SOLID_GREEN', 'UP'], ['SHRINKING_GREEN', 'DOWN'],
+  ]) {
+    const result = windowSignal(closedCandleSignal(classification), START, START);
+    assert.equal(result.side, expected, classification);
+    assert.equal(result.status, 'LOCKED');
+    assert.equal(result.previousCandle.end, START);
   }
+  const neutral = windowSignal(closedCandleSignal('NEUTRAL'), START, START);
+  assert.equal(neutral.side, null);
+  assert.equal(neutral.status, 'SKIP_WINDOW');
 });
 
-test('both solid same-color opening pairs choose the newly requested direction', () => {
-  assert.equal(windowSignal(pair('SOLID_GREEN', 'SOLID_GREEN'), START, START + 120000).side, 'UP');
-  assert.equal(windowSignal(pair('SOLID_RED', 'SOLID_RED'), START, START + 120000).side, 'DOWN');
-});
-
-test('two shrinking bars of the same color use the matching directional momentum', () => {
-  assert.equal(windowSignal(pair('SHRINKING_RED', 'SHRINKING_RED'), START, START + 120000).side, 'UP');
-  assert.equal(windowSignal(pair('SHRINKING_GREEN', 'SHRINKING_GREEN'), START, START + 120000).side, 'DOWN');
-});
-
-test('forming, stale, missing and wrong-window candles cannot choose a side', () => {
-  assert.equal(windowSignal(pair(), START, START + 119999).side, null);
-  assert.equal(windowSignal({ ...pair(), status: 'STALE' }, START, START + 120000).side, null);
-  assert.equal(windowSignal(pair(), START + 300000, START + 420000).side, null);
-  const missing = pair();
-  missing.chart.bars.pop();
-  assert.equal(windowSignal(missing, START, START + 120000).status, 'WAITING_HISTORY');
-  const observing = windowSignal(pair(), START, START + 60000);
-  assert.equal(observing.minute1.classification, 'SOLID_RED');
-  assert.equal(observing.side, null);
+test('unfinished, stale, missing and non-immediately-prior candles cannot choose a side', () => {
+  const signal = closedCandleSignal();
+  assert.equal(windowSignal(signal, START, START - 1).status, 'WAITING_HISTORY');
+  assert.equal(windowSignal({ ...signal, status: 'STALE' }, START, START).status, 'WAITING_HISTORY');
+  assert.equal(windowSignal({ ...signal, timeframe: '1m' }, START, START).status, 'WAITING_HISTORY');
+  assert.equal(windowSignal({
+    ...signal, method: 'macd-1m-12-26-9-window-pair-v3',
+  }, START, START).status, 'WAITING_HISTORY');
+  assert.equal(windowSignal(signal, START + CANDLE_MS, START + CANDLE_MS).side, null);
+  const missing = { ...signal, chart: { bars: [] } };
+  assert.equal(windowSignal(missing, START, START).status, 'WAITING_HISTORY');
+  const older = closedCandleSignal('SOLID_GREEN', START - CANDLE_MS);
+  assert.equal(windowSignal(older, START, START).status, 'WAITING_HISTORY');
 });

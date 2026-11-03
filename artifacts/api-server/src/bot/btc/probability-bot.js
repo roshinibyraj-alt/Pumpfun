@@ -15,9 +15,12 @@ const STARTING_CASH = 10_000;
 const POLL_MS = 500;
 const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const MIN_ENTRY_PRICE = 0.02;
-const OPENING_DELAY_SECONDS = 120;
+const OPENING_DELAY_SECONDS = 10;
 const ENTRY_INTERVAL_MS = 10_000;
+const FIRST_ENTRY_SECONDS = OPENING_DELAY_SECONDS;
 const LAST_ENTRY_SECONDS = 290;
+const MAX_ENTRIES_PER_WINDOW = Math.floor((LAST_ENTRY_SECONDS - FIRST_ENTRY_SECONDS) * 1000
+  / ENTRY_INTERVAL_MS) + 1;
 // Permit normal polling/network jitter, but never catch up missed slots in a burst.
 const SLOT_GRACE_MS = 1000;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
@@ -207,7 +210,7 @@ class ProbabilityBot {
         signalSide: this.pullback.detectedSide,
         regime: this.pullback.regime,
         activeSignalReason: this.pullback.activeSignalReason,
-        timeframe: '1m',
+         timeframe: '5m',
       } : null,
       activeSide: this.activeSide,
       windowDecision: this.windowDecision,
@@ -292,8 +295,8 @@ class ProbabilityBot {
       this.referencePrice = referenceTick?.price ?? null;
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
-      const minuteCandles = this.priceFeed.getHistoricalMinuteCandles?.() ?? [];
-      const detectedPullback = detectMacdHistogram(minuteCandles, now);
+      const candles = this.priceFeed.getHistoricalCandles?.() ?? [];
+      const detectedPullback = detectMacdHistogram(candles, now);
       this.applyPullbackSignal(detectedPullback);
       this.macd = {
         ...detectedPullback,
@@ -304,13 +307,13 @@ class ProbabilityBot {
         windowDecision: this.windowDecision,
       };
       this.pullback = this.macd; // Existing learning/storage contract; never a trendline detector.
-      this.statusReason = this.windowDecision.status === 'OBSERVING'
-        ? 'Observing minute 1 and minute 2; no entries before 120 seconds.'
-        : this.windowDecision.status === 'SKIP_WINDOW'
-          ? 'The first two histogram bars did not qualify; skipping this window.'
+      this.statusReason = this.windowDecision.status === 'WAITING_HISTORY'
+        ? 'Waiting for the prior closed five-minute MACD candle.'
+      : this.windowDecision.status === 'SKIP_WINDOW'
+          ? 'The prior closed five-minute histogram is neutral; skipping this window.'
           : this.activeSide
-            ? `Locked ${this.activeSide}; 50-share entries every 10 seconds from 120 through 290 seconds.`
-            : 'Waiting for the exact first two closed one-minute histogram bars.';
+            ? `Locked ${this.activeSide}; 50-share entries every 10 seconds from 10 through 290 seconds.`
+            : 'Waiting for the prior closed five-minute histogram candle.';
       this.probabilityUp = null;
       this.edges = { UP: null, DOWN: null };
       this.processSignals(this.now());
@@ -382,7 +385,7 @@ class ProbabilityBot {
     const decision = windowSignal(signal, this.market.start, this.now());
     this.windowDecision = decision;
     this.activeSide = decision.side;
-    this.activeSignalReason = decision.side ? 'WINDOW_MINUTE_2_PATTERN' : null;
+    this.activeSignalReason = decision.side ? 'PREVIOUS_CLOSED_5M_CANDLE' : null;
     if (['LOCKED', 'SKIP_WINDOW'].includes(decision.status)) {
       this.log('WINDOW_MACD_DECIDED', { ...decision, method: signal.method });
     }
@@ -469,16 +472,16 @@ class ProbabilityBot {
   entrySchedule(now = this.now()) {
     const start = this.market?.start;
     if (!Number.isFinite(start)) return { due: false, nextEntryAt: null };
-    const first = start + OPENING_DELAY_SECONDS * 1000;
+    const first = start + FIRST_ENTRY_SECONDS * 1000;
     const last = start + LAST_ENTRY_SECONDS * 1000;
     const slot = Math.floor((now - first) / ENTRY_INTERVAL_MS);
     const scheduledAt = first + slot * ENTRY_INTERVAL_MS;
-    const due = slot >= 0 && slot <= 17 && slot > this.lastEntrySlot
+    const due = slot >= 0 && slot < MAX_ENTRIES_PER_WINDOW && slot > this.lastEntrySlot
       && now < scheduledAt + SLOT_GRACE_MS && now < this.market.end;
     const nextSlot = Math.max(0, slot + (slot <= this.lastEntrySlot || now >= scheduledAt + SLOT_GRACE_MS ? 1 : 0));
     const nextEntryAt = first + nextSlot * ENTRY_INTERVAL_MS;
     return { due, slot, scheduledAt, nextEntryAt: nextEntryAt <= last ? nextEntryAt : null,
-      firstEntryAt: first, lastEntryAt: last, intervalSeconds: 10, maxEntries: 18,
+      firstEntryAt: first, lastEntryAt: last, intervalSeconds: 10, maxEntries: MAX_ENTRIES_PER_WINDOW,
       lastAttemptedSlot: this.lastEntrySlot };
   }
 
@@ -656,10 +659,10 @@ class ProbabilityBot {
         reversalsEnabled: false,
         entryIntervalSeconds: 10,
         lastEntrySeconds: LAST_ENTRY_SECONDS,
-        maxEntriesPerWindow: 18,
-        signalPersistence: 'Reset each window. Minute 1 and minute 2 choose one locked direction; later bars never flip it.',
-        entryModel: '50 shares every 10 seconds from 120 through 290 seconds (18 scheduled slots). No probability or edge gate; no catch-up bursts. Cash, price-floor, fresh-book and real-depth checks remain active.',
-        model: 'Closed 1-minute MACD (12,26,9): SOLID_RED→SHRINKING_RED/SOLID_GREEN and SHRINKING_RED→SHRINKING_RED select UP; SOLID_RED→SOLID_RED selects DOWN. SOLID_GREEN→SOLID_GREEN selects UP; SOLID_GREEN→SHRINKING_GREEN/SOLID_RED and SHRINKING_GREEN→SHRINKING_GREEN select DOWN. Other pairs skip.',
+        maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
+      signalPersistence: 'Reset each window. The immediately prior closed 5-minute MACD candle selects one locked direction; later candles never flip it.',
+        entryModel: `50 shares every 10 seconds from ${FIRST_ENTRY_SECONDS} through ${LAST_ENTRY_SECONDS} seconds (${MAX_ENTRIES_PER_WINDOW} scheduled slots). No probability or edge gate; no catch-up bursts. Cash, price-floor, fresh-book and real-depth checks remain active.`,
+        model: 'The immediately prior closed 5-minute MACD (12,26,9) histogram chooses the current window: SHRINKING_RED or SOLID_GREEN selects UP; SHRINKING_GREEN or SOLID_RED selects DOWN. Neutral or missing data yields no entry.',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,

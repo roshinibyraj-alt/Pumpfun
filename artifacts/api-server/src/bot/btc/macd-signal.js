@@ -1,9 +1,10 @@
 'use strict';
 
-const METHOD = 'macd-1m-12-26-9-window-pair-v3';
+const METHOD = 'macd-5m-12-26-9-prior-closed-v1';
 const FAST = 12;
 const SLOW = 26;
 const SIGNAL = 9;
+const CANDLE_MS = 5 * 60_000;
 
 function classifyHistogram(current, previous) {
   if (!Number.isFinite(current) || !Number.isFinite(previous) || current === 0 || current === previous) {
@@ -34,7 +35,7 @@ function ema(values, period) {
 
 function detectMacdHistogram(candles, now) {
   const base = {
-    method: METHOD, timeframe: '1m', fastPeriod: FAST, slowPeriod: SLOW, signalPeriod: SIGNAL,
+    method: METHOD, timeframe: '5m', fastPeriod: FAST, slowPeriod: SLOW, signalPeriod: SIGNAL,
     status: 'WAITING_HISTORY', side: null, signalSource: 'CLOSED_CANDLE', signalAt: null,
     signalReason: null, classification: 'NEUTRAL', latestHistogram: null, previousHistogram: null,
     chart: { bars: [] },
@@ -43,7 +44,7 @@ function detectMacdHistogram(candles, now) {
     .filter(c => Number.isFinite(c.end) && c.end <= now)
     .sort((a, b) => a.end - b.end).slice(-100);
   if (closed.some((c, i) => !Number.isFinite(c.close) || c.close <= 0
-    || !Number.isFinite(c.start) || c.end - c.start !== 60_000
+    || !Number.isFinite(c.start) || c.end - c.start !== CANDLE_MS
     || (i > 0 && c.start !== closed[i - 1].end))) {
     return { ...base, status: 'INVALID_HISTORY' };
   }
@@ -59,9 +60,10 @@ function detectMacdHistogram(candles, now) {
     const candle = closed[i + SLOW - 1];
     const histogram = macd[i] - signal[i];
     const previous = bars.at(-1)?.histogram;
+    const classified = classifyHistogram(histogram, previous);
     bars.push({
       start: candle.start, end: candle.end, histogram, macd: macd[i], signal: signal[i],
-      classification: classifyHistogram(histogram, previous).classification,
+      classification: classified.classification, side: classified.side,
     });
   }
   const latest = bars.at(-1);
@@ -77,28 +79,24 @@ function detectMacdHistogram(candles, now) {
   };
 }
 
-// Only the first two fully closed candles of this exact market can choose direction.
+// The immediately preceding, fully closed five-minute candle chooses direction.
 function windowSignal(signal, start, now) {
   const bars = signal?.chart?.bars ?? [];
-  const first = bars.find(b => b.start === start && b.end === start + 60_000 && b.end <= now);
-  const second = bars.find(b => b.start === start + 60_000 && b.end === start + 120_000 && b.end <= now);
-  if (now < start + 120_000) return { status: 'OBSERVING', side: null, minute1: first ?? null };
-  if (signal?.status !== 'READY') return { status: 'WAITING_HISTORY', side: null };
-  if (!first || !second) return { status: 'WAITING_HISTORY', side: null };
-  const up = first.classification === 'SOLID_RED'
-    && ['SHRINKING_RED', 'SOLID_GREEN'].includes(second.classification)
-    || first.classification === 'SOLID_GREEN' && second.classification === 'SOLID_GREEN'
-    || first.classification === 'SHRINKING_RED' && second.classification === 'SHRINKING_RED';
-  const down = first.classification === 'SOLID_GREEN'
-    && ['SHRINKING_GREEN', 'SOLID_RED'].includes(second.classification)
-    || first.classification === 'SOLID_RED' && second.classification === 'SOLID_RED'
-    || first.classification === 'SHRINKING_GREEN' && second.classification === 'SHRINKING_GREEN';
+  const previousCandle = bars.find(b => b.start === start - CANDLE_MS
+    && b.end === start && b.end <= now) ?? null;
+  if (now < start || signal?.method !== METHOD || signal?.timeframe !== '5m'
+    || signal?.status !== 'READY'
+    || signal.signalAt !== start || !previousCandle) {
+    return { status: 'WAITING_HISTORY', side: null, previousCandle };
+  }
+  const side = previousCandle.side
+    ?? classifyHistogram(previousCandle.histogram, signal.previousHistogram).side;
   return {
-    status: up || down ? 'LOCKED' : 'SKIP_WINDOW',
-    side: up ? 'UP' : down ? 'DOWN' : null,
-    minute1: { ...first }, minute2: { ...second },
-    signalAt: second.end,
+    status: side ? 'LOCKED' : 'SKIP_WINDOW',
+    side,
+    previousCandle: { ...previousCandle },
+    signalAt: previousCandle.end,
   };
 }
 
-module.exports = { METHOD, classifyHistogram, detectMacdHistogram, windowSignal, ema };
+module.exports = { METHOD, classifyHistogram, detectMacdHistogram, windowSignal, ema, CANDLE_MS };

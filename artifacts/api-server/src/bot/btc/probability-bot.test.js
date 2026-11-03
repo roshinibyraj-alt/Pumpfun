@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { fixture, pair } = require('./window-test-fixture.cjs');
+const { closedCandleSignal, fixture } = require('./window-test-fixture.cjs');
 const { simulateBuy, normalCdf, probabilityUp, estimateLogReturnVolatility } = require('./probability-bot');
 
 test('legacy probability utilities remain correct but are not entry requirements', () => {
@@ -18,22 +18,22 @@ test('50-share paper buys sweep actual asks, include per-level fees and reject a
   assert.equal(simulateBuy([{ price: .4, size: 49 }]), null);
 });
 
-for (const [first, second, side] of [
-  ['SOLID_RED', 'SHRINKING_RED', 'UP'], ['SOLID_RED', 'SOLID_GREEN', 'UP'],
-  ['SOLID_GREEN', 'SHRINKING_GREEN', 'DOWN'], ['SOLID_GREEN', 'SOLID_RED', 'DOWN'],
+for (const [classification, side] of [
+  ['SHRINKING_RED', 'UP'], ['SOLID_GREEN', 'UP'],
+  ['SHRINKING_GREEN', 'DOWN'], ['SOLID_RED', 'DOWN'],
 ]) {
-  test(`${first} -> ${second}: exactly 18 buys of 50 ${side}, not every scan`, () => {
+  test(`${classification} prior 5m candle: exactly 29 buys of 50 ${side}`, () => {
     const { bot, at } = fixture();
     for (let elapsed = 0; elapsed < 300; elapsed += .5) {
       const now = at(elapsed);
-      bot.applyPullbackSignal(pair(first, second));
+      bot.applyPullbackSignal(closedCandleSignal(classification));
       bot.processSignals(now);
     }
     assert.equal(bot.activeSide, side);
-    assert.equal(bot.trades.length, 18);
-    assert.equal(bot.trades.reduce((n, t) => n + t.shares, 0), 900);
+    assert.equal(bot.trades.length, 29);
+    assert.equal(bot.trades.reduce((n, t) => n + t.shares, 0), 1450);
     assert.deepEqual([...bot.trades].reverse().map(t => (t.openedAt - bot.market.start) / 1000),
-      Array.from({ length: 18 }, (_, i) => 120 + 10 * i));
+      Array.from({ length: 29 }, (_, i) => 10 + 10 * i));
     assert.ok(bot.trades.every(t => t.side === side && t.shares === 50
       && t.modelProbability === null && t.edgeAtEntry === null && t.entryKind === 'SCHEDULED_MACD'));
     assert.ok(Math.abs(bot.cash - (10000 - bot.trades.reduce((n, t) => n + t.totalCost, 0))) < 1e-8);
@@ -42,38 +42,38 @@ for (const [first, second, side] of [
 
 test('missing probability and strongly negative legacy edge do not block a scheduled entry', () => {
   const { bot, at } = fixture();
-  bot.applyPullbackSignal(pair());
+  bot.applyPullbackSignal(closedCandleSignal());
   bot.probabilityUp = null;
   bot.edges = { UP: -.99, DOWN: -.99 };
   bot.armed = { UP: false, DOWN: false };
-  bot.processSignals(at(120));
+  bot.processSignals(at(10));
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].shares, 50);
 });
 
 test('one-second polling grace, hard slot boundary and no catch-up bursts', () => {
   const { bot, at } = fixture();
-  bot.applyPullbackSignal(pair());
-  bot.processSignals(at(119.999));
-  bot.processSignals(at(120.5));
-  bot.processSignals(at(120.7));
+  bot.applyPullbackSignal(closedCandleSignal());
+  bot.processSignals(at(9.999));
+  bot.processSignals(at(10.5));
+  bot.processSignals(at(10.7));
   assert.equal(bot.trades.length, 1);
-  bot.processSignals(at(141)); // missed 130 and the 140-second grace period
+  bot.processSignals(at(31)); // missed 20 and the 30-second grace period
   assert.equal(bot.trades.length, 1);
-  bot.processSignals(at(150));
+  bot.processSignals(at(40));
   bot.processSignals(at(290.5));
   bot.processSignals(at(291));
   bot.processSignals(at(299));
   bot.processSignals(at(300));
   assert.equal(bot.trades.length, 3);
-  assert.deepEqual(bot.trades.map(t => t.entrySlot), [17, 3, 0]);
+  assert.deepEqual(bot.trades.map(t => t.entrySlot), [28, 3, 0]);
 });
 
 test('cash, real depth, fresh book and the existing both-sides price floor remain enforced', () => {
   for (const reason of ['cash', 'depth', 'stale', 'price-floor']) {
     const { bot, at } = fixture();
-    bot.applyPullbackSignal(pair());
-    const now = at(120);
+    bot.applyPullbackSignal(closedCandleSignal());
+    const now = at(10);
     if (reason === 'cash') bot.cash = 0;
     if (reason === 'depth') bot.quotes.UP.asks[0].size = 49;
     if (reason === 'stale') bot.quotes.UP.updatedAt -= 5001;
@@ -86,7 +86,7 @@ test('cash, real depth, fresh book and the existing both-sides price floor remai
     bot.quotes.DOWN.bestAsk = .5;
     bot.processSignals(now + 500);
     assert.equal(bot.trades.length, 0, 'blocked slot must not retry');
-    bot.processSignals(at(130));
+    bot.processSignals(at(20));
     assert.equal(bot.trades.length, 1);
   }
 });
@@ -94,23 +94,23 @@ test('cash, real depth, fresh book and the existing both-sides price floor remai
 for (const [bid, outcome, price] of [[.99, 'TAKE_PROFIT', 1], [.01, 'STOP_LOSS', 0]]) {
   test(`unchanged ${outcome} exits at ${price} and does not disable later scheduled buys`, () => {
     const { bot, at } = fixture();
-    bot.applyPullbackSignal(pair());
-    bot.processSignals(at(120));
+    bot.applyPullbackSignal(closedCandleSignal());
+    bot.processSignals(at(10));
     bot.processPositionExits(at(121, bid));
     assert.equal(bot.trades[0].finalOutcome, outcome);
     assert.equal(bot.trades[0].exitPrice, price);
     assert.equal(bot.trades[0].status, 'SETTLED');
     assert.equal(bot.activeSide, 'UP');
-    bot.processSignals(at(130));
+    bot.processSignals(at(20));
     assert.equal(bot.trades.filter(t => t.status === 'OPEN').length, 1);
   });
 }
 
 test('peak bid follows fresh own-side quotes only; stale/missing bids cannot trigger exits', () => {
   const { bot, at } = fixture();
-  bot.applyPullbackSignal(pair());
-  bot.processSignals(at(120));
-  bot.processPositionExits(at(121, .7));
+  bot.applyPullbackSignal(closedCandleSignal());
+  bot.processSignals(at(10));
+  bot.processPositionExits(at(11, .7));
   assert.equal(bot.trades[0].peakBid, .7);
   const now = at(122, .99);
   bot.quotes.UP.updatedAt = now - 6000;
@@ -123,8 +123,8 @@ test('peak bid follows fresh own-side quotes only; stale/missing bids cannot tri
 
 test('window expiry settles using the old market own-side bid, not the BTC price', () => {
   const { bot, at } = fixture();
-  bot.applyPullbackSignal(pair());
-  bot.processSignals(at(120));
+  bot.applyPullbackSignal(closedCandleSignal());
+  bot.processSignals(at(10));
   bot.processPositionExits(at(299, .8));
   bot.processPositionExits(at(300, .1));
   assert.equal(bot.trades[0].finalOutcome, 'WINDOW_PRICE_EXIT');
@@ -134,8 +134,8 @@ test('window expiry settles using the old market own-side bid, not the BTC price
 
 test('position accounting includes every open lot even beyond dashboard history length', () => {
   const { bot, at } = fixture();
-  bot.applyPullbackSignal(pair());
-  bot.processSignals(at(120));
+  bot.applyPullbackSignal(closedCandleSignal());
+  bot.processSignals(at(10));
   bot.trades = Array.from({ length: 220 }, (_, i) => ({ ...bot.trades[0], id: 'lot-' + i }));
   const state = bot.snapshot();
   assert.equal(state.trades.length, 50);

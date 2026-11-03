@@ -148,7 +148,7 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents the fixed two-candle MACD paper policy without old model gates", () => {
+test("dashboard presents the prior closed 5-minute MACD policy without old model gates", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
   assert.match(html, /BTC MACD PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
@@ -156,21 +156,22 @@ test("dashboard presents the fixed two-candle MACD paper policy without old mode
   assert.match(html, /MACD.*histogram/i);
   assert.match(html, /shrinking red/i);
   assert.match(html, /shrinking green/i);
-  assert.match(html, /SOLID RED → SOLID RED locks DOWN/i);
-  assert.match(html, /SOLID GREEN locks UP/i);
-  assert.match(html, /shrinking red → shrinking red, lock UP/i);
-  assert.match(html, /shrinking green → shrinking green, lock DOWN/i);
+  assert.match(html, /SHRINKING_RED or SOLID_GREEN → UP/i);
+  assert.match(html, /SHRINKING_GREEN or SOLID_RED → DOWN/i);
   assert.match(html, /12\/26\/9/);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
-  assert.match(html, /120 through 290 seconds/);
+  assert.match(html, /10 through 290 seconds/);
+  assert.match(html, /up to 29 scheduled entries/);
+  assert.match(html, /last 50 closed 5m bars/i);
+  assert.match(html, /immediately preceding closed five-minute candle/i);
   assert.match(html, /No probability model/);
   assert.match(html, /no flips or reversals/);
   assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
   assert.match(html, /TP: own-side bid ≥ \$0.99/);
   assert.match(html, /SL: bid ≤ \$0.01/);
   assert.match(html, /AWAITING SETTLEMENT/);
-  assert.match(html, /Minute 1 histogram/);
-  assert.match(html, /Minute 2 histogram/);
+  assert.match(html, /Previous 5m histogram/);
+  assert.match(html, /Current window direction/);
   assert.match(html, /Paper trade history/);
   assert.doesNotMatch(html, /Manual limit order/);
 });
