@@ -1,7 +1,7 @@
 'use strict';
 
 const { ProbabilityBot } = require('./probability-bot');
-const { METHOD, CANDLE_MS, classifyHistogram } = require('./macd-signal');
+const { METHOD, CANDLE_MS } = require('./macd-signal');
 const config = require('./config');
 
 const VARIANTS = ['baseline', 'fourBar', 'trailing', 'combined'];
@@ -205,6 +205,7 @@ function compareStrategies(input, { minimumTrain = 20, minimumTest = 10 } = {}) 
       'Legacy log times use the upper bound of their 500ms collection bucket; slot timing remains approximate.',
       'Peak giveback uses bid marks; drawdown is measured between closed windows, not full intrawindow drawdown.',
       'No historical order-queue or latency model. Holdout evidence is not a profit guarantee.',
+      'Stored books are projected to at most 20 recorded levels per side; insufficient retained depth skips/defer fills rather than inventing liquidity.',
     ],
     trailingCandidates: TRAILING_GRID, variants: {},
   };

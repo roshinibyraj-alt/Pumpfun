@@ -243,7 +243,7 @@ class ProbabilityBot {
     this.lastTunedWindowStart = this.market.start;
     try {
       await this.persistenceQueue;
-      const windows = await this.learningStore.getCompletedWindows(now);
+      const windows = await this.learningStore.getCompletedWindows(now, 15);
       const result = this.choosePaperSettings(windows, this.strategySettings);
       await this.learningStore.saveTuning(result, now, this.market.start);
       this.learningStatus = {

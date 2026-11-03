@@ -49,6 +49,9 @@ windows are loaded.
   not proof that all historical live ticks were captured.
 - A trailing sell needs enough recorded bid depth for the entire position;
   otherwise the exit is deferred. Fees use each consumed price level.
+- Database reads retain at most 20 recorded levels per side before transferring
+  data to Node, avoiding unbounded historical-book memory use. If these levels
+  lack enough depth, replay skips/defer fills rather than assuming more liquidity.
 - Original TP/SL and expiry retain paper payout/mark conventions. They are
   not guaranteed executable exchange orders.
 - Each window starts with $10,000 paper cash; this standardizes comparisons

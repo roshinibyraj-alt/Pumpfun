@@ -92,18 +92,42 @@ class LearningStore {
     );
   }
 
-  async getCompletedWindows(now, limit = 400) {
+  async getCompletedWindows(now, limit = 120) {
+    const boundedLimit = Number.isInteger(limit) ? Math.min(120, Math.max(1, limit)) : 120;
     const result = await this.pool.query(
-      `SELECT window_start,
-              jsonb_agg(sample ORDER BY sampled_at) AS samples
-       FROM btc_learning_samples
-       WHERE window_start + 300000::bigint <= $1::bigint - 10000::bigint
-       GROUP BY window_start
-       HAVING COUNT(*) >= 20
-           AND MAX(sampled_at) >= window_start + 285000::bigint
-       ORDER BY window_start DESC
-       LIMIT $2`,
-      [now, limit],
+      `WITH selected AS MATERIALIZED (
+         SELECT window_start
+         FROM btc_learning_samples
+         WHERE window_start + 300000::bigint <= $1::bigint - 10000::bigint
+         GROUP BY window_start
+         HAVING COUNT(*) >= 20
+             AND MAX(sampled_at) >= window_start + 285000::bigint
+         ORDER BY window_start DESC LIMIT $2
+       )
+       SELECT s.window_start,
+         jsonb_agg(jsonb_build_object(
+           'ts', s.sample->'ts', 'observedAt', s.sample->'observedAt',
+           'windowStart', s.sample->'windowStart', 'windowEnd', s.sample->'windowEnd',
+           'pullback', s.sample->'pullback', 'windowDecision', s.sample->'windowDecision',
+           'macd', s.sample->'macd', 'bookDepthLimit', 20,
+           'quotes', jsonb_build_object(
+             'UP', jsonb_build_object(
+               'updatedAt', s.sample#>'{quotes,UP,updatedAt}',
+               'bestBid', s.sample#>'{quotes,UP,bestBid}',
+               'bestAsk', s.sample#>'{quotes,UP,bestAsk}',
+               'asks', jsonb_path_query_array(s.sample, '$.quotes.UP.asks[0 to 19]'),
+               'bids', jsonb_path_query_array(s.sample, '$.quotes.UP.bids[0 to 19]')),
+             'DOWN', jsonb_build_object(
+               'updatedAt', s.sample#>'{quotes,DOWN,updatedAt}',
+               'bestBid', s.sample#>'{quotes,DOWN,bestBid}',
+               'bestAsk', s.sample#>'{quotes,DOWN,bestAsk}',
+               'asks', jsonb_path_query_array(s.sample, '$.quotes.DOWN.asks[0 to 19]'),
+               'bids', jsonb_path_query_array(s.sample, '$.quotes.DOWN.bids[0 to 19]'))
+           )
+         ) ORDER BY s.sampled_at) AS samples
+       FROM btc_learning_samples s JOIN selected USING (window_start)
+       GROUP BY s.window_start ORDER BY s.window_start DESC`,
+      [now, boundedLimit],
     );
     return result.rows.map(row => ({
       windowStart: Number(row.window_start),
