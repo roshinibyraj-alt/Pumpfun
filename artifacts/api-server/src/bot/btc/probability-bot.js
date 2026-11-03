@@ -15,6 +15,8 @@ const STARTING_CASH = 10_000;
 const POLL_MS = 500;
 const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const MIN_ENTRY_PRICE = 0.02;
+const ENTRY_BAND_MIN = 0.20;
+const ENTRY_BAND_MAX = 0.60;
 const OPENING_DELAY_SECONDS = 10;
 const ENTRY_INTERVAL_MS = 10_000;
 const FIRST_ENTRY_SECONDS = OPENING_DELAY_SECONDS;
@@ -78,12 +80,13 @@ function estimateTakerFee(price, shares) {
   return TAKER_FEE_RATE * price * (1 - price) * shares;
 }
 
-function simulateBuy(asks, shares = SHARES_PER_SIGNAL) {
+function simulateBuy(asks, shares = SHARES_PER_SIGNAL, { minimumPrice = 0, maximumPrice = 1 } = {}) {
   let remaining = shares;
   let cost = 0;
   let fees = 0;
   let visibleShares = 0;
   for (const level of parseLevels(asks, 'ask')) {
+    if (level.price < minimumPrice || level.price > maximumPrice) return null;
     const fill = Math.min(remaining, level.size);
     cost += fill * level.price;
     fees += estimateTakerFee(level.price, fill);
@@ -108,6 +111,7 @@ class ProbabilityBot {
     strategySettings = {},
     activeSide = null,
     fourBarFilter = false,
+    priceBandFilter = false,
   } = {}) {
     this.now = now;
     this.fetchMarket = fetchMarket;
@@ -116,6 +120,10 @@ class ProbabilityBot {
     this.expiryRecoveryAt = new Map();
     this.priceFeed = priceFeed;
     this.fourBarFilter = fourBarFilter;
+    this.priceBandFilter = priceBandFilter;
+    this.priceSkippedTriggers = 0;
+    this.pendingPriceTriggers = 0;
+    this.recoveredPriceTriggers = 0;
     this.running = false;
     this.timer = null;
     this.busy = false;
@@ -216,6 +224,8 @@ class ProbabilityBot {
       } : null,
       activeSide: this.activeSide,
       windowDecision: this.windowDecision,
+      entryPriceBand: { enabled: this.priceBandFilter,
+        minimumPrice: ENTRY_BAND_MIN, maximumPrice: ENTRY_BAND_MAX },
       macd: this.macd ? {
         method: this.macd.method, status: this.macd.status,
         latestHistogram: this.macd.latestHistogram, previousHistogram: this.macd.previousHistogram,
@@ -380,6 +390,11 @@ class ProbabilityBot {
     const blockedReasons = [];
     if (blockedSides.length) blockedReasons.push('PRICE_FLOOR');
     if (openingDelayActive) blockedReasons.push('OPENING_DELAY');
+    const priceBandBlockedSides = this.priceBandFilter ? ['UP', 'DOWN'].filter(side => {
+      const ask = this.quotes[side]?.bestAsk;
+      return Number.isFinite(ask) && (ask < ENTRY_BAND_MIN || ask > ENTRY_BAND_MAX);
+    }) : [];
+    if (priceBandBlockedSides.includes(this.activeSide)) blockedReasons.push('PRICE_BAND');
     this.entryFilter = {
       allowed: blockedReasons.length === 0,
       minimumBestAsk: MIN_ENTRY_PRICE,
@@ -389,6 +404,7 @@ class ProbabilityBot {
       openingDelayActive,
       secondsRemaining,
       blockedReasons,
+      priceBandBlockedSides,
     };
     return this.entryFilter;
   }
@@ -415,6 +431,9 @@ class ProbabilityBot {
     this.activeSignalReason = null;
     this.windowDecision = { status: 'OBSERVING', side: null };
     this.lastEntrySlot = -1;
+    this.priceSkippedTriggers = 0;
+    this.pendingPriceTriggers = 0;
+    this.recoveredPriceTriggers = 0;
     this.macd = null;
     this.pullback = null;
     this.log('WINDOW_MACD_RESET', { windowStart: start });
@@ -424,10 +443,10 @@ class ProbabilityBot {
     this.beginMarketWindow();
     const schedule = this.entrySchedule(now);
     if (!this.activeSide || !schedule.due) return;
-    // Exactly one attempt per slot, including failures; no every-poll retries or catch-up buys.
+    // One attempt per slot. Only price-band skips can be recovered at a later slot.
     this.lastEntrySlot = schedule.slot;
     const filter = this.updateEntryFilter(now);
-    if (!filter.allowed) {
+    if (filter.blockedReasons.some(reason => reason !== 'PRICE_BAND')) {
       this.log('SCHEDULED_ENTRY_SKIPPED', { slot: schedule.slot, reason: filter.blockedReasons.join(',') });
       return;
     }
@@ -435,13 +454,32 @@ class ProbabilityBot {
     const quote = this.quotes[side];
     const fresh = Number.isFinite(quote?.updatedAt) && now >= quote.updatedAt
       && now - quote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS;
-    const fill = fresh ? this.entryFill(side) : null;
-    if (!fill || fill.totalCost > this.cash) {
+    // Count a price skip only when the original 50-share trigger could otherwise
+    // execute: stale quotes, missing depth and cash failures do not accrue debt.
+    const baseFill = fresh ? simulateBuy(quote.asks, SHARES_PER_SIGNAL) : null;
+    if (!baseFill || baseFill.totalCost > this.cash) {
       this.log('SCHEDULED_ENTRY_SKIPPED', {
         side, slot: schedule.slot,
-        reason: !fresh ? 'Stale book' : !fill ? 'Insufficient visible ask depth for 50 shares' : 'Insufficient paper cash',
+        reason: !fresh ? 'Stale book' : !baseFill ? 'Insufficient visible ask depth for 50 shares' : 'Insufficient paper cash',
       });
       return;
+    }
+    if (filter.blockedReasons.includes('PRICE_BAND')) {
+      this.priceSkippedTriggers++;
+      this.pendingPriceTriggers++;
+      this.log('PRICE_BAND_TRIGGER_SKIPPED', { side, slot: schedule.slot,
+        bestAsk: quote.bestAsk, minimumPrice: ENTRY_BAND_MIN, maximumPrice: ENTRY_BAND_MAX,
+        skippedTriggers: this.priceSkippedTriggers, pendingShares: this.pendingPriceTriggers * SHARES_PER_SIGNAL });
+      return;
+    }
+    const recoveredTriggers = this.priceBandFilter ? this.pendingPriceTriggers : 0;
+    const requestedShares = SHARES_PER_SIGNAL * (1 + recoveredTriggers);
+    const fill = this.entryFill(side, requestedShares);
+    if (!fill || fill.totalCost > this.cash) {
+      this.log('SCHEDULED_ENTRY_SKIPPED', { side, slot: schedule.slot, requestedShares,
+        pendingShares: this.pendingPriceTriggers * SHARES_PER_SIGNAL,
+        reason: !fill ? 'Insufficient visible ask depth within the entry price limits' : 'Insufficient paper cash' });
+      return; // Preserve the existing backlog; do not count a depth/cash failure.
     }
     const trade = {
       id: `paper-${this.market.start}-${side}-${now}-${++this.entrySequence}`,
@@ -455,6 +493,7 @@ class ProbabilityBot {
       entryKind: 'SCHEDULED_MACD',
       scheduledAt: schedule.scheduledAt,
       entrySlot: schedule.slot,
+      recoveredPriceTriggers: recoveredTriggers,
       entryPrice: fill.averagePrice,
       cost: fill.cost,
       fees: fill.fees,
@@ -471,6 +510,8 @@ class ProbabilityBot {
       realizedPnl: null,
     };
     this.cash -= fill.totalCost;
+    this.pendingPriceTriggers = 0;
+    this.recoveredPriceTriggers += recoveredTriggers;
     this.trades.unshift(trade);
     let retainedSettled = 0;
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
@@ -478,11 +519,21 @@ class ProbabilityBot {
       tradeId: trade.id,
       entryKind: trade.entryKind, scheduledAt: trade.scheduledAt, slot: trade.entrySlot,
       side, shares: fill.shares, price: fill.averagePrice,
+      recoveredPriceTriggers: recoveredTriggers,
     });
   }
 
-  entryFill(side) {
-    return simulateBuy(this.quotes[side]?.asks, SHARES_PER_SIGNAL);
+  entryFill(side, shares = SHARES_PER_SIGNAL) {
+    return simulateBuy(this.quotes[side]?.asks, shares, this.priceBandFilter
+      ? { minimumPrice: ENTRY_BAND_MIN, maximumPrice: ENTRY_BAND_MAX } : {});
+  }
+
+  priceBandState() {
+    return { enabled: this.priceBandFilter, minimumPrice: ENTRY_BAND_MIN, maximumPrice: ENTRY_BAND_MAX,
+      windowStart: this.market?.start ?? null, skippedTriggers: this.priceSkippedTriggers,
+      pendingTriggers: this.pendingPriceTriggers, pendingShares: this.pendingPriceTriggers * SHARES_PER_SIGNAL,
+      recoveredTriggers: this.recoveredPriceTriggers,
+      nextTriggerShares: SHARES_PER_SIGNAL * (1 + this.pendingPriceTriggers) };
   }
 
   entrySchedule(now = this.now()) {
@@ -677,7 +728,7 @@ class ProbabilityBot {
         lastEntrySeconds: LAST_ENTRY_SECONDS,
         maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
       signalPersistence: 'Reset each window. The immediately prior closed 5-minute MACD candle selects one locked direction; later candles never flip it.',
-        entryModel: `50 shares every 10 seconds from ${FIRST_ENTRY_SECONDS} through ${LAST_ENTRY_SECONDS} seconds (${MAX_ENTRIES_PER_WINDOW} scheduled slots). No probability or edge gate; no catch-up bursts. Cash, price-floor, fresh-book and real-depth checks remain active.`,
+        entryModel: `50 shares every 10 seconds from ${FIRST_ENTRY_SECONDS} through ${LAST_ENTRY_SECONDS} seconds (${MAX_ENTRIES_PER_WINDOW} scheduled slots). ${this.priceBandFilter ? 'Entries require executable asks within $0.20–$0.60 inclusive. Price-blocked triggers accumulate 50 shares each for the next qualifying scheduled trigger; no carryover between windows.' : 'No catch-up bursts.'} No probability or edge gate. Cash, price-floor, fresh-book and real-depth checks remain active.`,
         model: 'The immediately prior closed 5-minute MACD (12,26,9) histogram chooses the current window: SHRINKING_RED or SOLID_GREEN selects UP; SHRINKING_GREEN or SOLID_RED selects DOWN. Neutral or missing data yields no entry.',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
@@ -711,6 +762,7 @@ class ProbabilityBot {
       activeSide: this.activeSide,
       windowDecision: this.windowDecision,
       entrySchedule: this.entrySchedule(now),
+      entryPriceBand: this.priceBandState(),
       learning: {
         ...this.learningStatus,
         persistenceStatus: this.persistenceError ? 'error' : this.learningStore ? 'connected' : 'disabled',

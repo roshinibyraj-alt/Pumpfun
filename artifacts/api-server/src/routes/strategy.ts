@@ -34,6 +34,7 @@ const bot = new ProbabilityBot({
   learningStore,
   choosePaperSettings,
   fourBarFilter: true,
+  priceBandFilter: true,
 });
 bot.start();
 

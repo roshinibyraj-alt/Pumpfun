@@ -62,6 +62,7 @@ function sellDepth(bids, shares) {
 
 function eligibleSamples(window) {
   return (window.samples || []).filter(sample => sample.pullback?.method === METHOD
+    && sample.entryPriceBand?.enabled !== true
     && sample.windowStart === window.windowStart && Number.isFinite(sample.ts)
     && sampleTime(sample) >= window.windowStart
     && sampleTime(sample) < window.windowStart + CANDLE_MS)

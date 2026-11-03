@@ -15,6 +15,7 @@ function simulateWindow(windowSamples) {
   const start = samples[0].windowStart;
   if (!Number.isFinite(start) || samples.some(s => s.windowStart !== start)) return null;
   const bot = new ProbabilityBot({ now: () => now, priceFeed: { start() {} },
+    priceBandFilter: samples.some(sample => sample.entryPriceBand?.enabled === true),
     fourBarFilter: samples.some(sample => sample.windowDecision?.fourBarFilter?.enabled === true) });
   bot.market = { id: 'replay', start, end: start + 300_000, tokens: { UP: 'u', DOWN: 'd' } };
   bot.beginMarketWindow();

@@ -49,6 +49,12 @@
     <article class="card"><div class="label">Current window direction</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Set by the previous closed candle</div></article>
     <article class="card"><div class="label">Next scheduled entry · UTC</div><div class="value" id="zscore">—</div><div class="foot">10s, 20s, …, 290s · maximum 29 entries</div></article>
   </section>
+  <article class="card" style="margin-bottom:16px">
+    <div class="label">Entry price band · $0.20–$0.60 inclusive</div>
+    <div class="value" id="priceBandQueue" style="font-size:clamp(18px,3vw,28px)">Waiting for live counters</div>
+    <div class="foot" id="priceBandNext">Price-blocked triggers add 50 shares each. The next qualifying scheduled trigger attempts its 50 shares plus the queue; all consumed asks must remain inside the band.</div>
+    <div class="foot">Queue resets every window. Cash, freshness and real depth still apply; other blocked triggers do not add shares.</div>
+  </article>
   <section class="prob-grid">
     <article class="prob up"><div class="prob-head"><span>UP · WINDOW DIRECTION</span><span id="upEdge">50 / 10s</span></div><div class="prob-price" id="upProb">WAIT</div><div class="bar"><i id="upBar"></i></div><div class="prob-meta"><div><span id="upAskLabel">50-share avg ask</span><strong id="upAsk">—</strong></div><div><span>Window decision</span><strong id="upNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="upSignal">WAIT</strong></div></div></article>
     <article class="prob down"><div class="prob-head"><span>DOWN · WINDOW DIRECTION</span><span id="downEdge">50 / 10s</span></div><div class="prob-price" id="downProb">WAIT</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">50-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Window decision</span><strong id="downNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="downSignal">WAIT</strong></div></div></article>
@@ -170,6 +176,9 @@ async function poll(){
   $('gap').textContent='Informational only · no probability model';
     $('expected').textContent=String(s.windowDecision?.side||'WAIT');
    $('zscore').textContent=s.activeSide&&s.entrySchedule?.nextEntryAt?time(s.entrySchedule.nextEntryAt):s.windowDecision?.status==='SKIP_WINDOW'?'SKIP':'—';
+   const band=s.entryPriceBand||{};
+   $('priceBandQueue').textContent=band.enabled?`${band.skippedTriggers||0} skipped · ${band.pendingShares||0} shares queued`:'Price-band filter inactive';
+   $('priceBandNext').textContent=band.enabled?`Next qualifying scheduled trigger: ${band.nextTriggerShares||50} shares · ${band.recoveredTriggers||0} skipped triggers recovered. All consumed asks must be $0.20–$0.60; insufficient cash or depth preserves the existing queue.`:'Waiting for the price-band policy.';
    renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);renderTrend(s);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
