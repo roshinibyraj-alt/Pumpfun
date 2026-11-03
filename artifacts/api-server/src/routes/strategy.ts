@@ -33,6 +33,7 @@ const getComparison = comparisonService(learningStore);
 const bot = new ProbabilityBot({
   learningStore,
   choosePaperSettings,
+  fourBarFilter: true,
 });
 bot.start();
 

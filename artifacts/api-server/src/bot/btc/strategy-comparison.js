@@ -1,7 +1,7 @@
 'use strict';
 
 const { ProbabilityBot } = require('./probability-bot');
-const { METHOD, CANDLE_MS } = require('./macd-signal');
+const { METHOD, CANDLE_MS, strengtheningSide } = require('./macd-signal');
 const config = require('./config');
 
 const VARIANTS = ['baseline', 'fourBar', 'trailing', 'combined'];
@@ -43,10 +43,7 @@ function strengtheningRun(start, observedAt, index) {
   }
   // Each classification must be known as of this observation, not reconstructed
   // from a future candle. Equal or shrinking bars do not count as strengthening.
-  const classes = bars.map(bar => bar.classification);
-  if (classes.some(value => typeof value !== 'string')) return null;
-  return classes.every(value => value === 'SOLID_GREEN') ? 'UP'
-    : classes.every(value => value === 'SOLID_RED') ? 'DOWN' : false;
+  return strengtheningSide(bars, start, observedAt);
 }
 
 function sellDepth(bids, shares) {

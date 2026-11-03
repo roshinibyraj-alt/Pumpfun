@@ -107,6 +107,7 @@ class ProbabilityBot {
     choosePaperSettings = null,
     strategySettings = {},
     activeSide = null,
+    fourBarFilter = false,
   } = {}) {
     this.now = now;
     this.fetchMarket = fetchMarket;
@@ -114,6 +115,7 @@ class ProbabilityBot {
     this.fetchMarketDetails = fetchMarketDetails;
     this.expiryRecoveryAt = new Map();
     this.priceFeed = priceFeed;
+    this.fourBarFilter = fourBarFilter;
     this.running = false;
     this.timer = null;
     this.busy = false;
@@ -230,7 +232,8 @@ class ProbabilityBot {
     // Persist a compact, causal history once per window, not 50 bars every scan.
     const closedBars = (this.macd?.chart?.bars || []).filter(bar =>
       bar.end <= this.market.start && bar.end <= now).slice(-4);
-    if (closedBars.length === 4 && this.lastHistorySampleWindow !== this.market.start) {
+    if (closedBars.length === 4 && closedBars.at(-1).end === this.market.start
+      && this.lastHistorySampleWindow !== this.market.start) {
       sample.macd = { ...(sample.macd || {}), closedBars };
       this.lastHistorySampleWindow = this.market.start;
     }
@@ -315,9 +318,13 @@ class ProbabilityBot {
       };
       this.pullback = this.macd; // Existing learning/storage contract; never a trendline detector.
       this.statusReason = this.windowDecision.status === 'WAITING_HISTORY'
-        ? 'Waiting for the prior closed five-minute MACD candle.'
+        ? this.windowDecision.reason === 'FOUR_BAR_HISTORY_REQUIRED'
+          ? 'Waiting for four consecutive closed five-minute histogram bars to check the entry filter.'
+          : 'Waiting for the prior closed five-minute MACD candle.'
       : this.windowDecision.status === 'SKIP_WINDOW'
-          ? 'The prior closed five-minute histogram is neutral; skipping this window.'
+          ? this.windowDecision.reason === 'FOUR_BAR_STRENGTHENING_STREAK'
+            ? `Four-bar filter: four strengthening ${this.windowDecision.candidateSide === 'UP' ? 'green' : 'red'} bars; skipping ${this.windowDecision.candidateSide} entries for this window.`
+            : 'The prior closed five-minute histogram is neutral; skipping this window.'
           : this.activeSide
             ? `Locked ${this.activeSide}; 50-share entries every 10 seconds from 10 through 290 seconds.`
             : 'Waiting for the prior closed five-minute histogram candle.';
@@ -389,7 +396,9 @@ class ProbabilityBot {
   applyPullbackSignal(signal) {
     this.beginMarketWindow();
     if (!this.market || ['LOCKED', 'SKIP_WINDOW'].includes(this.windowDecision.status)) return;
-    const decision = windowSignal(signal, this.market.start, this.now());
+    const decision = windowSignal(signal, this.market.start, this.now(), {
+      fourBarFilter: this.fourBarFilter,
+    });
     this.windowDecision = decision;
     this.activeSide = decision.side;
     this.activeSignalReason = decision.side ? 'PREVIOUS_CLOSED_5M_CANDLE' : null;

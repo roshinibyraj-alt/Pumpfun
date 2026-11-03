@@ -14,10 +14,13 @@ function simulateWindow(windowSamples) {
   let now = samples[0].ts;
   const start = samples[0].windowStart;
   if (!Number.isFinite(start) || samples.some(s => s.windowStart !== start)) return null;
-  const bot = new ProbabilityBot({ now: () => now, priceFeed: { start() {} } });
+  const bot = new ProbabilityBot({ now: () => now, priceFeed: { start() {} },
+    fourBarFilter: samples.some(sample => sample.windowDecision?.fourBarFilter?.enabled === true) });
   bot.market = { id: 'replay', start, end: start + 300_000, tokens: { UP: 'u', DOWN: 'd' } };
   bot.beginMarketWindow();
+  let closedBars = [];
   for (const sample of samples) {
+    if (sample.macd?.closedBars) closedBars = sample.macd.closedBars;
     now = sample.ts;
     bot.quotes = Object.fromEntries(['UP', 'DOWN'].map(side => [
       side, structuredClone(sample.quotes?.[side] ?? {}),
@@ -27,7 +30,8 @@ function simulateWindow(windowSamples) {
     bot.applyPullbackSignal({
       method: METHOD, timeframe: '5m', status: 'READY',
       signalAt: decision?.previousCandle?.end,
-      chart: { bars: decision?.previousCandle ? [decision.previousCandle] : [] },
+      chart: { bars: closedBars.length ? closedBars
+        : decision?.previousCandle ? [decision.previousCandle] : [] },
     });
     bot.processSignals(now);
   }

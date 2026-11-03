@@ -80,8 +80,25 @@ function detectMacdHistogram(candles, now) {
   };
 }
 
-// The immediately preceding, fully closed five-minute candle chooses direction.
-function windowSignal(signal, start, now) {
+// null means missing history; false means a complete history without a streak.
+function strengtheningSide(bars, start, now) {
+  const closed = [];
+  for (let offset = 4; offset >= 1; offset--) {
+    const end = start - (offset - 1) * CANDLE_MS;
+    const matches = bars.filter(bar => bar.start === end - CANDLE_MS
+      && bar.end === end && bar.end <= now);
+    if (matches.length !== 1 || ![
+      'SOLID_GREEN', 'SOLID_RED', 'SHRINKING_GREEN', 'SHRINKING_RED', 'NEUTRAL',
+    ].includes(matches[0].classification)) return null;
+    closed.push(matches[0]);
+  }
+  return closed.every(bar => bar.classification === 'SOLID_GREEN') ? 'UP'
+    : closed.every(bar => bar.classification === 'SOLID_RED') ? 'DOWN' : false;
+}
+
+// The prior closed candle chooses direction; an optional fixed entry filter
+// skips the entire window after four same-direction strengthening bars.
+function windowSignal(signal, start, now, { fourBarFilter = false } = {}) {
   const bars = signal?.chart?.bars ?? [];
   const previousCandle = bars.find(b => b.start === start - CANDLE_MS
     && b.end === start && b.end <= now) ?? null;
@@ -92,12 +109,27 @@ function windowSignal(signal, start, now) {
   }
   const side = previousCandle.side
     ?? classifyHistogram(previousCandle.histogram, signal.previousHistogram).side;
+  const streakSide = fourBarFilter && side ? strengtheningSide(bars, start, now) : false;
+  const filter = fourBarFilter ? {
+    fourBarFilter: { enabled: true, requiredBars: 4, streakSide: streakSide || null,
+      blocked: Boolean(side && streakSide === side) },
+  } : {};
+  if (fourBarFilter && side && streakSide === null) {
+    return { status: 'WAITING_HISTORY', side: null, previousCandle: { ...previousCandle },
+      reason: 'FOUR_BAR_HISTORY_REQUIRED', ...filter };
+  }
+  if (fourBarFilter && side && streakSide === side) {
+    return { status: 'SKIP_WINDOW', side: null, candidateSide: side,
+      previousCandle: { ...previousCandle }, signalAt: previousCandle.end,
+      reason: 'FOUR_BAR_STRENGTHENING_STREAK', ...filter };
+  }
   return {
     status: side ? 'LOCKED' : 'SKIP_WINDOW',
     side,
     previousCandle: { ...previousCandle },
     signalAt: previousCandle.end,
+    ...filter,
   };
 }
 
-module.exports = { METHOD, classifyHistogram, detectMacdHistogram, windowSignal, ema, CANDLE_MS };
+module.exports = { METHOD, classifyHistogram, detectMacdHistogram, windowSignal, strengtheningSide, ema, CANDLE_MS };
