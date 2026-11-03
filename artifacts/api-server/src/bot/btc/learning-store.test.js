@@ -16,6 +16,8 @@ test('historical reads select windows before aggregating and project bounded boo
   assert.match(query, /JOIN selected USING/);
   assert.match(query, /jsonb_path_query_array/);
   assert.match(query, /\[0 to 19\]/);
+  assert.match(query, /'rsi', s\.sample->'rsi'/);
   assert.doesNotMatch(query, /jsonb_agg\(sample ORDER/);
+  assert.doesNotMatch(query, /'macd'|'entryPriceBand'/);
   assert.equal(windows[0].windowStart, 1800000000000);
 });

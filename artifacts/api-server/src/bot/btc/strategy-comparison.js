@@ -76,6 +76,7 @@ function replay(window, variant, trailing, index) {
   bot.market = { id: 'comparison', start: now, end: now + CANDLE_MS, tokens: { UP: 'u', DOWN: 'd' } };
   bot.beginMarketWindow();
   let blocked = null, entryStopped = false, armed = false, highBid = null;
+  let legacySignalLoaded = false;
   let peakPnl = 0, trailingExits = 0, depthFailures = 0;
   const useFilter = variant === 'fourBar' || variant === 'combined';
   const useTrailing = variant === 'trailing' || variant === 'combined';
@@ -84,11 +85,13 @@ function replay(window, variant, trailing, index) {
     bot.quotes = structuredClone(sample.quotes || {});
     bot.processPositionExits(now);
     const previousCandle = sample.windowDecision?.previousCandle;
-    bot.applyPullbackSignal({
-      method: METHOD, timeframe: '5m', status: 'READY',
-      signalAt: previousCandle?.end,
-      chart: { bars: previousCandle ? [previousCandle] : [] },
-    });
+    if (!legacySignalLoaded && previousCandle) {
+      // This endpoint replays archived MACD samples only; live entries use RSI.
+      bot.activeSide = ['UP', 'DOWN'].includes(previousCandle.side) ? previousCandle.side : null;
+      bot.rsi = { status: 'READY', value: 50 };
+      bot.windowDecision = { status: bot.activeSide ? 'LOCKED' : 'OBSERVING', side: bot.activeSide };
+      legacySignalLoaded = true;
+    }
     if (bot.windowDecision.status === 'LOCKED' && blocked === null) {
       const run = strengtheningRun(window.windowStart, now, index);
       blocked = useFilter && run === bot.activeSide;

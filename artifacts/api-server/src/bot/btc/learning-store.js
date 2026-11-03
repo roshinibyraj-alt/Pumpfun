@@ -71,19 +71,6 @@ class LearningStore {
     return { ...defaultSettings, ...(result.rows[0]?.settings ?? {}) };
   }
 
-  async loadPullbackBias() {
-    const result = await this.pool.query(
-      `SELECT details->>'side' AS side
-       FROM btc_paper_events
-       WHERE event = 'PULLBACK_BIAS_CHANGED'
-         AND details->>'side' IN ('UP', 'DOWN')
-         AND details->>'method' IN ('macd-1m-12-26-9-reversal-sweep-v1', 'macd-1m-12-26-9-reversal-sweep-v2')
-       ORDER BY id DESC
-       LIMIT 1`,
-    );
-    return result.rows[0]?.side ?? null;
-  }
-
   async recordEvent({ ts, windowStart, event, details }) {
     await this.pool.query(
       `INSERT INTO btc_paper_events (ts, window_start, event, details)
@@ -109,8 +96,7 @@ class LearningStore {
            'ts', s.sample->'ts', 'observedAt', s.sample->'observedAt',
            'windowStart', s.sample->'windowStart', 'windowEnd', s.sample->'windowEnd',
            'pullback', s.sample->'pullback', 'windowDecision', s.sample->'windowDecision',
-           'macd', s.sample->'macd', 'bookDepthLimit', 20,
-           'entryPriceBand', s.sample->'entryPriceBand',
+            'rsi', s.sample->'rsi', 'bookDepthLimit', 20,
            'quotes', jsonb_build_object(
              'UP', jsonb_build_object(
                'updatedAt', s.sample#>'{quotes,UP,updatedAt}',

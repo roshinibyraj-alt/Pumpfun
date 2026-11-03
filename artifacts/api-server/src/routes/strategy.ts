@@ -14,7 +14,6 @@ const { LearningStore } = require("./bot/btc/learning-store.js") as {
   LearningStore: new (pool: unknown) => {
     initialize: (defaults: Record<string, unknown>) => Promise<void>;
     loadSettings: (defaults: Record<string, unknown>) => Promise<Record<string, unknown>>;
-    loadPullbackBias: () => Promise<"UP" | "DOWN" | null>;
     getState: () => Promise<unknown>;
   };
 };
@@ -33,8 +32,6 @@ const getComparison = comparisonService(learningStore);
 const bot = new ProbabilityBot({
   learningStore,
   choosePaperSettings,
-  fourBarFilter: true,
-  priceBandFilter: true,
 });
 bot.start();
 

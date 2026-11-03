@@ -297,7 +297,7 @@ class ChainlinkPriceFeed {
       minuteBars: this.minuteBars.size,
       error: this.error,
       history: {
-        source: 'Binance BTCUSDT 5-minute candles (MACD signal)',
+        source: 'Binance BTCUSDT closed 5-minute candles (RSI signal)',
         status: this.historyStatus,
         candles: this.historicalCandles.length,
         error: this.historyError,

@@ -148,30 +148,28 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents the prior closed 5-minute MACD policy without old model gates", () => {
+test("dashboard presents the closed 5-minute RSI policy without MACD or price-band gates", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
-  assert.match(html, /BTC MACD PAPER BOT/);
+  assert.match(html, /BTC RSI PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
   assert.match(html, /50 SHARES \/ 10 SECONDS/);
-  assert.match(html, /MACD.*histogram/i);
-  assert.match(html, /shrinking red/i);
-  assert.match(html, /shrinking green/i);
-  assert.match(html, /SHRINKING_RED or SOLID_GREEN → UP/i);
-  assert.match(html, /SHRINKING_GREEN or SOLID_RED → DOWN/i);
-  assert.match(html, /12\/26\/9/);
+  assert.match(html, /Wilder RSI\(14\)/i);
+  assert.match(html, /RSI below 30 selects UP/i);
+  assert.match(html, /RSI above 70 selects DOWN/i);
+  assert.match(html, /30 and 70 the last selected side stays active across windows/i);
+  assert.match(html, /waits for the first extreme/i);
+  assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
   assert.match(html, /10 through 290 seconds/);
   assert.match(html, /up to 29 scheduled entries/);
-  assert.match(html, /last 50 closed 5m bars/i);
-  assert.match(html, /immediately preceding closed five-minute candle/i);
   assert.match(html, /No probability model/);
-  assert.match(html, /no flips or reversals/);
+  assert.match(html, /RSI side changes do not close existing positions/);
   assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
   assert.match(html, /TP: own-side bid ≥ \$0.99/);
   assert.match(html, /SL: bid ≤ \$0.01/);
   assert.match(html, /AWAITING SETTLEMENT/);
-  assert.match(html, /Previous 5m histogram/);
-  assert.match(html, /Current window direction/);
+  assert.match(html, /Latest closed 5m RSI/);
+  assert.match(html, /Current active side/);
   assert.match(html, /Paper trade history/);
   assert.doesNotMatch(html, /Manual limit order/);
 });
@@ -198,7 +196,11 @@ test("dashboard renders locked, skipped and observing states without probability
   assert.equal(elements.upProb.textContent, "LOCKED");
   assert.equal(elements.downProb.textContent, "OFF");
   assert.equal(elements.upSignal.textContent, "ENTRY SLOT");
-  context.renderTrend(state);
+  state.rsi = { status: "READY", value: 25, bucket: "OVERSOLD", period: 14, signalAt: 1200000,
+    reason: "RSI is below 30 (oversold)." };
+  context.renderRsi(state);
+  assert.equal(elements.rsiVal.textContent, "25.0");
+  assert.equal(elements.rsiDir.textContent, "UP");
   context.renderPositions({});
   context.renderTrades([{ side: "UP", shares: 50, openedAt: 120000, scheduledAt: 120000, status: "OPEN" }]);
   assert.match(elements.trades.innerHTML, /Scheduled/);

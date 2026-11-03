@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080d16">
-  <title>BTC 5-Minute MACD Paper Bot</title>
+  <title>BTC 5-Minute RSI Paper Bot</title>
   <style>
     :root{color-scheme:dark;--bg:#080d16;--panel:#101927;--line:#263447;--muted:#8d9bb0;--text:#edf4ff;--cyan:#51d9ef;--green:#39d99a;--red:#ff6f7e;--amber:#ffc76a}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 8% 0,#102c3a 0,transparent 32%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
@@ -24,7 +24,7 @@
      .position-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.position-card{padding:16px;border-radius:14px;background:#0f1925;border:1px solid var(--line)}.position-card.up{--accent:var(--green)}.position-card.down{--accent:var(--red)}.position-title{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.position-shares{font:800 28px ui-monospace,monospace;margin:7px 0 12px}.position-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.position-metrics span{display:block;color:var(--muted);font-size:10px}.position-metrics strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
     .panel{padding:18px;margin-top:12px}.section-head{margin-bottom:12px}.section-head h2{font-size:15px;margin:0}.section-head small{font-size:11px}
      .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:640px}th,td{text-align:left;padding:11px 9px;border-top:1px solid #263447;font-size:12px}th{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
-     .trend-chart{width:100%;overflow:hidden;border:1px solid #202e40;border-radius:9px;background:#0b121c}.trend-chart svg{display:block;width:100%;height:auto;min-height:180px}.trend-legend{display:flex;flex-wrap:wrap;gap:14px;color:var(--muted);font-size:10px;margin-top:8px}.trend-legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}.macd-head{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}.macd-head div{background:#0b121c;border:1px solid #202e40;border-radius:9px;padding:10px 12px}.macd-head span{display:block;color:var(--muted);font-size:10px;letter-spacing:.1em;text-transform:uppercase}.macd-head strong{display:block;margin-top:4px;font:800 clamp(18px,2.6vw,26px) ui-monospace,monospace}.dir-UP{color:var(--green)}.dir-DOWN{color:var(--red)}.dir-NONE{color:var(--muted)}.st-READY{color:var(--green)}.st-STALE,.st-INVALID_HISTORY{color:var(--red)}.st-WAITING_HISTORY{color:var(--amber)}@media(max-width:800px){.macd-head{grid-template-columns:1fr 1fr}}
+     .rsi-head{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}.rsi-head div{background:#0b121c;border:1px solid #202e40;border-radius:9px;padding:12px}.rsi-head span{display:block;color:var(--muted);font-size:10px;letter-spacing:.1em;text-transform:uppercase}.rsi-head strong{display:block;margin-top:4px;font:800 clamp(19px,2.8vw,28px) ui-monospace,monospace}.dir-UP{color:var(--green)}.dir-DOWN{color:var(--red)}.dir-NONE{color:var(--muted)}.st-READY{color:var(--green)}.st-STALE,.st-INVALID_HISTORY{color:var(--red)}.st-WAITING_HISTORY{color:var(--amber)}@media(max-width:800px){.rsi-head{grid-template-columns:1fr 1fr}}
     .side{font-weight:800}.side.UP,.pnl.pos{color:var(--green)}.side.DOWN,.pnl.neg{color:var(--red)}.edge-good{color:var(--green)}.edge-bad{color:var(--red)}
     .empty{padding:24px 10px;text-align:center;color:var(--muted);border-top:1px solid var(--line)}.formula{font:11px ui-monospace,monospace;color:#bbcadb;background:#0b121c;border:1px solid #202e40;padding:12px;border-radius:9px;margin-top:10px}
     .status{font:10px ui-monospace,monospace;color:var(--muted)}.footer{margin-top:16px;color:var(--muted);font-size:10px;line-height:1.6}
@@ -35,35 +35,28 @@
 <body>
 <main>
   <header class="top">
-    <div><div class="brand">BTC MACD PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
+    <div><div class="brand">BTC RSI PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
     <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 50 SHARES / 10 SECONDS</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">MACD 12/26/9 · PREVIOUS CLOSED 5-MINUTE CANDLE</div><h1>Previous candle sets this window’s side.</h1><p>At each five-minute window open, the immediately preceding closed BTC 5-minute MACD histogram locks the direction: shrinking red or solid green selects UP; shrinking green or solid red selects DOWN. Four-bar filter: skip UP after four consecutive strengthening green bars, or DOWN after four strengthening red bars. The filter skips the whole window; it never forces an opposite entry. Neutral or unavailable data produces no signal. Buy 50 shares every 10 seconds from 10 through 290 seconds, for up to 29 scheduled entries. No probability model, no edge gate, no flips or reversals. Cash, price floor, real liquidity and existing TP/SL still apply.</p></div>
+    <div><div class="eyebrow">WILDER RSI(14) · CLOSED 5-MINUTE CANDLES</div><h1>RSI extremes select the active side.</h1><p>RSI below 30 selects UP; RSI above 70 selects DOWN. Between 30 and 70 the last selected side stays active across windows. On restart, if RSI is in the middle range, the bot waits for the first extreme. Buy 50 shares every 10 seconds from 10 through 290 seconds, for up to 29 scheduled entries. No probability model, edge gate or price-band filter. Cash, the existing $0.02 minimum ask, fresh quotes, real liquidity and TP/SL still apply.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid">
-    <article class="card"><div class="label">Previous 5m histogram</div><div class="value" id="reference" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Last fully closed candle before this window</div></article>
+    <article class="card"><div class="label">Latest closed 5m RSI</div><div class="value" id="reference" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Wilder RSI(14) · 30 oversold · 70 overbought</div></article>
     <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
-    <article class="card"><div class="label">Current window direction</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Set by the previous closed candle</div></article>
+    <article class="card"><div class="label">Current active side</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Held until RSI reaches the opposite extreme</div></article>
     <article class="card"><div class="label">Next scheduled entry · UTC</div><div class="value" id="zscore">—</div><div class="foot">10s, 20s, …, 290s · maximum 29 entries</div></article>
   </section>
-  <article class="card" style="margin-bottom:16px">
-    <div class="label">Entry price band · $0.20–$0.60 inclusive</div>
-    <div class="value" id="priceBandQueue" style="font-size:clamp(18px,3vw,28px)">Waiting for live counters</div>
-    <div class="foot" id="priceBandNext">Price-blocked triggers add 50 shares each. The next qualifying scheduled trigger attempts its 50 shares plus the queue; all consumed asks must remain inside the band.</div>
-    <div class="foot">Queue resets every window. Cash, freshness and real depth still apply; other blocked triggers do not add shares.</div>
-  </article>
   <section class="prob-grid">
     <article class="prob up"><div class="prob-head"><span>UP · WINDOW DIRECTION</span><span id="upEdge">50 / 10s</span></div><div class="prob-price" id="upProb">WAIT</div><div class="bar"><i id="upBar"></i></div><div class="prob-meta"><div><span id="upAskLabel">50-share avg ask</span><strong id="upAsk">—</strong></div><div><span>Window decision</span><strong id="upNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="upSignal">WAIT</strong></div></div></article>
     <article class="prob down"><div class="prob-head"><span>DOWN · WINDOW DIRECTION</span><span id="downEdge">50 / 10s</span></div><div class="prob-price" id="downProb">WAIT</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">50-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Window decision</span><strong id="downNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="downSignal">WAIT</strong></div></div></article>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>MACD histogram · 12/26/9 · last 50 closed 5m bars</h2><small id="trendStatus">Waiting for MACD history</small></div>
-    <div class="macd-head"><div><span>Active direction</span><strong id="macdDir" class="dir-NONE">—</strong></div><div><span>Latest histogram</span><strong id="macdVal">—</strong></div><div><span>Classification</span><strong id="macdClass" style="font-size:clamp(13px,1.6vw,17px)">—</strong></div><div><span>Status</span><strong id="macdStatus" style="font-size:clamp(13px,1.6vw,17px)">—</strong></div></div>
-    <div id="trendChart" class="trend-chart"><div class="empty">Waiting for closed five-minute candles to compute MACD 12/26/9.</div></div>
-    <div class="trend-legend"><span><i style="background:#39d99a"></i>Solid green</span><span><i style="background:#1f6b4f"></i>Shrinking green</span><span><i style="background:#ff6f7e"></i>Solid red</span><span><i style="background:#7a3540"></i>Shrinking red</span><span id="macdLast">Last closed bar —</span></div>
+    <div class="section-head"><h2>RSI signal · Wilder 14 · closed 5m candles</h2><small id="trendStatus">Waiting for RSI history</small></div>
+    <div class="rsi-head"><div><span>Active side</span><strong id="rsiDir" class="dir-NONE">—</strong></div><div><span>Latest RSI(14)</span><strong id="rsiVal">—</strong></div><div><span>RSI zone</span><strong id="rsiZone" style="font-size:clamp(14px,1.8vw,19px)">—</strong></div><div><span>Last closed candle</span><strong id="rsiLast" style="font-size:clamp(13px,1.6vw,17px)">—</strong></div></div>
+    <div id="rsiStatus" class="formula">Waiting for 15 contiguous closed five-minute BTC candles.</div>
   </section>
   <section class="grid" style="margin-top:12px">
     <article class="card"><div class="label">Paper cash</div><div class="value" id="cash">—</div><div class="foot">Starting balance $10,000</div></article>
@@ -77,7 +70,7 @@
   </section>
   <section class="panel">
     <div class="section-head"><h2>Paper trade history</h2><small>Fixed 50 shares · scheduled every 10 seconds</small></div>
-    <div id="trades" class="table-wrap"><div class="empty">Waiting for the previous closed five-minute MACD candle.</div></div>
+    <div id="trades" class="table-wrap"><div class="empty">Waiting for a closed five-minute RSI signal.</div></div>
   </section>
   <section class="panel">
     <div class="section-head"><h2>Paper learning &amp; regression</h2><small id="learningStatus">Connecting to persistent learning log</small></div>
@@ -86,9 +79,9 @@
   <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-     <div class="formula">MACD = EMA12 − EMA26 of closed 5m closes; signal = EMA9 of MACD; histogram = MACD − signal. The immediately preceding closed five-minute candle selects this window: SHRINKING_RED or SOLID_GREEN → UP; SHRINKING_GREEN or SOLID_RED → DOWN. A neutral candle skips the window; if the exact previous candle is unavailable, wait rather than using an older or unfinished candle. The direction locks for this window and resets at the next. Scheduled buys: 50 shares at 10, 20, …, 290 seconds, maximum 1,450 shares if all 29 entries fill. Normal scan jitter up to one second is allowed; missed or blocked slots are skipped, never accumulated or retried in a burst. No probability model, edge gate, opposite-signal selling or matched reversals. Cash, existing $0.02 price-floor checks, fresh quotes and real visible depth remain required. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. Expiry and original-market recovery remain unchanged. Regression logs cannot change this fixed sizing or schedule.</div>
+     <div class="formula">RSI(14) uses Wilder smoothing on contiguous, fully closed 5m BTC candles. RSI below 30 selects UP; RSI above 70 selects DOWN. Values from 30 through 70 keep the last selected side, including across window boundaries. If the bot starts in this middle band, it waits for an extreme. Missing, stale or gapped RSI history blocks new entries. Scheduled buys: 50 shares at 10, 20, …, 290 seconds, maximum 1,450 shares if all 29 entries fill. Missed or blocked slots are skipped, never accumulated or retried in a burst. No price-band filter, probability model or edge gate. The $0.02 minimum ask, cash, fresh quotes and real visible depth remain required. RSI side changes do not close existing positions. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. Expiry and original-market recovery remain unchanged. Learning logs cannot change the fixed sizing or schedule.</div>
   </section>
-  <p class="footer">Paper only—no live orders. Each five-minute window uses only the immediately preceding closed five-minute MACD candle; no carry-over and no intra-window flips. Entries are scheduled from 10 through 290 seconds. Exactly one attempt per slot; real liquidity and paper cash are required. Persistent learning logs and compatible fixed-policy regression remain available, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
+  <p class="footer">Paper only—no live orders. The selected RSI side carries across five-minute windows and changes only on a closed-candle RSI extreme. A fresh process starts without a side and waits for RSI below 30 or above 70. Entries are scheduled from 10 through 290 seconds. Exactly one attempt per slot; real liquidity and paper cash are required. Persistent learning logs and RSI-compatible regression remain available, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -113,7 +106,7 @@ async function pollLearning(){
   const state=await response.json(),latest=state.tuningRuns?.[0]?.result;
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
     const evaluation=window.latestStrategyState?.learning?.lastEvaluation;
-    $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">50 shares / 10 seconds · 10–290s · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting new prior-candle policy samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Side selection</span><span class="muted">Immediately prior closed 5m candle · direction locked for this window · no reversals</span></div>`;
+    $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">50 shares / 10 seconds · 10–290s · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting RSI policy samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Side selection</span><span class="muted">RSI below 30: UP · above 70: DOWN · 30–70 holds the last side across windows</span></div>`;
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -141,26 +134,17 @@ function renderPositions(positions){
   $(prefix+'Realized').className=Number(p.realizedPnl)>=0?'pnl pos':'pnl neg';
  }
 }
-function renderTrend(state){
- const m=state?.macd||{},bars=(m.chart?.bars||[]).filter(b=>isNumeric(b.histogram)).slice(-50);
- const dir=state.activeSide||m.side||null,st=m.status||'WAITING_HISTORY';
- $('macdDir').textContent=dir||'NO BIAS';$('macdDir').className='dir-'+(dir||'NONE');
- const lv=st==='READY'&&isNumeric(m.latestHistogram)?Number(m.latestHistogram):null;
- $('macdVal').textContent=lv==null?'—':(lv>=0?'+':'')+lv.toFixed(2);$('macdVal').className=lv==null?'':lv>0?'dir-UP':lv<0?'dir-DOWN':'dir-NONE';
- $('macdClass').textContent=st==='READY'?String(m.classification||'NEUTRAL').replace(/_/g,' '):'—';
- $('macdStatus').textContent=st.replace(/_/g,' ');$('macdStatus').className='st-'+st;
- const last=bars.length?bars[bars.length-1]:null;
- $('macdLast').textContent='Last closed bar '+(last?time(last.end)+' UTC':'—');
- const reason=(m.activeSignalReason||'').replace(/_/g,' ');
-   $('trendStatus').textContent=`5m · 12/26/9 · ${st.replace(/_/g,' ')} · ${(state.windowDecision?.status||'WAITING_HISTORY').replace(/_/g,' ')}${reason?' · '+reason:''}`;
-  if(!bars.length){$('trendChart').innerHTML='<div class="empty">'+(st==='STALE'?'MACD history is stale; no bars shown.':st==='INVALID_HISTORY'?'Candle history invalid; MACD unavailable.':'Waiting for enough closed five-minute candles to compute MACD 12/26/9.')+'</div>';return}
- const W=1000,H=260,L=60,R=990,T=14,B=246,mid=(T+B)/2;
- const mx=Math.max(...bars.map(b=>Math.abs(Number(b.histogram))))||1;
- const slot=(R-L)/50,bw=Math.max(4,slot*.72),off=50-bars.length;
- const col={SOLID_GREEN:'#39d99a',SHRINKING_GREEN:'#1f6b4f',SOLID_RED:'#ff6f7e',SHRINKING_RED:'#7a3540'};
- const rects=bars.map((b,i)=>{const v=Number(b.histogram),h=Math.abs(v)/mx*(mid-T),x=L+(off+i)*slot+(slot-bw)/2;return `<rect x="${x.toFixed(1)}" y="${(v>=0?mid-h:mid).toFixed(1)}" width="${bw.toFixed(1)}" height="${Math.max(1,h).toFixed(1)}" fill="${col[b.classification]||'#8d9bb0'}" rx="1.5"><title>${time(b.end)} · ${v.toFixed(3)} · ${safe(b.classification)}</title></rect>`}).join('');
- const fmt=v=>(v>=0?'+':'')+v.toFixed(2);
-  $('trendChart').innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="MACD 12/26/9 histogram, closed five-minute bars"><line x1="${L}" x2="${R}" y1="${T}" y2="${T}" stroke="#1a2636"/><line x1="${L}" x2="${R}" y1="${B}" y2="${B}" stroke="#1a2636"/>${rects}<line x1="${L}" x2="${R}" y1="${mid}" y2="${mid}" stroke="#8d9bb0" stroke-width="1.4"/><g fill="#8d9bb0" font-size="13" font-family="ui-monospace,monospace" text-anchor="end"><text x="${L-8}" y="${T+10}">${fmt(mx)}</text><text x="${L-8}" y="${mid+4}">0</text><text x="${L-8}" y="${B}">${fmt(-mx)}</text></g></svg>`;
+function renderRsi(state){
+  const r=state?.rsi||{},st=r.status||'WAITING_HISTORY',value=st==='READY'&&isNumeric(r.value)?Number(r.value):null;
+  const dir=state.activeSide||null,zone=r.bucket||'—';
+  $('rsiDir').textContent=dir||'NO SIDE';$('rsiDir').className='dir-'+(dir||'NONE');
+  $('rsiVal').textContent=value==null?'—':value.toFixed(1);
+  $('rsiVal').className=value==null?'':value>=70?'dir-DOWN':value<=30?'dir-UP':'dir-NONE';
+  $('rsiZone').textContent=zone.replace(/_/g,' ');
+  $('rsiStatus').textContent=r.reason||'Waiting for 15 contiguous closed five-minute BTC candles.';
+  $('rsiStatus').className='formula '+(st==='READY'?'st-READY':st==='STALE'||st==='INVALID_HISTORY'?'st-STALE':'st-WAITING_HISTORY');
+  $('rsiLast').textContent=isNumeric(r.signalAt)?time(r.signalAt)+' UTC':'—';
+  $('trendStatus').textContent=`5m · Wilder RSI(${r.period||14}) · ${st.replace(/_/g,' ')} · ${(state.windowDecision?.status||'OBSERVING').replace(/_/g,' ')}`;
 }
 
 async function poll(){
@@ -172,21 +156,18 @@ async function poll(){
    $('strategyBadge').textContent='PAPER ONLY · 50 SHARES / 10 SECONDS';
   $('remaining').textContent=s.window?`${Math.ceil(s.window.secondsRemaining)} seconds`:'—';
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
-   $('reference').textContent=String(s.windowDecision?.previousCandle?.classification||'WAIT').replace(/_/g,' ');$('spot').textContent=money(s.spotPrice,2);
+    $('reference').textContent=s.rsi?.status==='READY'?`${Number(s.rsi.value).toFixed(1)} · ${String(s.rsi.bucket||'').replace(/_/g,' ')}`:'WAIT';$('spot').textContent=money(s.spotPrice,2);
   $('gap').textContent='Informational only · no probability model';
-    $('expected').textContent=String(s.windowDecision?.side||'WAIT');
+     $('expected').textContent=String(s.activeSide||'WAIT');
    $('zscore').textContent=s.activeSide&&s.entrySchedule?.nextEntryAt?time(s.entrySchedule.nextEntryAt):s.windowDecision?.status==='SKIP_WINDOW'?'SKIP':'—';
-   const band=s.entryPriceBand||{};
-   $('priceBandQueue').textContent=band.enabled?`${band.skippedTriggers||0} skipped · ${band.pendingShares||0} shares queued`:'Price-band filter inactive';
-   $('priceBandNext').textContent=band.enabled?`Next qualifying scheduled trigger: ${band.nextTriggerShares||50} shares · ${band.recoveredTriggers||0} skipped triggers recovered. All consumed asks must be $0.20–$0.60; insufficient cash or depth preserves the existing queue.`:'Waiting for the price-band policy.';
-   renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);renderTrend(s);
+    renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);renderRsi(s);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
   $('settled').textContent=String(account.settled??0);$('openCount').textContent=(account.openPositions??0)+' open positions';
   $('wins').textContent=`${account.wins??0} wins · ${account.losses??0} losses`;
   $('feedState').textContent=s.priceFeed?.status||'—';
   $('updated').textContent=s.statusReason|| (s.lastUpdateAt?'Updated '+time(s.lastUpdateAt):'Waiting for first scan');
-  $('feedStatus').textContent=s.priceFeed?`${s.priceFeed.history?.source||s.priceFeed.source} · ${s.priceFeed.history?.status||'waiting'} · closed 5m MACD history`:'Awaiting live data';
+   $('feedStatus').textContent=s.priceFeed?`${s.priceFeed.history?.source||s.priceFeed.source} · ${s.priceFeed.history?.status||'waiting'} · closed 5m RSI history`:'Awaiting live data';
   renderTrades(s.trades);renderEvents(s.events);
  }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
  setTimeout(poll,1000);
