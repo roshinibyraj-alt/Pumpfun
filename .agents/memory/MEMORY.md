@@ -1,0 +1,8 @@
+- [Tennis paper bot scope](tennis-paper-bot.md) — CLOB-only break strategy: one flat 500-share entry, no adds, four-minute drop/rebound checks, and Railway settings preserved.
+- [Railway rollout verification](railway-rollout-verification.md) — Port stale-checkout changes onto current main, preserve unrelated polling helpers, and verify the live API after deploy.
+- [Bot target and outcome metrics](bot-target-selection.md) — `web-production-2d7ff` maps to `Invented`; merge losses are intentional, and exits count by net P&L.
+- [BTC 5m/15m paper model](btc-15m-paper-strategy.md) — Roulette RF runs paper-only on both intervals; its return target adapts to the last 20 closed candles.
+- [BTC candle-pattern paper bot](candle-pattern-paper-bot.md) — 5m demo waits 120s; three limits, $0.80 rung exits, and opposite $0.20 entries; 15m and live remain separate.
+- [Pumpfun BTC regime display](pumpfun-btc-chop-gate.md) — Keep BTC regime as informational context; it must not block new paper entries.
+- [BTC MACD paper bot](pumpfun-no-merge-bot.md) — Prior closed 5m bar locks the next window; 50 shares every 10s at 10–290s; no carry, flips or probability; TP/SL stays.
+- [BTC/ETH market-confusion bot](btc-live-entry-trading.md) — same paper ladder on BTC and ETH 5m/15m windows; live orders stay paused.

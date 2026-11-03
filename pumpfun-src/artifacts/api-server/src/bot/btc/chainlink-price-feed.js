@@ -1,0 +1,332 @@
+'use strict';
+
+const URL = 'wss://ws-live-data.polymarket.com';
+const SYMBOL = 'btc/usd';
+const MAX_AGE_MS = 15_000;
+const RETAIN_MS = 60 * 60 * 1000;
+const CANDLE_MS = 5 * 60_000;
+const HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100';
+const MINUTE_HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=100';
+const HISTORY_REFRESH_MS = 60_000;
+
+class ChainlinkPriceFeed {
+  constructor({ WebSocketImpl = globalThis.WebSocket, now = Date.now, fetchImpl = globalThis.fetch } = {}) {
+    this.WebSocketImpl = WebSocketImpl;
+    this.now = now;
+    this.fetchImpl = fetchImpl;
+    this.ticks = [];
+    this.minuteBars = new Map();
+    this.historicalCandles = [];
+    this.historicalMinuteCandles = [];
+    this.historyStatus = 'waiting';
+    this.minuteHistoryStatus = 'waiting';
+    this.historyError = null;
+    this.minuteHistoryError = null;
+    this.historyRetryTimer = null;
+    this.historyRefreshTimer = null;
+    this.closedCandleRefreshTimer = null;
+    this.socket = null;
+    this.started = false;
+    this.status = 'starting';
+    this.error = null;
+    this.lastUpdateAt = null;
+    this.retryMs = 1000;
+    this.reconnectTimer = null;
+  }
+
+  start() {
+    if (this.started) return;
+    this.started = true;
+    void this.loadHistoricalCandles();
+    void this.loadHistoricalMinuteCandles();
+    this.scheduleHistoryRefresh();
+    this.scheduleClosedCandleRefresh();
+    if (typeof this.WebSocketImpl !== 'function') {
+      this.status = 'unsupported';
+      this.error = 'Node.js WebSocket support is required (Node 22 or newer)';
+      return;
+    }
+    this.connect();
+  }
+
+  scheduleHistoryRefresh() {
+    clearTimeout(this.historyRefreshTimer);
+    if (!this.started) return;
+    this.historyRefreshTimer = setTimeout(async () => {
+      this.historyRefreshTimer = null;
+      await Promise.all([this.loadHistoricalCandles(), this.loadHistoricalMinuteCandles()]);
+      this.scheduleHistoryRefresh();
+    }, Math.max(1000, HISTORY_REFRESH_MS - (this.now() % HISTORY_REFRESH_MS) + 1000));
+    this.historyRefreshTimer.unref?.();
+  }
+
+  scheduleClosedCandleRefresh() {
+    clearTimeout(this.closedCandleRefreshTimer);
+    if (!this.started) return;
+    const now = this.now();
+    const nextBoundary = Math.floor(now / CANDLE_MS) * CANDLE_MS + CANDLE_MS;
+    this.closedCandleRefreshTimer = setTimeout(async () => {
+      this.closedCandleRefreshTimer = null;
+      await this.loadHistoricalCandles();
+      this.scheduleClosedCandleRefresh();
+    }, Math.max(50, nextBoundary - now + 250));
+    this.closedCandleRefreshTimer.unref?.();
+  }
+
+  async loadHistoricalCandles() {
+    if (typeof this.fetchImpl !== 'function') {
+      this.historyStatus = 'error';
+      this.historyError = 'Fetch is unavailable for Binance history';
+      return;
+    }
+    this.historyStatus = 'loading';
+    try {
+      const response = await this.fetchImpl(HISTORY_URL, { signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error(`Binance history request failed (${response.status})`);
+      const rows = await response.json();
+      const now = this.now();
+      this.historicalCandles = (Array.isArray(rows) ? rows : []).flatMap(row => {
+        const start = Number(row?.[0]);
+        const closeTime = Number(row?.[6]);
+        const open = Number(row?.[1]);
+        const high = Number(row?.[2]);
+        const low = Number(row?.[3]);
+        const close = Number(row?.[4]);
+        if (!Number.isFinite(start) || !Number.isFinite(closeTime) || start + 300_000 > now ||
+            ![open, high, low, close].every(value => Number.isFinite(value) && value > 0)) return [];
+        return [{
+          start, end: start + 300_000, open, high, low, close,
+          color: close > open ? 'GREEN' : close < open ? 'RED' : 'DOJI',
+          source: 'BINANCE_HISTORY',
+        }];
+      });
+      this.historyStatus = this.historicalCandles.length ? 'ready' : 'empty';
+      this.historyError = null;
+    } catch (error) {
+      this.historyStatus = 'error';
+      this.historyError = error?.message || 'Binance history request failed';
+      if (this.started && !this.historyRetryTimer) {
+        this.historyRetryTimer = setTimeout(() => {
+          this.historyRetryTimer = null;
+          void this.loadHistoricalCandles();
+        }, 30_000);
+        this.historyRetryTimer.unref?.();
+      }
+    }
+  }
+
+  async loadHistoricalMinuteCandles() {
+    if (typeof this.fetchImpl !== 'function') {
+      this.minuteHistoryStatus = 'error';
+      this.minuteHistoryError = 'Fetch is unavailable for Binance history';
+      return;
+    }
+    this.minuteHistoryStatus = 'loading';
+    try {
+      const response = await this.fetchImpl(MINUTE_HISTORY_URL, { signal: AbortSignal.timeout(10_000) });
+      if (!response.ok) throw new Error(`Binance one-minute history request failed (${response.status})`);
+      const rows = await response.json();
+      const now = this.now();
+      this.historicalMinuteCandles = (Array.isArray(rows) ? rows : []).flatMap(row => {
+        const start = Number(row?.[0]);
+        const closeTime = Number(row?.[6]);
+        const open = Number(row?.[1]);
+        const high = Number(row?.[2]);
+        const low = Number(row?.[3]);
+        const close = Number(row?.[4]);
+        if (!Number.isFinite(start) || !Number.isFinite(closeTime) || start + 60_000 > now ||
+            ![open, high, low, close].every(value => Number.isFinite(value) && value > 0)) return [];
+        return [{
+          start, end: start + 60_000, open, high, low, close,
+          color: close > open ? 'GREEN' : close < open ? 'RED' : 'DOJI',
+          source: 'BINANCE_1M_HISTORY',
+        }];
+      });
+      this.minuteHistoryStatus = this.historicalMinuteCandles.length ? 'ready' : 'empty';
+      this.minuteHistoryError = null;
+    } catch (error) {
+      this.minuteHistoryStatus = 'error';
+      this.minuteHistoryError = error?.message || 'Binance one-minute history request failed';
+    }
+  }
+
+  getHistoricalCandles() {
+    return this.historicalCandles.map(candle => ({ ...candle }));
+  }
+
+  getHistoricalMinuteCandles() {
+    return this.historicalMinuteCandles.map(candle => ({ ...candle }));
+  }
+
+  connect() {
+    if (!this.started) return;
+    this.status = 'connecting';
+    this.error = null;
+    let socket;
+    try {
+      socket = new this.WebSocketImpl(URL);
+      this.socket = socket;
+    } catch (error) {
+      this.scheduleReconnect(error);
+      return;
+    }
+    socket.addEventListener('open', () => {
+      if (this.socket !== socket) return;
+      this.status = 'subscribing';
+      this.retryMs = 1000;
+      socket.send(JSON.stringify({
+        action: 'subscribe',
+        subscriptions: [{ topic: 'crypto_prices_chainlink', type: '*', filters: JSON.stringify({ symbol: SYMBOL }) }],
+      }));
+    });
+    socket.addEventListener('message', event => {
+      if (this.socket === socket) this.onMessage(event.data);
+    });
+    socket.addEventListener('error', () => {
+      if (this.socket === socket) {
+        this.status = 'error';
+        this.error = 'Chainlink price stream connection failed';
+      }
+    });
+    socket.addEventListener('close', () => {
+      if (this.socket === socket) {
+        this.socket = null;
+        this.scheduleReconnect(new Error('Chainlink stream disconnected'));
+      }
+    });
+  }
+
+  scheduleReconnect(error) {
+    this.status = 'reconnecting';
+    this.error = error?.message || 'Chainlink stream disconnected';
+    if (!this.started || this.reconnectTimer) return;
+    const delay = this.retryMs;
+    this.retryMs = Math.min(this.retryMs * 2, 15_000);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+    this.reconnectTimer.unref?.();
+  }
+
+  onMessage(raw) {
+    let message;
+    try {
+      message = JSON.parse(typeof raw === 'string' ? raw : String(raw || ''));
+    } catch (_) {
+      return;
+    }
+    const payload = message?.payload || message;
+    const symbol = String(payload?.symbol || '').toLowerCase();
+    if (symbol && symbol !== SYMBOL) return;
+    const updates = Array.isArray(payload?.data) ? payload.data
+      : Array.isArray(payload) ? payload
+        : payload?.timestamp != null && payload?.value != null ? [payload] : [];
+    let accepted = 0;
+    for (const update of updates) if (this.addPrice(update)) accepted++;
+    if (accepted) {
+      this.status = 'live';
+      this.error = null;
+      this.lastUpdateAt = this.now();
+      this.prune();
+    }
+  }
+
+  addPrice(update) {
+    const price = Number(update?.value);
+    let timestamp = Number(update?.timestamp);
+    if (timestamp < 1e12) timestamp *= 1000;
+    if (!Number.isFinite(timestamp) || !Number.isFinite(price) || price <= 0) return false;
+    const tick = { ts: timestamp, price };
+    if (!this.ticks.length || timestamp >= this.ticks.at(-1).ts) this.ticks.push(tick);
+    else {
+      const index = this.ticks.findIndex(x => x.ts > timestamp);
+      this.ticks.splice(index < 0 ? this.ticks.length : index, 0, tick);
+    }
+    const minute = Math.floor(timestamp / 60_000) * 60_000;
+    const bar = this.minuteBars.get(minute);
+    if (!bar) {
+      this.minuteBars.set(minute, { t: minute, o: price, h: price, l: price, c: price, firstTs: timestamp, lastTs: timestamp });
+    } else {
+      bar.h = Math.max(bar.h, price);
+      bar.l = Math.min(bar.l, price);
+      if (timestamp < bar.firstTs) { bar.o = price; bar.firstTs = timestamp; }
+      if (timestamp >= bar.lastTs) { bar.c = price; bar.lastTs = timestamp; }
+    }
+    return true;
+  }
+
+  prune() {
+    const cutoff = this.now() - RETAIN_MS;
+    for (const timestamp of this.minuteBars.keys()) if (timestamp < cutoff) this.minuteBars.delete(timestamp);
+    while (this.ticks.length && this.ticks[0].ts < cutoff) this.ticks.shift();
+  }
+
+  getMinuteCandles() {
+    this.start();
+    const ageMs = this.lastUpdateAt == null ? null : this.now() - this.lastUpdateAt;
+    if (this.lastUpdateAt == null || ageMs > MAX_AGE_MS) {
+      if (this.status === 'live') this.status = 'stale';
+      if (ageMs != null && ageMs > MAX_AGE_MS && this.socket) this.socket.close?.();
+      throw new Error(this.error || `Chainlink BTC/USD feed ${this.status}; waiting for a fresh price update`);
+    }
+    return [...this.minuteBars.values()].sort((a, b) => a.t - b.t)
+      .map(({ t, o, h, l, c }) => ({ t, o, h, l, c, v: 0 }));
+  }
+
+  getTicks() {
+    this.start();
+    const ageMs = this.lastUpdateAt == null ? null : this.now() - this.lastUpdateAt;
+    if (this.lastUpdateAt == null || ageMs > MAX_AGE_MS) {
+      if (this.status === 'live') this.status = 'stale';
+      if (ageMs != null && ageMs > MAX_AGE_MS && this.socket) this.socket.close?.();
+      throw new Error(this.error || `Chainlink BTC/USD feed ${this.status}; waiting for a fresh price update`);
+    }
+    return this.ticks.slice();
+  }
+
+  snapshot() {
+    const ageMs = this.lastUpdateAt == null ? null : Math.max(0, this.now() - this.lastUpdateAt);
+    return {
+      source: 'Polymarket RTDS Chainlink BTC/USD',
+      symbol: SYMBOL,
+      status: ageMs != null && ageMs > MAX_AGE_MS ? 'stale' : this.status,
+      lastUpdateAt: this.lastUpdateAt,
+      ageMs,
+      ticks: this.ticks.length,
+      minuteBars: this.minuteBars.size,
+      error: this.error,
+      history: {
+        source: 'Binance BTCUSDT 5-minute candles (MACD signal)',
+        status: this.historyStatus,
+        candles: this.historicalCandles.length,
+        error: this.historyError,
+      },
+        minuteHistory: {
+          source: 'Binance BTCUSDT 1-minute candles (auxiliary history)',
+          status: this.minuteHistoryStatus,
+          candles: this.historicalMinuteCandles.length,
+          error: this.minuteHistoryError,
+        },
+    };
+  }
+
+  stop() {
+    this.started = false;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    clearTimeout(this.historyRetryTimer);
+    this.historyRetryTimer = null;
+    clearTimeout(this.historyRefreshTimer);
+    this.historyRefreshTimer = null;
+    clearTimeout(this.closedCandleRefreshTimer);
+    this.closedCandleRefreshTimer = null;
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) socket.close();
+    this.status = 'stopped';
+  }
+}
+
+const feed = new ChainlinkPriceFeed();
+module.exports = { ChainlinkPriceFeed, feed, MAX_AGE_MS };
