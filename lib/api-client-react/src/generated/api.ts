@@ -22,6 +22,8 @@ import type {
 import type {
   BotControlResponse,
   BotState,
+  GetStrategyComparison200,
+  GetStrategyComparison503,
   HealthStatus
 } from './api.schemas';
 
@@ -51,6 +53,83 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
   }
   return result;
 };
+
+export const getGetStrategyComparisonUrl = () => {
+
+
+
+
+  return `/api/strategy/comparison`
+}
+
+/**
+ * @summary Compare experimental MACD profit-protection rules without applying them
+ */
+export const getStrategyComparison = async ( options?: Parameters<typeof customFetch>[1]): Promise<GetStrategyComparison200> => {
+
+  return customFetch<GetStrategyComparison200>(getGetStrategyComparisonUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetStrategyComparisonQueryKey = () => {
+    return [
+    `/api/strategy/comparison`
+    ] as const;
+    }
+
+
+export const getGetStrategyComparisonQueryOptions = <TData = Awaited<ReturnType<typeof getStrategyComparison>>, TError = ErrorType<GetStrategyComparison503>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getStrategyComparison>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetStrategyComparisonQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getStrategyComparison>>> = ({ signal }) => getStrategyComparison({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getStrategyComparison>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetStrategyComparisonQueryResult = NonNullable<Awaited<ReturnType<typeof getStrategyComparison>>>
+export type GetStrategyComparisonQueryError = ErrorType<GetStrategyComparison503>
+
+
+/**
+ * @summary Compare experimental MACD profit-protection rules without applying them
+ */
+
+export function useGetStrategyComparison<TData = Awaited<ReturnType<typeof getStrategyComparison>>, TError = ErrorType<GetStrategyComparison503>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getStrategyComparison>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetStrategyComparisonQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getHealthCheckUrl = () => {
 

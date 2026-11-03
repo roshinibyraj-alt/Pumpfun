@@ -14,6 +14,8 @@ export * from './botState';
 export * from './botStateMode';
 export * from './botStatePrices';
 export * from './btcFeedState';
+export * from './getStrategyComparison200';
+export * from './getStrategyComparison503';
 export * from './healthStatus';
 export * from './position';
 export * from './positionSide';

@@ -9,6 +9,16 @@ import * as zod from 'zod';
 
 
 /**
+ * @summary Compare experimental MACD profit-protection rules without applying them
+ */
+export const GetStrategyComparisonResponse = zod.object({
+  "status": zod.string(),
+  "applied": zod.literal(false),
+  "tradingChanged": zod.literal(false)
+})
+
+
+/**
  * Returns server health status
  * @summary Health check
  */

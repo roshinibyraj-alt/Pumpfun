@@ -240,3 +240,14 @@ export interface BotControlResponse {
   message: string;
 }
 
+export type GetStrategyComparison200 = {
+  status: string;
+  applied: false;
+  tradingChanged: false;
+  [key: string]: unknown;
+ };
+
+export type GetStrategyComparison503 = {
+  error: string;
+};
+

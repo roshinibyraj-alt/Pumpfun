@@ -13,6 +13,33 @@ tags:
   - name: bot
     description: Demo bot controls and live state
 paths:
+  /strategy/comparison:
+    get:
+      operationId: getStrategyComparison
+      tags: [bot]
+      summary: Compare experimental MACD profit-protection rules without applying them
+      responses:
+        "200":
+          description: Chronological replay report, including explicit insufficient-data status
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                required: [status, applied, tradingChanged]
+                properties:
+                  status: { type: string }
+                  applied: { type: boolean, const: false }
+                  tradingChanged: { type: boolean, const: false }
+        "503":
+          description: Comparison unavailable; trading settings unchanged
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string }
   /healthz:
     get:
       operationId: healthCheck

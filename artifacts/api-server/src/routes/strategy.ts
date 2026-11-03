@@ -22,10 +22,14 @@ const { DEFAULT_SETTINGS, choosePaperSettings } = require("./bot/btc/learning-en
   DEFAULT_SETTINGS: Record<string, unknown>;
   choosePaperSettings: (windows: unknown[], current: Record<string, unknown>) => unknown;
 };
+const { comparisonService } = require("./bot/btc/comparison-service.js") as {
+  comparisonService: (store: unknown) => () => Promise<unknown>;
+};
 
 const router: IRouter = Router();
 const learningStore = new LearningStore(pool);
 await learningStore.initialize(DEFAULT_SETTINGS);
+const getComparison = comparisonService(learningStore);
 const bot = new ProbabilityBot({
   learningStore,
   choosePaperSettings,
@@ -44,6 +48,15 @@ router.get("/strategy/learning", async (_req, res) => {
     settings: DEFAULT_SETTINGS,
     tuningEnabled: false,
   });
+});
+
+router.get("/strategy/comparison", async (req, res) => {
+  try {
+    res.set("Cache-Control", "no-store").json(await getComparison());
+  } catch (error) {
+    req.log.error({ err: error }, "Strategy comparison failed");
+    res.status(503).json({ error: "Strategy comparison is unavailable; no trading settings were changed." });
+  }
 });
 
 export default router;

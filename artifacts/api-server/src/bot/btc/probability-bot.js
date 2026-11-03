@@ -198,7 +198,7 @@ class ProbabilityBot {
     if (ts === this.lastSampledAt) return;
     this.lastSampledAt = ts;
     const sample = {
-      ts, windowStart: this.market.start, windowEnd: this.market.end,
+      ts, observedAt: now, windowStart: this.market.start, windowEnd: this.market.end,
       secondsSinceOpen: Math.max(0, (now - this.market.start) / 1000),
       secondsRemaining: Math.max(0, (this.market.end - now) / 1000),
       referencePrice: this.referencePrice, spotPrice: this.latestPrice,
@@ -227,6 +227,13 @@ class ProbabilityBot {
         } : null];
       })),
     };
+    // Persist a compact, causal history once per window, not 50 bars every scan.
+    const closedBars = (this.macd?.chart?.bars || []).filter(bar =>
+      bar.end <= this.market.start && bar.end <= now).slice(-4);
+    if (closedBars.length === 4 && this.lastHistorySampleWindow !== this.market.start) {
+      sample.macd = { ...(sample.macd || {}), closedBars };
+      this.lastHistorySampleWindow = this.market.start;
+    }
     this.queuePersistence(() => this.learningStore.recordSample(sample));
   }
 
