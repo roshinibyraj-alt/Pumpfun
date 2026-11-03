@@ -3,7 +3,6 @@
 const config = require('./config');
 const marketData = require('./wick-market-data');
 const { feed } = require('./chainlink-price-feed');
-const { detectRsiSignal } = require('./rsi-signal');
 const { detectTechnicalSignal, METHOD: TECHNICAL_METHOD } = require('./technical-signal');
 const { TAKE_PROFIT_BID, STOP_LOSS_BID, thresholdExit, recoverExpiredPositions } = require('./position-exits');
 
@@ -141,6 +140,10 @@ class ProbabilityBot {
     this.armed = { UP: true, DOWN: true };
     this.cash = STARTING_CASH;
     this.trades = [];
+    this.settledCount = 0;
+    this.settledWins = 0;
+    this.settledLosses = 0;
+    this.realizedPnlBySide = { UP: 0, DOWN: 0 };
     this.events = [];
     this.learningStore = learningStore;
     // Stored adaptive settings and persisted direction must not override this fixed policy.
@@ -151,7 +154,6 @@ class ProbabilityBot {
     this.lastSampledAt = null;
     this.lastTunedWindowStart = null;
     this.pullback = null;
-    this.rsi = null;
     this.marketSignal = null;
     this.pendingReversal = null;
     this.activeSide = null;
@@ -224,15 +226,6 @@ class ProbabilityBot {
         } : null];
       })),
     };
-    // Persist a compact, causal history once per window, not 50 bars every scan.
-    sample.rsi = this.rsi ? {
-      method: this.rsi.method, timeframe: this.rsi.timeframe, period: this.rsi.period,
-      status: this.rsi.status, value: this.rsi.value, bucket: this.rsi.bucket,
-      side: this.rsi.side, activeSide: this.activeSide, signalAt: this.rsi.signalAt,
-      momentumSide: this.rsi.momentumSide,
-      lastExtreme: this.rsi.lastExtreme ? { ...this.rsi.lastExtreme } : null,
-      oversold: this.rsi.oversold, overbought: this.rsi.overbought,
-    } : null;
     sample.technicalSignal = this.marketSignal ? {
       method: this.marketSignal.method,
       timeframe: this.marketSignal.timeframe,
@@ -244,6 +237,7 @@ class ProbabilityBot {
       score: this.marketSignal.score,
       votes: this.marketSignal.votes,
       tieBreak: this.marketSignal.tieBreak,
+      fallbackRule: this.marketSignal.fallbackRule,
       reason: this.marketSignal.reason,
       signalAt: this.marketSignal.signalAt,
       indicators: this.marketSignal.indicators,
@@ -319,7 +313,6 @@ class ProbabilityBot {
       const candles = this.priceFeed.getHistoricalCandles?.() ?? [];
       const candles15m = this.priceFeed.getHistoricalFifteenMinuteCandles?.() ?? [];
       const candles1m = this.priceFeed.getHistoricalMinuteCandles?.() ?? [];
-      this.rsi = detectRsiSignal(candles, now);
       this.applyTechnicalSignal(detectTechnicalSignal({
         candles5m: candles,
         candles15m,
@@ -432,6 +425,7 @@ class ProbabilityBot {
       confirmed: signal.confirmed,
       regime: signal.regime,
       score: signal.score,
+      fallbackRule: signal.fallbackRule ?? signal.tieBreak ?? null,
       reason: signal.reason,
       targetPrice: signal.targetPrice ?? null,
       targetLabel: signal.targetLabel ?? null,
@@ -453,6 +447,7 @@ class ProbabilityBot {
         confirmed: signal.confirmed,
         regime: signal.regime,
         score: signal.score,
+        fallbackRule: signal.fallbackRule ?? signal.tieBreak ?? null,
         signalAt: signal.signalAt,
         reason: signal.reason,
         method: signal.method,
@@ -469,7 +464,6 @@ class ProbabilityBot {
       side: this.activeSide,
     };
     this.lastEntrySlot = -1;
-    this.rsi = null;
     this.marketSignal = null;
     this.pullback = null;
     this.lastLoggedSignalKey = null;
@@ -632,6 +626,12 @@ class ProbabilityBot {
     trade.realizedPnl = netPayout - trade.totalCost;
     trade.settledAt = now;
     this.cash += netPayout;
+    this.settledCount += 1;
+    if (trade.realizedPnl > 0) this.settledWins += 1;
+    else if (trade.realizedPnl < 0) this.settledLosses += 1;
+    if (trade.side === 'UP' || trade.side === 'DOWN') {
+      this.realizedPnlBySide[trade.side] += trade.realizedPnl;
+    }
     this.log('PAPER_EXIT', {
       tradeId: trade.id,
       modelProbability: trade.modelProbability,
@@ -671,12 +671,10 @@ class ProbabilityBot {
 
   snapshot() {
     const now = this.now();
-    const settled = this.trades.filter(trade => trade.status === 'SETTLED');
-    const wins = settled.filter(trade => trade.realizedPnl > 0).length;
-    const losses = settled.filter(trade => trade.realizedPnl < 0).length;
-    const realizedPnl = settled.reduce((sum, trade) => sum + trade.realizedPnl, 0);
     const openTrades = this.trades.filter(trade => trade.status === 'OPEN');
     const openCost = openTrades.reduce((sum, trade) => sum + trade.totalCost, 0);
+    // Reconcile against the cash ledger, not the bounded display history.
+    const realizedPnl = this.cash + openCost - STARTING_CASH;
     const positions = Object.fromEntries(['UP', 'DOWN'].map(side => {
       const sideOpenTrades = openTrades.filter(trade => trade.side === side);
       const shares = sideOpenTrades.reduce((sum, trade) => sum + trade.shares, 0);
@@ -695,9 +693,7 @@ class ProbabilityBot {
           + trade.shares * bid
           - estimateTakerFee(bid, trade.shares), 0)
         : null;
-      const sideRealizedPnl = settled
-        .filter(trade => trade.side === side)
-        .reduce((sum, trade) => sum + trade.realizedPnl, 0);
+      const sideRealizedPnl = this.realizedPnlBySide[side] ?? 0;
       return [side, {
         shares,
         costBasis,
@@ -737,9 +733,9 @@ class ProbabilityBot {
         entryIntervalSeconds: 10,
         lastEntrySeconds: LAST_ENTRY_SECONDS,
         maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
-        signalPersistence: 'Select Scenario A in aligned trends, Scenario B in confirmed ranges, otherwise a deterministic fallback score selects UP or DOWN for each valid five-minute window. Fallback ties use the previous side or latest closed candle; stale or insufficient data blocks entries.',
+        signalPersistence: 'Select Scenario A in aligned trends, Scenario B in confirmed ranges, otherwise use the aligned 15m EMA200 trend, latest closed 5m candle, previous side on doji, then closed-candle fallback for each valid five-minute window. Stale or insufficient data blocks entries.',
         entryModel: `50 shares every 10 seconds from ${FIRST_ENTRY_SECONDS} through ${LAST_ENTRY_SECONDS} seconds (${MAX_ENTRIES_PER_WINDOW} scheduled slots). No price-band filter, catch-up shares, probability model or edge gate. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.`,
-        model: 'Trend continuation uses 5m EMA9/EMA21 alignment with 15m EMA200, an EMA21/VWAP pullback, Stoch RSI crossing from an extreme, and signed-volume confirmation. Range mean reversion uses a flat 15m EMA200, parallel 5m Bollinger Bands, an outer-band touch, and RSI(7) divergence. A weighted fallback selects a side when neither setup confirms. All signals use closed candles; stale history blocks entries.',
+        model: 'Trend continuation uses 5m EMA9/EMA21 alignment with 15m EMA200, an EMA21/VWAP pullback, Stoch RSI crossing from an extreme, and signed-volume confirmation. Range mean reversion uses a flat 15m EMA200, parallel 5m Bollinger Bands, an outer-band touch, and RSI(7) divergence. A deterministic trend-first fallback selects a side when neither setup confirms. All signals use closed candles; stale history blocks entries.',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
@@ -760,14 +756,14 @@ class ProbabilityBot {
         DOWN: this.quotes.DOWN ? { bestBid: this.quotes.DOWN.bestBid, bestAsk: this.quotes.DOWN.bestAsk, midpoint: this.quotes.DOWN.midpoint, estimatedAverageAsk: this.entryFill('DOWN')?.averagePrice ?? null } : null,
       },
       paperAccount: {
-        startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl, wins, losses,
-        settled: settled.length, openPositions: openTrades.length, positions,
+        startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl,
+        wins: this.settledWins, losses: this.settledLosses,
+        settled: this.settledCount, openPositions: openTrades.length, positions,
         awaitingSettlement: openTrades.filter(trade => trade.settlementStatus === 'AWAITING_SETTLEMENT').length,
       },
       trades: this.trades.slice(0, 50),
       events: this.events,
       pullback: this.pullback,
-      rsi: this.rsi,
       technicalSignal: this.marketSignal,
       pendingReversal: this.pendingReversal ? { ...this.pendingReversal } : null,
       activeSide: this.activeSide,

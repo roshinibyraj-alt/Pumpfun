@@ -249,14 +249,20 @@ function sign(value, epsilon = 1e-10) {
   return value > 0 ? 1 : -1;
 }
 
-function chooseFallbackSide({ score, previousSide, last5m, last15m, last1m }) {
-  if (score > 0) return { side: 'UP', tieBreak: null };
-  if (score < 0) return { side: 'DOWN', tieBreak: null };
-  if (previousSide === 'UP' || previousSide === 'DOWN') {
-    return { side: previousSide, tieBreak: 'PREVIOUS_SIDE' };
+function chooseFallbackSide({ price15m, ema200, ema200Slope, previousSide, last5m, last15m, last1m }) {
+  const priceTrend = sign(price15m - ema200);
+  const slopeTrend = sign(ema200Slope);
+  if (priceTrend > 0 && slopeTrend > 0) {
+    return { side: 'UP', tieBreak: '15M_EMA200_TREND' };
+  }
+  if (priceTrend < 0 && slopeTrend < 0) {
+    return { side: 'DOWN', tieBreak: '15M_EMA200_TREND' };
   }
   if (last5m.close !== last5m.open) {
     return { side: last5m.close > last5m.open ? 'UP' : 'DOWN', tieBreak: 'LAST_5M_CANDLE' };
+  }
+  if (previousSide === 'UP' || previousSide === 'DOWN') {
+    return { side: previousSide, tieBreak: 'PREVIOUS_SIDE' };
   }
   if (last15m.close !== last15m.open) {
     return { side: last15m.close > last15m.open ? 'UP' : 'DOWN', tieBreak: 'LAST_15M_CANDLE' };
@@ -273,7 +279,7 @@ function selectScenarioSignal({
   rangeSignalUp,
   rangeSignalDown,
   fallbackSide,
-  fallbackScore,
+  fallbackRule,
   confluenceName,
   targetPrice,
   targetLabel,
@@ -304,9 +310,10 @@ function selectScenarioSignal({
   }
   return {
     side: fallbackSide,
-    setup: 'FALLBACK_SCORE',
+    setup: 'DIRECTIONAL_FALLBACK',
     confirmed: false,
-    reason: `Fallback score ${fallbackScore} selected ${fallbackSide}; this is a directional bias, not a confirmed setup.`,
+    fallbackRule,
+    reason: `No named setup confirmed; ${fallbackRule} selected ${fallbackSide}.`,
     targetPrice: null,
     targetLabel: null,
   };
@@ -444,19 +451,14 @@ function detectTechnicalSignal({
   const rangeSignalUp = rangeRegime && lowerBandTouch && divergence.bullish;
   const rangeSignalDown = rangeRegime && upperBandTouch && divergence.bearish;
 
-  const fallbackVotes = [
-    { name: '15M_PRICE_VS_EMA200', value: sign(price15m - ema200[ema15Last]), weight: 2 },
-    { name: '15M_EMA200_SLOPE', value: sign(ema200Slope), weight: 1 },
-    { name: '5M_EMA9_VS_EMA21', value: sign(ema9[last] - ema21[last]), weight: 1 },
-    { name: '5M_PRICE_VS_VWAP', value: sign(price5m - latestVwap), weight: 1 },
-    { name: '5M_CLOSE_MOMENTUM', value: sign(five[last].close - five[prior].close), weight: 1 },
-  ];
-  if (flow.spike && flow.direction) {
-    fallbackVotes.push({ name: 'SIGNED_VOLUME_SPIKE', value: flow.direction === 'UP' ? 1 : -1, weight: 1 });
-  }
-  const score = fallbackVotes.reduce((sum, vote) => sum + vote.value * vote.weight, 0);
   const fallback = chooseFallbackSide({
-    score, previousSide, last5m: five[last], last15m: latest15m, last1m: latest1m,
+    price15m,
+    ema200: ema200[ema15Last],
+    ema200Slope,
+    previousSide,
+    last5m: five[last],
+    last15m: latest15m,
+    last1m: latest1m,
   });
 
   const selection = selectScenarioSignal({
@@ -465,7 +467,7 @@ function detectTechnicalSignal({
     rangeSignalUp,
     rangeSignalDown,
     fallbackSide: fallback.side,
-    fallbackScore: score,
+    fallbackRule: fallback.tieBreak,
     confluenceName: touchedConfluence?.name ?? 'EMA21/VWAP',
     targetPrice: Number.isFinite(latestVwap) ? latestVwap : latestBands.middle,
     targetLabel: Number.isFinite(latestVwap) ? 'ROLLING_VWAP_20' : 'BOLLINGER_MIDDLE',
@@ -478,9 +480,9 @@ function detectTechnicalSignal({
     ...selection,
     regime,
     signalAt: latest5m.end,
-    score,
-    tieBreak: selection.setup === 'FALLBACK_SCORE' ? fallback.tieBreak : null,
-    votes: fallbackVotes.map(vote => ({ ...vote })),
+    score: null,
+    tieBreak: selection.setup === 'DIRECTIONAL_FALLBACK' ? fallback.tieBreak : null,
+    votes: [],
     indicators: {
       price5m: round(price5m),
       price15m: round(price15m),
@@ -530,5 +532,6 @@ module.exports = {
   rollingVwap,
   volumeFlow,
   detectDivergence,
+  chooseFallbackSide,
   selectScenarioSignal,
 };

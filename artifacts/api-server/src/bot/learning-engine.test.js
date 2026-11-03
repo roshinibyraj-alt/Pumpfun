@@ -12,10 +12,11 @@ function samples(side = 'UP') {
     timeframe: '5m',
     status: 'READY',
     side,
-    setup: 'FALLBACK_SCORE',
+    setup: 'DIRECTIONAL_FALLBACK',
     confirmed: false,
     regime: 'MIXED',
-    score: side === 'UP' ? 1 : -1,
+    score: null,
+    fallbackRule: '15M_EMA200_TREND',
     signalAt: START,
     reason: `Fallback selected ${side}.`,
   };
@@ -23,8 +24,7 @@ function samples(side = 'UP') {
     ts: START + i * 500,
     windowStart: START,
     technicalSignal,
-    pullback: { method: METHOD, side, signalSide: side, setup: 'FALLBACK_SCORE', timeframe: '5m' },
-    rsi: { method: 'wilder-rsi-14-closed-5m-v1', status: 'READY', value: 50 },
+    pullback: { method: METHOD, side, signalSide: side, setup: 'DIRECTIONAL_FALLBACK', timeframe: '5m' },
     quotes: Object.fromEntries(['UP', 'DOWN'].map(tokenSide => [tokenSide, {
       bestAsk: .5,
       bestBid: .4,

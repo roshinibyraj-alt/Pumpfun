@@ -11,10 +11,11 @@ function technicalSignal(side) {
     timeframe: '5m',
     status: 'READY',
     side,
-    setup: 'FALLBACK_SCORE',
+    setup: 'DIRECTIONAL_FALLBACK',
     confirmed: false,
     regime: 'MIXED',
-    score: side === 'UP' ? 1 : -1,
+    score: null,
+    fallbackRule: '15M_EMA200_TREND',
     signalAt: START,
     reason: `Fallback selected ${side}.`,
   };
@@ -154,4 +155,36 @@ test('position accounting includes every open lot even beyond dashboard history 
   assert.equal(state.trades.length, 50);
   assert.equal(state.paperAccount.positions.UP.shares, 11000);
   assert.equal(state.paperAccount.positions.DOWN.shares, 0);
+});
+
+test('realized P&L reconciles to cash after settled trade details are pruned', () => {
+  const { bot } = fixture();
+  for (let index = 0; index < 205; index++) {
+    const trade = {
+      id: `settled-${index}`, status: 'OPEN', side: 'UP',
+      shares: 1, totalCost: 1,
+    };
+    bot.cash -= trade.totalCost;
+    bot.closeTrade(trade, 0, 0, 'STOP_LOSS', 'test exit', START, 0, 0);
+    bot.trades.unshift(trade);
+  }
+  bot.trades = bot.trades.slice(0, 200);
+
+  const openTrade = {
+    id: 'open-lot', marketId: 'm', status: 'OPEN', side: 'DOWN',
+    shares: 50, totalCost: 50, openedAt: START,
+  };
+  bot.cash -= openTrade.totalCost;
+  bot.trades.unshift(openTrade);
+
+  const account = bot.snapshot().paperAccount;
+  assert.equal(account.cash, 9745);
+  assert.equal(account.openCost, 50);
+  assert.equal(account.realizedPnl, -205);
+  assert.equal(account.settled, 205);
+  assert.equal(account.wins, 0);
+  assert.equal(account.losses, 205);
+  assert.equal(account.openPositions, 1);
+  assert.equal(account.positions.UP.realizedPnl, -205);
+  assert.equal(account.positions.DOWN.realizedPnl, 0);
 });

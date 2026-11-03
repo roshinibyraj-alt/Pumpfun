@@ -25,7 +25,6 @@ function simulateWindow(windowSamples) {
       side, structuredClone(sample.quotes?.[side] ?? {}),
     ]));
     bot.processPositionExits(now);
-    bot.rsi = sample.rsi ?? null;
     if (sample.technicalSignal) bot.applyTechnicalSignal(sample.technicalSignal);
     else bot.marketSignal = { status: 'WAITING_HISTORY' };
     bot.processSignals(now);
