@@ -81,6 +81,8 @@ class LearningStore {
 
   async getCompletedWindows(now, limit = 120) {
     const boundedLimit = Number.isInteger(limit) ? Math.min(120, Math.max(1, limit)) : 120;
+    // This bounded reader also serves archived strategy comparisons; RSI replay
+    // filters by method, while the historical endpoint still needs old fields.
     const result = await this.pool.query(
       `WITH selected AS MATERIALIZED (
          SELECT window_start
@@ -96,7 +98,8 @@ class LearningStore {
            'ts', s.sample->'ts', 'observedAt', s.sample->'observedAt',
            'windowStart', s.sample->'windowStart', 'windowEnd', s.sample->'windowEnd',
            'pullback', s.sample->'pullback', 'windowDecision', s.sample->'windowDecision',
-            'rsi', s.sample->'rsi', 'bookDepthLimit', 20,
+            'rsi', s.sample->'rsi', 'macd', s.sample->'macd',
+            'entryPriceBand', s.sample->'entryPriceBand', 'bookDepthLimit', 20,
            'quotes', jsonb_build_object(
              'UP', jsonb_build_object(
                'updatedAt', s.sample#>'{quotes,UP,updatedAt}',
