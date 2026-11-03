@@ -7,7 +7,44 @@ const RETAIN_MS = 60 * 60 * 1000;
 const CANDLE_MS = 5 * 60_000;
 const HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=100';
 const MINUTE_HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=100';
+const FIFTEEN_MINUTE_HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=15m&limit=250';
+const FIFTEEN_MINUTES_MS = 15 * 60_000;
 const HISTORY_REFRESH_MS = 60_000;
+
+function parseClosedKlines(rows, intervalMs, now, source) {
+  return (Array.isArray(rows) ? rows : []).flatMap(row => {
+    const start = Number(row?.[0]);
+    const closeTime = Number(row?.[6]);
+    const open = Number(row?.[1]);
+    const high = Number(row?.[2]);
+    const low = Number(row?.[3]);
+    const close = Number(row?.[4]);
+    const volume = row?.[5] == null ? null : Number(row[5]);
+    const quoteVolume = row?.[7] == null ? null : Number(row[7]);
+    const tradeCount = row?.[8] == null ? null : Number(row[8]);
+    const takerBuyBaseVolume = row?.[9] == null ? null : Number(row[9]);
+    const takerBuyQuoteVolume = row?.[10] == null ? null : Number(row[10]);
+    if (!Number.isFinite(start) || !Number.isFinite(closeTime) || start + intervalMs > now
+      || ![open, high, low, close].every(value => Number.isFinite(value) && value > 0)) return [];
+    return [{
+      start,
+      end: start + intervalMs,
+      open,
+      high,
+      low,
+      close,
+      volume: Number.isFinite(volume) && volume >= 0 ? volume : null,
+      quoteVolume: Number.isFinite(quoteVolume) && quoteVolume >= 0 ? quoteVolume : null,
+      tradeCount: Number.isFinite(tradeCount) && tradeCount >= 0 ? tradeCount : null,
+      takerBuyBaseVolume: Number.isFinite(takerBuyBaseVolume) && takerBuyBaseVolume >= 0
+        ? takerBuyBaseVolume : null,
+      takerBuyQuoteVolume: Number.isFinite(takerBuyQuoteVolume) && takerBuyQuoteVolume >= 0
+        ? takerBuyQuoteVolume : null,
+      color: close > open ? 'GREEN' : close < open ? 'RED' : 'DOJI',
+      source,
+    }];
+  });
+}
 
 class ChainlinkPriceFeed {
   constructor({ WebSocketImpl = globalThis.WebSocket, now = Date.now, fetchImpl = globalThis.fetch } = {}) {
@@ -18,11 +55,15 @@ class ChainlinkPriceFeed {
     this.minuteBars = new Map();
     this.historicalCandles = [];
     this.historicalMinuteCandles = [];
+    this.historicalFifteenMinuteCandles = [];
     this.historyStatus = 'waiting';
     this.minuteHistoryStatus = 'waiting';
+    this.fifteenMinuteHistoryStatus = 'waiting';
     this.historyError = null;
     this.minuteHistoryError = null;
+    this.fifteenMinuteHistoryError = null;
     this.historyRetryTimer = null;
+    this.fifteenMinuteHistoryRetryTimer = null;
     this.historyRefreshTimer = null;
     this.closedCandleRefreshTimer = null;
     this.socket = null;
@@ -39,6 +80,7 @@ class ChainlinkPriceFeed {
     this.started = true;
     void this.loadHistoricalCandles();
     void this.loadHistoricalMinuteCandles();
+    void this.loadHistoricalFifteenMinuteCandles();
     this.scheduleHistoryRefresh();
     this.scheduleClosedCandleRefresh();
     if (typeof this.WebSocketImpl !== 'function') {
@@ -54,7 +96,11 @@ class ChainlinkPriceFeed {
     if (!this.started) return;
     this.historyRefreshTimer = setTimeout(async () => {
       this.historyRefreshTimer = null;
-      await Promise.all([this.loadHistoricalCandles(), this.loadHistoricalMinuteCandles()]);
+      await Promise.all([
+        this.loadHistoricalCandles(),
+        this.loadHistoricalMinuteCandles(),
+        this.loadHistoricalFifteenMinuteCandles(),
+      ]);
       this.scheduleHistoryRefresh();
     }, Math.max(1000, HISTORY_REFRESH_MS - (this.now() % HISTORY_REFRESH_MS) + 1000));
     this.historyRefreshTimer.unref?.();
@@ -68,6 +114,9 @@ class ChainlinkPriceFeed {
     this.closedCandleRefreshTimer = setTimeout(async () => {
       this.closedCandleRefreshTimer = null;
       await this.loadHistoricalCandles();
+      if (nextBoundary % FIFTEEN_MINUTES_MS === 0) {
+        await this.loadHistoricalFifteenMinuteCandles();
+      }
       this.scheduleClosedCandleRefresh();
     }, Math.max(50, nextBoundary - now + 250));
     this.closedCandleRefreshTimer.unref?.();
@@ -84,22 +133,7 @@ class ChainlinkPriceFeed {
       const response = await this.fetchImpl(HISTORY_URL, { signal: AbortSignal.timeout(10_000) });
       if (!response.ok) throw new Error(`Binance history request failed (${response.status})`);
       const rows = await response.json();
-      const now = this.now();
-      this.historicalCandles = (Array.isArray(rows) ? rows : []).flatMap(row => {
-        const start = Number(row?.[0]);
-        const closeTime = Number(row?.[6]);
-        const open = Number(row?.[1]);
-        const high = Number(row?.[2]);
-        const low = Number(row?.[3]);
-        const close = Number(row?.[4]);
-        if (!Number.isFinite(start) || !Number.isFinite(closeTime) || start + 300_000 > now ||
-            ![open, high, low, close].every(value => Number.isFinite(value) && value > 0)) return [];
-        return [{
-          start, end: start + 300_000, open, high, low, close,
-          color: close > open ? 'GREEN' : close < open ? 'RED' : 'DOJI',
-          source: 'BINANCE_HISTORY',
-        }];
-      });
+      this.historicalCandles = parseClosedKlines(rows, CANDLE_MS, this.now(), 'BINANCE_5M_HISTORY');
       this.historyStatus = this.historicalCandles.length ? 'ready' : 'empty';
       this.historyError = null;
     } catch (error) {
@@ -126,27 +160,43 @@ class ChainlinkPriceFeed {
       const response = await this.fetchImpl(MINUTE_HISTORY_URL, { signal: AbortSignal.timeout(10_000) });
       if (!response.ok) throw new Error(`Binance one-minute history request failed (${response.status})`);
       const rows = await response.json();
-      const now = this.now();
-      this.historicalMinuteCandles = (Array.isArray(rows) ? rows : []).flatMap(row => {
-        const start = Number(row?.[0]);
-        const closeTime = Number(row?.[6]);
-        const open = Number(row?.[1]);
-        const high = Number(row?.[2]);
-        const low = Number(row?.[3]);
-        const close = Number(row?.[4]);
-        if (!Number.isFinite(start) || !Number.isFinite(closeTime) || start + 60_000 > now ||
-            ![open, high, low, close].every(value => Number.isFinite(value) && value > 0)) return [];
-        return [{
-          start, end: start + 60_000, open, high, low, close,
-          color: close > open ? 'GREEN' : close < open ? 'RED' : 'DOJI',
-          source: 'BINANCE_1M_HISTORY',
-        }];
-      });
+      this.historicalMinuteCandles = parseClosedKlines(rows, 60_000, this.now(), 'BINANCE_1M_HISTORY');
       this.minuteHistoryStatus = this.historicalMinuteCandles.length ? 'ready' : 'empty';
       this.minuteHistoryError = null;
     } catch (error) {
       this.minuteHistoryStatus = 'error';
       this.minuteHistoryError = error?.message || 'Binance one-minute history request failed';
+    }
+  }
+
+  async loadHistoricalFifteenMinuteCandles() {
+    if (typeof this.fetchImpl !== 'function') {
+      this.fifteenMinuteHistoryStatus = 'error';
+      this.fifteenMinuteHistoryError = 'Fetch is unavailable for Binance history';
+      return;
+    }
+    this.fifteenMinuteHistoryStatus = 'loading';
+    try {
+      const response = await this.fetchImpl(FIFTEEN_MINUTE_HISTORY_URL, {
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!response.ok) throw new Error(`Binance fifteen-minute history request failed (${response.status})`);
+      const rows = await response.json();
+      this.historicalFifteenMinuteCandles = parseClosedKlines(
+        rows, FIFTEEN_MINUTES_MS, this.now(), 'BINANCE_15M_HISTORY',
+      );
+      this.fifteenMinuteHistoryStatus = this.historicalFifteenMinuteCandles.length ? 'ready' : 'empty';
+      this.fifteenMinuteHistoryError = null;
+    } catch (error) {
+      this.fifteenMinuteHistoryStatus = 'error';
+      this.fifteenMinuteHistoryError = error?.message || 'Binance fifteen-minute history request failed';
+      if (this.started && !this.fifteenMinuteHistoryRetryTimer) {
+        this.fifteenMinuteHistoryRetryTimer = setTimeout(() => {
+          this.fifteenMinuteHistoryRetryTimer = null;
+          void this.loadHistoricalFifteenMinuteCandles();
+        }, 30_000);
+        this.fifteenMinuteHistoryRetryTimer.unref?.();
+      }
     }
   }
 
@@ -156,6 +206,10 @@ class ChainlinkPriceFeed {
 
   getHistoricalMinuteCandles() {
     return this.historicalMinuteCandles.map(candle => ({ ...candle }));
+  }
+
+  getHistoricalFifteenMinuteCandles() {
+    return this.historicalFifteenMinuteCandles.map(candle => ({ ...candle }));
   }
 
   connect() {
@@ -297,17 +351,23 @@ class ChainlinkPriceFeed {
       minuteBars: this.minuteBars.size,
       error: this.error,
       history: {
-        source: 'Binance BTCUSDT closed 5-minute candles (RSI signal)',
+        source: 'Binance BTCUSDT closed 5-minute candles',
         status: this.historyStatus,
         candles: this.historicalCandles.length,
         error: this.historyError,
       },
-        minuteHistory: {
-          source: 'Binance BTCUSDT 1-minute candles (auxiliary history)',
-          status: this.minuteHistoryStatus,
-          candles: this.historicalMinuteCandles.length,
-          error: this.minuteHistoryError,
-        },
+      minuteHistory: {
+        source: 'Binance BTCUSDT closed 1-minute candles (volume confirmation)',
+        status: this.minuteHistoryStatus,
+        candles: this.historicalMinuteCandles.length,
+        error: this.minuteHistoryError,
+      },
+      fifteenMinuteHistory: {
+        source: 'Binance BTCUSDT closed 15-minute candles (EMA200 regime)',
+        status: this.fifteenMinuteHistoryStatus,
+        candles: this.historicalFifteenMinuteCandles.length,
+        error: this.fifteenMinuteHistoryError,
+      },
     };
   }
 
@@ -317,6 +377,8 @@ class ChainlinkPriceFeed {
     this.reconnectTimer = null;
     clearTimeout(this.historyRetryTimer);
     this.historyRetryTimer = null;
+    clearTimeout(this.fifteenMinuteHistoryRetryTimer);
+    this.fifteenMinuteHistoryRetryTimer = null;
     clearTimeout(this.historyRefreshTimer);
     this.historyRefreshTimer = null;
     clearTimeout(this.closedCandleRefreshTimer);
@@ -329,4 +391,4 @@ class ChainlinkPriceFeed {
 }
 
 const feed = new ChainlinkPriceFeed();
-module.exports = { ChainlinkPriceFeed, feed, MAX_AGE_MS };
+module.exports = { ChainlinkPriceFeed, feed, MAX_AGE_MS, parseClosedKlines };

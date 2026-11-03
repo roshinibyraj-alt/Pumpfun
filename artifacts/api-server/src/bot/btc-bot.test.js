@@ -148,24 +148,26 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents the closed 5-minute RSI policy without MACD or price-band gates", () => {
+test("dashboard presents hybrid setups, fallback direction, and unchanged execution rules", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
-  assert.match(html, /BTC RSI PAPER BOT/);
+  assert.match(html, /BTC HYBRID PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
   assert.match(html, /50 SHARES \/ 10 SECONDS/);
   assert.match(html, /Wilder RSI\(14\)/i);
-  assert.match(html, /RSI below 30 selects UP/i);
-  assert.match(html, /RSI above 70 selects DOWN/i);
-  assert.match(html, /In the 30–70 band, the bot keeps its side unless two consecutive closed RSI moves confirm a pullback/i);
-  assert.match(html, /restores the latest extreme from its last 50 closed RSI readings/i);
-  assert.match(html, /RSI chart · Wilder 14 · last 50 closed 5m readings/i);
+  assert.match(html, /Scenario A/);
+  assert.match(html, /Scenario B/);
+  assert.match(html, /directional fallback score chooses UP or DOWN/);
+  assert.match(html, /15m EMA200/);
+  assert.match(html, /Stoch RSI/);
+  assert.match(html, /RSI\(7\) divergence/);
+  assert.match(html, /RSI telemetry · Wilder 14 · last 50 closed 5m readings/i);
   assert.match(html, /rsiChart/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
   assert.match(html, /10 through 290 seconds/);
   assert.match(html, /up to 29 scheduled entries/);
   assert.match(html, /No probability model/);
-  assert.match(html, /RSI side changes do not close existing positions/);
+  assert.match(html, /Signal changes do not close existing positions/);
   assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
   assert.match(html, /TP: own-side bid ≥ \$0.99/);
   assert.match(html, /SL: bid ≤ \$0.01/);
@@ -208,6 +210,22 @@ test("dashboard renders locked, skipped and observing states without probability
   assert.equal(elements.rsiDir.textContent, "UP");
   assert.match(elements.rsiChart.innerHTML, /role="img"/);
   assert.match(elements.rsiChart.innerHTML, /M54\.0/);
+  state.technicalSignal = {
+    status: "READY", side: "UP", setup: "FALLBACK_SCORE", confirmed: false,
+    regime: "MIXED", score: 2, reason: "Fallback score 2 selected UP.",
+    indicators: { volume: { status: "READY", direction: "UP", ratio: 1.6 } },
+  };
+  state.windowDecision.status = "FALLBACK";
+  context.renderTechnical(state);
+  context.renderSide("UP", state);
+  assert.equal(elements.upProb.textContent, "FALLBACK");
+  assert.equal(elements.technicalSetup.textContent, "FALLBACK SCORE");
+  assert.equal(elements.technicalScore.textContent, "2");
+  assert.match(elements.technicalReason.textContent, /selected UP/);
+  state.technicalSignal.status = "STALE";
+  context.renderSide("UP", state);
+  assert.equal(elements.upSignal.textContent, "WAIT DATA");
+  delete state.technicalSignal;
   context.renderPositions({});
   context.renderTrades([{ side: "UP", shares: 50, openedAt: 120000, scheduledAt: 120000, status: "OPEN" }]);
   assert.match(elements.trades.innerHTML, /Scheduled/);

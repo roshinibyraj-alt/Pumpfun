@@ -99,6 +99,7 @@ class LearningStore {
            'windowStart', s.sample->'windowStart', 'windowEnd', s.sample->'windowEnd',
            'pullback', s.sample->'pullback', 'windowDecision', s.sample->'windowDecision',
             'rsi', s.sample->'rsi', 'macd', s.sample->'macd',
+             'technicalSignal', s.sample->'technicalSignal',
             'entryPriceBand', s.sample->'entryPriceBand', 'bookDepthLimit', 20,
            'quotes', jsonb_build_object(
              'UP', jsonb_build_object(

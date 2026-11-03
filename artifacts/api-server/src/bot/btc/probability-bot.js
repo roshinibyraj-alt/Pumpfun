@@ -3,7 +3,8 @@
 const config = require('./config');
 const marketData = require('./wick-market-data');
 const { feed } = require('./chainlink-price-feed');
-const { detectRsiSignal, METHOD: RSI_METHOD } = require('./rsi-signal');
+const { detectRsiSignal } = require('./rsi-signal');
+const { detectTechnicalSignal, METHOD: TECHNICAL_METHOD } = require('./technical-signal');
 const { TAKE_PROFIT_BID, STOP_LOSS_BID, thresholdExit, recoverExpiredPositions } = require('./position-exits');
 
 const WINDOW_MS = 5 * 60 * 1000;
@@ -31,7 +32,7 @@ const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   lowPriceMinimumNetEdge: LOW_PRICE_MIN_EDGE,
   volatilityMultiplier: 1,
   sharesPerSignal: SHARES_PER_SIGNAL,
-  sideMode: 'rsi-14-hysteresis',
+  sideMode: TECHNICAL_METHOD,
 });
 
 function parseLevels(levels, direction) {
@@ -151,10 +152,12 @@ class ProbabilityBot {
     this.lastTunedWindowStart = null;
     this.pullback = null;
     this.rsi = null;
+    this.marketSignal = null;
     this.pendingReversal = null;
     this.activeSide = null;
     this.activeSignalReason = null;
     this.windowDecision = { status: 'OBSERVING', side: null };
+    this.lastLoggedSignalKey = null;
     this.lastEntrySlot = -1;
     this.entrySequence = 0;
     this.entryWindowStart = null;
@@ -230,6 +233,21 @@ class ProbabilityBot {
       lastExtreme: this.rsi.lastExtreme ? { ...this.rsi.lastExtreme } : null,
       oversold: this.rsi.oversold, overbought: this.rsi.overbought,
     } : null;
+    sample.technicalSignal = this.marketSignal ? {
+      method: this.marketSignal.method,
+      timeframe: this.marketSignal.timeframe,
+      status: this.marketSignal.status,
+      side: this.marketSignal.side,
+      setup: this.marketSignal.setup,
+      confirmed: this.marketSignal.confirmed,
+      regime: this.marketSignal.regime,
+      score: this.marketSignal.score,
+      votes: this.marketSignal.votes,
+      tieBreak: this.marketSignal.tieBreak,
+      reason: this.marketSignal.reason,
+      signalAt: this.marketSignal.signalAt,
+      indicators: this.marketSignal.indicators,
+    } : null;
     this.queuePersistence(() => this.learningStore.recordSample(sample));
   }
 
@@ -299,20 +317,29 @@ class ProbabilityBot {
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
       const candles = this.priceFeed.getHistoricalCandles?.() ?? [];
-      this.applyRsiSignal(detectRsiSignal(candles, now));
-      this.pullback = this.rsi ? {
-        method: this.rsi.method,
-        timeframe: this.rsi.timeframe,
+      const candles15m = this.priceFeed.getHistoricalFifteenMinuteCandles?.() ?? [];
+      const candles1m = this.priceFeed.getHistoricalMinuteCandles?.() ?? [];
+      this.rsi = detectRsiSignal(candles, now);
+      this.applyTechnicalSignal(detectTechnicalSignal({
+        candles5m: candles,
+        candles15m,
+        candles1m,
+        now,
+        previousSide: this.activeSide,
+      }));
+      this.pullback = this.marketSignal ? {
+        method: this.marketSignal.method,
+        timeframe: this.marketSignal.timeframe,
         side: this.activeSide,
-        signalSide: this.rsi.side,
-        regime: this.windowDecision.status,
+        signalSide: this.marketSignal.side,
+        setup: this.marketSignal.setup,
+        confirmed: this.marketSignal.confirmed,
+        regime: this.marketSignal.regime,
         activeSignalReason: this.activeSignalReason,
       } : null;
-      this.statusReason = this.rsi?.status !== 'READY'
-        ? this.rsi?.reason || 'Waiting for closed five-minute RSI data.'
-        : this.activeSide
-          ? `RSI ${this.rsi.value.toFixed(1)} · holding ${this.activeSide}; 50-share entries every 10 seconds from 10 through 290 seconds.`
-          : `RSI ${this.rsi.value.toFixed(1)} is in the middle range; waiting for below 30 or above 70 to select a side.`;
+      this.statusReason = this.marketSignal?.status !== 'READY'
+        ? this.marketSignal?.reason || 'Waiting for valid closed-candle strategy data.'
+        : `${this.marketSignal.confirmed ? 'Confirmed' : 'Fallback'} ${this.marketSignal.setup} · ${this.activeSide}; 50-share entries every 10 seconds from 10 through 290 seconds.`;
       this.probabilityUp = null;
       this.edges = { UP: null, DOWN: null };
       this.processSignals(this.now());
@@ -322,7 +349,7 @@ class ProbabilityBot {
       this.lastUpdateAt = now;
     } catch (error) {
       this.processPositionExits(this.now());
-      this.error = error?.message || 'BTC window RSI scan failed.';
+      this.error = error?.message || 'BTC window strategy scan failed.';
       this.statusReason = this.error;
       this.lastUpdateAt = this.now();
     } finally {
@@ -378,76 +405,58 @@ class ProbabilityBot {
     return this.entryFilter;
   }
 
-  applyRsiSignal(signal) {
+  applyTechnicalSignal(signal) {
     this.beginMarketWindow();
     if (!this.market) return;
-    this.rsi = signal;
-    const previousSide = this.activeSide;
-    if (signal?.status === 'READY') {
-      let selectionSource = null;
-      let pullbackReversed = false;
-      if (signal.value < signal.oversold) {
-        this.activeSide = 'UP';
-        this.activeSignalReason = 'RSI_OVERSOLD';
-        selectionSource = 'CURRENT_CLOSED_CANDLE';
-      } else if (signal.value > signal.overbought) {
-        this.activeSide = 'DOWN';
-        this.activeSignalReason = 'RSI_OVERBOUGHT';
-        selectionSource = 'CURRENT_CLOSED_CANDLE';
-      } else if (!this.activeSide && ['UP', 'DOWN'].includes(signal.lastExtreme?.side)) {
-        this.activeSide = signal.lastExtreme.side;
-        this.activeSignalReason = 'RSI_HISTORY_EXTREME';
-        selectionSource = 'RECENT_HISTORY_EXTREME';
-      } else if (!this.activeSide && ['UP', 'DOWN'].includes(signal.momentumSide)) {
-        this.activeSide = signal.momentumSide;
-        this.activeSignalReason = 'RSI_STARTUP_MOMENTUM';
-        selectionSource = 'TWO_STEP_RSI_MOMENTUM';
-      }
-      if (signal.side == null && this.activeSide
-        && ['UP', 'DOWN'].includes(signal.momentumSide)
-        && signal.momentumSide !== this.activeSide) {
-        this.activeSide = signal.momentumSide;
-        this.activeSignalReason = 'RSI_PULLBACK_REVERSAL';
-        selectionSource = 'TWO_STEP_RSI_PULLBACK';
-        pullbackReversed = true;
-      }
-      const held = signal.side == null;
-      this.windowDecision = {
-        status: this.activeSide ? (held ? 'HELD' : 'LOCKED') : 'OBSERVING',
-        side: this.activeSide,
-        signalAt: signal.signalAt,
-        value: signal.value,
-        reason: held
-          ? this.activeSide
-            ? pullbackReversed
-              ? `Two consecutive closed RSI moves confirmed a pullback; switched to ${this.activeSide} for future entries.`
-              : selectionSource === 'TWO_STEP_RSI_MOMENTUM'
-                ? `No recent extreme; two consecutive closed RSI moves selected ${this.activeSide}.`
-                : selectionSource === 'RECENT_HISTORY_EXTREME'
-              ? `RSI ${signal.value.toFixed(1)} is neutral; restored ${this.activeSide} from the latest ${signal.lastExtreme.bucket} reading (${signal.lastExtreme.value.toFixed(1)}).`
-              : `RSI ${signal.value.toFixed(1)}; keeping ${this.activeSide}.`
-            : 'No recent extreme or two-step RSI move; waiting for a closed-candle signal.'
-          : signal.reason,
-      };
-      if (previousSide !== this.activeSide && this.activeSide) {
-        const selectedReading = selectionSource === 'RECENT_HISTORY_EXTREME'
-          ? signal.lastExtreme
-          : { value: signal.value, bucket: signal.bucket, signalAt: signal.signalAt };
-        this.log(selectionSource === 'TWO_STEP_RSI_PULLBACK' ? 'RSI_PULLBACK_REVERSAL' : 'RSI_SIDE_SELECTED', {
-          side: this.activeSide, previousSide, value: selectedReading?.value ?? signal.value,
-          currentValue: signal.value, bucket: selectedReading?.bucket ?? signal.bucket,
-          signalAt: selectedReading?.signalAt ?? signal.signalAt,
-          source: selectionSource,
-          method: RSI_METHOD,
-        });
-      }
-    } else {
+    this.marketSignal = signal;
+    if (signal?.status !== 'READY' || !['UP', 'DOWN'].includes(signal.side)) {
       this.windowDecision = {
         status: signal?.status || 'WAITING_HISTORY',
         side: this.activeSide,
         signalAt: signal?.signalAt ?? null,
-        reason: signal?.reason || 'Waiting for closed five-minute RSI data.',
+        setup: signal?.setup ?? null,
+        confirmed: false,
+        reason: signal?.reason || 'Waiting for closed-candle signal data.',
       };
+      return;
+    }
+
+    const previousSide = this.activeSide;
+    this.activeSide = signal.side;
+    this.activeSignalReason = signal.setup;
+    this.windowDecision = {
+      status: signal.confirmed ? 'LOCKED' : 'FALLBACK',
+      side: signal.side,
+      signalAt: signal.signalAt,
+      setup: signal.setup,
+      confirmed: signal.confirmed,
+      regime: signal.regime,
+      score: signal.score,
+      reason: signal.reason,
+      targetPrice: signal.targetPrice ?? null,
+      targetLabel: signal.targetLabel ?? null,
+    };
+
+    const signalKey = [
+      signal.signalAt,
+      signal.side,
+      signal.setup,
+      signal.confirmed,
+      signal.indicators?.volume?.signalAt ?? '',
+    ].join(':');
+    if (signalKey !== this.lastLoggedSignalKey) {
+      this.lastLoggedSignalKey = signalKey;
+      this.log('WINDOW_SIGNAL_SELECTED', {
+        side: signal.side,
+        previousSide,
+        setup: signal.setup,
+        confirmed: signal.confirmed,
+        regime: signal.regime,
+        score: signal.score,
+        signalAt: signal.signalAt,
+        reason: signal.reason,
+        method: signal.method,
+      });
     }
   }
 
@@ -461,14 +470,16 @@ class ProbabilityBot {
     };
     this.lastEntrySlot = -1;
     this.rsi = null;
+    this.marketSignal = null;
     this.pullback = null;
-    this.log('WINDOW_RSI_RESET', { windowStart: start, side: this.activeSide });
+    this.lastLoggedSignalKey = null;
+    this.log('WINDOW_SIGNAL_RESET', { windowStart: start, side: this.activeSide });
   }
 
   processSignals(now) {
     this.beginMarketWindow();
     const schedule = this.entrySchedule(now);
-    if (!this.activeSide || this.rsi?.status !== 'READY' || !schedule.due) return;
+    if (!this.activeSide || this.marketSignal?.status !== 'READY' || !schedule.due) return;
     // One attempt per slot; skipped slots are never accumulated or replayed.
     this.lastEntrySlot = schedule.slot;
     const filter = this.updateEntryFilter(now);
@@ -502,7 +513,7 @@ class ProbabilityBot {
       marketTitle: this.market.title,
       side,
       shares: fill.shares,
-      entryKind: 'SCHEDULED_RSI',
+      entryKind: 'SCHEDULED_SIGNAL',
       scheduledAt: schedule.scheduledAt,
       entrySlot: schedule.slot,
       entryPrice: fill.averagePrice,
@@ -726,9 +737,9 @@ class ProbabilityBot {
         entryIntervalSeconds: 10,
         lastEntrySeconds: LAST_ENTRY_SECONDS,
         maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
-        signalPersistence: 'Closed five-minute RSI(14) below 30 selects UP; above 70 selects DOWN. In the 30–70 band, keep the side across windows unless two consecutive RSI rises select UP or two falls select DOWN, changing only future entries. On startup, use the latest extreme in the last 50 closed RSI readings, otherwise a confirmed two-step RSI direction; wait if neither is present.',
+        signalPersistence: 'Select Scenario A in aligned trends, Scenario B in confirmed ranges, otherwise a deterministic fallback score selects UP or DOWN for each valid five-minute window. Fallback ties use the previous side or latest closed candle; stale or insufficient data blocks entries.',
         entryModel: `50 shares every 10 seconds from ${FIRST_ENTRY_SECONDS} through ${LAST_ENTRY_SECONDS} seconds (${MAX_ENTRIES_PER_WINDOW} scheduled slots). No price-band filter, catch-up shares, probability model or edge gate. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.`,
-        model: 'Wilder RSI(14) from closed five-minute BTC candles: below 30 selects UP and above 70 selects DOWN. In the 30–70 band, two consecutive rises select UP and two falls select DOWN; confirmed pullbacks change future entries only. On startup, restore the latest extreme from up to 50 closed RSI readings, otherwise use the confirmed two-step direction; wait if neither exists. Missing or stale candle data blocks new entries.',
+        model: 'Trend continuation uses 5m EMA9/EMA21 alignment with 15m EMA200, an EMA21/VWAP pullback, Stoch RSI crossing from an extreme, and signed-volume confirmation. Range mean reversion uses a flat 15m EMA200, parallel 5m Bollinger Bands, an outer-band touch, and RSI(7) divergence. A weighted fallback selects a side when neither setup confirms. All signals use closed candles; stale history blocks entries.',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
@@ -757,6 +768,7 @@ class ProbabilityBot {
       events: this.events,
       pullback: this.pullback,
       rsi: this.rsi,
+      technicalSignal: this.marketSignal,
       pendingReversal: this.pendingReversal ? { ...this.pendingReversal } : null,
       activeSide: this.activeSide,
       windowDecision: this.windowDecision,

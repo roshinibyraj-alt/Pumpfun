@@ -86,9 +86,16 @@ function replay(window, variant, trailing, index) {
     bot.processPositionExits(now);
     const previousCandle = sample.windowDecision?.previousCandle;
     if (!legacySignalLoaded && previousCandle) {
-      // This endpoint replays archived MACD samples only; live entries use RSI.
+      // This endpoint replays archived decisions only; live entries use the hybrid signal.
       bot.activeSide = ['UP', 'DOWN'].includes(previousCandle.side) ? previousCandle.side : null;
       bot.rsi = { status: 'READY', value: 50 };
+      bot.marketSignal = {
+        method: 'archived-window-decision-replay',
+        status: bot.activeSide ? 'READY' : 'WAITING_HISTORY',
+        side: bot.activeSide,
+        setup: 'ARCHIVED_PREVIOUS_CANDLE',
+        confirmed: Boolean(bot.activeSide),
+      };
       bot.windowDecision = { status: bot.activeSide ? 'LOCKED' : 'OBSERVING', side: bot.activeSide };
       legacySignalLoaded = true;
     }

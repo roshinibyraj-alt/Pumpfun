@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080d16">
-  <title>BTC 5-Minute RSI Paper Bot</title>
+  <title>BTC Hybrid Signal Paper Bot</title>
   <style>
     :root{color-scheme:dark;--bg:#080d16;--panel:#101927;--line:#263447;--muted:#8d9bb0;--text:#edf4ff;--cyan:#51d9ef;--green:#39d99a;--red:#ff6f7e;--amber:#ffc76a}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 8% 0,#102c3a 0,transparent 32%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
@@ -35,18 +35,18 @@
 <body>
 <main>
   <header class="top">
-    <div><div class="brand">BTC RSI PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
+    <div><div class="brand">BTC HYBRID PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
     <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 50 SHARES / 10 SECONDS</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">WILDER RSI(14) · CLOSED 5-MINUTE CANDLES</div><h1>RSI signals select the active side.</h1><p>RSI below 30 selects UP; RSI above 70 selects DOWN. In the 30–70 band, the bot keeps its side unless two consecutive closed RSI moves confirm a pullback. On startup it restores the latest extreme from its last 50 closed RSI readings, or uses the same two-step direction if there is no extreme. Buy 50 shares every 10 seconds from 10 through 290 seconds, for up to 29 scheduled entries. No probability model, edge gate or price-band filter. Cash, the existing $0.02 minimum ask, fresh quotes, real liquidity and TP/SL still apply.</p></div>
+    <div><div class="eyebrow">5M TREND &amp; RANGE · 15M EMA200 · CLOSED CANDLES</div><h1>A directional signal for every valid window.</h1><p>Scenario A follows a trend after an EMA21/VWAP pullback, a Stoch RSI extreme-cross and a signed-volume spike. Scenario B fades a Bollinger Band extreme in a range with RSI(7) divergence. If neither setup confirms, a directional fallback score chooses UP or DOWN. Buy 50 shares every 10 seconds from 10 through 290 seconds, for up to 29 scheduled entries. No probability model, edge gate or price-band filter. Cash, the existing $0.02 minimum ask, fresh quotes, real liquidity and TP/SL still apply.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid">
     <article class="card"><div class="label">Latest closed 5m RSI</div><div class="value" id="reference" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Wilder RSI(14) · 30 oversold · 70 overbought</div></article>
     <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
-    <article class="card"><div class="label">Current active side</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Two opposite RSI moves can confirm a pullback</div></article>
+    <article class="card"><div class="label">Current active side</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Scenario A, Scenario B or directional fallback</div></article>
     <article class="card"><div class="label">Next scheduled entry · UTC</div><div class="value" id="zscore">—</div><div class="foot">10s, 20s, …, 290s · maximum 29 entries</div></article>
   </section>
   <section class="prob-grid">
@@ -54,7 +54,13 @@
     <article class="prob down"><div class="prob-head"><span>DOWN · WINDOW DIRECTION</span><span id="downEdge">50 / 10s</span></div><div class="prob-price" id="downProb">WAIT</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">50-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Window decision</span><strong id="downNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="downSignal">WAIT</strong></div></div></article>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>RSI chart · Wilder 14 · last 50 closed 5m readings</h2><small id="trendStatus">Waiting for RSI history</small></div>
+    <div class="section-head"><h2>Hybrid signal decision</h2><small id="technicalStatus">Waiting for closed-candle history</small></div>
+    <div class="rsi-head"><div><span>Selected setup</span><strong id="technicalSetup" style="font-size:18px">—</strong></div><div><span>Market regime</span><strong id="technicalRegime" style="font-size:18px">—</strong></div><div><span>Fallback score</span><strong id="technicalScore">—</strong></div><div><span>Signed volume</span><strong id="technicalVolume" style="font-size:18px">—</strong></div></div>
+    <div id="technicalReason" class="formula">Waiting for valid 5m and 15m candles. Missing or stale history blocks entries.</div>
+    <div id="technicalIndicators" class="formula">EMA9 / EMA21 · 15m EMA200 · VWAP20 · Stoch RSI · Bollinger Bands · RSI(7)</div>
+  </section>
+  <section class="panel">
+    <div class="section-head"><h2>RSI telemetry · Wilder 14 · last 50 closed 5m readings</h2><small id="trendStatus">Waiting for RSI history</small></div>
     <div class="rsi-head"><div><span>Active side</span><strong id="rsiDir" class="dir-NONE">—</strong></div><div><span>Latest RSI(14)</span><strong id="rsiVal">—</strong></div><div><span>RSI zone</span><strong id="rsiZone" style="font-size:clamp(14px,1.8vw,19px)">—</strong></div><div><span>Last closed candle</span><strong id="rsiLast" style="font-size:clamp(13px,1.6vw,17px)">—</strong></div></div>
     <div id="rsiChart" class="rsi-chart-wrap" aria-label="RSI line chart"></div>
     <div id="rsiStatus" class="formula">Waiting for 15 contiguous closed five-minute BTC candles.</div>
@@ -71,7 +77,7 @@
   </section>
   <section class="panel">
     <div class="section-head"><h2>Paper trade history</h2><small>Fixed 50 shares · scheduled every 10 seconds</small></div>
-    <div id="trades" class="table-wrap"><div class="empty">Waiting for a closed five-minute RSI signal.</div></div>
+    <div id="trades" class="table-wrap"><div class="empty">Waiting for a valid hybrid signal.</div></div>
   </section>
   <section class="panel">
     <div class="section-head"><h2>Paper learning &amp; regression</h2><small id="learningStatus">Connecting to persistent learning log</small></div>
@@ -80,9 +86,9 @@
   <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-     <div class="formula">RSI(14) uses Wilder smoothing on contiguous, fully closed 5m BTC candles. RSI below 30 selects UP; RSI above 70 selects DOWN. In the 30–70 band, two consecutive rises select UP and two consecutive falls select DOWN; this changes future entries only. On startup, restore the latest extreme from the last 50 closed RSI readings, or use the same two-step direction if none exists. The chart and strategy use closed candles only. Missing, stale or gapped RSI history blocks new entries. Scheduled buys: 50 shares at 10, 20, …, 290 seconds, maximum 1,450 shares if all 29 entries fill. Missed or blocked slots are skipped, never accumulated or retried in a burst. No price-band filter, probability model or edge gate. The $0.02 minimum ask, cash, fresh quotes and real visible depth remain required. RSI side changes do not close existing positions. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. Expiry and original-market recovery remain unchanged. Learning logs cannot change the fixed sizing or schedule.</div>
+     <div class="formula">Scenario A: 5m EMA9/EMA21 and 15m EMA200 trend alignment, EMA21/VWAP pullback, Stoch RSI crossing out of oversold/overbought, and directional volume spike. Scenario B: flat 15m EMA200, parallel 5m Bollinger Bands, outer-band touch and confirmed RSI(7) divergence. Otherwise a weighted fallback selects a side; it is not a confirmed setup or a profit guarantee. Scheduled buys: 50 shares at 10, 20, …, 290 seconds, maximum 1,450 shares if all 29 entries fill. Missed or blocked slots are skipped, never accumulated or retried in a burst. No price-band filter, probability model or edge gate. The $0.02 minimum ask, cash, fresh quotes and real visible depth remain required. Signal changes do not close existing positions. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. The range VWAP target is informational; existing TP/SL and expiry exits remain unchanged. Learning logs cannot change fixed sizing or timing.</div>
   </section>
- <p class="footer">Paper only—no live orders. RSI extremes and two-step pullbacks use closed five-minute candles. A fresh process scans the latest 50 RSI readings for the last extreme, then uses a confirmed two-step direction if none is present. Side changes affect future entries only. Entries are scheduled from 10 through 290 seconds. Exactly one attempt per slot; real liquidity and paper cash are required. Persistent learning logs and RSI-compatible regression remain available, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
+ <p class="footer">Paper only—no live orders. The hybrid strategy uses closed 5m and 15m candles plus closed 1m volume data. Each valid window has a selected direction, including fallback when no named setup confirms; this does not guarantee a fill. Side changes affect future entries only. Exactly one attempt per scheduled slot; real liquidity and paper cash are required. Regression replays only compatible hybrid-signal logs, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -113,13 +119,24 @@ async function pollLearning(){
 }
 function renderSide(side,state){
  const active=state.activeSide===side,prefix=side.toLowerCase(),decision=state.windowDecision||{},schedule=state.entrySchedule||{};
- $(prefix+'Prob').textContent=active?'LOCKED':state.activeSide?'OFF':decision.status==='SKIP_WINDOW'?'SKIP':'WAIT';
+ const ready=!state.technicalSignal||state.technicalSignal.status==='READY';
+ $(prefix+'Prob').textContent=active?(ready?(decision.status==='FALLBACK'?'FALLBACK':'LOCKED'):'WAIT DATA'):state.activeSide?'OFF':decision.status==='SKIP_WINDOW'?'SKIP':'WAIT';
  $(prefix+'Bar').style.width=active?'100%':'0%';
  $(side.toLowerCase()+'Ask').textContent=money(state.quotes?.[side]?.estimatedAverageAsk);
  $(prefix+'AskLabel').textContent='50-share avg ask';
  $(prefix+'Net').textContent=String(decision.status||'OBSERVING').replace(/_/g,' ');
  $(prefix+'Edge').textContent='50 / 10s';
- $(prefix+'Signal').textContent=!active?'NO ENTRY':!schedule.nextEntryAt?'ENTRIES FINISHED':state.entryFilter?.allowed===false?'BLOCKED':schedule.due?'ENTRY SLOT':'NEXT '+time(schedule.nextEntryAt);
+ $(prefix+'Signal').textContent=!active?'NO ENTRY':!ready?'WAIT DATA':!schedule.nextEntryAt?'ENTRIES FINISHED':state.entryFilter?.allowed===false?'BLOCKED':schedule.due?'ENTRY SLOT':'NEXT '+time(schedule.nextEntryAt);
+}
+function renderTechnical(state){
+ const signal=state.technicalSignal||{},i=signal.indicators||{},volume=i.volume||{};
+ $('technicalStatus').textContent=`${String(signal.status||'WAITING_HISTORY').replace(/_/g,' ')} · ${signal.confirmed?'CONFIRMED SETUP':'DIRECTIONAL FALLBACK'}`;
+ $('technicalSetup').textContent=String(signal.setup||'WAITING').replace(/_/g,' ');
+ $('technicalRegime').textContent=String(signal.regime||'—').replace(/_/g,' ');
+ $('technicalScore').textContent=isNumeric(signal.score)?String(signal.score):'—';
+ $('technicalVolume').textContent=volume.status==='READY'?`${volume.direction||'NEUTRAL'} · ${isNumeric(volume.ratio)?Number(volume.ratio).toFixed(2):'—'}×`:'WAIT DATA';
+ $('technicalReason').textContent=signal.reason||'Waiting for valid 5m and 15m candles. Missing or stale history blocks entries.';
+ $('technicalIndicators').textContent=`EMA9 ${money(i.ema9)} · EMA21 ${money(i.ema21)} · 15m EMA200 ${money(i.ema200_15m)} · VWAP20 ${money(i.vwap20)} · Stoch RSI ${isNumeric(i.stochRsiK)?Number(i.stochRsiK).toFixed(1):'—'} · RSI(7) ${isNumeric(i.rsi7)?Number(i.rsi7).toFixed(1):'—'} · Bands ${i.bollinger?.parallel?'parallel':'not parallel'} · Divergence ${i.divergence?.bullish?'bullish':i.divergence?.bearish?'bearish':'none'}`;
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
@@ -160,7 +177,7 @@ function renderPositions(positions){
   $('rsiVal').textContent=value==null?'—':value.toFixed(1);
   $('rsiVal').className=value==null?'':value>=70?'dir-DOWN':value<=30?'dir-UP':'dir-NONE';
   $('rsiZone').textContent=zone.replace(/_/g,' ');
-   $('rsiStatus').textContent=state.windowDecision?.reason||r.reason||'Waiting for 15 contiguous closed five-minute BTC candles.';
+    $('rsiStatus').textContent='Telemetry only; RSI(14) does not independently choose the trading side. '+(r.reason||'Waiting for closed five-minute BTC candles.');
   $('rsiStatus').className='formula '+(st==='READY'?'st-READY':st==='STALE'||st==='INVALID_HISTORY'?'st-STALE':'st-WAITING_HISTORY');
   $('rsiLast').textContent=isNumeric(r.signalAt)?time(r.signalAt)+' UTC':'—';
   $('trendStatus').textContent=`5m · Wilder RSI(${r.period||14}) · ${st.replace(/_/g,' ')} · ${(state.windowDecision?.status||'OBSERVING').replace(/_/g,' ')}`;
@@ -180,14 +197,14 @@ async function poll(){
   $('gap').textContent='Informational only · no probability model';
      $('expected').textContent=String(s.activeSide||'WAIT');
    $('zscore').textContent=s.activeSide&&s.entrySchedule?.nextEntryAt?time(s.entrySchedule.nextEntryAt):s.windowDecision?.status==='SKIP_WINDOW'?'SKIP':'—';
-    renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);renderRsi(s);
+     renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);renderRsi(s);renderTechnical(s);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
   $('settled').textContent=String(account.settled??0);$('openCount').textContent=(account.openPositions??0)+' open positions';
   $('wins').textContent=`${account.wins??0} wins · ${account.losses??0} losses`;
   $('feedState').textContent=s.priceFeed?.status||'—';
   $('updated').textContent=s.statusReason|| (s.lastUpdateAt?'Updated '+time(s.lastUpdateAt):'Waiting for first scan');
-   $('feedStatus').textContent=s.priceFeed?`${s.priceFeed.history?.source||s.priceFeed.source} · ${s.priceFeed.history?.status||'waiting'} · closed 5m RSI history`:'Awaiting live data';
+    $('feedStatus').textContent=s.priceFeed?`Closed 5m: ${s.priceFeed.history?.status||'waiting'} · 15m: ${s.priceFeed.fifteenMinuteHistory?.status||'waiting'} · 1m volume: ${s.priceFeed.minuteHistory?.status||'waiting'}`:'Awaiting live data';
   renderTrades(s.trades);renderEvents(s.events);
  }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
  setTimeout(poll,1000);

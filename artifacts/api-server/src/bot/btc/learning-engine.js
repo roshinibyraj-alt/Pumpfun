@@ -1,14 +1,14 @@
 'use strict';
 
 const { ProbabilityBot, DEFAULT_STRATEGY_SETTINGS } = require('./probability-bot');
-const { METHOD } = require('./rsi-signal');
+const { METHOD } = require('./technical-signal');
 
 const DEFAULT_SETTINGS = DEFAULT_STRATEGY_SETTINGS;
 const MIN_CLOSED_WINDOWS = 15;
 
-// Replay the fixed RSI execution policy; historical MACD samples are incompatible.
+// Replay only samples captured with the current closed-candle hybrid signal.
 function simulateWindow(windowSamples) {
-  const samples = [...windowSamples].filter(s => s.pullback?.method === METHOD)
+  const samples = [...windowSamples].filter(s => s.technicalSignal?.method === METHOD)
     .sort((a, b) => a.ts - b.ts);
   if (samples.length < 20) return null;
   let now = samples[0].ts;
@@ -16,7 +16,7 @@ function simulateWindow(windowSamples) {
   if (!Number.isFinite(start) || samples.some(s => s.windowStart !== start)) return null;
   const bot = new ProbabilityBot({ now: () => now, priceFeed: { start() {} } });
   bot.market = { id: 'replay', start, end: start + 300_000, tokens: { UP: 'u', DOWN: 'd' } };
-  const initialSide = samples[0].rsi?.activeSide ?? samples[0].pullback?.side ?? null;
+  const initialSide = samples[0].technicalSignal?.side ?? null;
   bot.activeSide = ['UP', 'DOWN'].includes(initialSide) ? initialSide : null;
   bot.beginMarketWindow();
   for (const sample of samples) {
@@ -25,8 +25,9 @@ function simulateWindow(windowSamples) {
       side, structuredClone(sample.quotes?.[side] ?? {}),
     ]));
     bot.processPositionExits(now);
-    if (sample.rsi) bot.applyRsiSignal(sample.rsi);
-    else bot.rsi = { status: 'WAITING_HISTORY' };
+    bot.rsi = sample.rsi ?? null;
+    if (sample.technicalSignal) bot.applyTechnicalSignal(sample.technicalSignal);
+    else bot.marketSignal = { status: 'WAITING_HISTORY' };
     bot.processSignals(now);
   }
   bot.processPositionExits(start + 300_000);
@@ -38,12 +39,12 @@ function simulateWindow(windowSamples) {
 }
 
 function choosePaperSettings(windows) {
-  const compatible = [...windows].filter(w => w.samples?.some(s => s.pullback?.method === METHOD))
+  const compatible = [...windows].filter(w => w.samples?.some(s => s.technicalSignal?.method === METHOD))
     .sort((a, b) => a.windowStart - b.windowStart).slice(-MIN_CLOSED_WINDOWS);
   const results = compatible.map(w => simulateWindow(w.samples)).filter(Boolean);
   return {
     applied: false, settings: { ...DEFAULT_SETTINGS }, windows: results.length,
-    reason: 'Fixed 5-minute RSI hysteresis policy: logging and regression only; automatic setting changes are disabled.',
+    reason: 'Fixed hybrid trend/range signal with directional fallback: regression only; automatic setting changes are disabled.',
     baseline: {
       pnl: results.reduce((sum, r) => sum + r.pnl, 0),
       trades: results.reduce((sum, r) => sum + r.trades, 0),
