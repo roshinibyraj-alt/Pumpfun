@@ -382,12 +382,17 @@ class ProbabilityBot {
     this.rsi = signal;
     const previousSide = this.activeSide;
     if (signal?.status === 'READY') {
+      let seededFromHistory = false;
       if (signal.value < signal.oversold) {
         this.activeSide = 'UP';
         this.activeSignalReason = 'RSI_OVERSOLD';
       } else if (signal.value > signal.overbought) {
         this.activeSide = 'DOWN';
         this.activeSignalReason = 'RSI_OVERBOUGHT';
+      } else if (!this.activeSide && ['UP', 'DOWN'].includes(signal.lastExtreme?.side)) {
+        this.activeSide = signal.lastExtreme.side;
+        this.activeSignalReason = 'RSI_HISTORY_EXTREME';
+        seededFromHistory = true;
       }
       const held = signal.side == null;
       this.windowDecision = {
@@ -396,14 +401,23 @@ class ProbabilityBot {
         signalAt: signal.signalAt,
         value: signal.value,
         reason: held
-          ? this.activeSide ? `RSI ${signal.value.toFixed(1)}; keeping ${this.activeSide}.`
-            : 'No side selected yet; waiting for RSI to reach an extreme.'
+          ? this.activeSide
+            ? seededFromHistory
+              ? `RSI ${signal.value.toFixed(1)} is neutral; restored ${this.activeSide} from the latest ${signal.lastExtreme.bucket} reading (${signal.lastExtreme.value.toFixed(1)}).`
+              : `RSI ${signal.value.toFixed(1)}; keeping ${this.activeSide}.`
+            : 'No recent RSI extreme found; waiting for RSI to reach below 30 or above 70.'
           : signal.reason,
       };
       if (previousSide !== this.activeSide && this.activeSide) {
+        const selectedReading = signal.side
+          ? { value: signal.value, bucket: signal.bucket, signalAt: signal.signalAt }
+          : signal.lastExtreme;
         this.log('RSI_SIDE_SELECTED', {
-          side: this.activeSide, previousSide, value: signal.value,
-          bucket: signal.bucket, signalAt: signal.signalAt, method: RSI_METHOD,
+          side: this.activeSide, previousSide, value: selectedReading?.value ?? signal.value,
+          currentValue: signal.value, bucket: selectedReading?.bucket ?? signal.bucket,
+          signalAt: selectedReading?.signalAt ?? signal.signalAt,
+          source: signal.side ? 'CURRENT_CLOSED_CANDLE' : 'RECENT_HISTORY',
+          method: RSI_METHOD,
         });
       }
     } else {
@@ -691,9 +705,9 @@ class ProbabilityBot {
         entryIntervalSeconds: 10,
         lastEntrySeconds: LAST_ENTRY_SECONDS,
         maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
-        signalPersistence: 'Closed five-minute RSI(14) below 30 selects UP; above 70 selects DOWN. Between 30 and 70, keep the last selected side across windows. After a restart, wait for the first extreme before selecting a side.',
+        signalPersistence: 'Closed five-minute RSI(14) below 30 selects UP; above 70 selects DOWN. Between 30 and 70, keep the selected side across windows. On startup, seed from the latest extreme in the last 50 closed RSI readings; if none exists, wait for a new extreme.',
         entryModel: `50 shares every 10 seconds from ${FIRST_ENTRY_SECONDS} through ${LAST_ENTRY_SECONDS} seconds (${MAX_ENTRIES_PER_WINDOW} scheduled slots). No price-band filter, catch-up shares, probability model or edge gate. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.`,
-        model: 'Wilder RSI(14) from closed five-minute BTC candles: below 30 selects UP, above 70 selects DOWN, and the 30–70 middle band retains the last selected side. Missing or stale candle data blocks new entries.',
+        model: 'Wilder RSI(14) from closed five-minute BTC candles: below 30 selects UP, above 70 selects DOWN, and the 30–70 middle band retains the last selected side. On startup, restore the latest extreme from up to 50 closed RSI readings; if none exists, wait for a new extreme. Missing or stale candle data blocks new entries.',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,

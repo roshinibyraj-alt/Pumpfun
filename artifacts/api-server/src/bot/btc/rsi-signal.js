@@ -4,6 +4,7 @@ const CANDLE_MS = 5 * 60_000;
 const RSI_PERIOD = 14;
 const OVERSOLD = 30;
 const OVERBOUGHT = 70;
+const LOOKBACK_READINGS = 50;
 const METHOD = 'rsi-5m-14-hysteresis-v1';
 
 function rsiValue(previous) {
@@ -27,6 +28,7 @@ function detectRsiSignal(candles, now) {
     side: null,
     signalAt: null,
     history: [],
+    lastExtreme: null,
     reason: 'Waiting for 15 contiguous, closed five-minute candles.',
   };
   if (!Number.isFinite(now)) {
@@ -99,6 +101,12 @@ function detectRsiSignal(candles, now) {
   const side = value < OVERSOLD ? 'UP' : value > OVERBOUGHT ? 'DOWN' : null;
   const bucket = value < OVERSOLD ? 'OVERSOLD'
     : value > OVERBOUGHT ? 'OVERBOUGHT' : 'NEUTRAL';
+  const visibleHistory = history.slice(-LOOKBACK_READINGS);
+  const lastExtreme = [...visibleHistory].reverse().find(point =>
+    point.value < OVERSOLD || point.value > OVERBOUGHT);
+  const lastExtremeSide = lastExtreme
+    ? lastExtreme.value < OVERSOLD ? 'UP' : 'DOWN'
+    : null;
   return {
     ...base,
     status: 'READY',
@@ -106,11 +114,22 @@ function detectRsiSignal(candles, now) {
     bucket,
     side,
     signalAt: latest.end,
-    history: history.slice(-50),
+    history: visibleHistory,
+    lookbackReadings: LOOKBACK_READINGS,
+    lastExtreme: lastExtreme ? {
+      side: lastExtremeSide,
+      value: lastExtreme.value,
+      bucket: lastExtreme.value < OVERSOLD ? 'OVERSOLD' : 'OVERBOUGHT',
+      signalAt: lastExtreme.end,
+    } : null,
     reason: side === 'UP' ? 'RSI is below 30 (oversold).'
       : side === 'DOWN' ? 'RSI is above 70 (overbought).'
-        : 'RSI is between the thresholds; retain the last selected side.',
+        : lastExtreme
+          ? `RSI is neutral; the latest extreme in the last ${LOOKBACK_READINGS} readings is ${lastExtremeSide}.`
+          : `RSI is neutral with no extreme in the last ${LOOKBACK_READINGS} readings.`,
   };
 }
 
-module.exports = { METHOD, CANDLE_MS, RSI_PERIOD, OVERSOLD, OVERBOUGHT, detectRsiSignal };
+module.exports = {
+  METHOD, CANDLE_MS, RSI_PERIOD, OVERSOLD, OVERBOUGHT, LOOKBACK_READINGS, detectRsiSignal,
+};

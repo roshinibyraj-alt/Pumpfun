@@ -30,7 +30,22 @@ test('the middle RSI band retains the last side across windows', () => {
   assert.equal(bot.activeSide, 'DOWN');
 });
 
-test('startup in the middle band waits until RSI reaches an extreme', () => {
+test('startup in the middle band restores the latest historical extreme', () => {
+  const { bot, at } = fixture();
+  bot.applyRsiSignal({
+    ...rsiSignal(50),
+    lastExtreme: {
+      side: 'DOWN', value: 74, bucket: 'OVERBOUGHT', signalAt: START - 300_000,
+    },
+  });
+  bot.processSignals(at(10));
+  assert.equal(bot.activeSide, 'DOWN');
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.windowDecision.status, 'HELD');
+  assert.match(bot.windowDecision.reason, /restored DOWN from the latest OVERBOUGHT/);
+});
+
+test('startup waits in the middle band when no recent extreme is available', () => {
   const { bot, at } = fixture();
   bot.applyRsiSignal(rsiSignal(50));
   bot.processSignals(at(10));
@@ -81,6 +96,7 @@ test('snapshot reports RSI policy, fixed timing, and no price-band filter', () =
   assert.equal(state.strategy.sideMode, 'rsi-14-hysteresis');
   assert.match(state.strategy.signalPersistence, /across windows/);
   assert.match(state.strategy.model, /Wilder RSI\(14\)/);
+  assert.match(state.strategy.signalPersistence, /last 50 closed RSI readings/);
   assert.equal(state.strategy.sharesPerSignal, 50);
   assert.equal(state.strategy.entryIntervalSeconds, 10);
   assert.equal(state.strategy.lastEntrySeconds, 290);

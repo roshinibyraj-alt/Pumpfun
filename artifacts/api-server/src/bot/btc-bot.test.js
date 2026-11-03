@@ -157,7 +157,9 @@ test("dashboard presents the closed 5-minute RSI policy without MACD or price-ba
   assert.match(html, /RSI below 30 selects UP/i);
   assert.match(html, /RSI above 70 selects DOWN/i);
   assert.match(html, /30 and 70 the last selected side stays active across windows/i);
-  assert.match(html, /waits for the first extreme/i);
+  assert.match(html, /restores the latest extreme from its last 50 closed RSI readings/i);
+  assert.match(html, /RSI chart · Wilder 14 · last 50 closed 5m readings/i);
+  assert.match(html, /rsiChart/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
   assert.match(html, /10 through 290 seconds/);
@@ -196,11 +198,16 @@ test("dashboard renders locked, skipped and observing states without probability
   assert.equal(elements.upProb.textContent, "LOCKED");
   assert.equal(elements.downProb.textContent, "OFF");
   assert.equal(elements.upSignal.textContent, "ENTRY SLOT");
-  state.rsi = { status: "READY", value: 25, bucket: "OVERSOLD", period: 14, signalAt: 1200000,
-    reason: "RSI is below 30 (oversold)." };
+  state.rsi = {
+    status: "READY", value: 25, bucket: "OVERSOLD", period: 14, signalAt: 1200000,
+    reason: "RSI is below 30 (oversold).",
+    history: [{ end: 900000, value: 50 }, { end: 1200000, value: 25 }],
+  };
   context.renderRsi(state);
   assert.equal(elements.rsiVal.textContent, "25.0");
   assert.equal(elements.rsiDir.textContent, "UP");
+  assert.match(elements.rsiChart.innerHTML, /role="img"/);
+  assert.match(elements.rsiChart.innerHTML, /M54\.0/);
   context.renderPositions({});
   context.renderTrades([{ side: "UP", shares: 50, openedAt: 120000, scheduledAt: 120000, status: "OPEN" }]);
   assert.match(elements.trades.innerHTML, /Scheduled/);

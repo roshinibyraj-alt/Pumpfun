@@ -40,6 +40,23 @@ test('neutral RSI does not select a new side and reports the middle band', () =>
   assert.equal(signal.overbought, OVERBOUGHT);
   assert.equal(signal.oversold, OVERSOLD);
   assert.equal(signal.period, RSI_PERIOD);
+  assert.equal(signal.lastExtreme, null);
+});
+
+test('neutral RSI exposes the latest extreme from the 50-reading chart history', () => {
+  const closes = [
+    ...Array.from({ length: 21 }, (_, i) => 100 + i),
+    ...Array.from({ length: 7 }, (_, i) => 119 - i),
+    ...Array(20).fill(113),
+  ];
+  const signal = detectRsiSignal(candles(closes), END + 100);
+  assert.equal(signal.status, 'READY');
+  assert.equal(signal.bucket, 'NEUTRAL');
+  assert.equal(signal.side, null);
+  assert.equal(signal.lastExtreme?.side, 'DOWN');
+  assert.equal(signal.lastExtreme?.bucket, 'OVERBOUGHT');
+  assert.ok(signal.history.length <= 50);
+  assert.equal(signal.history.at(-1).value, signal.value);
 });
 
 test('unfinished or stale candles never drive the RSI signal', () => {

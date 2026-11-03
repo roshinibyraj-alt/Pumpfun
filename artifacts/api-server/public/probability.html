@@ -24,7 +24,7 @@
      .position-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.position-card{padding:16px;border-radius:14px;background:#0f1925;border:1px solid var(--line)}.position-card.up{--accent:var(--green)}.position-card.down{--accent:var(--red)}.position-title{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.position-shares{font:800 28px ui-monospace,monospace;margin:7px 0 12px}.position-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.position-metrics span{display:block;color:var(--muted);font-size:10px}.position-metrics strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
     .panel{padding:18px;margin-top:12px}.section-head{margin-bottom:12px}.section-head h2{font-size:15px;margin:0}.section-head small{font-size:11px}
      .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:640px}th,td{text-align:left;padding:11px 9px;border-top:1px solid #263447;font-size:12px}th{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
-     .rsi-head{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}.rsi-head div{background:#0b121c;border:1px solid #202e40;border-radius:9px;padding:12px}.rsi-head span{display:block;color:var(--muted);font-size:10px;letter-spacing:.1em;text-transform:uppercase}.rsi-head strong{display:block;margin-top:4px;font:800 clamp(19px,2.8vw,28px) ui-monospace,monospace}.dir-UP{color:var(--green)}.dir-DOWN{color:var(--red)}.dir-NONE{color:var(--muted)}.st-READY{color:var(--green)}.st-STALE,.st-INVALID_HISTORY{color:var(--red)}.st-WAITING_HISTORY{color:var(--amber)}@media(max-width:800px){.rsi-head{grid-template-columns:1fr 1fr}}
+     .rsi-head{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}.rsi-head div{background:#0b121c;border:1px solid #202e40;border-radius:9px;padding:12px}.rsi-head span{display:block;color:var(--muted);font-size:10px;letter-spacing:.1em;text-transform:uppercase}.rsi-head strong{display:block;margin-top:4px;font:800 clamp(19px,2.8vw,28px) ui-monospace,monospace}.rsi-chart-wrap{overflow:hidden;border:1px solid #202e40;border-radius:10px;background:#0b121c}.rsi-chart{display:block;width:100%;height:240px}.rsi-chart .gridline{stroke:#253346;stroke-width:1}.rsi-chart .threshold{stroke:#8897aa;stroke-width:1.2;stroke-dasharray:6 5}.rsi-chart .axis{fill:#8d9bb0;font:12px ui-monospace,monospace}.rsi-chart .latest{fill:#edf4ff;font:700 13px ui-monospace,monospace}.rsi-chart-empty{padding:70px 12px;text-align:center;color:var(--muted);font:12px ui-monospace,monospace}.dir-UP{color:var(--green)}.dir-DOWN{color:var(--red)}.dir-NONE{color:var(--muted)}.st-READY{color:var(--green)}.st-STALE,.st-INVALID_HISTORY{color:var(--red)}.st-WAITING_HISTORY{color:var(--amber)}@media(max-width:800px){.rsi-head{grid-template-columns:1fr 1fr}.rsi-chart{height:200px}}
     .side{font-weight:800}.side.UP,.pnl.pos{color:var(--green)}.side.DOWN,.pnl.neg{color:var(--red)}.edge-good{color:var(--green)}.edge-bad{color:var(--red)}
     .empty{padding:24px 10px;text-align:center;color:var(--muted);border-top:1px solid var(--line)}.formula{font:11px ui-monospace,monospace;color:#bbcadb;background:#0b121c;border:1px solid #202e40;padding:12px;border-radius:9px;margin-top:10px}
     .status{font:10px ui-monospace,monospace;color:var(--muted)}.footer{margin-top:16px;color:var(--muted);font-size:10px;line-height:1.6}
@@ -39,7 +39,7 @@
     <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 50 SHARES / 10 SECONDS</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">WILDER RSI(14) · CLOSED 5-MINUTE CANDLES</div><h1>RSI extremes select the active side.</h1><p>RSI below 30 selects UP; RSI above 70 selects DOWN. Between 30 and 70 the last selected side stays active across windows. On restart, if RSI is in the middle range, the bot waits for the first extreme. Buy 50 shares every 10 seconds from 10 through 290 seconds, for up to 29 scheduled entries. No probability model, edge gate or price-band filter. Cash, the existing $0.02 minimum ask, fresh quotes, real liquidity and TP/SL still apply.</p></div>
+    <div><div class="eyebrow">WILDER RSI(14) · CLOSED 5-MINUTE CANDLES</div><h1>RSI extremes select the active side.</h1><p>RSI below 30 selects UP; RSI above 70 selects DOWN. Between 30 and 70 the last selected side stays active across windows. On startup in the middle band, the bot restores the latest extreme from its last 50 closed RSI readings; if none exists, it waits for a new extreme. Buy 50 shares every 10 seconds from 10 through 290 seconds, for up to 29 scheduled entries. No probability model, edge gate or price-band filter. Cash, the existing $0.02 minimum ask, fresh quotes, real liquidity and TP/SL still apply.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
@@ -54,8 +54,9 @@
     <article class="prob down"><div class="prob-head"><span>DOWN · WINDOW DIRECTION</span><span id="downEdge">50 / 10s</span></div><div class="prob-price" id="downProb">WAIT</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">50-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Window decision</span><strong id="downNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="downSignal">WAIT</strong></div></div></article>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>RSI signal · Wilder 14 · closed 5m candles</h2><small id="trendStatus">Waiting for RSI history</small></div>
+    <div class="section-head"><h2>RSI chart · Wilder 14 · last 50 closed 5m readings</h2><small id="trendStatus">Waiting for RSI history</small></div>
     <div class="rsi-head"><div><span>Active side</span><strong id="rsiDir" class="dir-NONE">—</strong></div><div><span>Latest RSI(14)</span><strong id="rsiVal">—</strong></div><div><span>RSI zone</span><strong id="rsiZone" style="font-size:clamp(14px,1.8vw,19px)">—</strong></div><div><span>Last closed candle</span><strong id="rsiLast" style="font-size:clamp(13px,1.6vw,17px)">—</strong></div></div>
+    <div id="rsiChart" class="rsi-chart-wrap" aria-label="RSI line chart"></div>
     <div id="rsiStatus" class="formula">Waiting for 15 contiguous closed five-minute BTC candles.</div>
   </section>
   <section class="grid" style="margin-top:12px">
@@ -79,9 +80,9 @@
   <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-     <div class="formula">RSI(14) uses Wilder smoothing on contiguous, fully closed 5m BTC candles. RSI below 30 selects UP; RSI above 70 selects DOWN. Values from 30 through 70 keep the last selected side, including across window boundaries. If the bot starts in this middle band, it waits for an extreme. Missing, stale or gapped RSI history blocks new entries. Scheduled buys: 50 shares at 10, 20, …, 290 seconds, maximum 1,450 shares if all 29 entries fill. Missed or blocked slots are skipped, never accumulated or retried in a burst. No price-band filter, probability model or edge gate. The $0.02 minimum ask, cash, fresh quotes and real visible depth remain required. RSI side changes do not close existing positions. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. Expiry and original-market recovery remain unchanged. Learning logs cannot change the fixed sizing or schedule.</div>
+     <div class="formula">RSI(14) uses Wilder smoothing on contiguous, fully closed 5m BTC candles. RSI below 30 selects UP; RSI above 70 selects DOWN. Values from 30 through 70 keep the last selected side, including across window boundaries. On startup in the middle band, restore the latest extreme from the last 50 closed RSI readings; if none exists, wait for a new extreme. The chart and strategy use closed candles only. Missing, stale or gapped RSI history blocks new entries. Scheduled buys: 50 shares at 10, 20, …, 290 seconds, maximum 1,450 shares if all 29 entries fill. Missed or blocked slots are skipped, never accumulated or retried in a burst. No price-band filter, probability model or edge gate. The $0.02 minimum ask, cash, fresh quotes and real visible depth remain required. RSI side changes do not close existing positions. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. Expiry and original-market recovery remain unchanged. Learning logs cannot change the fixed sizing or schedule.</div>
   </section>
-  <p class="footer">Paper only—no live orders. The selected RSI side carries across five-minute windows and changes only on a closed-candle RSI extreme. A fresh process starts without a side and waits for RSI below 30 or above 70. Entries are scheduled from 10 through 290 seconds. Exactly one attempt per slot; real liquidity and paper cash are required. Persistent learning logs and RSI-compatible regression remain available, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
+ <p class="footer">Paper only—no live orders. The selected RSI side carries across five-minute windows and changes only on a closed-candle RSI extreme. A fresh process scans the latest 50 closed RSI readings to restore the most recent extreme; it waits for a new extreme if none is present. Entries are scheduled from 10 through 290 seconds. Exactly one attempt per slot; real liquidity and paper cash are required. Persistent learning logs and RSI-compatible regression remain available, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -106,7 +107,7 @@ async function pollLearning(){
   const state=await response.json(),latest=state.tuningRuns?.[0]?.result;
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
     const evaluation=window.latestStrategyState?.learning?.lastEvaluation;
-    $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">50 shares / 10 seconds · 10–290s · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting RSI policy samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Side selection</span><span class="muted">RSI below 30: UP · above 70: DOWN · 30–70 holds the last side across windows</span></div>`;
+   $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">50 shares / 10 seconds · 10–290s · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting RSI policy samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Side selection</span><span class="muted">RSI below 30: UP · above 70: DOWN · neutral keeps last side; startup scans last 50 closed RSI readings</span></div>`;
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -134,7 +135,25 @@ function renderPositions(positions){
   $(prefix+'Realized').className=Number(p.realizedPnl)>=0?'pnl pos':'pnl neg';
  }
 }
-function renderRsi(state){
+ let lastRsiChartKey='';
+ function renderRsiChart(r){
+   const points=(Array.isArray(r.history)?r.history:[]).filter(point=>isNumeric(point?.value)&&isNumeric(point?.end));
+   const key=`${r.status||''}|${points.map(point=>`${point.end}:${Number(point.value).toFixed(3)}`).join(',')}`;
+   if(key===lastRsiChartKey)return;
+   lastRsiChartKey=key;
+   if(!points.length){
+    $('rsiChart').innerHTML='<div class="rsi-chart-empty">Waiting for closed-candle RSI history</div>';
+    return;
+   }
+   const width=1000,height=250,left=54,right=18,top=18,bottom=32,plotWidth=width-left-right,plotHeight=height-top-bottom;
+   const x=i=>left+(points.length===1?plotWidth:i*plotWidth/(points.length-1));
+   const y=value=>top+(100-Number(value))*plotHeight/100;
+   const path=points.map((point,i)=>`${i?'L':'M'}${x(i).toFixed(1)},${y(point.value).toFixed(1)}`).join(' ');
+   const latest=points[points.length-1],latestX=x(points.length-1),latestY=y(latest.value);
+   const grid=[100,70,50,30,0].map(value=>`<g><line x1="${left}" y1="${y(value).toFixed(1)}" x2="${width-right}" y2="${y(value).toFixed(1)}" class="${value===30||value===70?'threshold':'gridline'}"/><text x="${left-10}" y="${(y(value)+4).toFixed(1)}" text-anchor="end" class="axis">${value}</text></g>`).join('');
+   $('rsiChart').innerHTML=`<svg class="rsi-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="Wilder RSI 14 over ${points.length} closed five-minute candles"><rect x="${left}" y="${top}" width="${plotWidth}" height="${(y(70)-top).toFixed(1)}" fill="rgba(255,111,126,.07)"/><rect x="${left}" y="${y(30).toFixed(1)}" width="${plotWidth}" height="${(top+plotHeight-y(30)).toFixed(1)}" fill="rgba(57,217,154,.07)"/>${grid}<path d="${path}" fill="none" stroke="#51d9ef" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/><circle cx="${latestX.toFixed(1)}" cy="${latestY.toFixed(1)}" r="5" fill="#51d9ef" stroke="#0b121c" stroke-width="3"/><text x="${Math.min(width-right-4,latestX-8).toFixed(1)}" y="${Math.max(top+14,latestY-12).toFixed(1)}" text-anchor="end" class="latest">${Number(latest.value).toFixed(1)}</text><text x="${left}" y="${height-8}" class="axis">Oldest</text><text x="${width-right}" y="${height-8}" text-anchor="end" class="axis">Latest · closed 5m</text></svg>`;
+ }
+ function renderRsi(state){
   const r=state?.rsi||{},st=r.status||'WAITING_HISTORY',value=st==='READY'&&isNumeric(r.value)?Number(r.value):null;
   const dir=state.activeSide||null,zone=r.bucket||'—';
   $('rsiDir').textContent=dir||'NO SIDE';$('rsiDir').className='dir-'+(dir||'NONE');
@@ -145,6 +164,7 @@ function renderRsi(state){
   $('rsiStatus').className='formula '+(st==='READY'?'st-READY':st==='STALE'||st==='INVALID_HISTORY'?'st-STALE':'st-WAITING_HISTORY');
   $('rsiLast').textContent=isNumeric(r.signalAt)?time(r.signalAt)+' UTC':'—';
   $('trendStatus').textContent=`5m · Wilder RSI(${r.period||14}) · ${st.replace(/_/g,' ')} · ${(state.windowDecision?.status||'OBSERVING').replace(/_/g,' ')}`;
+   renderRsiChart(r);
 }
 
 async function poll(){
