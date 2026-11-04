@@ -250,6 +250,10 @@ function sign(value, epsilon = 1e-10) {
 }
 
 function chooseFallbackSide({ price15m, ema200, ema200Slope, previousSide, last5m, last15m, last1m }) {
+  if (last5m.close !== last5m.open) {
+    return { side: last5m.close > last5m.open ? 'UP' : 'DOWN', tieBreak: 'LAST_5M_CANDLE' };
+  }
+
   const priceTrend = sign(price15m - ema200);
   const slopeTrend = sign(ema200Slope);
   if (priceTrend > 0 && slopeTrend > 0) {
@@ -257,9 +261,6 @@ function chooseFallbackSide({ price15m, ema200, ema200Slope, previousSide, last5
   }
   if (priceTrend < 0 && slopeTrend < 0) {
     return { side: 'DOWN', tieBreak: '15M_EMA200_TREND' };
-  }
-  if (last5m.close !== last5m.open) {
-    return { side: last5m.close > last5m.open ? 'UP' : 'DOWN', tieBreak: 'LAST_5M_CANDLE' };
   }
   if (previousSide === 'UP' || previousSide === 'DOWN') {
     return { side: previousSide, tieBreak: 'PREVIOUS_SIDE' };

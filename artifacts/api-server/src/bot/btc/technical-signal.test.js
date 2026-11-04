@@ -77,24 +77,33 @@ test('fallback always returns a selected side when no setup confirms', () => {
   assert.equal(selection.confirmed, false);
 });
 
-test('fallback prioritizes aligned 15m trend, then the latest 5m candle, then prior side', () => {
-  const trend = chooseFallbackSide({
+test('fallback prioritizes the latest 5m candle and uses aligned 15m trend on a doji', () => {
+  const downCandle = chooseFallbackSide({
     price15m: 101, ema200: 100, ema200Slope: 1,
     previousSide: 'DOWN',
     last5m: { open: 102, close: 101 },
     last15m: { open: 99, close: 100 },
     last1m: null,
   });
-  assert.deepEqual(trend, { side: 'UP', tieBreak: '15M_EMA200_TREND' });
+  assert.deepEqual(downCandle, { side: 'DOWN', tieBreak: 'LAST_5M_CANDLE' });
 
-  const candle = chooseFallbackSide({
-    price15m: 101, ema200: 100, ema200Slope: -1,
+  const upCandle = chooseFallbackSide({
+    price15m: 99, ema200: 100, ema200Slope: -1,
     previousSide: 'DOWN',
     last5m: { open: 100, close: 101 },
     last15m: { open: 99, close: 100 },
     last1m: null,
   });
-  assert.deepEqual(candle, { side: 'UP', tieBreak: 'LAST_5M_CANDLE' });
+  assert.deepEqual(upCandle, { side: 'UP', tieBreak: 'LAST_5M_CANDLE' });
+
+  const trendOnDoji = chooseFallbackSide({
+    price15m: 99, ema200: 100, ema200Slope: -1,
+    previousSide: 'UP',
+    last5m: { open: 100, close: 100 },
+    last15m: { open: 100, close: 100 },
+    last1m: null,
+  });
+  assert.deepEqual(trendOnDoji, { side: 'DOWN', tieBreak: '15M_EMA200_TREND' });
 
   const previous = chooseFallbackSide({
     price15m: 100, ema200: 100, ema200Slope: 0,
@@ -121,7 +130,7 @@ test('each valid window gets a deterministic side from closed candles', () => {
   assert.equal(signal.setup, 'DIRECTIONAL_FALLBACK');
   assert.equal(signal.confirmed, false);
   assert.equal(signal.score, null);
-  assert.equal(signal.fallbackRule, '15M_EMA200_TREND');
+  assert.equal(signal.fallbackRule, 'LAST_5M_CANDLE');
   assert.equal(signal.signalAt, Math.floor((NOW + 1_000) / (5 * 60_000)) * (5 * 60_000));
 });
 

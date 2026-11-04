@@ -155,7 +155,8 @@ test("dashboard presents hybrid setups, fallback direction, and unchanged execut
   assert.match(html, /500 SHARES \/ MINUTE/);
   assert.match(html, /Scenario A/);
   assert.match(html, /Scenario B/);
-  assert.match(html, /fallback uses an aligned 15m EMA200 trend/);
+  assert.match(html, /latest closed 5m candle first/i);
+  assert.match(html, /doji.*aligned 15m EMA200/i);
   assert.match(html, /15m EMA200/);
   assert.match(html, /Stoch RSI/);
   assert.match(html, /RSI\(7\) divergence/);
