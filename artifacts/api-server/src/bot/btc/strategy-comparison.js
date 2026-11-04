@@ -207,7 +207,7 @@ function compareStrategies(input, { minimumTrain = 20, minimumTest = 10 } = {}) 
       'Trailing protects the aggregate open position; activation uses net visible-depth liquidation profit per share.',
       'Trailing triggers stop all later scheduled buys in that window; insufficient full exit depth defers the exit.',
       'Each window starts with the same $10,000 paper cash. Summed P&L is not a continuous funded account simulation.',
-      'Original 50-share schedule, entry liquidity, fees and threshold/expiry conventions are retained.',
+      'Replay uses the current four 500-share minute checkpoints and price-filter carry, with recorded liquidity and the existing fee/expiry conventions.',
       'Original TP/SL and expiry are paper marks, not proof of executable live fills.',
       'Legacy log times use the upper bound of their 500ms collection bucket; slot timing remains approximate.',
       'Peak giveback uses bid marks; drawdown is measured between closed windows, not full intrawindow drawdown.',

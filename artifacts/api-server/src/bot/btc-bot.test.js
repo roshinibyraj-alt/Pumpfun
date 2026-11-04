@@ -152,7 +152,7 @@ test("dashboard presents hybrid setups, fallback direction, and unchanged execut
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
   assert.match(html, /BTC HYBRID PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
-  assert.match(html, /50 SHARES \/ 10 SECONDS/);
+  assert.match(html, /500 SHARES \/ MINUTE/);
   assert.match(html, /Scenario A/);
   assert.match(html, /Scenario B/);
   assert.match(html, /fallback uses an aligned 15m EMA200 trend/);
@@ -164,8 +164,12 @@ test("dashboard presents hybrid setups, fallback direction, and unchanged execut
   assert.match(html, /Selected signal rule/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
-  assert.match(html, /10 through 290 seconds/);
-  assert.match(html, /up to 29 scheduled entries/);
+  assert.match(html, /At 1, 2, 3 and 4 minutes/);
+  assert.match(html, /price-filtered shares carry forward/);
+  assert.match(html, /maximum planned volume is 2,000 shares per window/i);
+  assert.match(html, /Completed-window performance &amp; global equity/);
+  assert.match(html, /Window win rate/);
+  assert.match(html, /Equity = cash \+ open positions marked at fresh own-side best bids/);
   assert.match(html, /No probability model/);
   assert.match(html, /Signal changes do not close existing positions/);
   assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
@@ -224,9 +228,20 @@ test("dashboard renders locked, skipped and observing states without probability
   assert.equal(elements.upSignal.textContent, "WAIT DATA");
   delete state.technicalSignal;
   context.renderPositions({});
-  context.renderTrades([{ side: "UP", shares: 50, openedAt: 120000, scheduledAt: 120000, status: "OPEN" }]);
+  context.renderTrades([{ side: "UP", shares: 500, openedAt: 120000, scheduledAt: 120000, status: "OPEN" }]);
   assert.match(elements.trades.innerHTML, /Scheduled/);
+  assert.match(elements.trades.innerHTML, /Price cap · carry/);
   assert.doesNotMatch(elements.trades.innerHTML, /Model probability/);
+  context.renderAnalytics({
+    windowPerformance: { completed: 3, wins: 2, losses: 1, flats: 0, winRate: 2 / 3, netPnl: 12.5 },
+    equityHistory: [
+      { ts: 1_800_000_000_000, accountSessionStartedAt: 1_800_000_000_000, equity: 10000 },
+      { ts: 1_800_000_030_000, accountSessionStartedAt: 1_800_000_000_000, equity: 10012.5 },
+    ],
+  });
+  assert.equal(elements.completedWindows.textContent, "3");
+  assert.equal(elements.windowWinRate.textContent, "66.7%");
+  assert.match(elements.equityChart.innerHTML, /<svg/);
   state.activeSide = null;
   state.windowDecision.status = "SKIP_WINDOW";
   context.renderSide("UP", state);

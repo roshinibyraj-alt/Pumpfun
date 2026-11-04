@@ -25,6 +25,7 @@
     .panel{padding:18px;margin-top:12px}.section-head{margin-bottom:12px}.section-head h2{font-size:15px;margin:0}.section-head small{font-size:11px}
      .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:640px}th,td{text-align:left;padding:11px 9px;border-top:1px solid #263447;font-size:12px}th{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
      .metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}.metric-grid div{background:#0b121c;border:1px solid #202e40;border-radius:9px;padding:12px}.metric-grid span{display:block;color:var(--muted);font-size:10px;letter-spacing:.1em;text-transform:uppercase}.metric-grid strong{display:block;margin-top:4px;font:800 clamp(19px,2.8vw,28px) ui-monospace,monospace}@media(max-width:800px){.metric-grid{grid-template-columns:1fr 1fr}}
+    .equity-chart{width:100%;overflow:hidden;border:1px solid #202e40;border-radius:10px;background:#0b121c}.equity-chart svg{display:block;width:100%;height:auto;min-height:210px}.equity-gridline{stroke:#263447;stroke-width:1}.equity-line{fill:none;stroke:var(--cyan);stroke-width:3;stroke-linejoin:round;stroke-linecap:round}.equity-axis{fill:var(--muted);font:11px ui-monospace,monospace}.equity-point{fill:var(--cyan);stroke:#0b121c;stroke-width:2}
     .side{font-weight:800}.side.UP,.pnl.pos{color:var(--green)}.side.DOWN,.pnl.neg{color:var(--red)}.edge-good{color:var(--green)}.edge-bad{color:var(--red)}
     .empty{padding:24px 10px;text-align:center;color:var(--muted);border-top:1px solid var(--line)}.formula{font:11px ui-monospace,monospace;color:#bbcadb;background:#0b121c;border:1px solid #202e40;padding:12px;border-radius:9px;margin-top:10px}
     .status{font:10px ui-monospace,monospace;color:var(--muted)}.footer{margin-top:16px;color:var(--muted);font-size:10px;line-height:1.6}
@@ -36,10 +37,10 @@
 <main>
   <header class="top">
     <div><div class="brand">BTC HYBRID PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
-    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 50 SHARES / 10 SECONDS</span><span id="run" class="pill">Connecting</span></div>
+    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 500 SHARES / MINUTE</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">5M TREND &amp; RANGE · 15M EMA200 · CLOSED CANDLES</div><h1>A directional signal for every valid window.</h1><p>Scenario A follows a trend after an EMA21/VWAP pullback, a Stoch RSI extreme-cross and a signed-volume spike. Scenario B fades a Bollinger Band extreme in a range with RSI(7) divergence. If neither setup confirms, the fallback uses an aligned 15m EMA200 trend, then the latest closed 5m candle, then the previous side on a doji. Buy 50 shares every 10 seconds from 10 through 290 seconds, for up to 29 scheduled entries. No probability model, edge gate or price-band filter. Cash, the existing $0.02 minimum ask, fresh quotes, real liquidity and TP/SL still apply.</p></div>
+    <div><div class="eyebrow">5M TREND &amp; RANGE · 15M EMA200 · CLOSED CANDLES</div><h1>A directional signal for every valid window.</h1><p>Scenario A follows a trend after an EMA21/VWAP pullback, a Stoch RSI extreme-cross and a signed-volume spike. Scenario B fades a Bollinger Band extreme in a range with RSI(7) divergence. If neither setup confirms, the fallback uses an aligned 15m EMA200 trend, then the latest closed 5m candle, then the previous side on a doji. At 1, 2, 3 and 4 minutes, buy 500 shares if the selected side’s best ask is below $0.40, $0.60, $0.70 and $0.80 respectively. Price-filtered shares carry forward to the next qualifying checkpoint in that same window. Cash, the existing $0.02 minimum ask, fresh quotes, visible depth and TP/SL still apply.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
@@ -47,11 +48,11 @@
     <article class="card"><div class="label">Selected signal rule</div><div class="value" id="signalRule" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot" id="signalRuleHint">Waiting for closed-candle data</div></article>
     <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
     <article class="card"><div class="label">Current active side</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Scenario A, Scenario B or directional fallback</div></article>
-    <article class="card"><div class="label">Next scheduled entry · UTC</div><div class="value" id="zscore">—</div><div class="foot">10s, 20s, …, 290s · maximum 29 entries</div></article>
+    <article class="card"><div class="label">Next scheduled entry · UTC</div><div class="value" id="zscore">—</div><div class="foot" id="scheduleHint">1m &lt;$0.40 · 2m &lt;$0.60 · 3m &lt;$0.70 · 4m &lt;$0.80</div></article>
   </section>
   <section class="prob-grid">
-    <article class="prob up"><div class="prob-head"><span>UP · WINDOW DIRECTION</span><span id="upEdge">50 / 10s</span></div><div class="prob-price" id="upProb">WAIT</div><div class="bar"><i id="upBar"></i></div><div class="prob-meta"><div><span id="upAskLabel">50-share avg ask</span><strong id="upAsk">—</strong></div><div><span>Window decision</span><strong id="upNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="upSignal">WAIT</strong></div></div></article>
-    <article class="prob down"><div class="prob-head"><span>DOWN · WINDOW DIRECTION</span><span id="downEdge">50 / 10s</span></div><div class="prob-price" id="downProb">WAIT</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">50-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Window decision</span><strong id="downNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="downSignal">WAIT</strong></div></div></article>
+    <article class="prob up"><div class="prob-head"><span>UP · WINDOW DIRECTION</span><span id="upEdge">500 / MIN</span></div><div class="prob-price" id="upProb">WAIT</div><div class="bar"><i id="upBar"></i></div><div class="prob-meta"><div><span id="upAskLabel">500-share avg ask</span><strong id="upAsk">—</strong></div><div><span>Window decision</span><strong id="upNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="upSignal">WAIT</strong></div></div></article>
+    <article class="prob down"><div class="prob-head"><span>DOWN · WINDOW DIRECTION</span><span id="downEdge">500 / MIN</span></div><div class="prob-price" id="downProb">WAIT</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">500-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Window decision</span><strong id="downNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="downSignal">WAIT</strong></div></div></article>
   </section>
   <section class="panel">
     <div class="section-head"><h2>Hybrid signal decision</h2><small id="technicalStatus">Waiting for closed-candle history</small></div>
@@ -65,12 +66,24 @@
     <article class="card"><div class="label">Settled signals</div><div class="value" id="settled">—</div><div class="foot" id="openCount">— open positions</div></article>
     <article class="card"><div class="label">Bot state</div><div class="value" id="feedState">—</div><div class="foot" id="updated">Waiting for first scan</div></article>
   </section>
+  <section class="panel">
+    <div class="section-head"><h2>Completed-window performance &amp; global equity</h2><small id="analyticsStatus">Loading persistent account history</small></div>
+    <div class="metric-grid">
+      <div><span>Completed traded windows</span><strong id="completedWindows">—</strong></div>
+      <div><span>Window win rate</span><strong id="windowWinRate">—</strong></div>
+      <div><span>Wins · losses · flat</span><strong id="windowOutcomes">—</strong></div>
+      <div><span>Net window P&amp;L</span><strong id="windowNetPnl">—</strong></div>
+    </div>
+    <div class="section-head"><h2>Account equity</h2><small id="equityCurrent">Latest marked value —</small></div>
+    <div id="equityChart" class="equity-chart"><div class="empty">Waiting for fresh equity snapshots.</div></div>
+    <div class="formula">Equity = cash + open positions marked at fresh own-side best bids, less estimated exit fees. Samples are saved in persistent storage; stale or unavailable marks are omitted. A process restart starts a separate paper-account segment.</div>
+  </section>
   <section class="position-grid" aria-label="Open paper positions by side">
     <article class="position-card up"><div class="position-title">UP · ACCUMULATED POSITION</div><div class="position-shares" id="upShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="upAverageCost">—</strong></div><div><span>Unrealized P&amp;L</span><strong id="upUnrealized">—</strong></div><div><span>Realized P&amp;L</span><strong id="upRealized">—</strong></div><div><span>Open cost basis</span><strong id="upCostBasis">—</strong></div><div><span>Live best bid</span><strong id="upMarkBid">—</strong></div><div><span>Marked value</span><strong id="upMarkedValue">—</strong></div></div></article>
     <article class="position-card down"><div class="position-title">DOWN · ACCUMULATED POSITION</div><div class="position-shares" id="downShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="downAverageCost">—</strong></div><div><span>Unrealized P&amp;L</span><strong id="downUnrealized">—</strong></div><div><span>Realized P&amp;L</span><strong id="downRealized">—</strong></div><div><span>Open cost basis</span><strong id="downCostBasis">—</strong></div><div><span>Live best bid</span><strong id="downMarkBid">—</strong></div><div><span>Marked value</span><strong id="downMarkedValue">—</strong></div></div></article>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>Paper trade history</h2><small>Fixed 50 shares · scheduled every 10 seconds</small></div>
+    <div class="section-head"><h2>Paper trade history</h2><small>500-share checkpoints · price-filter carry is shown per lot</small></div>
     <div id="trades" class="table-wrap"><div class="empty">Waiting for a valid hybrid signal.</div></div>
   </section>
   <section class="panel">
@@ -80,9 +93,9 @@
   <section class="panel">
     <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-      <div class="formula">Scenario A: 5m EMA9/EMA21 and 15m EMA200 trend alignment, EMA21/VWAP pullback, Stoch RSI crossing out of oversold/overbought, and directional volume spike. Scenario B: flat 15m EMA200, parallel 5m Bollinger Bands, outer-band touch and confirmed RSI(7) divergence. Otherwise, the deterministic fallback uses aligned 15m EMA200 trend, latest closed 5m candle, then previous side on a doji. It is not a confirmed setup or a profit guarantee. Scheduled buys: 50 shares at 10, 20, …, 290 seconds, maximum 1,450 shares if all 29 entries fill. Missed or blocked slots are skipped, never accumulated or retried in a burst. No price-band filter, probability model or edge gate. The $0.02 minimum ask, cash, fresh quotes and real visible depth remain required. Signal changes do not close existing positions. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. The range VWAP target is informational; existing TP/SL and expiry exits remain unchanged. Learning logs cannot change fixed sizing or timing.</div>
+      <div class="formula">Scenario A: 5m EMA9/EMA21 and 15m EMA200 trend alignment, EMA21/VWAP pullback, Stoch RSI crossing out of oversold/overbought, and directional volume spike. Scenario B: flat 15m EMA200, parallel 5m Bollinger Bands, outer-band touch and confirmed RSI(7) divergence. Otherwise, the deterministic fallback uses aligned 15m EMA200 trend, latest closed 5m candle, then previous side on a doji. It is not a confirmed setup or a profit guarantee. At 1/2/3/4 minutes, attempt 500 shares if the selected side’s best ask is below $0.40/$0.60/$0.70/$0.80. Shares missed specifically by this price filter accumulate and join the next qualifying checkpoint in the same window; the carry resets at the next window. Maximum planned volume is 2,000 shares per window if all checkpoints qualify. Other blocks (cash, $0.02 minimum ask, stale book, or insufficient visible depth) do not add shares to the carry. No probability model or edge gate. Signal changes do not close existing positions. TP: own-side bid ≥ $0.99 credits $1.00/share; SL: bid ≤ $0.01 credits $0.00/share, before fees. The range VWAP target is informational; existing TP/SL and expiry exits remain unchanged. Learning logs cannot change fixed sizing or timing.</div>
   </section>
- <p class="footer">Paper only—no live orders. The hybrid strategy uses closed 5m and 15m candles plus closed 1m volume data. Each valid window has a selected direction, including fallback when no named setup confirms; this does not guarantee a fill. Side changes affect future entries only. Exactly one attempt per scheduled slot; real liquidity and paper cash are required. Regression replays only compatible hybrid-signal logs, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
+  <p class="footer">Paper only—no live orders. The hybrid strategy uses closed 5m and 15m candles plus closed 1m volume data. Each valid window has a selected direction, including fallback when no named setup confirms; this does not guarantee a fill. Side changes affect future entries only. Each of four minute checkpoints gets one attempt; only price-filtered shares carry forward. Visible liquidity and paper cash are still required. Regression replays only compatible hybrid-signal logs, without automatic setting changes. Existing TP/SL and original-market expiry recovery remain active.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -95,7 +108,7 @@ const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'
 const resultLabel=t=>t.status==='OPEN'?(t.settlementStatus==='AWAITING_SETTLEMENT'?'AWAITING SETTLEMENT':'OPEN'):t.finalOutcome==='TAKE_PROFIT'?'TP · $1.00':t.finalOutcome==='STOP_LOSS'?'SL · $0.00':['WINDOW_PRICE_EXIT','WINDOW_RECOVERY_EXIT'].includes(t.finalOutcome)?'WINDOW · '+money(t.exitPrice):t.finalOutcome==='MARKET_RESOLUTION'?'RESOLVED · '+money(t.exitPrice):t.finalOutcome||'—';
 function renderTrades(trades){
   if(!trades?.length){$('trades').innerHTML='<div class="empty">No signal entries yet.</div>';return}
-  $('trades').innerHTML='<table><thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry avg</th><th>Peak bid</th><th>Scheduled · UTC</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${Number(t.shares).toFixed(0)}</td><td>${money(t.entryPrice)}</td><td>${money(t.peakBid)}<div class="muted">${time(t.peakBidAt)}</div></td><td>${time(t.scheduledAt)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
+  $('trades').innerHTML='<table><thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry avg</th><th>Price cap · carry</th><th>Peak bid</th><th>Scheduled · UTC</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${Number(t.shares).toFixed(0)}</td><td>${money(t.entryPrice)}</td><td>${money(t.entryPriceLimit)} · +${Number(t.priceFilteredSharesIncluded||0).toLocaleString()} shares</td><td>${money(t.peakBid)}<div class="muted">${time(t.peakBidAt)}</div></td><td>${time(t.scheduledAt)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
 }
 function renderEvents(events){
  $('events').innerHTML=events?.length?events.slice(0,10).map(e=>`<div class="trade"><span>${safe(e.event.replaceAll('_',' '))} · ${safe(e.side||'')}</span><span class="muted">${time(e.ts)}${e.edge!=null?' · edge '+pct(e.edge):''}${e.realizedPnl!=null?' · '+signed(e.realizedPnl):''}</span></div>`).join(''):'<div class="empty">No signal activity yet.</div>';
@@ -104,12 +117,62 @@ async function pollLearning(){
  try{
   const response=await fetch('/api/strategy/learning',{cache:'no-store'});
   if(!response.ok)throw Error('Learning API HTTP '+response.status);
-  const state=await response.json(),latest=state.tuningRuns?.[0]?.result;
+  const state=await response.json();
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
     const evaluation=window.latestStrategyState?.learning?.lastEvaluation;
-    $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">50 shares / 10 seconds · 10–290s · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting compatible hybrid samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Directional fallback</span><span class="muted">Aligned 15m EMA200 trend → latest closed 5m candle → previous side on a doji</span></div>`;
+    $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">500 shares at 1m / 2m / 3m / 4m · price-filter carry only · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting compatible hybrid samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Directional fallback</span><span class="muted">Aligned 15m EMA200 trend → latest closed 5m candle → previous side on a doji</span></div>`;
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
+}
+function renderEquityChart(history){
+ const points=(history||[]).filter(p=>isNumeric(p.ts)&&isNumeric(p.equity)).sort((a,b)=>Number(a.ts)-Number(b.ts));
+ if(!points.length){$('equityChart').innerHTML='<div class="empty">Waiting for the first fresh marked equity snapshot.</div>';$('equityCurrent').textContent='Latest marked value —';return}
+ const width=900,height=260,pad={left:86,right:20,top:18,bottom:38};
+ const values=points.map(p=>Number(p.equity)),low=Math.min(...values),high=Math.max(...values);
+ const span=high-low||Math.max(Math.abs(high)*.01,1),min=low-span*.12,max=high+span*.12;
+ const firstTs=Number(points[0].ts),lastTs=Number(points[points.length-1].ts),timeSpan=lastTs-firstTs||1;
+ const x=p=>pad.left+(Number(p.ts)-firstTs)/timeSpan*(width-pad.left-pad.right);
+ const y=p=>pad.top+(max-Number(p.equity))/(max-min)*(height-pad.top-pad.bottom);
+ const segments=[];
+ for(const point of points){
+  const session=String(point.accountSessionStartedAt??'default');
+  let segment=segments[segments.length-1];
+  if(!segment||segment.session!==session||Number(point.ts)-segment.lastTs>120000){
+   segment={session,points:[],lastTs:Number(point.ts)};segments.push(segment);
+  }
+  segment.points.push(point);segment.lastTs=Number(point.ts);
+ }
+ const grid=Array.from({length:5},(_,i)=>{
+  const value=max-(max-min)*i/4,yy=pad.top+(height-pad.top-pad.bottom)*i/4;
+  return `<line class="equity-gridline" x1="${pad.left}" y1="${yy}" x2="${width-pad.right}" y2="${yy}"></line><text class="equity-axis" x="${pad.left-10}" y="${yy+4}" text-anchor="end">${safe(money(value,0))}</text>`;
+ }).join('');
+ const paths=segments.map(segment=>{
+  const d=segment.points.map((p,i)=>`${i?'L':'M'}${x(p).toFixed(1)},${y(p).toFixed(1)}`).join(' ');
+  return `<path class="equity-line" d="${d}"></path>`;
+ }).join('');
+ const latest=points[points.length-1],latestX=x(latest),latestY=y(latest);
+ const startLabel=new Date(firstTs).toLocaleString('en-AU',{timeZone:'UTC',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
+ const endLabel=new Date(lastTs).toLocaleString('en-AU',{timeZone:'UTC',month:'short',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
+ $('equityChart').innerHTML=`<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Global paper account equity history"><title>Global paper account equity history</title>${grid}${paths}<circle class="equity-point" cx="${latestX}" cy="${latestY}" r="5"></circle><text class="equity-axis" x="${pad.left}" y="${height-10}">${safe(startLabel)} UTC</text><text class="equity-axis" x="${width-pad.right}" y="${height-10}" text-anchor="end">${safe(endLabel)} UTC</text></svg>`;
+ $('equityCurrent').textContent=`Latest ${money(latest.equity)} · ${time(latest.ts)} UTC · ${points.length} saved marks`;
+}
+function renderAnalytics(data){
+ const stats=data?.windowPerformance||{};
+ $('completedWindows').textContent=Number(stats.completed||0).toLocaleString();
+ $('windowWinRate').textContent=pct(stats.winRate);
+ $('windowOutcomes').textContent=`${Number(stats.wins||0)} · ${Number(stats.losses||0)} · ${Number(stats.flats||0)}`;
+ $('windowNetPnl').textContent=signed(stats.netPnl);
+ $('windowNetPnl').className='pnl '+(Number(stats.netPnl)>=0?'pos':'neg');
+ renderEquityChart(data?.equityHistory);
+ $('analyticsStatus').textContent=`A window counts after all its paper positions close · ${Number(stats.completed||0)} completed traded windows`;
+}
+async function pollAnalytics(){
+ try{
+  const response=await fetch('/api/strategy/analytics?limit=1000',{cache:'no-store'});
+  if(!response.ok)throw Error('Analytics API HTTP '+response.status);
+  renderAnalytics(await response.json());
+ }catch(error){$('analyticsStatus').textContent='Performance history unavailable';$('equityChart').innerHTML=`<div class="empty">${safe(error.message)}</div>`}
+ setTimeout(pollAnalytics,15000);
 }
 function renderSide(side,state){
  const active=state.activeSide===side,prefix=side.toLowerCase(),decision=state.windowDecision||{},schedule=state.entrySchedule||{};
@@ -117,9 +180,9 @@ function renderSide(side,state){
  $(prefix+'Prob').textContent=active?(ready?(decision.status==='FALLBACK'?'FALLBACK':'LOCKED'):'WAIT DATA'):state.activeSide?'OFF':decision.status==='SKIP_WINDOW'?'SKIP':'WAIT';
  $(prefix+'Bar').style.width=active?'100%':'0%';
  $(side.toLowerCase()+'Ask').textContent=money(state.quotes?.[side]?.estimatedAverageAsk);
- $(prefix+'AskLabel').textContent='50-share avg ask';
+  $(prefix+'AskLabel').textContent='500-share avg ask';
  $(prefix+'Net').textContent=String(decision.status||'OBSERVING').replace(/_/g,' ');
- $(prefix+'Edge').textContent='50 / 10s';
+  $(prefix+'Edge').textContent='500 / MIN';
  $(prefix+'Signal').textContent=!active?'NO ENTRY':!ready?'WAIT DATA':!schedule.nextEntryAt?'ENTRIES FINISHED':state.entryFilter?.allowed===false?'BLOCKED':schedule.due?'ENTRY SLOT':'NEXT '+time(schedule.nextEntryAt);
 }
 function renderTechnical(state){
@@ -158,13 +221,17 @@ async function poll(){
    const s=await response.json(),account=s.paperAccount||{};window.latestStrategyState=s;
   $('error').style.display=s.error?'block':'none';$('error').textContent=s.error||'';
   $('run').innerHTML=`<i class="dot"></i>${s.running?'SCANNER RUNNING':'SCANNER STOPPED'}`;
-   $('strategyBadge').textContent='PAPER ONLY · 50 SHARES / 10 SECONDS';
+   $('strategyBadge').textContent='PAPER ONLY · 500 SHARES / MINUTE';
   $('remaining').textContent=s.window?`${Math.ceil(s.window.secondsRemaining)} seconds`:'—';
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
      renderSignalRule(s);$('spot').textContent=money(s.spotPrice,2);
   $('gap').textContent='Informational only · no probability model';
      $('expected').textContent=String(s.activeSide||'WAIT');
-   $('zscore').textContent=s.activeSide&&s.entrySchedule?.nextEntryAt?time(s.entrySchedule.nextEntryAt):s.windowDecision?.status==='SKIP_WINDOW'?'SKIP':'—';
+    $('zscore').textContent=s.activeSide&&s.entrySchedule?.nextEntryAt?time(s.entrySchedule.nextEntryAt):s.windowDecision?.status==='SKIP_WINDOW'?'SKIP':'—';
+   const schedule=s.entrySchedule||{};
+   $('scheduleHint').textContent=schedule.nextEntryAt
+     ?`${Math.round((schedule.nextEntryAt-(s.window?.start||schedule.nextEntryAt))/60000)}m · ask < ${money(schedule.nextPriceMaximumAsk)} · ${Number(schedule.nextEntryShares||500).toLocaleString()} shares${Number(schedule.pendingPriceFilteredShares||0)?` (${Number(schedule.pendingPriceFilteredShares).toLocaleString()} carried)`:''}`
+     :'1m <$0.40 · 2m <$0.60 · 3m <$0.70 · 4m <$0.80 · complete';
       renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);renderTechnical(s);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
@@ -177,7 +244,7 @@ async function poll(){
  }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
  setTimeout(poll,1000);
 }
-void poll();void pollLearning();
+void poll();void pollLearning();void pollAnalytics();
 </script>
 </body>
 </html>

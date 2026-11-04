@@ -7,7 +7,7 @@ const { detectTechnicalSignal, METHOD: TECHNICAL_METHOD } = require('./technical
 const { TAKE_PROFIT_BID, STOP_LOSS_BID, thresholdExit, recoverExpiredPositions } = require('./position-exits');
 
 const WINDOW_MS = 5 * 60 * 1000;
-const SHARES_PER_SIGNAL = 50;
+const SHARES_PER_SIGNAL = 500;
 const MIN_EDGE = 0.05;
 const LOW_PRICE_THRESHOLD = 0.25;
 const LOW_PRICE_MIN_EDGE = 0.10;
@@ -16,13 +16,16 @@ const POLL_MS = 500;
 const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const MIN_ENTRY_PRICE = 0.02;
 const OPENING_DELAY_SECONDS = 10;
-const ENTRY_INTERVAL_MS = 10_000;
-const FIRST_ENTRY_SECONDS = OPENING_DELAY_SECONDS;
-const LAST_ENTRY_SECONDS = 290;
-const MAX_ENTRIES_PER_WINDOW = Math.floor((LAST_ENTRY_SECONDS - FIRST_ENTRY_SECONDS) * 1000
-  / ENTRY_INTERVAL_MS) + 1;
-// Permit normal polling/network jitter, but never catch up missed slots in a burst.
-const SLOT_GRACE_MS = 1000;
+const ENTRY_CHECKPOINTS = Object.freeze([
+  { slot: 0, seconds: 60, maximumAsk: 0.40 },
+  { slot: 1, seconds: 120, maximumAsk: 0.60 },
+  { slot: 2, seconds: 180, maximumAsk: 0.70 },
+  { slot: 3, seconds: 240, maximumAsk: 0.80 },
+]);
+const MAX_ENTRIES_PER_WINDOW = ENTRY_CHECKPOINTS.length;
+// The 500ms scan loop gets a small tolerance for network and scheduler jitter.
+const SLOT_GRACE_MS = 5000;
+const EQUITY_SNAPSHOT_INTERVAL_MS = 30_000;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
 const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   openingDelaySeconds: OPENING_DELAY_SECONDS,
@@ -161,8 +164,14 @@ class ProbabilityBot {
     this.windowDecision = { status: 'OBSERVING', side: null };
     this.lastLoggedSignalKey = null;
     this.lastEntrySlot = -1;
+    this.pendingPriceFilteredShares = 0;
     this.entrySequence = 0;
     this.entryWindowStart = null;
+    this.windowResults = new Map();
+    this.finalizedWindowStarts = new Set();
+    this.accountSessionStartedAt = this.now();
+    this.lastEquitySnapshotAt = null;
+    this.equitySnapshotRequested = true;
     this.handledClosedSignals = new Set();
     this.lastLiveSignal = null;
     this.learningStatus = {
@@ -178,12 +187,12 @@ class ProbabilityBot {
     this.priceFeed.start();
   }
 
-  log(event, details = {}) {
+  log(event, details = {}, windowStart = this.market?.start) {
     const ts = this.now();
     this.events.unshift({ ts, event, ...details });
     this.events.length = Math.min(this.events.length, 60);
     if (this.learningStore) this.queuePersistence(() => this.learningStore.recordEvent({
-      ts, windowStart: this.market?.start, event, details,
+      ts, windowStart, event, details,
     }));
   }
 
@@ -285,6 +294,8 @@ class ProbabilityBot {
       }
       if (!this.market) {
         this.processPositionExits(now);
+        this.maybeFinalizeCompletedWindows(now);
+        this.maybeRecordEquitySnapshot(now);
         this.error = 'Waiting for the exact BTC 5-minute UP/DOWN market.';
         this.lastUpdateAt = now;
         return;
@@ -332,16 +343,22 @@ class ProbabilityBot {
       } : null;
       this.statusReason = this.marketSignal?.status !== 'READY'
         ? this.marketSignal?.reason || 'Waiting for valid closed-candle strategy data.'
-        : `${this.marketSignal.confirmed ? 'Confirmed' : 'Fallback'} ${this.marketSignal.setup} · ${this.activeSide}; 50-share entries every 10 seconds from 10 through 290 seconds.`;
+        : `${this.marketSignal.confirmed ? 'Confirmed' : 'Fallback'} ${this.marketSignal.setup} · ${this.activeSide}; 500-share minute checkpoints with price-filter catch-up.`;
       this.probabilityUp = null;
       this.edges = { UP: null, DOWN: null };
-      this.processSignals(this.now());
-      await this.captureLearningSample(this.now());
+      const scanAt = this.now();
+      this.processSignals(scanAt);
+      this.maybeFinalizeCompletedWindows(scanAt);
+      this.maybeRecordEquitySnapshot(scanAt);
+      await this.captureLearningSample(scanAt);
       await this.maybeTune(now);
       this.error = null;
       this.lastUpdateAt = now;
     } catch (error) {
-      this.processPositionExits(this.now());
+      const scanAt = this.now();
+      this.processPositionExits(scanAt);
+      this.maybeFinalizeCompletedWindows(scanAt);
+      this.maybeRecordEquitySnapshot(scanAt);
       this.error = error?.message || 'BTC window strategy scan failed.';
       this.statusReason = this.error;
       this.lastUpdateAt = this.now();
@@ -464,6 +481,7 @@ class ProbabilityBot {
       side: this.activeSide,
     };
     this.lastEntrySlot = -1;
+    this.pendingPriceFilteredShares = 0;
     this.marketSignal = null;
     this.pullback = null;
     this.lastLoggedSignalKey = null;
@@ -474,13 +492,7 @@ class ProbabilityBot {
     this.beginMarketWindow();
     const schedule = this.entrySchedule(now);
     if (!this.activeSide || this.marketSignal?.status !== 'READY' || !schedule.due) return;
-    // One attempt per slot; skipped slots are never accumulated or replayed.
     this.lastEntrySlot = schedule.slot;
-    const filter = this.updateEntryFilter(now);
-    if (filter.blockedReasons.length) {
-      this.log('SCHEDULED_ENTRY_SKIPPED', { slot: schedule.slot, reason: filter.blockedReasons.join(',') });
-      return;
-    }
     const side = this.activeSide;
     const quote = this.quotes[side];
     const fresh = Number.isFinite(quote?.updatedAt) && now >= quote.updatedAt
@@ -492,10 +504,46 @@ class ProbabilityBot {
       });
       return;
     }
-    const fill = this.entryFill(side, SHARES_PER_SIGNAL);
+    const checkpoint = ENTRY_CHECKPOINTS[schedule.slot];
+    const bestAsk = quote.bestAsk == null ? NaN : Number(quote.bestAsk);
+    if (!Number.isFinite(bestAsk)) {
+      this.log('SCHEDULED_ENTRY_SKIPPED', {
+        side, slot: schedule.slot, reason: 'No current best ask',
+      });
+      return;
+    }
+    if (bestAsk >= checkpoint.maximumAsk) {
+      this.pendingPriceFilteredShares += SHARES_PER_SIGNAL;
+      this.log('SCHEDULED_ENTRY_PRICE_FILTERED', {
+        side,
+        slot: schedule.slot,
+        checkpointSeconds: checkpoint.seconds,
+        maximumAsk: checkpoint.maximumAsk,
+        bestAsk: Number.isFinite(bestAsk) ? bestAsk : null,
+        sharesAdded: SHARES_PER_SIGNAL,
+        pendingPriceFilteredShares: this.pendingPriceFilteredShares,
+      });
+      return;
+    }
+    const filter = this.updateEntryFilter(now);
+    if (filter.blockedReasons.length) {
+      this.log('SCHEDULED_ENTRY_SKIPPED', {
+        side, slot: schedule.slot, reason: filter.blockedReasons.join(','),
+        pendingPriceFilteredShares: this.pendingPriceFilteredShares,
+      });
+      return;
+    }
+    const carriedShares = this.pendingPriceFilteredShares;
+    const sharesToBuy = SHARES_PER_SIGNAL + carriedShares;
+    const fill = this.entryFill(side, sharesToBuy);
     if (!fill || fill.totalCost > this.cash) {
       this.log('SCHEDULED_ENTRY_SKIPPED', { side, slot: schedule.slot,
-        reason: !fill ? 'Insufficient visible ask depth for 50 shares' : 'Insufficient paper cash' });
+        reason: !fill
+          ? `Insufficient visible ask depth for ${sharesToBuy} shares`
+          : 'Insufficient paper cash',
+        requestedShares: sharesToBuy,
+        pendingPriceFilteredShares: carriedShares,
+      });
       return;
     }
     const trade = {
@@ -510,6 +558,9 @@ class ProbabilityBot {
       entryKind: 'SCHEDULED_SIGNAL',
       scheduledAt: schedule.scheduledAt,
       entrySlot: schedule.slot,
+      entryPriceLimit: checkpoint.maximumAsk,
+      baseShares: SHARES_PER_SIGNAL,
+      priceFilteredSharesIncluded: carriedShares,
       entryPrice: fill.averagePrice,
       cost: fill.cost,
       fees: fill.fees,
@@ -526,13 +577,21 @@ class ProbabilityBot {
       realizedPnl: null,
     };
     this.cash -= fill.totalCost;
+    this.pendingPriceFilteredShares = 0;
     this.trades.unshift(trade);
+    const windowResult = this.windowResults.get(this.market.start)
+      ?? { entryCount: 0, settledCount: 0, netPnl: 0 };
+    windowResult.entryCount += 1;
+    this.windowResults.set(this.market.start, windowResult);
+    this.equitySnapshotRequested = true;
     let retainedSettled = 0;
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     this.log('PAPER_BUY', {
       tradeId: trade.id,
       entryKind: trade.entryKind, scheduledAt: trade.scheduledAt, slot: trade.entrySlot,
       side, shares: fill.shares, price: fill.averagePrice,
+      priceLimit: checkpoint.maximumAsk,
+      priceFilteredSharesIncluded: carriedShares,
     });
   }
 
@@ -543,17 +602,36 @@ class ProbabilityBot {
   entrySchedule(now = this.now()) {
     const start = this.market?.start;
     if (!Number.isFinite(start)) return { due: false, nextEntryAt: null };
-    const first = start + FIRST_ENTRY_SECONDS * 1000;
-    const last = start + LAST_ENTRY_SECONDS * 1000;
-    const slot = Math.floor((now - first) / ENTRY_INTERVAL_MS);
-    const scheduledAt = first + slot * ENTRY_INTERVAL_MS;
-    const due = slot >= 0 && slot < MAX_ENTRIES_PER_WINDOW && slot > this.lastEntrySlot
-      && now < scheduledAt + SLOT_GRACE_MS && now < this.market.end;
-    const nextSlot = Math.max(0, slot + (slot <= this.lastEntrySlot || now >= scheduledAt + SLOT_GRACE_MS ? 1 : 0));
-    const nextEntryAt = first + nextSlot * ENTRY_INTERVAL_MS;
-    return { due, slot, scheduledAt, nextEntryAt: nextEntryAt <= last ? nextEntryAt : null,
-      firstEntryAt: first, lastEntryAt: last, intervalSeconds: 10, maxEntries: MAX_ENTRIES_PER_WINDOW,
-      lastAttemptedSlot: this.lastEntrySlot };
+    const slot = Math.floor((now - start) / 60_000) - 1;
+    const checkpoint = ENTRY_CHECKPOINTS[slot];
+    const scheduledAt = checkpoint ? start + checkpoint.seconds * 1000 : null;
+    const due = Boolean(checkpoint) && slot > this.lastEntrySlot
+      && now >= scheduledAt && now < scheduledAt + SLOT_GRACE_MS
+      && now < this.market.end;
+    const nextCheckpoint = due
+      ? checkpoint
+      : ENTRY_CHECKPOINTS.find(item => item.slot > this.lastEntrySlot
+        && start + item.seconds * 1000 > now);
+    const nextEntryAt = nextCheckpoint ? start + nextCheckpoint.seconds * 1000 : null;
+    return {
+      due,
+      slot,
+      scheduledAt,
+      nextEntryAt,
+      nextPriceMaximumAsk: nextCheckpoint?.maximumAsk ?? null,
+      nextEntryShares: nextCheckpoint ? SHARES_PER_SIGNAL + this.pendingPriceFilteredShares : null,
+      pendingPriceFilteredShares: this.pendingPriceFilteredShares,
+      firstEntryAt: start + ENTRY_CHECKPOINTS[0].seconds * 1000,
+      lastEntryAt: start + ENTRY_CHECKPOINTS[ENTRY_CHECKPOINTS.length - 1].seconds * 1000,
+      intervalSeconds: 60,
+      maxEntries: MAX_ENTRIES_PER_WINDOW,
+      checkpoints: ENTRY_CHECKPOINTS.map(item => ({
+        slot: item.slot,
+        seconds: item.seconds,
+        maximumAsk: item.maximumAsk,
+      })),
+      lastAttemptedSlot: this.lastEntrySlot,
+    };
   }
 
   processPositionExits(now) {
@@ -632,6 +710,12 @@ class ProbabilityBot {
     if (trade.side === 'UP' || trade.side === 'DOWN') {
       this.realizedPnlBySide[trade.side] += trade.realizedPnl;
     }
+    const windowResult = this.windowResults.get(trade.windowStart);
+    if (windowResult) {
+      windowResult.settledCount += 1;
+      windowResult.netPnl += trade.realizedPnl;
+    }
+    this.equitySnapshotRequested = true;
     this.log('PAPER_EXIT', {
       tradeId: trade.id,
       modelProbability: trade.modelProbability,
@@ -643,7 +727,88 @@ class ProbabilityBot {
       exitFees,
       netPayout,
       realizedPnl: trade.realizedPnl,
-    });
+      windowStart: trade.windowStart,
+    }, trade.windowStart ?? this.market?.start);
+  }
+
+  maybeFinalizeCompletedWindows(now) {
+    for (const [windowStart, result] of this.windowResults) {
+      if (this.finalizedWindowStarts.has(windowStart)
+        || windowStart + WINDOW_MS > now
+        || result.settledCount < result.entryCount
+        || this.trades.some(trade => trade.windowStart === windowStart && trade.status === 'OPEN')) {
+        continue;
+      }
+      const windowResult = {
+        windowStart,
+        windowEnd: windowStart + WINDOW_MS,
+        completedAt: now,
+        tradeCount: result.entryCount,
+        netPnl: Number(result.netPnl.toFixed(8)),
+        outcome: result.netPnl > 1e-8 ? 'WIN' : result.netPnl < -1e-8 ? 'LOSS' : 'FLAT',
+      };
+      this.finalizedWindowStarts.add(windowStart);
+      this.windowResults.delete(windowStart);
+      this.log('PAPER_WINDOW_COMPLETED', windowResult, windowStart);
+      if (this.learningStore && typeof this.learningStore.recordWindowResult === 'function') {
+        this.queuePersistence(() => this.learningStore.recordWindowResult(windowResult));
+      }
+    }
+  }
+
+  calculateGlobalEquity(now = this.now()) {
+    const openTrades = this.trades.filter(trade => trade.status === 'OPEN');
+    const openCost = openTrades.reduce((sum, trade) => sum + trade.totalCost, 0);
+    let markedValue = 0;
+    for (const trade of openTrades) {
+      const quote = trade.marketId === this.market?.id ? this.quotes[trade.side] : null;
+      const bid = quote?.bestBid == null ? NaN : Number(quote.bestBid);
+      const fresh = Number.isFinite(quote?.updatedAt) && now >= quote.updatedAt
+        && now - quote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS
+        && Number.isFinite(bid) && bid >= 0 && bid <= 1;
+      if (!fresh) {
+        return {
+          valid: false,
+          equity: null,
+          cash: this.cash,
+          markedValue: null,
+          unrealizedPnl: null,
+        };
+      }
+      markedValue += trade.shares * bid - estimateTakerFee(bid, trade.shares);
+    }
+    return {
+      valid: true,
+      equity: this.cash + markedValue,
+      cash: this.cash,
+      markedValue,
+      unrealizedPnl: markedValue - openCost,
+    };
+  }
+
+  maybeRecordEquitySnapshot(now = this.now()) {
+    if (!this.learningStore || typeof this.learningStore.recordEquitySnapshot !== 'function') return;
+    const intervalElapsed = this.lastEquitySnapshotAt == null
+      || now - this.lastEquitySnapshotAt >= EQUITY_SNAPSHOT_INTERVAL_MS;
+    if (!this.equitySnapshotRequested && !intervalElapsed) return;
+    const equity = this.calculateGlobalEquity(now);
+    if (!equity.valid) return;
+    this.lastEquitySnapshotAt = now;
+    this.equitySnapshotRequested = false;
+    const openCost = this.trades.filter(trade => trade.status === 'OPEN')
+      .reduce((sum, trade) => sum + trade.totalCost, 0);
+    const realizedPnl = this.cash + openCost - STARTING_CASH;
+    const snapshot = {
+      ts: now,
+      accountSessionStartedAt: this.accountSessionStartedAt,
+      windowStart: this.market?.start ?? null,
+      equity: equity.equity,
+      cash: equity.cash,
+      markedValue: equity.markedValue,
+      realizedPnl,
+      unrealizedPnl: equity.unrealizedPnl,
+    };
+    this.queuePersistence(() => this.learningStore.recordEquitySnapshot(snapshot));
   }
 
   start() {
@@ -675,6 +840,7 @@ class ProbabilityBot {
     const openCost = openTrades.reduce((sum, trade) => sum + trade.totalCost, 0);
     // Reconcile against the cash ledger, not the bounded display history.
     const realizedPnl = this.cash + openCost - STARTING_CASH;
+    const globalEquity = this.calculateGlobalEquity(now);
     const positions = Object.fromEntries(['UP', 'DOWN'].map(side => {
       const sideOpenTrades = openTrades.filter(trade => trade.side === side);
       const shares = sideOpenTrades.reduce((sum, trade) => sum + trade.shares, 0);
@@ -730,11 +896,16 @@ class ProbabilityBot {
         stopLossPayoutPerShare: 0,
         probabilityModelEnabled: false,
         reversalsEnabled: false,
-        entryIntervalSeconds: 10,
-        lastEntrySeconds: LAST_ENTRY_SECONDS,
+        entryIntervalSeconds: 60,
+        lastEntrySeconds: ENTRY_CHECKPOINTS[ENTRY_CHECKPOINTS.length - 1].seconds,
         maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
+        sharesPerEntry: SHARES_PER_SIGNAL,
+        entryPriceCheckpoints: ENTRY_CHECKPOINTS.map(item => ({
+          seconds: item.seconds,
+          maximumAsk: item.maximumAsk,
+        })),
         signalPersistence: 'Select Scenario A in aligned trends, Scenario B in confirmed ranges, otherwise use the aligned 15m EMA200 trend, latest closed 5m candle, previous side on doji, then closed-candle fallback for each valid five-minute window. Stale or insufficient data blocks entries.',
-        entryModel: `50 shares every 10 seconds from ${FIRST_ENTRY_SECONDS} through ${LAST_ENTRY_SECONDS} seconds (${MAX_ENTRIES_PER_WINDOW} scheduled slots). No price-band filter, catch-up shares, probability model or edge gate. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.`,
+        entryModel: 'At 60s / 120s / 180s / 240s, buy 500 shares on the selected side if its best ask is below $0.40 / $0.60 / $0.70 / $0.80 respectively. Shares skipped by those price checks accumulate for the next qualifying checkpoint in the same window. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.',
         model: 'Trend continuation uses 5m EMA9/EMA21 alignment with 15m EMA200, an EMA21/VWAP pullback, Stoch RSI crossing from an extreme, and signed-volume confirmation. Range mean reversion uses a flat 15m EMA200, parallel 5m Bollinger Bands, an outer-band touch, and RSI(7) divergence. A deterministic trend-first fallback selects a side when neither setup confirms. All signals use closed candles; stale history blocks entries.',
         exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
       },
@@ -757,6 +928,10 @@ class ProbabilityBot {
       },
       paperAccount: {
         startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl,
+        equity: globalEquity.valid ? globalEquity.equity : null,
+        markedValue: globalEquity.markedValue,
+        unrealizedPnl: globalEquity.unrealizedPnl,
+        equityMarkStatus: globalEquity.valid ? 'FRESH' : 'WAITING_FOR_FRESH_MARKS',
         wins: this.settledWins, losses: this.settledLosses,
         settled: this.settledCount, openPositions: openTrades.length, positions,
         awaitingSettlement: openTrades.filter(trade => trade.settlementStatus === 'AWAITING_SETTLEMENT').length,

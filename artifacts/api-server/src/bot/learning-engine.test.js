@@ -35,9 +35,9 @@ function samples(side = 'UP') {
   }));
 }
 
-test('hybrid-policy replay matches all 29 timed buys and own-side fee-adjusted P&L', () => {
+test('hybrid-policy replay uses four price checkpoints and own-side fee-adjusted P&L', () => {
   const result = simulateWindow(samples());
-  assert.equal(result.trades, 29);
+  assert.equal(result.trades, 3);
   assert.ok(Number.isFinite(result.pnl));
   assert.ok(Math.abs(result.finalCash - (10000 + result.pnl)) < 1e-8);
 });
@@ -57,9 +57,9 @@ test('replay requires a real timely closing mark; never invents data for an open
 test('regression uses logged technical decisions but never changes fixed execution settings', () => {
   const result = choosePaperSettings([{ windowStart: START, samples: samples() }], { sharesPerSignal: 999 });
   assert.equal(result.applied, false);
-  assert.equal(result.settings.sharesPerSignal, 50);
+  assert.equal(result.settings.sharesPerSignal, 500);
   assert.equal(DEFAULT_SETTINGS.openingDelaySeconds, 10);
   assert.equal(result.windows, 1);
-  assert.equal(result.baseline.trades, 29);
+  assert.equal(result.baseline.trades, 3);
 });
 

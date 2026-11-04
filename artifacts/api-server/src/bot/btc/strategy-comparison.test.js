@@ -49,11 +49,19 @@ test('history observed later cannot be used for an earlier decision', () => {
 
 test('trailing exits protect net profit and prohibit later scheduled re-entry', () => {
   const window = fixture();
+  for (const sample of window.samples) {
+    const elapsed = (sample.ts - window.windowStart) / 1000;
+    const bid = elapsed >= 60 && elapsed < 90 ? .70 : .20;
+    for (const quote of Object.values(sample.quotes)) {
+      quote.bestBid = bid;
+      quote.bids = [{ price: bid, size: 100000 }];
+    }
+  }
   const index = historyIndex([window]);
   const baseline = replay(window, 'baseline', null, index);
   const trailing = replay(window, 'trailing', { activation: .10, retracement: .05 }, index);
-  assert.equal(baseline.trades, 29);
-  assert.equal(trailing.trades, 3);
+  assert.equal(baseline.trades, 4);
+  assert.equal(trailing.trades, 1);
   assert.equal(trailing.trailingExits, 1);
   assert.equal(trailing.stopAfterExit, true);
   assert.ok(trailing.pnl > baseline.pnl);
@@ -64,7 +72,7 @@ test('insufficient full-position bid depth never invents a trailing fill', () =>
   const window = fixture(0, { depth: 1 });
   const result = replay(window, 'trailing', { activation: .10, retracement: .05 }, historyIndex([window]));
   assert.equal(result.trailingExits, 0);
-  assert.equal(result.trades, 29, 'cannot arm without executable net liquidation profit');
+  assert.equal(result.trades, 4, 'cannot arm without executable net liquidation profit');
   assert.equal(sellDepth([{ price: .5, size: 1 }], 5), null);
 });
 

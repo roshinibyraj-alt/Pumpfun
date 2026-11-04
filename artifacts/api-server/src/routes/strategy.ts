@@ -15,6 +15,7 @@ const { LearningStore } = require("./bot/btc/learning-store.js") as {
     initialize: (defaults: Record<string, unknown>) => Promise<void>;
     loadSettings: (defaults: Record<string, unknown>) => Promise<Record<string, unknown>>;
     getState: () => Promise<unknown>;
+    getPaperAnalytics: (limit?: number) => Promise<unknown>;
   };
 };
 const { DEFAULT_SETTINGS, choosePaperSettings } = require("./bot/btc/learning-engine.js") as {
@@ -47,6 +48,17 @@ router.get("/strategy/learning", async (_req, res) => {
     settings: DEFAULT_SETTINGS,
     tuningEnabled: false,
   });
+});
+
+router.get("/strategy/analytics", async (req, res) => {
+  try {
+    const limit = Number(req.query.limit);
+    const safeLimit = Number.isInteger(limit) ? Math.min(1200, Math.max(50, limit)) : 1000;
+    res.set("Cache-Control", "no-store").json(await learningStore.getPaperAnalytics(safeLimit));
+  } catch (error) {
+    req.log.error({ err: error }, "Paper analytics query failed");
+    res.status(503).json({ error: "Paper performance history is temporarily unavailable." });
+  }
 });
 
 router.get("/strategy/comparison", async (req, res) => {
