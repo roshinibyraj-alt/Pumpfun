@@ -82,6 +82,63 @@ class LearningStore {
     );
   }
 
+  async resetHistoryOnce(requestId) {
+    const normalizedRequestId = String(requestId ?? '').trim();
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(normalizedRequestId)) {
+      throw new Error('A valid BTC history reset request ID is required.');
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const previousReset = await client.query(
+        `SELECT 1 FROM btc_paper_events
+         WHERE event = 'BOT_HISTORY_RESET_COMPLETED'
+           AND details->>'requestId' = $1
+         LIMIT 1`,
+        [normalizedRequestId],
+      );
+      if (previousReset.rows.length) {
+        await client.query('COMMIT');
+        return false;
+      }
+
+      await client.query(`
+        TRUNCATE TABLE
+          btc_learning_samples,
+          btc_paper_events,
+          btc_paper_window_results,
+          btc_paper_equity_snapshots,
+          btc_strategy_tuning_runs
+        RESTART IDENTITY
+      `);
+      await client.query(
+        `UPDATE btc_strategy_learning_state
+         SET updated_at = $1, last_tuned_window = NULL
+         WHERE singleton_id = 1`,
+        [Date.now()],
+      );
+      await client.query(
+        `INSERT INTO btc_paper_events (ts, window_start, event, details)
+         VALUES ($1, NULL, 'BOT_HISTORY_RESET_COMPLETED', $2::jsonb)`,
+        [Date.now(), JSON.stringify({ requestId: normalizedRequestId })],
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async clearHistoryResetMarkers() {
+    await this.pool.query(
+      `DELETE FROM btc_paper_events WHERE event = 'BOT_HISTORY_RESET_COMPLETED'`,
+    );
+  }
+
   async recordSample(sample) {
     await this.pool.query(
       `INSERT INTO btc_learning_samples (window_start, sampled_at, sample)

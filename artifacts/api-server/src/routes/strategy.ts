@@ -16,6 +16,8 @@ const { LearningStore } = require("./bot/btc/learning-store.js") as {
     loadSettings: (defaults: Record<string, unknown>) => Promise<Record<string, unknown>>;
     getState: () => Promise<unknown>;
     getPaperAnalytics: (limit?: number) => Promise<unknown>;
+    resetHistoryOnce: (requestId: string) => Promise<boolean>;
+    clearHistoryResetMarkers: () => Promise<void>;
   };
 };
 const { DEFAULT_SETTINGS, choosePaperSettings } = require("./bot/btc/learning-engine.js") as {
@@ -29,12 +31,18 @@ const { comparisonService } = require("./bot/btc/comparison-service.js") as {
 const router: IRouter = Router();
 const learningStore = new LearningStore(pool);
 await learningStore.initialize(DEFAULT_SETTINGS);
+const historyResetRequestId = process.env.BTC_HISTORY_RESET_REQUEST_ID?.trim() || null;
+if (historyResetRequestId) {
+  await learningStore.resetHistoryOnce(historyResetRequestId);
+} else {
+  await learningStore.clearHistoryResetMarkers();
+}
 const getComparison = comparisonService(learningStore);
 const bot = new ProbabilityBot({
   learningStore,
   choosePaperSettings,
 });
-bot.start();
+if (!historyResetRequestId) bot.start();
 
 router.get("/strategy/state", (_req, res) => {
   res.set("Cache-Control", "no-store").json(bot.snapshot());
