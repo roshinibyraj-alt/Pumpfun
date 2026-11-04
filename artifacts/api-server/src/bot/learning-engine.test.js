@@ -12,19 +12,16 @@ function samples(side = 'UP') {
     timeframe: '5m',
     status: 'READY',
     side,
-    setup: 'DIRECTIONAL_FALLBACK',
-    confirmed: false,
-    regime: 'MIXED',
-    score: null,
-    fallbackRule: '15M_EMA200_TREND',
+    setup: side === 'UP' ? 'PREVIOUS_GREEN' : 'PREVIOUS_RED',
+    confirmed: true,
     signalAt: START,
-    reason: `Fallback selected ${side}.`,
+    reason: `${side} selected by the previous closed candle.`,
   };
   return Array.from({ length: 600 }, (_, i) => ({
     ts: START + i * 500,
     windowStart: START,
     technicalSignal,
-    pullback: { method: METHOD, side, signalSide: side, setup: 'DIRECTIONAL_FALLBACK', timeframe: '5m' },
+    pullback: { method: METHOD, side, signalSide: side, setup: technicalSignal.setup, timeframe: '5m' },
     quotes: Object.fromEntries(['UP', 'DOWN'].map(tokenSide => [tokenSide, {
       bestAsk: .5,
       bestBid: .4,
@@ -35,7 +32,7 @@ function samples(side = 'UP') {
   }));
 }
 
-test('hybrid-policy replay uses four price checkpoints and own-side fee-adjusted P&L', () => {
+test('closed-candle-policy replay uses four price checkpoints and own-side fee-adjusted P&L', () => {
   const result = simulateWindow(samples());
   assert.equal(result.trades, 3);
   assert.ok(Number.isFinite(result.pnl));

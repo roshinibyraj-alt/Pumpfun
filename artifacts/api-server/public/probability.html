@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080d16">
-  <title>BTC Hybrid Signal Paper Bot</title>
+  <title>BTC Closed-Candle Paper Bot</title>
   <style>
     :root{color-scheme:dark;--bg:#080d16;--panel:#101927;--line:#263447;--muted:#8d9bb0;--text:#edf4ff;--cyan:#51d9ef;--green:#39d99a;--red:#ff6f7e;--amber:#ffc76a}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 8% 0,#102c3a 0,transparent 32%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
@@ -32,70 +32,127 @@
     @media(max-width:800px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{align-items:flex-start;flex-direction:column}.window{text-align:left}.top-right{flex-wrap:wrap;justify-content:flex-end}}
      @media(max-width:520px){main{width:min(100% - 22px,1180px);padding-top:16px}.top{align-items:flex-start}.top-right{gap:6px}.badge,.pill{padding:6px 8px;font-size:9px}.grid{gap:8px}.card{padding:12px}.prob-grid,.position-grid{gap:8px}.prob,.position-card{padding:13px}.prob-meta{grid-template-columns:1fr 1fr}.position-metrics{grid-template-columns:1fr 1fr}.panel{padding:13px}}
   </style>
+  <style>
+    :root{color-scheme:light;--bg:#f2f4ef;--panel:#fbfcf9;--line:#d9e0d8;--muted:#78847c;--text:#24332b;--cyan:#3c846b;--green:#39866d;--red:#b66360;--amber:#a37c39}
+    body{background:radial-gradient(ellipse at 8% 0,#e5ede5 0,transparent 35%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
+    main{width:min(1240px,calc(100% - 36px));padding:28px 0 48px}
+    .top{border-color:var(--line);padding-bottom:18px}.brand{letter-spacing:.11em}.subbrand{color:var(--muted)}
+    .badge,.pill{border-color:#c8dcd0;color:#39735d;background:#eaf3ed}.pill{color:#4b6557}
+    .hero{padding:28px 0 22px;align-items:center}.eyebrow{color:#74867a;font-size:10px;letter-spacing:.13em}
+    h1{font:500 clamp(32px,5vw,54px)/1.04 Georgia,"Times New Roman",serif;letter-spacing:-.045em;color:#203128;margin:8px 0}
+    .hero p{max-width:680px;color:#758078;margin-top:10px}
+    .window{color:#7a857d}.window strong{font-size:20px;color:#24332b}
+    .error{color:#8d3434;background:#fff0ef;border-color:#e4c2c0}
+    .card,.panel{background:rgba(251,252,249,.94);border-color:var(--line);box-shadow:0 5px 20px rgba(32,49,39,.035);border-radius:13px}
+    .card{padding:15px 17px}.label{color:#77847b;letter-spacing:.09em}.value{color:#26372e;font-size:clamp(18px,2.3vw,25px)}
+    .foot,.muted,small{color:var(--muted)}
+    .prob{background:#f6f8f4;border-color:var(--line)}.prob.up{--accent:#39866d}.prob.down{--accent:#b66360}.prob-price{color:#28372f}
+    .bar{background:#e4e9e3}.bar i{background:var(--accent)}
+    .position-card{background:#f6f8f4;border-color:var(--line)}
+    .panel{padding:17px}.section-head h2{font-size:14px;color:#2e3e34}
+    .metric-grid div{background:#f5f7f3;border-color:#e0e5de}.metric-grid span{color:#78847c}.metric-grid strong{color:#2b3a31}
+    .equity-chart{background:#f7f9f5;border-color:#e0e5de}.equity-gridline{stroke:#e0e5de}.equity-line{stroke:#39866d}.equity-axis{fill:#77847b}.equity-point{fill:#39866d;stroke:#f7f9f5}
+    .formula{color:#64736a;background:#f4f7f2;border-color:#e0e5de}
+    .empty{border-color:#e3e8e1;color:#78847c}
+    .side.UP,.pnl.pos{color:#328064}.side.DOWN,.pnl.neg{color:#b45a58}
+    .disclosure{margin-top:12px;border:1px solid var(--line);border-radius:13px;background:rgba(251,252,249,.94);box-shadow:0 5px 20px rgba(32,49,39,.035);overflow:hidden}
+    .disclosure>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 18px;cursor:pointer;list-style:none;color:#34443a;font-size:13px;font-weight:750}
+    .disclosure>summary::-webkit-details-marker{display:none}.disclosure>summary:after{content:"＋";color:#63806e;font:16px ui-monospace,monospace}
+    .disclosure[open]>summary:after{content:"−"}.disclosure[open]>summary{border-bottom:1px solid var(--line)}
+    .disclosure>summary small{font-size:10px;font-weight:500;margin-left:auto}
+    .disclosure>.panel{margin-top:0;border:0;box-shadow:none;background:transparent;border-radius:0}
+    .disclosure>.prob-grid,.disclosure>.position-grid{padding:14px 16px 16px;margin-top:0}
+    .disclosure>.position-grid{padding-top:16px}
+    .disclosure>.panel+.panel{padding-top:0}
+    .footer{color:#78847c}
+    @media(max-width:800px){main{width:min(100% - 28px,1240px)}.hero{align-items:flex-start}.disclosure>summary{align-items:flex-start}.disclosure>summary small{text-align:right}}
+    @media(max-width:520px){main{width:calc(100% - 22px);padding-top:16px}.hero{gap:12px}.disclosure>summary{padding:13px}.disclosure>.prob-grid,.disclosure>.position-grid{padding:10px}.disclosure>summary small{max-width:48%}}
+  </style>
 </head>
 <body>
 <main>
   <header class="top">
-    <div><div class="brand">BTC HYBRID PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
+    <div><div class="brand">BTC CLOSED-CANDLE PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
     <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · 500 SHARES / MINUTE</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">5M TREND &amp; RANGE · 15M EMA200 · CLOSED CANDLES</div><h1>A directional signal for every valid window.</h1><p>Scenario A follows a trend after an EMA21/VWAP pullback, a Stoch RSI extreme-cross and a signed-volume spike. Scenario B fades a Bollinger Band extreme in a range with RSI(7) divergence. If neither setup confirms, the latest closed 5m candle chooses first; if it is a doji, the fallback checks aligned 15m EMA200, then the previous side and other closed candles. At 1, 2, 3 and 4 minutes, buy 500 shares if the selected side’s best ask is below $0.40, $0.60, $0.70 and $0.80 respectively. Price-filtered shares carry forward to the next qualifying checkpoint in that same window. Cash, the existing $0.02 minimum ask, fresh quotes and visible depth still apply. TP/SL are disabled until 295 seconds; afterward they require a fresh own-side bid. If no fresh bid is available, the position stays open for expiry handling.</p></div>
+    <div><div class="eyebrow">CLOSED 5-MINUTE CANDLE · PAPER EXECUTION</div><h1>The candle sets this window’s side.</h1><p>The signal uses only the latest closed 5-minute candle and its color sequence. Entry timing, share size, price checks, exits, and paper-account handling are unchanged.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid">
-    <article class="card"><div class="label">Selected signal rule</div><div class="value" id="signalRule" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot" id="signalRuleHint">Waiting for closed-candle data</div></article>
+    <article class="card"><div class="label">Closed candle rule</div><div class="value" id="signalRule" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot" id="signalRuleHint">Waiting for closed-candle data</div></article>
     <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
-    <article class="card"><div class="label">Current active side</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Scenario A, Scenario B or directional fallback</div></article>
+    <article class="card"><div class="label">Current active side</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Selected from the latest closed 5m candle</div></article>
     <article class="card"><div class="label">Next scheduled entry · UTC</div><div class="value" id="zscore">—</div><div class="foot" id="scheduleHint">1m &lt;$0.40 · 2m &lt;$0.60 · 3m &lt;$0.70 · 4m &lt;$0.80</div></article>
   </section>
+  <details class="disclosure" id="marketDetails">
+    <summary><span>Market and signal details</span><small>UP/DOWN prices · candle confirmation</small></summary>
   <section class="prob-grid">
     <article class="prob up"><div class="prob-head"><span>UP · WINDOW DIRECTION</span><span id="upEdge">500 / MIN</span></div><div class="prob-price" id="upProb">WAIT</div><div class="bar"><i id="upBar"></i></div><div class="prob-meta"><div><span id="upAskLabel">500-share avg ask</span><strong id="upAsk">—</strong></div><div><span>Window decision</span><strong id="upNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="upSignal">WAIT</strong></div></div></article>
     <article class="prob down"><div class="prob-head"><span>DOWN · WINDOW DIRECTION</span><span id="downEdge">500 / MIN</span></div><div class="prob-price" id="downProb">WAIT</div><div class="bar"><i id="downBar"></i></div><div class="prob-meta"><div><span id="downAskLabel">500-share avg ask</span><strong id="downAsk">—</strong></div><div><span>Window decision</span><strong id="downNet">OBSERVING</strong></div><div><span>Entry status</span><strong id="downSignal">WAIT</strong></div></div></article>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>Hybrid signal decision</h2><small id="technicalStatus">Waiting for closed-candle history</small></div>
-    <div class="metric-grid"><div><span>Selected setup</span><strong id="technicalSetup" style="font-size:18px">—</strong></div><div><span>Market regime</span><strong id="technicalRegime" style="font-size:18px">—</strong></div><div><span>Fallback rule</span><strong id="technicalFallbackRule" style="font-size:18px">—</strong></div><div><span>Signed volume</span><strong id="technicalVolume" style="font-size:18px">—</strong></div></div>
-    <div id="technicalReason" class="formula">Waiting for valid 5m and 15m candles. Missing or stale history blocks entries.</div>
-    <div id="technicalIndicators" class="formula">EMA9 / EMA21 · 15m EMA200 · VWAP20 · Stoch RSI · Bollinger Bands · RSI(7)</div>
+    <div class="section-head"><h2>Closed-candle signal</h2><small id="technicalStatus">Waiting for the latest closed candle</small></div>
+    <div class="metric-grid"><div><span>Selection rule</span><strong id="technicalSetup" style="font-size:18px">—</strong></div><div><span>Last candle</span><strong id="technicalRegime" style="font-size:18px">—</strong></div><div><span>Prior streak</span><strong id="technicalFallbackRule" style="font-size:18px">—</strong></div><div><span>Selected side</span><strong id="technicalVolume" style="font-size:18px">—</strong></div></div>
+    <div id="technicalReason" class="formula">Waiting for the latest closed five-minute candle.</div>
+    <div id="technicalCandle" class="formula">Open — · Close — · Closed at —</div>
   </section>
+  </details>
   <section class="grid" style="margin-top:12px">
     <article class="card"><div class="label">Paper cash</div><div class="value" id="cash">—</div><div class="foot">Starting balance $10,000</div></article>
     <article class="card"><div class="label">Realized P&amp;L</div><div class="value" id="pnl">—</div><div class="foot" id="wins">No settled signals yet</div></article>
-    <article class="card"><div class="label">Settled signals</div><div class="value" id="settled">—</div><div class="foot" id="openCount">— open positions</div></article>
-    <article class="card"><div class="label">Bot state</div><div class="value" id="feedState">—</div><div class="foot" id="updated">Waiting for first scan</div></article>
+    <article class="card"><div class="label">Completed-window win rate</div><div class="value" id="windowWinRate">—</div><div class="foot"><span id="windowRateHint">Waiting for completed windows</span></div></article>
+    <article class="card"><div class="label">Open positions</div><div class="value" id="openCount">—</div><div class="foot">Paper positions not yet closed</div></article>
   </section>
+  <details class="disclosure" id="performanceDetails">
+    <summary><span>Performance and equity</span><small id="analyticsStatus">Loading account history</small></summary>
   <section class="panel">
     <div class="section-head"><h2>Completed-window performance &amp; global equity</h2><small id="analyticsStatus">Loading persistent account history</small></div>
     <div class="metric-grid">
       <div><span>Completed traded windows</span><strong id="completedWindows">—</strong></div>
-      <div><span>Window win rate</span><strong id="windowWinRate">—</strong></div>
+      <div><span>Settled signals</span><strong id="settled">—</strong></div>
+      <div><span>Window win rate</span><strong id="windowWinRateDetail">—</strong></div>
       <div><span>Wins · losses · flat</span><strong id="windowOutcomes">—</strong></div>
       <div><span>Net window P&amp;L</span><strong id="windowNetPnl">—</strong></div>
+      <div><span>Signal outcomes</span><strong id="wins">—</strong></div>
     </div>
     <div class="section-head"><h2>Account equity</h2><small id="equityCurrent">Latest marked value —</small></div>
     <div id="equityChart" class="equity-chart"><div class="empty">Waiting for fresh equity snapshots.</div></div>
     <div class="formula">Equity = cash + open positions marked at fresh own-side best bids, less estimated exit fees. Samples are saved in persistent storage; stale or unavailable marks are omitted. A process restart starts a separate paper-account segment.</div>
   </section>
+  </details>
+  <details class="disclosure" id="positionsDetails">
+    <summary><span>Positions and trade history</span><small>Open lots · completed entries</small></summary>
   <section class="position-grid" aria-label="Open paper positions by side">
     <article class="position-card up"><div class="position-title">UP · ACCUMULATED POSITION</div><div class="position-shares" id="upShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="upAverageCost">—</strong></div><div><span>Unrealized P&amp;L</span><strong id="upUnrealized">—</strong></div><div><span>Realized P&amp;L</span><strong id="upRealized">—</strong></div><div><span>Open cost basis</span><strong id="upCostBasis">—</strong></div><div><span>Live best bid</span><strong id="upMarkBid">—</strong></div><div><span>Marked value</span><strong id="upMarkedValue">—</strong></div></div></article>
     <article class="position-card down"><div class="position-title">DOWN · ACCUMULATED POSITION</div><div class="position-shares" id="downShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="downAverageCost">—</strong></div><div><span>Unrealized P&amp;L</span><strong id="downUnrealized">—</strong></div><div><span>Realized P&amp;L</span><strong id="downRealized">—</strong></div><div><span>Open cost basis</span><strong id="downCostBasis">—</strong></div><div><span>Live best bid</span><strong id="downMarkBid">—</strong></div><div><span>Marked value</span><strong id="downMarkedValue">—</strong></div></div></article>
   </section>
   <section class="panel">
     <div class="section-head"><h2>Paper trade history</h2><small>500-share checkpoints · price-filter carry is shown per lot</small></div>
-    <div id="trades" class="table-wrap"><div class="empty">Waiting for a valid hybrid signal.</div></div>
+    <div id="trades" class="table-wrap"><div class="empty">Waiting for the first closed-candle signal.</div></div>
   </section>
+  </details>
+  <details class="disclosure" id="activityDetails">
+    <summary><span>Learning and activity</span><small id="feedStatus">Awaiting live data</small></summary>
   <section class="panel">
     <div class="section-head"><h2>Paper learning &amp; regression</h2><small id="learningStatus">Connecting to persistent learning log</small></div>
     <div id="learningSummary" class="empty">Waiting for learning service.</div>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>Signal activity</h2><small id="feedStatus">Awaiting live data</small></div>
+    <div class="section-head"><h2>Signal activity</h2><small>Recent paper events · <span id="feedState">—</span> · <span id="updated">Waiting for first scan</span></small></div>
     <div id="events"><div class="empty">Connecting to the Chainlink BTC feed and Polymarket market.</div></div>
-      <div class="formula">Scenario A: 5m EMA9/EMA21 and 15m EMA200 trend alignment, EMA21/VWAP pullback, Stoch RSI crossing out of oversold/overbought, and directional volume spike. Scenario B: flat 15m EMA200, parallel 5m Bollinger Bands, outer-band touch and confirmed RSI(7) divergence. Otherwise, the deterministic fallback uses the latest closed 5m candle first; on a doji it checks aligned 15m EMA200, previous side, then other closed candles. It is not a confirmed setup or a profit guarantee. At 1/2/3/4 minutes, attempt 500 shares if the selected side’s best ask is below $0.40/$0.60/$0.70/$0.80. Shares missed specifically by this price filter accumulate and join the next qualifying checkpoint in the same window; the carry resets at the next window. Maximum planned volume is 2,000 shares per window if all checkpoints qualify. Other blocks (cash, $0.02 minimum ask, stale book, or insufficient visible depth) do not add shares to the carry. No probability model or edge gate. Signal changes do not close existing positions. TP/SL are disabled before 295 seconds; afterward TP uses a fresh own-side bid ≥ $0.99 to credit $1.00/share and SL uses a fresh own-side bid ≤ $0.01 to credit $0.00/share, before fees. A missing or stale bid does not trigger a sale; the position stays open for the existing window-end or expiry handling. The range VWAP target is informational. Learning logs cannot change fixed sizing or timing.</div>
   </section>
-  <p class="footer">Paper only—no live orders. The hybrid strategy uses closed 5m and 15m candles plus closed 1m volume data. Each valid window has a selected direction, including fallback when no named setup confirms; this does not guarantee a fill. Side changes affect future entries only. Each of four minute checkpoints gets one attempt; only price-filtered shares carry forward. Visible liquidity and paper cash are still required. TP/SL cannot close positions before 295 seconds and require a fresh own-side bid afterward; missing bids leave positions open for window-end/expiry handling. Regression replays only compatible hybrid-signal logs, without automatic setting changes.</p>
+  </details>
+  <details class="disclosure" id="strategyDetails">
+    <summary><span>Strategy rules</span><small>Signal · entries · exits</small></summary>
+    <section class="panel">
+      <p>The latest closed 5-minute candle selects the side: green → UP, red → DOWN. A doji after 2 or more consecutive green candles selects DOWN; a doji after 2 or more consecutive red candles selects UP. A doji without either run does not create a new side.</p>
+      <p>At 60, 120, 180, and 240 seconds, the bot attempts 500 shares when the selected side’s best ask is below $0.40, $0.60, $0.70, and $0.80. Shares skipped by that price check carry forward to the next qualifying checkpoint in the same window. Maximum planned volume is 2,000 shares per window if all four checkpoints qualify. Paper cash, the $0.02 minimum ask, fresh quotes, and visible depth checks still apply.</p>
+      <p>TP/SL are disabled before 295 seconds. After that, TP uses a fresh own-side bid ≥ $0.99 to credit $1.00 per share; SL uses a fresh own-side bid ≤ $0.01 to credit $0.00 per share, before fees. A missing or stale bid does not trigger a sale; the position stays open for expiry handling. Signal changes do not close existing positions, and learning logs do not change the fixed execution settings.</p>
+    </section>
+  </details>
+  <p class="footer">Paper only—no live orders. Closed 5-minute candles choose the side; the existing schedule, sizing, entry checks, exits, and account handling remain in place.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -120,7 +177,7 @@ async function pollLearning(){
   const state=await response.json();
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
     const evaluation=window.latestStrategyState?.learning?.lastEvaluation;
-   $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">500 shares at 1m / 2m / 3m / 4m · price-filter carry only · no automatic setting changes</span></div><div class="trade"><span>Compatible-policy regression</span><span class="muted">${safe(evaluation?.reason||'Collecting compatible hybrid samples')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Directional fallback</span><span class="muted">Latest closed 5m candle → aligned 15m EMA200 on doji → prior side if still tied</span></div>`;
+    $('learningSummary').innerHTML=`<div class="trade"><span>Fixed paper policy</span><span class="muted">500 shares at 1m / 2m / 3m / 4m · price-filter carry only · no automatic setting changes</span></div><div class="trade"><span>Closed-candle regression</span><span class="muted">${safe(evaluation?.reason||'Collecting samples for the current candle rule')} · ${Number(evaluation?.windows||0)} windows</span></div><div class="trade"><span>Signal rule</span><span class="muted">Latest closed 5m candle: green → UP, red → DOWN; a doji reverses a 2+ candle color streak.</span></div>`;
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -160,6 +217,8 @@ function renderAnalytics(data){
  const stats=data?.windowPerformance||{};
  $('completedWindows').textContent=Number(stats.completed||0).toLocaleString();
  $('windowWinRate').textContent=pct(stats.winRate);
+  $('windowWinRateDetail').textContent=pct(stats.winRate);
+  $('windowRateHint').textContent=`${Number(stats.completed||0).toLocaleString()} completed traded windows`;
  $('windowOutcomes').textContent=`${Number(stats.wins||0)} · ${Number(stats.losses||0)} · ${Number(stats.flats||0)}`;
  $('windowNetPnl').textContent=signed(stats.netPnl);
  $('windowNetPnl').className='pnl '+(Number(stats.netPnl)>=0?'pos':'neg');
@@ -176,24 +235,34 @@ async function pollAnalytics(){
 }
 function renderSide(side,state){
  const active=state.activeSide===side,prefix=side.toLowerCase(),decision=state.windowDecision||{},schedule=state.entrySchedule||{};
- const ready=!state.technicalSignal||state.technicalSignal.status==='READY';
- $(prefix+'Prob').textContent=active?(ready?(decision.status==='FALLBACK'?'FALLBACK':'LOCKED'):'WAIT DATA'):state.activeSide?'OFF':decision.status==='SKIP_WINDOW'?'SKIP':'WAIT';
+  const signal=state.technicalSignal||{},ready=signal.status==='READY';
+  $(prefix+'Prob').textContent=active?(ready?'SELECTED':signal.status==='NO_SIGNAL'?'NO SIDE':'WAIT DATA'):state.activeSide?'OFF':decision.status==='SKIP_WINDOW'?'SKIP':'WAIT';
  $(prefix+'Bar').style.width=active?'100%':'0%';
  $(side.toLowerCase()+'Ask').textContent=money(state.quotes?.[side]?.estimatedAverageAsk);
   $(prefix+'AskLabel').textContent='500-share avg ask';
  $(prefix+'Net').textContent=String(decision.status||'OBSERVING').replace(/_/g,' ');
   $(prefix+'Edge').textContent='500 / MIN';
- $(prefix+'Signal').textContent=!active?'NO ENTRY':!ready?'WAIT DATA':!schedule.nextEntryAt?'ENTRIES FINISHED':state.entryFilter?.allowed===false?'BLOCKED':schedule.due?'ENTRY SLOT':'NEXT '+time(schedule.nextEntryAt);
+  $(prefix+'Signal').textContent=!active?'NO ENTRY':!ready?(signal.status==='NO_SIGNAL'?'NO SIDE':'WAIT DATA'):!schedule.nextEntryAt?'ENTRIES FINISHED':state.entryFilter?.allowed===false?'BLOCKED':schedule.due?'ENTRY SLOT':'NEXT '+time(schedule.nextEntryAt);
 }
 function renderTechnical(state){
- const signal=state.technicalSignal||{},i=signal.indicators||{},volume=i.volume||{};
- $('technicalStatus').textContent=`${String(signal.status||'WAITING_HISTORY').replace(/_/g,' ')} · ${signal.confirmed?'CONFIRMED SETUP':'DIRECTIONAL FALLBACK'}`;
- $('technicalSetup').textContent=String(signal.setup||'WAITING').replace(/_/g,' ');
- $('technicalRegime').textContent=String(signal.regime||'—').replace(/_/g,' ');
-  $('technicalFallbackRule').textContent=signal.confirmed?'NOT USED':String(signal.fallbackRule||signal.tieBreak||'—').replace(/_/g,' ');
- $('technicalVolume').textContent=volume.status==='READY'?`${volume.direction||'NEUTRAL'} · ${isNumeric(volume.ratio)?Number(volume.ratio).toFixed(2):'—'}×`:'WAIT DATA';
- $('technicalReason').textContent=signal.reason||'Waiting for valid 5m and 15m candles. Missing or stale history blocks entries.';
- $('technicalIndicators').textContent=`EMA9 ${money(i.ema9)} · EMA21 ${money(i.ema21)} · 15m EMA200 ${money(i.ema200_15m)} · VWAP20 ${money(i.vwap20)} · Stoch RSI ${isNumeric(i.stochRsiK)?Number(i.stochRsiK).toFixed(1):'—'} · RSI(7) ${isNumeric(i.rsi7)?Number(i.rsi7).toFixed(1):'—'} · Bands ${i.bollinger?.parallel?'parallel':'not parallel'} · Divergence ${i.divergence?.bullish?'bullish':i.divergence?.bearish?'bearish':'none'}`;
+  const signal=state.technicalSignal||{},candle=signal.candle||{};
+  const labels={
+    PREVIOUS_GREEN:'PREVIOUS GREEN',
+    PREVIOUS_RED:'PREVIOUS RED',
+    DOJI_AFTER_GREEN_RUN:'DOJI AFTER GREEN RUN',
+    DOJI_AFTER_RED_RUN:'DOJI AFTER RED RUN',
+    DOJI_NO_DIRECTION:'DOJI · NO SIDE',
+  };
+  $('technicalStatus').textContent=`${String(signal.status||'WAITING_HISTORY').replace(/_/g,' ')} · CLOSED 5M`;
+  $('technicalSetup').textContent=labels[signal.setup]||'WAITING';
+  $('technicalRegime').textContent=candle.color||'—';
+  $('technicalFallbackRule').textContent=candle.priorColor&&Number(candle.consecutivePriorCandles)>0
+    ?`${Number(candle.consecutivePriorCandles)} ${candle.priorColor}`:'—';
+  $('technicalVolume').textContent=signal.side||'NO SIDE';
+  $('technicalReason').textContent=signal.reason||'Waiting for the latest closed five-minute candle.';
+  $('technicalCandle').textContent=candle.end
+    ?`Open ${money(candle.open)} · High ${money(candle.high)} · Low ${money(candle.low)} · Close ${money(candle.close)} · Closed ${time(candle.end)} UTC`
+    :'Open — · High — · Low — · Close — · Closed at —';
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
@@ -211,8 +280,9 @@ function renderPositions(positions){
 }
   function renderSignalRule(state){
    const signal=state.technicalSignal||{};
-   $('signalRule').textContent=String(signal.fallbackRule||signal.setup||'WAITING').replace(/_/g,' ');
-   $('signalRuleHint').textContent=signal.confirmed?'Confirmed setup':signal.status==='READY'?'Directional fallback':'Waiting for closed-candle history';
+    const labels={PREVIOUS_GREEN:'PREVIOUS GREEN',PREVIOUS_RED:'PREVIOUS RED',DOJI_AFTER_GREEN_RUN:'DOJI AFTER GREEN RUN',DOJI_AFTER_RED_RUN:'DOJI AFTER RED RUN',DOJI_NO_DIRECTION:'DOJI · NO SIDE'};
+    $('signalRule').textContent=labels[signal.setup]||'WAITING';
+    $('signalRuleHint').textContent=signal.reason||'Waiting for the latest closed five-minute candle';
   }
 
 async function poll(){
@@ -226,7 +296,7 @@ async function poll(){
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
      renderSignalRule(s);$('spot').textContent=money(s.spotPrice,2);
   $('gap').textContent='Informational only · no probability model';
-     $('expected').textContent=String(s.activeSide||'WAIT');
+      $('expected').textContent=String(s.activeSide||(s.technicalSignal?.status==='NO_SIGNAL'?'NO SIDE':'WAIT'));
     $('zscore').textContent=s.activeSide&&s.entrySchedule?.nextEntryAt?time(s.entrySchedule.nextEntryAt):s.windowDecision?.status==='SKIP_WINDOW'?'SKIP':'—';
    const schedule=s.entrySchedule||{};
    $('scheduleHint').textContent=schedule.nextEntryAt
@@ -239,7 +309,7 @@ async function poll(){
   $('wins').textContent=`${account.wins??0} wins · ${account.losses??0} losses`;
   $('feedState').textContent=s.priceFeed?.status||'—';
   $('updated').textContent=s.statusReason|| (s.lastUpdateAt?'Updated '+time(s.lastUpdateAt):'Waiting for first scan');
-    $('feedStatus').textContent=s.priceFeed?`Closed 5m: ${s.priceFeed.history?.status||'waiting'} · 15m: ${s.priceFeed.fifteenMinuteHistory?.status||'waiting'} · 1m volume: ${s.priceFeed.minuteHistory?.status||'waiting'}`:'Awaiting live data';
+   $('feedStatus').textContent=s.priceFeed?`Closed 5m candles · ${s.priceFeed.history?.status||'waiting'}`:'Awaiting live data';
   renderTrades(s.trades);renderEvents(s.events);
  }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
  setTimeout(poll,1000);

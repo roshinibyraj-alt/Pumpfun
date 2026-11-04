@@ -148,30 +148,27 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents hybrid setups, fallback direction, and unchanged execution rules", () => {
+test("dashboard presents the closed-candle rule and preserves paper execution rules", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
-  assert.match(html, /BTC HYBRID PAPER BOT/);
+  assert.match(html, /BTC CLOSED-CANDLE PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
   assert.match(html, /500 SHARES \/ MINUTE/);
-  assert.match(html, /Scenario A/);
-  assert.match(html, /Scenario B/);
-  assert.match(html, /latest closed 5m candle first/i);
-  assert.match(html, /doji.*aligned 15m EMA200/i);
-  assert.match(html, /15m EMA200/);
-  assert.match(html, /Stoch RSI/);
-  assert.match(html, /RSI\(7\) divergence/);
-  assert.doesNotMatch(html, /Wilder RSI\(14\)|RSI telemetry|rsiChart|Latest closed 5m RSI/i);
-  assert.match(html, /Fallback rule/);
-  assert.match(html, /Selected signal rule/);
+  assert.match(html, /latest closed 5m candle/i);
+  assert.match(html, /green → UP, red → DOWN/);
+  assert.match(html, /doji after 2 or more consecutive green candles selects DOWN/);
+  assert.match(html, /doji after 2 or more consecutive red candles selects UP/);
+  assert.doesNotMatch(html, /\bScenario A\b|\bScenario B\b|\bEMA\d*\b|\bRSI\b|\bBollinger\b|\bStoch(?:astic)?\b|\bMACD\b|\bHybrid signal\b|\bindicators?\b/i);
+  assert.match(html, /Prior streak/);
+  assert.match(html, /Closed candle rule/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
-  assert.match(html, /At 1, 2, 3 and 4 minutes/);
-  assert.match(html, /price-filtered shares carry forward/);
+  assert.match(html, /At 60, 120, 180, and 240 seconds/);
+  assert.match(html, /carry forward to the next qualifying checkpoint/);
   assert.match(html, /maximum planned volume is 2,000 shares per window/i);
   assert.match(html, /Completed-window performance &amp; global equity/);
   assert.match(html, /Window win rate/);
   assert.match(html, /Equity = cash \+ open positions marked at fresh own-side best bids/);
-  assert.match(html, /No probability model/);
+  assert.match(html, /no probability model/i);
   assert.match(html, /Signal changes do not close existing positions/);
   assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
   assert.match(html, /TP uses a fresh own-side bid ≥ \$0.99/);
@@ -200,32 +197,39 @@ test("dashboard renders locked, skipped and observing states without probability
     activeSide: "UP", windowDecision: { status: "LOCKED" },
     entrySchedule: { nextEntryAt: 130000, due: true }, entryFilter: { allowed: true },
     quotes: { UP: { estimatedAverageAsk: .5 } },
+    technicalSignal: {
+      status: "READY", side: "UP", setup: "PREVIOUS_GREEN", confirmed: true,
+      reason: "UP because the latest closed five-minute candle was green.",
+      candle: { color: "GREEN", open: 100, high: 102, low: 99, close: 101, end: 120000 },
+    },
   };
   context.renderSide("UP", state);
   context.renderSide("DOWN", state);
-  assert.equal(elements.upProb.textContent, "LOCKED");
+  assert.equal(elements.upProb.textContent, "SELECTED");
   assert.equal(elements.downProb.textContent, "OFF");
   assert.equal(elements.upSignal.textContent, "ENTRY SLOT");
   state.technicalSignal = {
-    status: "READY", side: "UP", setup: "DIRECTIONAL_FALLBACK",
-    fallbackRule: "15M_EMA200_TREND", confirmed: false,
+    status: "READY", side: "UP", setup: "PREVIOUS_GREEN",
+    confirmed: true, reason: "UP because the latest closed five-minute candle was green.",
+    candle: { color: "GREEN", open: 100, high: 102, low: 99, close: 101, end: 120000 },
   };
   context.renderSignalRule(state);
-  assert.equal(elements.signalRule.textContent, "15M EMA200 TREND");
-  assert.equal(elements.signalRuleHint.textContent, "Directional fallback");
+  assert.equal(elements.signalRule.textContent, "PREVIOUS GREEN");
+  assert.match(elements.signalRuleHint.textContent, /latest closed five-minute candle was green/);
   state.technicalSignal = {
-    status: "READY", side: "UP", setup: "DIRECTIONAL_FALLBACK",
-    fallbackRule: "15M_EMA200_TREND", confirmed: false,
-    regime: "MIXED", score: null, reason: "No named setup confirmed; 15M_EMA200_TREND selected UP.",
-    indicators: { volume: { status: "READY", direction: "UP", ratio: 1.6 } },
+    status: "READY", side: "UP", setup: "PREVIOUS_GREEN",
+    confirmed: true, reason: "UP because the latest closed five-minute candle was green.",
+    candle: { color: "GREEN", priorColor: null, consecutivePriorCandles: 0, open: 100, high: 102, low: 99, close: 101, end: 120000 },
   };
-  state.windowDecision.status = "FALLBACK";
+  state.windowDecision.status = "LOCKED";
   context.renderTechnical(state);
   context.renderSide("UP", state);
-  assert.equal(elements.upProb.textContent, "FALLBACK");
-  assert.equal(elements.technicalSetup.textContent, "DIRECTIONAL FALLBACK");
-  assert.equal(elements.technicalFallbackRule.textContent, "15M EMA200 TREND");
-  assert.match(elements.technicalReason.textContent, /selected UP/);
+  assert.equal(elements.upProb.textContent, "SELECTED");
+  assert.equal(elements.technicalSetup.textContent, "PREVIOUS GREEN");
+  assert.equal(elements.technicalRegime.textContent, "GREEN");
+  assert.equal(elements.technicalFallbackRule.textContent, "—");
+  assert.equal(elements.technicalVolume.textContent, "UP");
+  assert.match(elements.technicalReason.textContent, /latest closed five-minute candle was green/);
   state.technicalSignal.status = "STALE";
   context.renderSide("UP", state);
   assert.equal(elements.upSignal.textContent, "WAIT DATA");

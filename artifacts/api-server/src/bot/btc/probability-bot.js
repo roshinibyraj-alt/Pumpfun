@@ -222,7 +222,6 @@ class ProbabilityBot {
         method: this.pullback.method,
         side: this.pullback.side,
         signalSide: this.pullback.signalSide,
-        regime: this.pullback.regime,
         activeSignalReason: this.pullback.activeSignalReason,
          timeframe: '5m',
       } : null,
@@ -242,15 +241,11 @@ class ProbabilityBot {
       status: this.marketSignal.status,
       side: this.marketSignal.side,
       setup: this.marketSignal.setup,
+      pattern: this.marketSignal.pattern,
       confirmed: this.marketSignal.confirmed,
-      regime: this.marketSignal.regime,
-      score: this.marketSignal.score,
-      votes: this.marketSignal.votes,
-      tieBreak: this.marketSignal.tieBreak,
-      fallbackRule: this.marketSignal.fallbackRule,
       reason: this.marketSignal.reason,
       signalAt: this.marketSignal.signalAt,
-      indicators: this.marketSignal.indicators,
+      candle: this.marketSignal.candle,
     } : null;
     this.queuePersistence(() => this.learningStore.recordSample(sample));
   }
@@ -323,14 +318,9 @@ class ProbabilityBot {
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
       const candles = this.priceFeed.getHistoricalCandles?.() ?? [];
-      const candles15m = this.priceFeed.getHistoricalFifteenMinuteCandles?.() ?? [];
-      const candles1m = this.priceFeed.getHistoricalMinuteCandles?.() ?? [];
       this.applyTechnicalSignal(detectTechnicalSignal({
         candles5m: candles,
-        candles15m,
-        candles1m,
         now,
-        previousSide: this.activeSide,
       }));
       this.pullback = this.marketSignal ? {
         method: this.marketSignal.method,
@@ -339,12 +329,11 @@ class ProbabilityBot {
         signalSide: this.marketSignal.side,
         setup: this.marketSignal.setup,
         confirmed: this.marketSignal.confirmed,
-        regime: this.marketSignal.regime,
         activeSignalReason: this.activeSignalReason,
       } : null;
       this.statusReason = this.marketSignal?.status !== 'READY'
         ? this.marketSignal?.reason || 'Waiting for valid closed-candle strategy data.'
-        : `${this.marketSignal.confirmed ? 'Confirmed' : 'Fallback'} ${this.marketSignal.setup} · ${this.activeSide}; 500-share minute checkpoints with price-filter catch-up.`;
+        : `Closed 5m candle selected ${this.activeSide} · ${this.marketSignal.setup}; 500-share minute checkpoints with price-filter catch-up.`;
       this.probabilityUp = null;
       this.edges = { UP: null, DOWN: null };
       const scanAt = this.now();
@@ -432,7 +421,6 @@ class ProbabilityBot {
       return;
     }
 
-    const previousSide = this.activeSide;
     this.activeSide = signal.side;
     this.activeSignalReason = signal.setup;
     this.windowDecision = {
@@ -441,31 +429,21 @@ class ProbabilityBot {
       signalAt: signal.signalAt,
       setup: signal.setup,
       confirmed: signal.confirmed,
-      regime: signal.regime,
-      score: signal.score,
-      fallbackRule: signal.fallbackRule ?? signal.tieBreak ?? null,
       reason: signal.reason,
-      targetPrice: signal.targetPrice ?? null,
-      targetLabel: signal.targetLabel ?? null,
     };
 
     const signalKey = [
       signal.signalAt,
       signal.side,
       signal.setup,
-      signal.confirmed,
-      signal.indicators?.volume?.signalAt ?? '',
     ].join(':');
     if (signalKey !== this.lastLoggedSignalKey) {
       this.lastLoggedSignalKey = signalKey;
       this.log('WINDOW_SIGNAL_SELECTED', {
         side: signal.side,
-        previousSide,
         setup: signal.setup,
         confirmed: signal.confirmed,
-        regime: signal.regime,
-        score: signal.score,
-        fallbackRule: signal.fallbackRule ?? signal.tieBreak ?? null,
+        candle: signal.candle,
         signalAt: signal.signalAt,
         reason: signal.reason,
         method: signal.method,
@@ -911,9 +889,9 @@ class ProbabilityBot {
           seconds: item.seconds,
           maximumAsk: item.maximumAsk,
         })),
-        signalPersistence: 'Select Scenario A in aligned trends and Scenario B in confirmed ranges. Otherwise the latest closed 5m candle chooses first; on a doji use aligned 15m EMA200, previous side, then other closed-candle fallback. Stale or insufficient data blocks entries.',
+        signalPersistence: 'Use only the latest closed 5m candle: green selects UP, red selects DOWN, a doji after 2+ consecutive green candles selects DOWN, and a doji after 2+ consecutive red candles selects UP. Other dojis produce no new side. Stale candles block entries.',
         entryModel: 'At 60s / 120s / 180s / 240s, buy 500 shares on the selected side if its best ask is below $0.40 / $0.60 / $0.70 / $0.80 respectively. Shares skipped by those price checks accumulate for the next qualifying checkpoint in the same window. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.',
-        model: 'Trend continuation uses 5m EMA9/EMA21 alignment with 15m EMA200, an EMA21/VWAP pullback, Stoch RSI crossing from an extreme, and signed-volume confirmation. Range mean reversion uses a flat 15m EMA200, parallel 5m Bollinger Bands, an outer-band touch, and RSI(7) divergence. If neither confirms, the latest closed 5m candle leads the fallback; aligned 15m EMA200 is used when the 5m candle is a doji. All signals use closed candles; stale history blocks entries.',
+        model: 'Signal selection uses only the latest closed 5m candle color and the immediately preceding candle-color run for doji reversal. Green selects UP; red selects DOWN; doji after 2+ green selects DOWN; doji after 2+ red selects UP. No indicator, probability, or prior-window side is used.',
         exitModel: 'No TP or SL exits before 295 seconds. From 295 seconds, TP uses a fresh own-side best bid >= $0.99 to credit $1; SL uses a fresh own-side best bid <= $0.01 to credit $0, before fees. Missing or stale bids do not trigger a sale. No opposite-signal exits or reversals. At expiry, retry the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,

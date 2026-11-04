@@ -11,13 +11,10 @@ function technicalSignal(side) {
     timeframe: '5m',
     status: 'READY',
     side,
-    setup: 'DIRECTIONAL_FALLBACK',
-    confirmed: false,
-    regime: 'MIXED',
-    score: null,
-    fallbackRule: '15M_EMA200_TREND',
+    setup: side === 'UP' ? 'PREVIOUS_GREEN' : 'PREVIOUS_RED',
+    confirmed: true,
     signalAt: START,
-    reason: `Fallback selected ${side}.`,
+    reason: `${side} selected by the previous closed candle.`,
   };
 }
 
@@ -36,7 +33,7 @@ test('500-share paper buys sweep actual asks, include fees and reject a shortfal
 });
 
 for (const side of ['UP', 'DOWN']) {
-  test(`a valid ${side} technical signal enables four 500-share minute checkpoints`, () => {
+  test(`a valid ${side} closed-candle signal enables four 500-share minute checkpoints`, () => {
     const { bot, at } = fixture();
     bot.applyTechnicalSignal(technicalSignal(side));
     for (const seconds of [60, 120, 180, 240]) {
