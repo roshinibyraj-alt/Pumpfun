@@ -173,8 +173,10 @@ test("dashboard presents hybrid setups, fallback direction, and unchanged execut
   assert.match(html, /No probability model/);
   assert.match(html, /Signal changes do not close existing positions/);
   assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
-  assert.match(html, /TP: own-side bid ≥ \$0.99/);
-  assert.match(html, /SL: bid ≤ \$0.01/);
+  assert.match(html, /TP uses a fresh own-side bid ≥ \$0.99/);
+  assert.match(html, /SL uses a fresh own-side bid ≤ \$0.01/);
+  assert.match(html, /TP\/SL are disabled before 295 seconds/);
+  assert.match(html, /missing or stale bid does not trigger a sale/i);
   assert.match(html, /AWAITING SETTLEMENT/);
   assert.match(html, /Current active side/);
   assert.match(html, /Paper trade history/);

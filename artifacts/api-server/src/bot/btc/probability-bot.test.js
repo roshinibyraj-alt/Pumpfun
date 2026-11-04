@@ -130,19 +130,49 @@ test('cash, real depth, fresh book and the existing both-sides price floor remai
 });
 
 for (const [bid, outcome, price] of [[.99, 'TAKE_PROFIT', 1], [.01, 'STOP_LOSS', 0]]) {
-  test(`unchanged ${outcome} exits at ${price} and does not disable later scheduled buys`, () => {
+  test(`${outcome} stays blocked before 295 seconds, then exits on a fresh own-side bid`, () => {
     const { bot, at } = fixture();
+    assert.equal(bot.snapshot().strategy.exitStartSeconds, 295);
     bot.applyTechnicalSignal(technicalSignal('UP'));
     bot.processSignals(at(60, .4, .3));
-    bot.processPositionExits(at(121, bid));
-    assert.equal(bot.trades[0].finalOutcome, outcome);
-    assert.equal(bot.trades[0].exitPrice, price);
-    assert.equal(bot.trades[0].status, 'SETTLED');
-    assert.equal(bot.activeSide, 'UP');
     bot.processSignals(at(120, .4, .3));
-    assert.equal(bot.trades.filter(t => t.status === 'OPEN').length, 1);
+    bot.processPositionExits(at(121, bid));
+    bot.processPositionExits(at(294.999, bid));
+    assert.equal(bot.trades.length, 2, 'scheduled entries remain available before the exit window');
+    assert.ok(bot.trades.every(trade => trade.status === 'OPEN'));
+    bot.processPositionExits(at(295, bid));
+    assert.ok(bot.trades.every(trade => trade.finalOutcome === outcome));
+    assert.ok(bot.trades.every(trade => trade.exitPrice === price));
+    assert.ok(bot.trades.every(trade => trade.status === 'SETTLED'));
+    assert.equal(bot.activeSide, 'UP');
   });
 }
+
+test('missing or stale bid at the 295-second gate holds positions until a fresh bid arrives', () => {
+  const { bot, at } = fixture();
+  bot.applyTechnicalSignal(technicalSignal('UP'));
+  bot.processSignals(at(60, .4, .3));
+
+  const missingBidAt = at(295, .99);
+  bot.quotes.UP.bestBid = null;
+  bot.quotes.UP.midPrice = .99;
+  bot.quotes.UP.updatedAt = missingBidAt;
+  bot.processPositionExits(missingBidAt);
+  assert.equal(bot.trades[0].status, 'OPEN', 'ask/mid data cannot substitute for a missing bid');
+
+  const staleBidAt = at(296, .01);
+  bot.quotes.UP.bestBid = .01;
+  bot.quotes.UP.updatedAt = staleBidAt - 6000;
+  bot.processPositionExits(staleBidAt);
+  assert.equal(bot.trades[0].status, 'OPEN', 'a stale bid cannot trigger the stop loss');
+
+  const freshBidAt = at(297, .99);
+  bot.quotes.UP.bestBid = .99;
+  bot.quotes.UP.updatedAt = freshBidAt;
+  bot.processPositionExits(freshBidAt);
+  assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
+  assert.equal(bot.trades[0].status, 'SETTLED');
+});
 
 test('peak bid follows fresh own-side quotes only; stale/missing bids cannot trigger exits', () => {
   const { bot, at } = fixture();

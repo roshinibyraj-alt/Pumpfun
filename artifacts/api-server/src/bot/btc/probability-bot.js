@@ -27,6 +27,7 @@ const MAX_ENTRIES_PER_WINDOW = ENTRY_CHECKPOINTS.length;
 const SLOT_GRACE_MS = 5000;
 const EQUITY_SNAPSHOT_INTERVAL_MS = 30_000;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
+const EXIT_START_SECONDS = 295;
 const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   openingDelaySeconds: OPENING_DELAY_SECONDS,
   minimumNetEdge: MIN_EDGE,
@@ -637,6 +638,9 @@ class ProbabilityBot {
   processPositionExits(now) {
     for (const trade of this.trades) {
       if (trade.status !== 'OPEN') continue;
+      const exitStartAt = (Number.isFinite(trade.windowStart)
+        ? trade.windowStart
+        : trade.windowEnd - WINDOW_MS) + EXIT_START_SECONDS * 1000;
       const quote = trade.marketId === this.market?.id ? this.quotes[trade.side] : null;
       const bid = quote?.bestBid == null ? NaN : Number(quote.bestBid);
       const fresh = Number.isFinite(quote?.updatedAt)
@@ -655,11 +659,13 @@ class ProbabilityBot {
       if (now < trade.windowEnd && fresh) {
         trade.lastOutcomeBid = bid;
         trade.lastOutcomeBidAt = quote.updatedAt;
-        const exit = thresholdExit(bid);
-        if (exit) {
-          this.closeTrade(trade, exit.price, trade.shares * exit.price, exit.outcome,
-            `Own-side bid reached the ${exit.outcome === 'TAKE_PROFIT' ? '$0.99 TP' : '$0.01 SL'}; credited $${exit.price.toFixed(2)} per share before fees.`,
-            now, bid);
+        if (now >= exitStartAt) {
+          const exit = thresholdExit(bid);
+          if (exit) {
+            this.closeTrade(trade, exit.price, trade.shares * exit.price, exit.outcome,
+              `Own-side bid reached the ${exit.outcome === 'TAKE_PROFIT' ? '$0.99 TP' : '$0.01 SL'} after the 295-second exit gate; credited $${exit.price.toFixed(2)} per share before fees.`,
+              now, bid);
+          }
         }
         continue;
       }
@@ -894,6 +900,7 @@ class ProbabilityBot {
         takeProfitPayoutPerShare: 1,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: 0,
+        exitStartSeconds: EXIT_START_SECONDS,
         probabilityModelEnabled: false,
         reversalsEnabled: false,
         entryIntervalSeconds: 60,
@@ -907,7 +914,7 @@ class ProbabilityBot {
         signalPersistence: 'Select Scenario A in aligned trends, Scenario B in confirmed ranges, otherwise use the aligned 15m EMA200 trend, latest closed 5m candle, previous side on doji, then closed-candle fallback for each valid five-minute window. Stale or insufficient data blocks entries.',
         entryModel: 'At 60s / 120s / 180s / 240s, buy 500 shares on the selected side if its best ask is below $0.40 / $0.60 / $0.70 / $0.80 respectively. Shares skipped by those price checks accumulate for the next qualifying checkpoint in the same window. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.',
         model: 'Trend continuation uses 5m EMA9/EMA21 alignment with 15m EMA200, an EMA21/VWAP pullback, Stoch RSI crossing from an extreme, and signed-volume confirmation. Range mean reversion uses a flat 15m EMA200, parallel 5m Bollinger Bands, an outer-band touch, and RSI(7) divergence. A deterministic trend-first fallback selects a side when neither setup confirms. All signals use closed candles; stale history blocks entries.',
-        exitModel: 'TP: own-side bid >= $0.99 credits $1; SL: bid <= $0.01 credits $0, before fees. No opposite-signal exits or reversals. Expiry retries the original market when needed; unavailable data remains explicitly pending.',
+        exitModel: 'No TP or SL exits before 295 seconds. From 295 seconds, TP uses a fresh own-side best bid >= $0.99 to credit $1; SL uses a fresh own-side best bid <= $0.01 to credit $0, before fees. Missing or stale bids do not trigger a sale. No opposite-signal exits or reversals. At expiry, retry the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
       referencePrice: this.referencePrice,
