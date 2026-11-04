@@ -148,41 +148,38 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents the closed-candle rule and preserves paper execution rules", () => {
+test("dashboard presents midpoint limit orders, visible inventory and preserved exits", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
-  assert.match(html, /BTC CLOSED-CANDLE PAPER BOT/);
+  assert.match(html, /BTC MIDPOINT LIMIT PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
-  assert.match(html, /500 SHARES \/ MINUTE/);
-  assert.match(html, /latest closed 5m candle/i);
-  assert.match(html, /green → UP, red → DOWN/);
-  assert.match(html, /doji after 2 or more consecutive green candles selects DOWN/);
-  assert.match(html, /doji after 2 or more consecutive red candles selects UP/);
+  assert.match(html, /100-share limits at the cheaper outcome’s midpoint/);
+  assert.match(html, /300-share limits at the expensive outcome’s midpoint/);
+  assert.match(html, /seconds 20, 40, 60, 80, 100 and 120/);
+  assert.match(html, /seconds 140, 160, 180, 200, 220 and 240/);
+  assert.match(html, /cancelled at window end/i);
   assert.doesNotMatch(html, /\bScenario A\b|\bScenario B\b|\bEMA\d*\b|\bRSI\b|\bBollinger\b|\bStoch(?:astic)?\b|\bMACD\b|\bHybrid signal\b|\bindicators?\b/i);
-  assert.match(html, /Prior streak/);
-  assert.match(html, /Closed candle rule/);
+  assert.match(html, /UP · ACCUMULATED POSITION/);
+  assert.match(html, /DOWN · ACCUMULATED POSITION/);
+  assert.match(html, /Average cost \/ share/);
+  assert.match(html, /Resting limit orders/);
+  assert.match(html, /Filled shares only/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
-  assert.match(html, /checks every 500 ms/);
-  assert.match(html, /seconds 1–60, 61–120, 121–180, and 181–240/);
-  assert.match(html, /carry forward to the next qualifying stage/);
-  assert.match(html, /maximum planned volume remains 2,000 shares per window/i);
   assert.match(html, /Completed-window performance &amp; global equity/);
   assert.match(html, /Window win rate/);
   assert.match(html, /Equity = cash \+ open positions marked at fresh own-side best bids/);
-  assert.match(html, /no probability model/i);
-  assert.match(html, /Signal changes do not close existing positions/);
+  assert.doesNotMatch(html, /latest closed 5m candle|doji after .*consecutive|price-filter carry/i);
   assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
   assert.match(html, /TP uses a fresh own-side bid ≥ \$0.99/);
   assert.match(html, /SL uses a fresh own-side bid ≤ \$0.01/);
   assert.match(html, /TP\/SL are disabled before 295 seconds/);
   assert.match(html, /missing or stale bid does not trigger a sale/i);
   assert.match(html, /AWAITING SETTLEMENT/);
-  assert.match(html, /Current active side/);
   assert.match(html, /Paper trade history/);
   assert.doesNotMatch(html, /Manual limit order/);
 });
 
-test("dashboard renders locked, skipped and observing states without probability or reversal dependencies", () => {
+test("dashboard renders midpoint roles, schedule, filled inventory, resting orders and analytics", () => {
   const vm = require("node:vm");
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
   const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m => [m[1], { style: {} }]));
@@ -195,50 +192,34 @@ test("dashboard renders locked, skipped and observing states without probability
     vm.runInContext(script[1], context);
   }
   const state = {
-    activeSide: "UP", windowDecision: { status: "LOCKED" },
-    entrySchedule: { nextEntryAt: 130000, due: true }, entryFilter: { allowed: true },
-    quotes: { UP: { estimatedAverageAsk: .5 } },
-    technicalSignal: {
-      status: "READY", side: "UP", setup: "PREVIOUS_GREEN", confirmed: true,
-      reason: "UP because the latest closed five-minute candle was green.",
-      candle: { color: "GREEN", open: 100, high: 102, low: 99, close: 101, end: 120000 },
+    now: 120000,
+    midpointSelection: { status: "READY", cheapSide: "UP", expensiveSide: "DOWN", midpoints: { UP: .31, DOWN: .69 } },
+    quotes: {
+      UP: { midpoint: .31, bestBid: .3, bestAsk: .32, updatedAt: 120000 },
+      DOWN: { midpoint: .69, bestBid: .68, bestAsk: .7, updatedAt: 120000 },
     },
+    orderSchedule: { phase: "CHEAP", shares: 100, nextOrderAt: 120000, nextScheduledSeconds: 20, due: true },
+    openOrders: [{ side: "UP", remainingShares: 80 }, { side: "DOWN", remainingShares: 300 }],
   };
-  context.renderSide("UP", state);
-  context.renderSide("DOWN", state);
-  assert.equal(elements.upProb.textContent, "SELECTED");
-  assert.equal(elements.downProb.textContent, "OFF");
-  assert.equal(elements.upSignal.textContent, "ENTRY STAGE");
-  state.technicalSignal = {
-    status: "READY", side: "UP", setup: "PREVIOUS_GREEN",
-    confirmed: true, reason: "UP because the latest closed five-minute candle was green.",
-    candle: { color: "GREEN", open: 100, high: 102, low: 99, close: 101, end: 120000 },
-  };
-  context.renderSignalRule(state);
-  assert.equal(elements.signalRule.textContent, "PREVIOUS GREEN");
-  assert.match(elements.signalRuleHint.textContent, /latest closed five-minute candle was green/);
-  state.technicalSignal = {
-    status: "READY", side: "UP", setup: "PREVIOUS_GREEN",
-    confirmed: true, reason: "UP because the latest closed five-minute candle was green.",
-    candle: { color: "GREEN", priorColor: null, consecutivePriorCandles: 0, open: 100, high: 102, low: 99, close: 101, end: 120000 },
-  };
-  state.windowDecision.status = "LOCKED";
-  context.renderTechnical(state);
-  context.renderSide("UP", state);
-  assert.equal(elements.upProb.textContent, "SELECTED");
-  assert.equal(elements.technicalSetup.textContent, "PREVIOUS GREEN");
-  assert.equal(elements.technicalRegime.textContent, "GREEN");
-  assert.equal(elements.technicalFallbackRule.textContent, "—");
-  assert.equal(elements.technicalVolume.textContent, "UP");
-  assert.match(elements.technicalReason.textContent, /latest closed five-minute candle was green/);
-  state.technicalSignal.status = "STALE";
-  context.renderSide("UP", state);
-  assert.equal(elements.upSignal.textContent, "WAIT DATA");
-  delete state.technicalSignal;
-  context.renderPositions({});
-  context.renderTrades([{ side: "UP", shares: 500, openedAt: 120000, scheduledAt: 120000, status: "OPEN" }]);
-  assert.match(elements.trades.innerHTML, /Scheduled/);
-  assert.match(elements.trades.innerHTML, /Price cap · carry/);
+  context.renderMarket(state);
+  context.renderSchedule(state);
+  context.renderPositions({ UP: { shares: 80, averageCost: .3, costBasis: 24 }, DOWN: {} });
+  context.renderPendingBySide(state.openOrders);
+  context.renderOrders([
+    { side: "UP", phase: "CHEAP", limitPrice: .31, requestedShares: 100, filledShares: 20, remainingShares: 80, status: "PARTIALLY_FILLED", placedAt: 120000 },
+  ]);
+  context.renderTrades([{ side: "UP", phase: "CHEAP", shares: 20, openedAt: 120000, entryPrice: .3, entryPriceLimit: .31, status: "OPEN" }]);
+  assert.equal(elements.upRole.textContent, "CHEAPER");
+  assert.equal(elements.downRole.textContent, "EXPENSIVE");
+  assert.match(elements.cheaperMid.textContent, /\$0\.3100/);
+  assert.match(elements.nextOrder.textContent, /DUE NOW/);
+  assert.equal(elements.restingSummary.textContent, "2");
+  assert.equal(elements.upShares.textContent, "80 shares");
+  assert.equal(elements.upAverageCost.textContent, "$0.3000");
+  assert.equal(elements.upOpenOrders.textContent, "1");
+  assert.equal(elements.upRestingShares.textContent, "80");
+  assert.match(elements.orders.innerHTML, /PARTIALLY_FILLED/);
+  assert.match(elements.trades.innerHTML, /Average fill/);
   assert.doesNotMatch(elements.trades.innerHTML, /Model probability/);
   context.renderAnalytics({
     windowPerformance: { completed: 3, wins: 2, losses: 1, flats: 0, winRate: 2 / 3, netPnl: 12.5 },
@@ -250,11 +231,11 @@ test("dashboard renders locked, skipped and observing states without probability
   assert.equal(elements.completedWindows.textContent, "3");
   assert.equal(elements.windowWinRate.textContent, "66.7%");
   assert.match(elements.equityChart.innerHTML, /<svg/);
-  state.activeSide = null;
-  state.windowDecision.status = "SKIP_WINDOW";
-  context.renderSide("UP", state);
-  assert.equal(elements.upProb.textContent, "SKIP");
-  state.windowDecision.status = "OBSERVING";
-  context.renderSide("UP", state);
-  assert.equal(elements.upProb.textContent, "WAIT");
+  state.midpointSelection.status = "MIDPOINTS_TIED";
+  context.renderMarket(state);
+  assert.equal(elements.upRole.textContent, "TIED");
+  assert.equal(elements.downRole.textContent, "TIED");
+  state.midpointSelection.status = "WAITING_FOR_FRESH_MIDPOINTS";
+  context.renderMarket(state);
+  assert.equal(elements.upRole.textContent, "WAITING");
 });

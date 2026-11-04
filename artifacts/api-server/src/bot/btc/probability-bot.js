@@ -3,8 +3,21 @@
 const config = require('./config');
 const marketData = require('./wick-market-data');
 const { feed } = require('./chainlink-price-feed');
-const { detectTechnicalSignal, METHOD: TECHNICAL_METHOD } = require('./technical-signal');
+const { METHOD: TECHNICAL_METHOD } = require('./technical-signal');
 const { TAKE_PROFIT_BID, STOP_LOSS_BID, thresholdExit, recoverExpiredPositions } = require('./position-exits');
+const {
+  ORDER_INTERVAL_SECONDS,
+  CHEAP_PHASE_END_SECONDS,
+  EXPENSIVE_PHASE_START_SECONDS,
+  EXPENSIVE_PHASE_END_SECONDS,
+  CHEAP_ORDER_SHARES,
+  EXPENSIVE_ORDER_SHARES,
+  LIMIT_ORDER_CHECKPOINTS,
+  scheduledOrderSlotAt,
+  quoteIsFresh,
+  selectMidpointSides,
+  simulateLimitBuy,
+} = require('./midpoint-limit-strategy');
 
 const WINDOW_MS = 5 * 60 * 1000;
 const SHARES_PER_SIGNAL = 500;
@@ -173,6 +186,13 @@ class ProbabilityBot {
     this.pendingPriceFilteredShares = 0;
     this.priceFilteredSlots = new Map();
     this.entryStageSkipLogs = new Set();
+    this.limitOrders = [];
+    this.lastOrderSlot = -1;
+    this.orderWindowStart = null;
+    this.orderSequence = 0;
+    this.orderSlotSkipLogs = new Set();
+    this.orderBookLiquidity = { UP: null, DOWN: null };
+    this.midpointSelection = { status: 'WAITING_FOR_FRESH_MIDPOINTS', cheapSide: null, expensiveSide: null, midpoints: {} };
     this.entrySequence = 0;
     this.entryWindowStart = null;
     this.windowResults = new Map();
@@ -184,12 +204,12 @@ class ProbabilityBot {
     this.lastLiveSignal = null;
     this.learningStatus = {
       enabled: false,
-      mode: learningStore ? 'logging-only-fixed-policy' : 'disabled',
+      mode: learningStore ? 'logging-only-fixed-midpoint-policy' : 'disabled',
       completedWindows: 0,
       lastEvaluation: null,
     };
     this.error = null;
-    this.statusReason = 'Starting price and market feeds.';
+    this.statusReason = 'Starting BTC market and order-book feeds.';
     this.lastUpdateAt = null;
     this.startedAt = this.now();
     this.priceFeed.start();
@@ -222,38 +242,24 @@ class ProbabilityBot {
       ts, observedAt: now, windowStart: this.market.start, windowEnd: this.market.end,
       secondsSinceOpen: Math.max(0, (now - this.market.start) / 1000),
       secondsRemaining: Math.max(0, (this.market.end - now) / 1000),
-      referencePrice: this.referencePrice, spotPrice: this.latestPrice,
-      volatility5m: this.volatility5m, probabilityUp: this.probabilityUp,
-      edges: this.edges,
-      pullback: this.pullback ? {
-        method: this.pullback.method,
-        side: this.pullback.side,
-        signalSide: this.pullback.signalSide,
-        activeSignalReason: this.pullback.activeSignalReason,
-         timeframe: '5m',
-      } : null,
-      activeSide: this.activeSide,
-      windowDecision: this.windowDecision,
+      orderStrategy: 'midpoint-resting-limit-v1',
+      midpointSelection: this.midpointSelection,
+      orderSchedule: this.orderSchedule(now),
+      referencePrice: this.referencePrice,
+      spotPrice: this.latestPrice,
       quotes: Object.fromEntries(['UP', 'DOWN'].map(side => {
-        const quote = this.learningQuotes?.[side] ?? this.quotes[side];
+        const quote = this.quotes[side];
         return [side, quote ? {
           bestBid: quote.bestBid, bestAsk: quote.bestAsk, asks: quote.asks, bids: quote.bids,
           updatedAt: quote.updatedAt,
         } : null];
       })),
+      openOrders: this.limitOrders.filter(order => this.isLimitOrderOpen(order)).map(order => ({
+        id: order.id, side: order.side, phase: order.phase, limitPrice: order.limitPrice,
+        requestedShares: order.requestedShares, filledShares: order.filledShares,
+        remainingShares: order.remainingShares, status: order.status,
+      })),
     };
-    sample.technicalSignal = this.marketSignal ? {
-      method: this.marketSignal.method,
-      timeframe: this.marketSignal.timeframe,
-      status: this.marketSignal.status,
-      side: this.marketSignal.side,
-      setup: this.marketSignal.setup,
-      pattern: this.marketSignal.pattern,
-      confirmed: this.marketSignal.confirmed,
-      reason: this.marketSignal.reason,
-      signalAt: this.marketSignal.signalAt,
-      candle: this.marketSignal.candle,
-    } : null;
     this.queuePersistence(() => this.learningStore.recordSample(sample));
   }
 
@@ -286,6 +292,8 @@ class ProbabilityBot {
     this.busy = true;
     try {
       const now = this.now();
+      this.cancelExpiredLimitOrders(now);
+      this.processPendingLimitOrders(now);
       this.processPositionExits(now);
       await recoverExpiredPositions(this, now);
       const start = Math.floor(now / WINDOW_MS) * WINDOW_MS;
@@ -312,8 +320,6 @@ class ProbabilityBot {
         UP: this.quote(upBook, now),
         DOWN: this.quote(downBook, now),
       };
-      this.learningQuotes = structuredClone(this.quotes);
-      this.updateEntryFilter(now);
       this.processPositionExits(now);
 
       const ticks = this.priceFeed.getTicks?.() ?? [];
@@ -324,35 +330,22 @@ class ProbabilityBot {
       this.referencePrice = referenceTick?.price ?? null;
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
-      const candles = this.priceFeed.getHistoricalCandles?.() ?? [];
-      this.applyTechnicalSignal(detectTechnicalSignal({
-        candles5m: candles,
-        now,
-      }));
-      this.pullback = this.marketSignal ? {
-        method: this.marketSignal.method,
-        timeframe: this.marketSignal.timeframe,
-        side: this.activeSide,
-        signalSide: this.marketSignal.side,
-        setup: this.marketSignal.setup,
-        confirmed: this.marketSignal.confirmed,
-        activeSignalReason: this.activeSignalReason,
-      } : null;
-      this.statusReason = this.marketSignal?.status !== 'READY'
-        ? this.marketSignal?.reason || 'Waiting for valid closed-candle strategy data.'
-        : `Closed 5m candle selected ${this.activeSide} · ${this.marketSignal.setup}; checking each 500-share price stage every 500ms.`;
+      const scanAt = this.now();
+      this.midpointSelection = selectMidpointSides(this.quotes, scanAt, EXIT_QUOTE_MAX_AGE_MS);
+      this.statusReason = this.midpointStatusReason(this.midpointSelection, scanAt);
       this.probabilityUp = null;
       this.edges = { UP: null, DOWN: null };
-      const scanAt = this.now();
-      this.processSignals(scanAt);
+      this.processPendingLimitOrders(scanAt);
+      this.processScheduledLimitOrder(scanAt);
       this.maybeFinalizeCompletedWindows(scanAt);
       this.maybeRecordEquitySnapshot(scanAt);
       await this.captureLearningSample(scanAt);
-      await this.maybeTune(now);
       this.error = null;
       this.lastUpdateAt = now;
     } catch (error) {
       const scanAt = this.now();
+      this.cancelExpiredLimitOrders(scanAt);
+      this.processPendingLimitOrders(scanAt);
       this.processPositionExits(scanAt);
       this.maybeFinalizeCompletedWindows(scanAt);
       this.maybeRecordEquitySnapshot(scanAt);
@@ -460,7 +453,18 @@ class ProbabilityBot {
 
   beginMarketWindow(start = this.market?.start) {
     if (!Number.isFinite(start) || this.entryWindowStart === start) return;
+    const now = this.now();
+    for (const order of this.limitOrders) {
+      if (this.isLimitOrderOpen(order) && order.windowStart !== start) {
+        this.cancelLimitOrder(order, now, 'WINDOW_ENDED');
+      }
+    }
     this.entryWindowStart = start;
+    this.orderWindowStart = start;
+    this.lastOrderSlot = -1;
+    this.orderSlotSkipLogs.clear();
+    this.orderBookLiquidity = { UP: null, DOWN: null };
+    this.midpointSelection = { status: 'WAITING_FOR_FRESH_MIDPOINTS', cheapSide: null, expensiveSide: null, midpoints: {} };
     this.pendingReversal = null;
     this.windowDecision = {
       status: this.activeSide ? 'HELD' : 'OBSERVING',
@@ -473,7 +477,317 @@ class ProbabilityBot {
     this.marketSignal = null;
     this.pullback = null;
     this.lastLoggedSignalKey = null;
-    this.log('WINDOW_SIGNAL_RESET', { windowStart: start, side: this.activeSide });
+    this.log('PAPER_WINDOW_ORDER_SCHEDULE_STARTED', {
+      windowStart: start,
+      checkpoints: LIMIT_ORDER_CHECKPOINTS.map(({ seconds, phase, shares }) => ({ seconds, phase, shares })),
+    });
+  }
+
+  midpointStatusReason(selection, now) {
+    if (selection.status === 'MIDPOINTS_TIED') {
+      return 'UP and DOWN midpoints are equal; waiting for a distinct cheaper and more expensive side.';
+    }
+    if (selection.status !== 'READY') {
+      return 'Waiting for fresh UP and DOWN midpoints.';
+    }
+    const cheapMid = selection.midpoints[selection.cheapSide];
+    const expensiveMid = selection.midpoints[selection.expensiveSide];
+    const schedule = this.orderSchedule(now);
+    return `UP/DOWN mids: cheaper ${selection.cheapSide} ${cheapMid.toFixed(3)} · expensive ${selection.expensiveSide} ${expensiveMid.toFixed(3)}${schedule.nextOrderAt ? ` · next ${schedule.phase} order at ${new Date(schedule.nextOrderAt).toISOString()}` : ' · scheduled orders complete'}.`;
+  }
+
+  isLimitOrderOpen(order) {
+    return ['OPEN', 'PARTIALLY_FILLED'].includes(order?.status)
+      && Number(order.remainingShares) > 1e-8;
+  }
+
+  cancelLimitOrder(order, now, reason) {
+    if (!this.isLimitOrderOpen(order)) return false;
+    order.status = 'CANCELLED';
+    order.cancelledAt = now;
+    order.cancelReason = reason;
+    this.log('PAPER_LIMIT_ORDER_CANCELLED', {
+      orderId: order.id,
+      side: order.side,
+      phase: order.phase,
+      limitPrice: order.limitPrice,
+      filledShares: order.filledShares,
+      remainingShares: order.remainingShares,
+      reason,
+    }, order.windowStart);
+    return true;
+  }
+
+  cancelExpiredLimitOrders(now) {
+    for (const order of this.limitOrders) {
+      if (this.isLimitOrderOpen(order) && Number.isFinite(order.windowEnd) && order.windowEnd <= now) {
+        this.cancelLimitOrder(order, now, 'WINDOW_ENDED');
+      }
+    }
+  }
+
+  orderBookAsksAvailable(side, quote) {
+    const asks = Array.isArray(quote?.asks) ? quote.asks : [];
+    const signature = JSON.stringify(asks.map(level => [level.price, level.size]));
+    let state = this.orderBookLiquidity[side];
+    if (!state || state.signature !== signature) {
+      state = { signature, consumedByPrice: new Map() };
+      this.orderBookLiquidity[side] = state;
+    }
+    return asks.map(level => ({
+      price: level.price,
+      size: Math.max(0, level.size - (state.consumedByPrice.get(level.price) || 0)),
+    }));
+  }
+
+  consumeOrderBookAsks(side, fill) {
+    const state = this.orderBookLiquidity[side];
+    if (!state) return;
+    for (const level of fill.fills) {
+      state.consumedByPrice.set(level.price,
+        (state.consumedByPrice.get(level.price) || 0) + level.shares);
+    }
+  }
+
+  processPendingLimitOrders(now) {
+    this.cancelExpiredLimitOrders(now);
+    const orders = this.limitOrders
+      .filter(order => this.isLimitOrderOpen(order))
+      .sort((a, b) => a.placedAt - b.placedAt);
+    for (const order of orders) {
+      if (order.windowEnd <= now || order.marketId !== this.market?.id) continue;
+      const quote = this.quotes[order.side];
+      if (!quoteIsFresh(quote, now, EXIT_QUOTE_MAX_AGE_MS)) continue;
+      const asks = this.orderBookAsksAvailable(order.side, quote);
+      const fill = simulateLimitBuy(
+        asks, order.limitPrice, order.remainingShares, this.cash, estimateTakerFee,
+      );
+      if (!fill) continue;
+      this.consumeOrderBookAsks(order.side, fill);
+      this.recordLimitOrderFill(order, fill, now);
+    }
+  }
+
+  recordLimitOrderFill(order, fill, now) {
+    let trade = order.tradeId
+      ? this.trades.find(item => item.id === order.tradeId)
+      : null;
+    if (!trade) {
+      trade = {
+        id: `paper-${order.id}`,
+        orderId: order.id,
+        marketId: order.marketId,
+        tokenId: order.tokenId,
+        windowStart: order.windowStart,
+        windowEnd: order.windowEnd,
+        marketTitle: order.marketTitle,
+        side: order.side,
+        phase: order.phase,
+        entryKind: 'MIDPOINT_LIMIT',
+        scheduledAt: order.scheduledAt,
+        entrySlot: order.slot,
+        entryPriceLimit: order.limitPrice,
+        shares: 0,
+        entryPrice: null,
+        cost: 0,
+        fees: 0,
+        totalCost: 0,
+        openedAt: now,
+        status: 'OPEN',
+        peakBid: null,
+        peakBidAt: null,
+        lastOutcomeBid: null,
+        lastOutcomeBidAt: null,
+        realizedPnl: null,
+      };
+      order.tradeId = trade.id;
+      this.trades.unshift(trade);
+      const windowResult = this.windowResults.get(order.windowStart)
+        ?? { entryCount: 0, settledCount: 0, netPnl: 0 };
+      windowResult.entryCount += 1;
+      this.windowResults.set(order.windowStart, windowResult);
+    }
+
+    trade.shares += fill.shares;
+    trade.cost += fill.cost;
+    trade.fees += fill.fees;
+    trade.totalCost += fill.totalCost;
+    trade.entryPrice = trade.cost / trade.shares;
+    trade.lastFillAt = now;
+    order.filledShares += fill.shares;
+    order.remainingShares = Math.max(0, order.requestedShares - order.filledShares);
+    order.filledCost = (order.filledCost || 0) + fill.cost;
+    order.fees = (order.fees || 0) + fill.fees;
+    order.averageFillPrice = order.filledCost / order.filledShares;
+    order.lastFillAt = now;
+    order.status = order.remainingShares <= 1e-8 ? 'FILLED' : 'PARTIALLY_FILLED';
+    if (order.status === 'FILLED') order.filledAt = now;
+
+    this.cash -= fill.totalCost;
+    this.equitySnapshotRequested = true;
+    let retainedSettled = 0;
+    this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
+    this.log(order.status === 'FILLED' ? 'PAPER_LIMIT_ORDER_FILLED' : 'PAPER_LIMIT_ORDER_PARTIAL_FILL', {
+      orderId: order.id,
+      tradeId: trade.id,
+      phase: order.phase,
+      side: order.side,
+      limitPrice: order.limitPrice,
+      fillShares: fill.shares,
+      totalFilledShares: order.filledShares,
+      remainingShares: order.remainingShares,
+      averageFillPrice: order.averageFillPrice,
+      fillCost: fill.cost,
+      fillFees: fill.fees,
+    }, order.windowStart);
+  }
+
+  logOrderSlotSkipped(slot, now, reason) {
+    const key = `${slot}:${reason}`;
+    if (this.orderSlotSkipLogs.has(key)) return;
+    this.orderSlotSkipLogs.add(key);
+    const checkpoint = LIMIT_ORDER_CHECKPOINTS[slot];
+    this.log('PAPER_LIMIT_ORDER_SLOT_SKIPPED', {
+      slot,
+      scheduledAt: checkpoint ? this.market?.start + checkpoint.seconds * 1000 : null,
+      phase: checkpoint?.phase ?? null,
+      shares: checkpoint?.shares ?? null,
+      reason,
+    });
+  }
+
+  logOrderSlotWaiting(slot, reason) {
+    const key = `waiting:${slot}`;
+    if (this.orderSlotSkipLogs.has(key)) return;
+    this.orderSlotSkipLogs.add(key);
+    const checkpoint = LIMIT_ORDER_CHECKPOINTS[slot];
+    this.log('PAPER_LIMIT_ORDER_WAITING_FOR_QUOTES', {
+      slot,
+      scheduledAt: checkpoint ? this.market?.start + checkpoint.seconds * 1000 : null,
+      phase: checkpoint?.phase ?? null,
+      reason,
+    });
+  }
+
+  processScheduledLimitOrder(now) {
+    if (!this.market || now >= this.market.end) return;
+    if (this.orderWindowStart !== this.market.start) this.beginMarketWindow(this.market.start);
+    const slot = scheduledOrderSlotAt(this.market.start, now);
+    if (slot < 0) {
+      const lastCheckpoint = LIMIT_ORDER_CHECKPOINTS[LIMIT_ORDER_CHECKPOINTS.length - 1];
+      const finishedAt = this.market.start + (lastCheckpoint.seconds + ORDER_INTERVAL_SECONDS) * 1000;
+      if (now >= finishedAt) {
+        while (this.lastOrderSlot < LIMIT_ORDER_CHECKPOINTS.length - 1) {
+          const missed = this.lastOrderSlot + 1;
+          this.logOrderSlotSkipped(missed, now, 'ORDER_WINDOW_ENDED');
+          this.lastOrderSlot = missed;
+        }
+      }
+      return;
+    }
+    if (slot > this.lastOrderSlot + 1) {
+      while (this.lastOrderSlot < slot - 1) {
+        const missed = this.lastOrderSlot + 1;
+        this.logOrderSlotSkipped(missed, now, 'MISSED_SCHEDULE_INTERVAL');
+        this.lastOrderSlot = missed;
+      }
+    }
+    if (slot <= this.lastOrderSlot) return;
+
+    const checkpoint = LIMIT_ORDER_CHECKPOINTS[slot];
+    const stageEndsAt = this.market.start
+      + (checkpoint.seconds + ORDER_INTERVAL_SECONDS) * 1000;
+    if (now >= stageEndsAt) {
+      this.logOrderSlotSkipped(slot, now, 'MISSED_SCHEDULE_INTERVAL');
+      this.lastOrderSlot = slot;
+      return;
+    }
+
+    const selection = selectMidpointSides(this.quotes, now, EXIT_QUOTE_MAX_AGE_MS);
+    this.midpointSelection = selection;
+    if (selection.status !== 'READY') {
+      this.logOrderSlotWaiting(slot, selection.status);
+      return;
+    }
+    const side = checkpoint.phase === 'CHEAP' ? selection.cheapSide : selection.expensiveSide;
+    const midpoint = selection.midpoints[side];
+    const limitPrice = Number(midpoint.toFixed(6));
+    const order = {
+      id: `paper-limit-${this.market.start}-${slot}-${++this.orderSequence}`,
+      marketId: this.market.id,
+      tokenId: this.market.tokens?.[side] ?? null,
+      windowStart: this.market.start,
+      windowEnd: this.market.end,
+      marketTitle: this.market.title,
+      slot,
+      phase: checkpoint.phase,
+      side,
+      scheduledAt: this.market.start + checkpoint.seconds * 1000,
+      placedAt: now,
+      limitPrice,
+      requestedShares: checkpoint.shares,
+      filledShares: 0,
+      remainingShares: checkpoint.shares,
+      averageFillPrice: null,
+      filledCost: 0,
+      fees: 0,
+      status: 'OPEN',
+      tradeId: null,
+    };
+    this.limitOrders.unshift(order);
+    this.lastOrderSlot = slot;
+    this.midpointSelection = { ...selection, selectedSide: side, selectedPhase: checkpoint.phase };
+    this.log('PAPER_LIMIT_ORDER_PLACED', {
+      orderId: order.id,
+      slot,
+      phase: order.phase,
+      side,
+      limitPrice,
+      midpoint,
+      requestedShares: order.requestedShares,
+      scheduledAt: order.scheduledAt,
+      placedAt: now,
+    }, this.market.start);
+    let retainedClosedOrders = 0;
+    this.limitOrders = this.limitOrders.filter(item => this.isLimitOrderOpen(item)
+      || retainedClosedOrders++ < 200);
+    this.statusReason = `Placed ${order.requestedShares}-share ${order.phase.toLowerCase()} limit buy on ${side} at ${limitPrice.toFixed(3)}.`;
+  }
+
+  orderSchedule(now = this.now()) {
+    const start = this.market?.start;
+    if (!Number.isFinite(start)) {
+      return { due: false, nextOrderAt: null, ordersPlaced: 0, openOrders: 0 };
+    }
+    const slot = scheduledOrderSlotAt(start, now);
+    const currentCheckpoint = slot >= 0 ? LIMIT_ORDER_CHECKPOINTS[slot] : null;
+    const due = Boolean(currentCheckpoint) && slot > this.lastOrderSlot
+      && now >= start + currentCheckpoint.seconds * 1000
+      && now < start + (currentCheckpoint.seconds + ORDER_INTERVAL_SECONDS) * 1000
+      && now < this.market.end;
+    const nextCheckpoint = due
+      ? currentCheckpoint
+      : LIMIT_ORDER_CHECKPOINTS.find(item => item.slot > this.lastOrderSlot
+        && start + item.seconds * 1000 > now);
+    const currentOrders = this.limitOrders.filter(order => order.windowStart === start);
+    return {
+      due,
+      slot,
+      phase: nextCheckpoint?.phase ?? null,
+      shares: nextCheckpoint?.shares ?? null,
+      nextOrderAt: nextCheckpoint
+        ? due ? now : start + nextCheckpoint.seconds * 1000
+        : null,
+      nextScheduledSeconds: nextCheckpoint?.seconds ?? null,
+      ordersPlaced: currentOrders.length,
+      openOrders: currentOrders.filter(order => this.isLimitOrderOpen(order)).length,
+      maxOrdersPerWindow: LIMIT_ORDER_CHECKPOINTS.length,
+      lastPlacedSlot: this.lastOrderSlot,
+      checkpoints: LIMIT_ORDER_CHECKPOINTS.map(item => ({ ...item })),
+      cheapPhaseEndSeconds: CHEAP_PHASE_END_SECONDS,
+      expensivePhaseStartSeconds: EXPENSIVE_PHASE_START_SECONDS,
+      expensivePhaseEndSeconds: EXPENSIVE_PHASE_END_SECONDS,
+    };
   }
 
   processSignals(now) {
@@ -915,35 +1229,23 @@ class ProbabilityBot {
       strategy: {
         timeframe: '5m',
         pollIntervalMs: POLL_MS,
-        sharesPerSignal: this.strategySettings.sharesPerSignal,
-        minimumNetEdge: null,
-        lowPriceThreshold: this.strategySettings.lowPriceThreshold,
-        lowPriceMinimumNetEdge: null,
+        orderType: 'RESTING_LIMIT',
+        orderIntervalSeconds: ORDER_INTERVAL_SECONDS,
+        cheapPhaseEndSeconds: CHEAP_PHASE_END_SECONDS,
+        cheapOrderShares: CHEAP_ORDER_SHARES,
+        expensivePhaseStartSeconds: EXPENSIVE_PHASE_START_SECONDS,
+        expensivePhaseEndSeconds: EXPENSIVE_PHASE_END_SECONDS,
+        expensiveOrderShares: EXPENSIVE_ORDER_SHARES,
+        maxOrdersPerWindow: LIMIT_ORDER_CHECKPOINTS.length,
         takerFeeRate: TAKER_FEE_RATE,
-        minimumBestAsk: MIN_ENTRY_PRICE,
-        openingDelaySeconds: this.strategySettings.openingDelaySeconds,
-        volatilityMultiplier: this.strategySettings.volatilityMultiplier,
-        sideMode: this.strategySettings.sideMode,
         takeProfitBid: TAKE_PROFIT_BID,
         takeProfitPayoutPerShare: 1,
         stopLossBid: STOP_LOSS_BID,
         stopLossPayoutPerShare: 0,
         exitStartSeconds: EXIT_START_SECONDS,
-        probabilityModelEnabled: false,
-        reversalsEnabled: false,
-        entryIntervalSeconds: 60,
-        lastEntrySeconds: ENTRY_CHECKPOINTS[ENTRY_CHECKPOINTS.length - 1].endSeconds,
-        maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
-        sharesPerEntry: SHARES_PER_SIGNAL,
-        entryPriceCheckpoints: ENTRY_CHECKPOINTS.map(item => ({
-          seconds: item.seconds,
-          startSeconds: item.seconds,
-          endSeconds: item.endSeconds,
-          maximumAsk: item.maximumAsk,
-        })),
-        signalPersistence: 'Use only the latest closed 5m candle: green selects UP, red selects DOWN, a doji after 2+ consecutive green candles selects DOWN, and a doji after 2+ consecutive red candles selects UP. Other dojis produce no new side. Stale candles block entries.',
-        entryModel: 'Check every 500ms during seconds 1–60, 61–120, 121–180, and 181–240. Buy 500 shares immediately on the selected side at the first fresh best ask below $0.40, $0.60, $0.70, or $0.80 for that stage. If a stage ends without meeting its price cap, carry its 500 shares to the next qualifying stage in the same window. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.',
-        model: 'Signal selection uses only the latest closed 5m candle color and the immediately preceding candle-color run for doji reversal. Green selects UP; red selects DOWN; doji after 2+ green selects DOWN; doji after 2+ red selects UP. No indicator, probability, or prior-window side is used.',
+        orderSchedule: LIMIT_ORDER_CHECKPOINTS.map(item => ({ ...item })),
+        orderModel: 'At seconds 20, 40, 60, 80, 100 and 120, place 100-share resting limit buys on the outcome with the lower fresh UP/DOWN midpoint, at that midpoint. At seconds 140, 160, 180, 200, 220 and 240, place 300-share resting limit buys on the outcome with the higher fresh midpoint, at that midpoint. Orders are not re-placed after their scheduled interval and any unfilled remainder is cancelled at window end.',
+        fillModel: 'Paper resting buys fill only when a fresh own-side ask is at or below the order limit and visible ask depth is available. Cash is deducted only for filled shares; partial fills remain open until filled or cancelled at window end.',
         exitModel: 'No TP or SL exits before 295 seconds. From 295 seconds, TP uses a fresh own-side best bid >= $0.99 to credit $1; SL uses a fresh own-side best bid <= $0.01 to credit $0, before fees. Missing or stale bids do not trigger a sale. No opposite-signal exits or reversals. At expiry, retry the original market when needed; unavailable data remains explicitly pending.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
@@ -951,17 +1253,9 @@ class ProbabilityBot {
       spotPrice: this.latestPrice,
       priceGap: this.referencePrice && this.latestPrice ? this.latestPrice - this.referencePrice : null,
       priceAt: this.priceAt,
-      volatility5m: this.volatility5m,
-      expectedMove: this.expectedMove ?? null,
-      standardizedGap: this.standardizedGap ?? null,
-      probability: this.probabilityUp == null ? null : { UP: this.probabilityUp, DOWN: 1 - this.probabilityUp },
-      edges: this.edges,
-      requiredNetEdge: { UP: null, DOWN: null },
-      entryArmed: { ...this.armed },
-      entryFilter: this.entryFilter,
       quotes: {
-        UP: this.quotes.UP ? { bestBid: this.quotes.UP.bestBid, bestAsk: this.quotes.UP.bestAsk, midpoint: this.quotes.UP.midpoint, estimatedAverageAsk: this.entryFill('UP')?.averagePrice ?? null } : null,
-        DOWN: this.quotes.DOWN ? { bestBid: this.quotes.DOWN.bestBid, bestAsk: this.quotes.DOWN.bestAsk, midpoint: this.quotes.DOWN.midpoint, estimatedAverageAsk: this.entryFill('DOWN')?.averagePrice ?? null } : null,
+        UP: this.quotes.UP ? { bestBid: this.quotes.UP.bestBid, bestAsk: this.quotes.UP.bestAsk, midpoint: this.quotes.UP.midpoint, updatedAt: this.quotes.UP.updatedAt } : null,
+        DOWN: this.quotes.DOWN ? { bestBid: this.quotes.DOWN.bestBid, bestAsk: this.quotes.DOWN.bestAsk, midpoint: this.quotes.DOWN.midpoint, updatedAt: this.quotes.DOWN.updatedAt } : null,
       },
       paperAccount: {
         startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl,
@@ -970,17 +1264,15 @@ class ProbabilityBot {
         unrealizedPnl: globalEquity.unrealizedPnl,
         equityMarkStatus: globalEquity.valid ? 'FRESH' : 'WAITING_FOR_FRESH_MARKS',
         wins: this.settledWins, losses: this.settledLosses,
-        settled: this.settledCount, openPositions: openTrades.length, positions,
+        settled: this.settledCount, openPositions: openTrades.length, openOrders: this.limitOrders.filter(order => this.isLimitOrderOpen(order)).length, positions,
         awaitingSettlement: openTrades.filter(trade => trade.settlementStatus === 'AWAITING_SETTLEMENT').length,
       },
       trades: this.trades.slice(0, 50),
+      limitOrders: this.limitOrders.slice(0, 50),
+      openOrders: this.limitOrders.filter(order => this.isLimitOrderOpen(order)),
       events: this.events,
-      pullback: this.pullback,
-      technicalSignal: this.marketSignal,
-      pendingReversal: this.pendingReversal ? { ...this.pendingReversal } : null,
-      activeSide: this.activeSide,
-      windowDecision: this.windowDecision,
-      entrySchedule: this.entrySchedule(now),
+      midpointSelection: this.midpointSelection,
+      orderSchedule: this.orderSchedule(now),
       learning: {
         ...this.learningStatus,
         persistenceStatus: this.persistenceError ? 'error' : this.learningStore ? 'connected' : 'disabled',

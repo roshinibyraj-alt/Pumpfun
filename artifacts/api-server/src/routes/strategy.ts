@@ -20,9 +20,8 @@ const { LearningStore } = require("./bot/btc/learning-store.js") as {
     clearHistoryResetMarkers: () => Promise<void>;
   };
 };
-const { DEFAULT_SETTINGS, choosePaperSettings } = require("./bot/btc/learning-engine.js") as {
+const { DEFAULT_SETTINGS } = require("./bot/btc/learning-engine.js") as {
   DEFAULT_SETTINGS: Record<string, unknown>;
-  choosePaperSettings: (windows: unknown[], current: Record<string, unknown>) => unknown;
 };
 const { comparisonService } = require("./bot/btc/comparison-service.js") as {
   comparisonService: (store: unknown) => () => Promise<unknown>;
@@ -38,10 +37,7 @@ if (historyResetRequestId) {
   await learningStore.clearHistoryResetMarkers();
 }
 const getComparison = comparisonService(learningStore);
-const bot = new ProbabilityBot({
-  learningStore,
-  choosePaperSettings,
-});
+const bot = new ProbabilityBot({ learningStore });
 if (!historyResetRequestId) bot.start();
 
 router.get("/strategy/state", (_req, res) => {
@@ -52,8 +48,14 @@ router.get("/strategy/learning", async (_req, res) => {
   const state = await learningStore.getState() as Record<string, unknown>;
   res.set("Cache-Control", "no-store").json({
     ...state,
-    mode: "logging-only-fixed-policy",
-    settings: DEFAULT_SETTINGS,
+    mode: "logging-only-fixed-midpoint-policy",
+    settings: {
+      orderType: "RESTING_LIMIT",
+      orderIntervalSeconds: 20,
+      cheapPhase: { throughSecond: 120, sharesPerOrder: 100 },
+      expensivePhase: { fromSecond: 140, throughSecond: 240, sharesPerOrder: 300 },
+      cancelUnfilledAtWindowEnd: true,
+    },
     tuningEnabled: false,
   });
 });
