@@ -61,7 +61,7 @@ test('trailing exits protect net profit and prohibit later scheduled re-entry', 
   const baseline = replay(window, 'baseline', null, index);
   const trailing = replay(window, 'trailing', { activation: .10, retracement: .05 }, index);
   assert.equal(baseline.trades, 4);
-  assert.equal(trailing.trades, 1);
+  assert.equal(trailing.trades, 2, 'the second stage can qualify before the trailing exit triggers');
   assert.equal(trailing.trailingExits, 1);
   assert.equal(trailing.stopAfterExit, true);
   assert.ok(trailing.pnl > baseline.pnl);

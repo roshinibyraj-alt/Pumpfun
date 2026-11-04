@@ -84,7 +84,7 @@
     <article class="card"><div class="label">Closed candle rule</div><div class="value" id="signalRule" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot" id="signalRuleHint">Waiting for closed-candle data</div></article>
     <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
     <article class="card"><div class="label">Current active side</div><div class="value" id="expected" style="font-size:clamp(14px,2vw,20px)">—</div><div class="foot">Selected from the latest closed 5m candle</div></article>
-    <article class="card"><div class="label">Next scheduled entry · UTC</div><div class="value" id="zscore">—</div><div class="foot" id="scheduleHint">1m &lt;$0.40 · 2m &lt;$0.60 · 3m &lt;$0.70 · 4m &lt;$0.80</div></article>
+    <article class="card"><div class="label">Next eligible stage · UTC</div><div class="value" id="zscore">—</div><div class="foot" id="scheduleHint">Checks every 500 ms: 1–60s &lt;$0.40 · 61–120s &lt;$0.60 · 121–180s &lt;$0.70 · 181–240s &lt;$0.80</div></article>
   </section>
   <details class="disclosure" id="marketDetails">
     <summary><span>Market and signal details</span><small>UP/DOWN prices · candle confirmation</small></summary>
@@ -129,7 +129,7 @@
     <article class="position-card down"><div class="position-title">DOWN · ACCUMULATED POSITION</div><div class="position-shares" id="downShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="downAverageCost">—</strong></div><div><span>Unrealized P&amp;L</span><strong id="downUnrealized">—</strong></div><div><span>Realized P&amp;L</span><strong id="downRealized">—</strong></div><div><span>Open cost basis</span><strong id="downCostBasis">—</strong></div><div><span>Live best bid</span><strong id="downMarkBid">—</strong></div><div><span>Marked value</span><strong id="downMarkedValue">—</strong></div></div></article>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>Paper trade history</h2><small>500-share checkpoints · price-filter carry is shown per lot</small></div>
+    <div class="section-head"><h2>Paper trade history</h2><small>500-share stages · price-filter carry is shown per lot</small></div>
     <div id="trades" class="table-wrap"><div class="empty">Waiting for the first closed-candle signal.</div></div>
   </section>
   </details>
@@ -148,7 +148,7 @@
     <summary><span>Strategy rules</span><small>Signal · entries · exits</small></summary>
     <section class="panel">
       <p>The latest closed 5-minute candle selects the side: green → UP, red → DOWN. A doji after 2 or more consecutive green candles selects DOWN; a doji after 2 or more consecutive red candles selects UP. A doji without either run does not create a new side.</p>
-      <p>At 60, 120, 180, and 240 seconds, the bot attempts 500 shares when the selected side’s best ask is below $0.40, $0.60, $0.70, and $0.80. Shares skipped by that price check carry forward to the next qualifying checkpoint in the same window. Maximum planned volume is 2,000 shares per window if all four checkpoints qualify. Paper cash, the $0.02 minimum ask, fresh quotes, and visible depth checks still apply.</p>
+      <p>From seconds 1–60, 61–120, 121–180, and 181–240, the bot checks every 500 ms and buys 500 shares immediately when the selected side’s fresh best ask first falls below that stage’s $0.40, $0.60, $0.70, or $0.80 cap. If a stage ends without meeting its cap, its 500 shares carry forward to the next qualifying stage in the same window. Maximum planned volume remains 2,000 shares per window. Paper cash, the $0.02 minimum ask, fresh quotes, and visible depth checks still apply.</p>
       <p>TP/SL are disabled before 295 seconds. After that, TP uses a fresh own-side bid ≥ $0.99 to credit $1.00 per share; SL uses a fresh own-side bid ≤ $0.01 to credit $0.00 per share, before fees. A missing or stale bid does not trigger a sale; the position stays open for expiry handling. Signal changes do not close existing positions, and learning logs do not change the fixed execution settings.</p>
     </section>
   </details>
@@ -242,7 +242,7 @@ function renderSide(side,state){
   $(prefix+'AskLabel').textContent='500-share avg ask';
  $(prefix+'Net').textContent=String(decision.status||'OBSERVING').replace(/_/g,' ');
   $(prefix+'Edge').textContent='500 / MIN';
-  $(prefix+'Signal').textContent=!active?'NO ENTRY':!ready?(signal.status==='NO_SIGNAL'?'NO SIDE':'WAIT DATA'):!schedule.nextEntryAt?'ENTRIES FINISHED':state.entryFilter?.allowed===false?'BLOCKED':schedule.due?'ENTRY SLOT':'NEXT '+time(schedule.nextEntryAt);
+  $(prefix+'Signal').textContent=!active?'NO ENTRY':!ready?(signal.status==='NO_SIGNAL'?'NO SIDE':'WAIT DATA'):!schedule.nextEntryAt?'ENTRIES FINISHED':state.entryFilter?.allowed===false?'BLOCKED':schedule.due?'ENTRY STAGE':'NEXT '+time(schedule.nextEntryAt);
 }
 function renderTechnical(state){
   const signal=state.technicalSignal||{},candle=signal.candle||{};
@@ -300,8 +300,8 @@ async function poll(){
     $('zscore').textContent=s.activeSide&&s.entrySchedule?.nextEntryAt?time(s.entrySchedule.nextEntryAt):s.windowDecision?.status==='SKIP_WINDOW'?'SKIP':'—';
    const schedule=s.entrySchedule||{};
    $('scheduleHint').textContent=schedule.nextEntryAt
-     ?`${Math.round((schedule.nextEntryAt-(s.window?.start||schedule.nextEntryAt))/60000)}m · ask < ${money(schedule.nextPriceMaximumAsk)} · ${Number(schedule.nextEntryShares||500).toLocaleString()} shares${Number(schedule.pendingPriceFilteredShares||0)?` (${Number(schedule.pendingPriceFilteredShares).toLocaleString()} carried)`:''}`
-     :'1m <$0.40 · 2m <$0.60 · 3m <$0.70 · 4m <$0.80 · complete';
+     ?`Stage ${Math.floor((Number(schedule.nextStageStartSeconds||1)-1)/60)+1} · ${schedule.nextStageStartSeconds}–${schedule.nextStageEndSeconds}s · ask < ${money(schedule.nextPriceMaximumAsk)} · ${Number(schedule.nextEntryShares||500).toLocaleString()} shares${Number(schedule.pendingPriceFilteredShares||0)?` (${Number(schedule.pendingPriceFilteredShares).toLocaleString()} carried)`:''} · checks every 500ms`
+     :'1–60s <$0.40 · 61–120s <$0.60 · 121–180s <$0.70 · 181–240s <$0.80 · complete';
       renderSide('UP',s);renderSide('DOWN',s);renderPositions(account.positions);renderTechnical(s);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');

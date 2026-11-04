@@ -162,9 +162,10 @@ test("dashboard presents the closed-candle rule and preserves paper execution ru
   assert.match(html, /Closed candle rule/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
-  assert.match(html, /At 60, 120, 180, and 240 seconds/);
-  assert.match(html, /carry forward to the next qualifying checkpoint/);
-  assert.match(html, /maximum planned volume is 2,000 shares per window/i);
+  assert.match(html, /checks every 500 ms/);
+  assert.match(html, /seconds 1–60, 61–120, 121–180, and 181–240/);
+  assert.match(html, /carry forward to the next qualifying stage/);
+  assert.match(html, /maximum planned volume remains 2,000 shares per window/i);
   assert.match(html, /Completed-window performance &amp; global equity/);
   assert.match(html, /Window win rate/);
   assert.match(html, /Equity = cash \+ open positions marked at fresh own-side best bids/);
@@ -207,7 +208,7 @@ test("dashboard renders locked, skipped and observing states without probability
   context.renderSide("DOWN", state);
   assert.equal(elements.upProb.textContent, "SELECTED");
   assert.equal(elements.downProb.textContent, "OFF");
-  assert.equal(elements.upSignal.textContent, "ENTRY SLOT");
+  assert.equal(elements.upSignal.textContent, "ENTRY STAGE");
   state.technicalSignal = {
     status: "READY", side: "UP", setup: "PREVIOUS_GREEN",
     confirmed: true, reason: "UP because the latest closed five-minute candle was green.",

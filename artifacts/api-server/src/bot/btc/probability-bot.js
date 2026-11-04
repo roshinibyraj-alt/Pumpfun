@@ -15,19 +15,24 @@ const STARTING_CASH = 10_000;
 const POLL_MS = 500;
 const TAKER_FEE_RATE = config.CRYPTO_TAKER_FEE_RATE;
 const MIN_ENTRY_PRICE = 0.02;
-const OPENING_DELAY_SECONDS = 10;
+const OPENING_DELAY_SECONDS = 1;
 const ENTRY_CHECKPOINTS = Object.freeze([
-  { slot: 0, seconds: 60, maximumAsk: 0.40 },
-  { slot: 1, seconds: 120, maximumAsk: 0.60 },
-  { slot: 2, seconds: 180, maximumAsk: 0.70 },
-  { slot: 3, seconds: 240, maximumAsk: 0.80 },
+  { slot: 0, seconds: 1, endSeconds: 60, maximumAsk: 0.40 },
+  { slot: 1, seconds: 61, endSeconds: 120, maximumAsk: 0.60 },
+  { slot: 2, seconds: 121, endSeconds: 180, maximumAsk: 0.70 },
+  { slot: 3, seconds: 181, endSeconds: 240, maximumAsk: 0.80 },
 ]);
 const MAX_ENTRIES_PER_WINDOW = ENTRY_CHECKPOINTS.length;
-// The 500ms scan loop gets a small tolerance for network and scheduler jitter.
-const SLOT_GRACE_MS = 5000;
 const EQUITY_SNAPSHOT_INTERVAL_MS = 30_000;
 const EXIT_QUOTE_MAX_AGE_MS = 5000;
 const EXIT_START_SECONDS = 295;
+
+function entrySlotAt(start, now) {
+  const elapsedMs = now - start;
+  if (elapsedMs < ENTRY_CHECKPOINTS[0].seconds * 1000) return -1;
+  return Math.min(ENTRY_CHECKPOINTS.length,
+    Math.floor((elapsedMs - ENTRY_CHECKPOINTS[0].seconds * 1000) / 60_000));
+}
 const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   openingDelaySeconds: OPENING_DELAY_SECONDS,
   minimumNetEdge: MIN_EDGE,
@@ -166,6 +171,8 @@ class ProbabilityBot {
     this.lastLoggedSignalKey = null;
     this.lastEntrySlot = -1;
     this.pendingPriceFilteredShares = 0;
+    this.priceFilteredSlots = new Map();
+    this.entryStageSkipLogs = new Set();
     this.entrySequence = 0;
     this.entryWindowStart = null;
     this.windowResults = new Map();
@@ -333,7 +340,7 @@ class ProbabilityBot {
       } : null;
       this.statusReason = this.marketSignal?.status !== 'READY'
         ? this.marketSignal?.reason || 'Waiting for valid closed-candle strategy data.'
-        : `Closed 5m candle selected ${this.activeSide} · ${this.marketSignal.setup}; 500-share minute checkpoints with price-filter catch-up.`;
+        : `Closed 5m candle selected ${this.activeSide} · ${this.marketSignal.setup}; checking each 500-share price stage every 500ms.`;
       this.probabilityUp = null;
       this.edges = { UP: null, DOWN: null };
       const scanAt = this.now();
@@ -461,6 +468,8 @@ class ProbabilityBot {
     };
     this.lastEntrySlot = -1;
     this.pendingPriceFilteredShares = 0;
+    this.priceFilteredSlots.clear();
+    this.entryStageSkipLogs.clear();
     this.marketSignal = null;
     this.pullback = null;
     this.lastLoggedSignalKey = null;
@@ -469,41 +478,46 @@ class ProbabilityBot {
 
   processSignals(now) {
     this.beginMarketWindow();
+    const currentSchedule = this.entrySchedule(now);
+    if (!this.activeSide || this.marketSignal?.status !== 'READY') return;
+    this.finalizeExpiredEntrySlots(currentSchedule.slot);
     const schedule = this.entrySchedule(now);
-    if (!this.activeSide || this.marketSignal?.status !== 'READY' || !schedule.due) return;
-    this.lastEntrySlot = schedule.slot;
+    if (!schedule.due) return;
     const side = this.activeSide;
     const quote = this.quotes[side];
     const fresh = Number.isFinite(quote?.updatedAt) && now >= quote.updatedAt
       && now - quote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS;
     if (!fresh) {
-      this.log('SCHEDULED_ENTRY_SKIPPED', {
-        side, slot: schedule.slot,
-        reason: 'Stale book',
-      });
+      this.logEntryStageSkipOnce(schedule.slot, side, 'Stale book');
       return;
     }
     const checkpoint = ENTRY_CHECKPOINTS[schedule.slot];
     const bestAsk = quote.bestAsk == null ? NaN : Number(quote.bestAsk);
     if (!Number.isFinite(bestAsk)) {
-      this.log('SCHEDULED_ENTRY_SKIPPED', {
-        side, slot: schedule.slot, reason: 'No current best ask',
-      });
+      this.logEntryStageSkipOnce(schedule.slot, side, 'No current best ask');
       return;
     }
     if (bestAsk >= checkpoint.maximumAsk) {
-      this.pendingPriceFilteredShares += SHARES_PER_SIGNAL;
-      this.log('SCHEDULED_ENTRY_PRICE_FILTERED', {
-        side,
-        slot: schedule.slot,
-        checkpointSeconds: checkpoint.seconds,
-        maximumAsk: checkpoint.maximumAsk,
-        bestAsk: Number.isFinite(bestAsk) ? bestAsk : null,
-        sharesAdded: SHARES_PER_SIGNAL,
-        pendingPriceFilteredShares: this.pendingPriceFilteredShares,
-      });
+      const firstPriceFilterObservation = !this.priceFilteredSlots.has(schedule.slot);
+      this.priceFilteredSlots.set(schedule.slot, bestAsk);
+      if (firstPriceFilterObservation) {
+        this.log('SCHEDULED_ENTRY_PRICE_FILTERED', {
+          side,
+          slot: schedule.slot,
+          stageStartSeconds: checkpoint.seconds,
+          stageEndSeconds: checkpoint.endSeconds,
+          maximumAsk: checkpoint.maximumAsk,
+          bestAsk,
+          potentialCarryShares: SHARES_PER_SIGNAL,
+          pendingPriceFilteredShares: this.pendingPriceFilteredShares,
+          reason: 'Waiting for the price cap during this stage.',
+        });
+      }
       return;
     }
+    // A qualifying price consumes this stage once; other execution safeguards
+    // still run as before and are not retried on every 500ms scan.
+    this.lastEntrySlot = schedule.slot;
     const filter = this.updateEntryFilter(now);
     if (filter.blockedReasons.length) {
       this.log('SCHEDULED_ENTRY_SKIPPED', {
@@ -578,35 +592,71 @@ class ProbabilityBot {
     return simulateBuy(this.quotes[side]?.asks, shares);
   }
 
+  logEntryStageSkipOnce(slot, side, reason) {
+    const key = `${slot}:${reason}`;
+    if (this.entryStageSkipLogs.has(key)) return;
+    this.entryStageSkipLogs.add(key);
+    this.log('SCHEDULED_ENTRY_SKIPPED', { side, slot, reason });
+  }
+
+  finalizeExpiredEntrySlots(currentSlot) {
+    const lastExpiredSlot = Math.min(currentSlot - 1, ENTRY_CHECKPOINTS.length - 1);
+    while (this.lastEntrySlot < lastExpiredSlot) {
+      const slot = this.lastEntrySlot + 1;
+      const checkpoint = ENTRY_CHECKPOINTS[slot];
+      const lastFilteredAsk = this.priceFilteredSlots.get(slot);
+      if (Number.isFinite(lastFilteredAsk)) {
+        this.pendingPriceFilteredShares += SHARES_PER_SIGNAL;
+        this.log('SCHEDULED_ENTRY_PRICE_FILTERED_STAGE_ENDED', {
+          side: this.activeSide,
+          slot,
+          stageStartSeconds: checkpoint.seconds,
+          stageEndSeconds: checkpoint.endSeconds,
+          maximumAsk: checkpoint.maximumAsk,
+          lastFilteredAsk,
+          sharesAdded: SHARES_PER_SIGNAL,
+          pendingPriceFilteredShares: this.pendingPriceFilteredShares,
+        });
+      }
+      this.lastEntrySlot = slot;
+    }
+  }
+
   entrySchedule(now = this.now()) {
     const start = this.market?.start;
     if (!Number.isFinite(start)) return { due: false, nextEntryAt: null };
-    const slot = Math.floor((now - start) / 60_000) - 1;
+    const slot = entrySlotAt(start, now);
     const checkpoint = ENTRY_CHECKPOINTS[slot];
     const scheduledAt = checkpoint ? start + checkpoint.seconds * 1000 : null;
     const due = Boolean(checkpoint) && slot > this.lastEntrySlot
-      && now >= scheduledAt && now < scheduledAt + SLOT_GRACE_MS
+      && now >= scheduledAt && now < start + (checkpoint.endSeconds + 1) * 1000
       && now < this.market.end;
     const nextCheckpoint = due
       ? checkpoint
       : ENTRY_CHECKPOINTS.find(item => item.slot > this.lastEntrySlot
         && start + item.seconds * 1000 > now);
-    const nextEntryAt = nextCheckpoint ? start + nextCheckpoint.seconds * 1000 : null;
+    const nextEntryAt = nextCheckpoint
+      ? due ? now : start + nextCheckpoint.seconds * 1000
+      : null;
     return {
       due,
       slot,
       scheduledAt,
       nextEntryAt,
+      nextStageStartSeconds: nextCheckpoint?.seconds ?? null,
+      nextStageEndSeconds: nextCheckpoint?.endSeconds ?? null,
       nextPriceMaximumAsk: nextCheckpoint?.maximumAsk ?? null,
       nextEntryShares: nextCheckpoint ? SHARES_PER_SIGNAL + this.pendingPriceFilteredShares : null,
       pendingPriceFilteredShares: this.pendingPriceFilteredShares,
       firstEntryAt: start + ENTRY_CHECKPOINTS[0].seconds * 1000,
-      lastEntryAt: start + ENTRY_CHECKPOINTS[ENTRY_CHECKPOINTS.length - 1].seconds * 1000,
+      lastEntryAt: start + ENTRY_CHECKPOINTS[ENTRY_CHECKPOINTS.length - 1].endSeconds * 1000,
       intervalSeconds: 60,
       maxEntries: MAX_ENTRIES_PER_WINDOW,
       checkpoints: ENTRY_CHECKPOINTS.map(item => ({
         slot: item.slot,
         seconds: item.seconds,
+        startSeconds: item.seconds,
+        endSeconds: item.endSeconds,
         maximumAsk: item.maximumAsk,
       })),
       lastAttemptedSlot: this.lastEntrySlot,
@@ -882,15 +932,17 @@ class ProbabilityBot {
         probabilityModelEnabled: false,
         reversalsEnabled: false,
         entryIntervalSeconds: 60,
-        lastEntrySeconds: ENTRY_CHECKPOINTS[ENTRY_CHECKPOINTS.length - 1].seconds,
+        lastEntrySeconds: ENTRY_CHECKPOINTS[ENTRY_CHECKPOINTS.length - 1].endSeconds,
         maxEntriesPerWindow: MAX_ENTRIES_PER_WINDOW,
         sharesPerEntry: SHARES_PER_SIGNAL,
         entryPriceCheckpoints: ENTRY_CHECKPOINTS.map(item => ({
           seconds: item.seconds,
+          startSeconds: item.seconds,
+          endSeconds: item.endSeconds,
           maximumAsk: item.maximumAsk,
         })),
         signalPersistence: 'Use only the latest closed 5m candle: green selects UP, red selects DOWN, a doji after 2+ consecutive green candles selects DOWN, and a doji after 2+ consecutive red candles selects UP. Other dojis produce no new side. Stale candles block entries.',
-        entryModel: 'At 60s / 120s / 180s / 240s, buy 500 shares on the selected side if its best ask is below $0.40 / $0.60 / $0.70 / $0.80 respectively. Shares skipped by those price checks accumulate for the next qualifying checkpoint in the same window. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.',
+        entryModel: 'Check every 500ms during seconds 1–60, 61–120, 121–180, and 181–240. Buy 500 shares immediately on the selected side at the first fresh best ask below $0.40, $0.60, $0.70, or $0.80 for that stage. If a stage ends without meeting its price cap, carry its 500 shares to the next qualifying stage in the same window. Cash, $0.02 minimum ask, fresh-book and real-depth checks remain active.',
         model: 'Signal selection uses only the latest closed 5m candle color and the immediately preceding candle-color run for doji reversal. Green selects UP; red selects DOWN; doji after 2+ green selects DOWN; doji after 2+ red selects UP. No indicator, probability, or prior-window side is used.',
         exitModel: 'No TP or SL exits before 295 seconds. From 295 seconds, TP uses a fresh own-side best bid >= $0.99 to credit $1; SL uses a fresh own-side best bid <= $0.01 to credit $0, before fees. Missing or stale bids do not trigger a sale. No opposite-signal exits or reversals. At expiry, retry the original market when needed; unavailable data remains explicitly pending.',
       },

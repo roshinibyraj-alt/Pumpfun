@@ -55,7 +55,7 @@ test('regression uses logged technical decisions but never changes fixed executi
   const result = choosePaperSettings([{ windowStart: START, samples: samples() }], { sharesPerSignal: 999 });
   assert.equal(result.applied, false);
   assert.equal(result.settings.sharesPerSignal, 500);
-  assert.equal(DEFAULT_SETTINGS.openingDelaySeconds, 10);
+  assert.equal(DEFAULT_SETTINGS.openingDelaySeconds, 1);
   assert.equal(result.windows, 1);
   assert.equal(result.baseline.trades, 3);
 });

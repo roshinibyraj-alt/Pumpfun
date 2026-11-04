@@ -194,7 +194,7 @@ function compareStrategies(input, { minimumTrain = 20, minimumTest = 10 } = {}) 
   const split = Math.floor(cohort.length * .7);
   const train = cohort.slice(0, split), test = cohort.slice(split);
   const report = {
-    version: 'macd-protection-comparison-v1', applied: false, tradingChanged: false,
+    version: 'macd-protection-comparison-v2', applied: false, tradingChanged: false,
     status: train.length >= minimumTrain && test.length >= minimumTest ? 'ready' : 'insufficient-data',
     method: METHOD, inputWindows: windows.length, usableWindows: cohort.length, excluded,
     split: { trainingWindows: train.length, holdoutWindows: test.length,
@@ -207,7 +207,7 @@ function compareStrategies(input, { minimumTrain = 20, minimumTest = 10 } = {}) 
       'Trailing protects the aggregate open position; activation uses net visible-depth liquidation profit per share.',
       'Trailing triggers stop all later scheduled buys in that window; insufficient full exit depth defers the exit.',
       'Each window starts with the same $10,000 paper cash. Summed P&L is not a continuous funded account simulation.',
-      'Replay uses the current four 500-share minute checkpoints and price-filter carry, with recorded liquidity and the existing fee/expiry conventions.',
+      'Replay checks every 500ms in the four 500-share stages (seconds 1–60, 61–120, 121–180, and 181–240); price-filtered shares carry to the next qualifying stage, with recorded liquidity and existing fee/expiry conventions.',
       'TP/SL exits are only eligible from 295 seconds and require a fresh own-side bid; expiry marks are paper outcomes, not proof of executable live fills.',
       'Legacy log times use the upper bound of their 500ms collection bucket; slot timing remains approximate.',
       'Peak giveback uses bid marks; drawdown is measured between closed windows, not full intrawindow drawdown.',
