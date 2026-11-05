@@ -3,110 +3,81 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  TAKER_ORDER_CHECKPOINTS,
-  scheduledOrderSlotAt,
-  selectCheapestAskSide,
-  filterAskLevelsForPhase,
-  simulateTakerBuy,
+  ENTRY_TRIGGER_SECONDS,
+  ENTRY_TRIGGER_PRICE,
+  LIMIT_ORDER_LADDER,
+  selectTriggeredSide,
+  filterAskLevelsForLimit,
+  simulateLimitBuyFill,
 } = require('./midpoint-limit-strategy');
 
 const START = 1_800_000_000_000;
+const fee = (price, shares) => price * (1 - price) * shares * 0.001;
 
-test('taker checkpoints are 50 shares every 3 seconds through 60, then 150 every 5 through 150', () => {
-  assert.equal(TAKER_ORDER_CHECKPOINTS.length, 37);
-  assert.deepEqual(TAKER_ORDER_CHECKPOINTS.slice(0, 3)
-    .map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
-    [3, 'FIRST', 50], [6, 'FIRST', 50], [9, 'FIRST', 50],
-  ]);
-  assert.deepEqual(TAKER_ORDER_CHECKPOINTS.slice(18, 22)
-    .map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
-    [57, 'FIRST', 50], [60, 'FIRST', 50], [70, 'SECOND', 150], [75, 'SECOND', 150],
-  ]);
-  assert.deepEqual(TAKER_ORDER_CHECKPOINTS.slice(-2)
-    .map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
-    [145, 'SECOND', 150], [150, 'SECOND', 150],
-  ]);
-  for (const checkpoint of TAKER_ORDER_CHECKPOINTS) {
-    assert.equal(scheduledOrderSlotAt(START, START + checkpoint.seconds * 1000), checkpoint.slot);
-    const next = TAKER_ORDER_CHECKPOINTS[checkpoint.slot + 1];
-    if (next) assert.equal(scheduledOrderSlotAt(START, START + (next.seconds - 1) * 1000), checkpoint.slot);
-  }
-  assert.equal(scheduledOrderSlotAt(START, START + 2_999), -1);
-  assert.equal(scheduledOrderSlotAt(START, START + 154_999), 36);
-  assert.equal(scheduledOrderSlotAt(START, START + 155_000), -1);
-  assert.equal(scheduledOrderSlotAt(START, START + 160_000), -1);
-});
-
-test('cheapest taker side uses the lower fresh ask and sensible tie breakers', () => {
-  const quotes = {
-    UP: { bestAsk: .31, midpoint: .30, updatedAt: START + 5_000 },
-    DOWN: { bestAsk: .68, midpoint: .67, updatedAt: START + 5_000 },
-  };
-  assert.deepEqual(selectCheapestAskSide(quotes, START + 5_000, 5_000), {
-    status: 'READY',
-    cheapSide: 'UP',
-    expensiveSide: 'DOWN',
-    cheapestSide: 'UP',
-    otherSide: 'DOWN',
-    selectionReason: 'LOWER_BEST_ASK',
-    asks: { UP: .31, DOWN: .68 },
-    midpoints: { UP: .30, DOWN: .67 },
-  });
-  const midpointTieBreak = selectCheapestAskSide({
-    UP: { bestAsk: .4, midpoint: .35, updatedAt: START },
-    DOWN: { bestAsk: .4, midpoint: .39, updatedAt: START },
-  }, START, 5_000);
-  assert.equal(midpointTieBreak.cheapSide, 'UP');
-  assert.equal(midpointTieBreak.selectionReason, 'LOWER_MIDPOINT_TIE_BREAK');
-  const fullTie = selectCheapestAskSide({
-    UP: { bestAsk: .4, midpoint: .39, updatedAt: START },
-    DOWN: { bestAsk: .4, midpoint: .39, updatedAt: START },
-  }, START, 5_000, 'DOWN');
-  assert.equal(fullTie.cheapSide, 'DOWN');
-  assert.equal(fullTie.selectionReason, 'ALTERNATING_FULL_TIE_BREAK');
-  assert.equal(selectCheapestAskSide({
-    UP: { bestAsk: .3, midpoint: .29, updatedAt: START - 5_001 },
-    DOWN: { bestAsk: .7, midpoint: .69, updatedAt: START },
-  }, START, 5_000).status, 'WAITING_FOR_FRESH_ASKS');
-});
-
-test('phase filters allow the boundary and exclude disallowed ask depth', () => {
-  assert.deepEqual(filterAskLevelsForPhase([
-    { price: .39, size: 10 },
-    { price: .40, size: 20 },
-    { price: .4001, size: 30 },
-  ], 'FIRST'), [
-    { price: .39, size: 10 },
-    { price: .40, size: 20 },
-  ]);
-  assert.deepEqual(filterAskLevelsForPhase([
-    { price: .5999, size: 10 },
-    { price: .60, size: 20 },
-    { price: .61, size: 30 },
-  ], 'SECOND'), [
-    { price: .60, size: 20 },
-    { price: .61, size: 30 },
+test('new strategy waits 120 seconds and places the fixed two-rung limit ladder', () => {
+  assert.equal(ENTRY_TRIGGER_SECONDS, 120);
+  assert.equal(ENTRY_TRIGGER_PRICE, 0.80);
+  assert.deepEqual(LIMIT_ORDER_LADDER.map(({ price, shares }) => [price, shares]), [
+    [0.40, 1000],
+    [0.60, 2000],
   ]);
 });
 
-test('taker buy sweeps visible asks, charges fees, and records partial depth or cash fills', () => {
-  const estimateFee = (price, shares) => price * (1 - price) * shares * .001;
-  const fill = simulateTakerBuy([
-    { price: .24, size: 20 },
-    { price: .25, size: 50 },
-    { price: .26, size: 500 },
-  ], 100, 100, estimateFee);
-  assert.ok(fill);
-  assert.equal(fill.shares, 100);
+test('trigger picks the highest fresh qualifying midpoint and uses UP for a tie', () => {
+  const selection = selectTriggeredSide({
+    UP: { midpoint: 0.80, updatedAt: START },
+    DOWN: { midpoint: 0.83, updatedAt: START },
+  }, START, 5000);
+  assert.equal(selection.status, 'READY');
+  assert.equal(selection.selectedSide, 'DOWN');
+  assert.equal(selection.triggeringPrice, 0.83);
+
+  const tie = selectTriggeredSide({
+    UP: { midpoint: 0.82, updatedAt: START },
+    DOWN: { midpoint: 0.82, updatedAt: START },
+  }, START, 5000);
+  assert.equal(tie.selectedSide, 'UP');
+});
+
+test('stale or sub-threshold midpoint cannot trigger, while one fresh side is sufficient', () => {
+  assert.equal(selectTriggeredSide({
+    UP: { midpoint: 0.90, updatedAt: START - 5001 },
+    DOWN: { midpoint: 0.30, updatedAt: START },
+  }, START, 5000).status, 'WAITING_FOR_TRIGGER');
+  const oneSide = selectTriggeredSide({
+    UP: { midpoint: 0.81, updatedAt: START },
+    DOWN: null,
+  }, START, 5000);
+  assert.equal(oneSide.selectedSide, 'UP');
+});
+
+test('limit fill filters out asks above the order price and preserves partial remainder', () => {
+  const asks = [
+    { price: 0.60, size: 20 },
+    { price: 0.40, size: 30 },
+    { price: 0.4001, size: 50 },
+  ];
+  assert.deepEqual(filterAskLevelsForLimit(asks, 0.40), [
+    { price: 0.40, size: 30 },
+  ]);
+
+  const partial = simulateLimitBuyFill(asks, 0.40, 100, fee);
+  assert.equal(partial.shares, 30);
+  assert.equal(partial.remainingShares, 70);
+  assert.equal(partial.averagePrice, 0.40);
+  assert.ok(partial.fees > 0);
+  assert.equal(simulateLimitBuyFill(asks, 0.39, 100, fee), null);
+});
+
+test('limit matcher applies price improvement across eligible visible ask levels', () => {
+  const fill = simulateLimitBuyFill([
+    { price: 0.55, size: 500 },
+    { price: 0.60, size: 1500 },
+    { price: 0.6001, size: 3000 },
+  ], 0.60, 2000, fee);
+  assert.equal(fill.shares, 2000);
   assert.equal(fill.remainingShares, 0);
-  assert.ok(Math.abs(fill.cost - 25.1) < 1e-10);
-  assert.equal(fill.fills.length, 3);
+  assert.equal(fill.averagePrice, 0.5875);
+  assert.equal(fill.fills.length, 2);
   assert.ok(fill.fees > 0);
-  const partial = simulateTakerBuy([{ price: .24, size: 20 }, { price: .25, size: 40 }], 100, 100, estimateFee);
-  assert.equal(partial.shares, 60);
-  assert.equal(partial.remainingShares, 40);
-  const cashLimited = simulateTakerBuy([{ price: .24, size: 100 }], 100, .5, estimateFee);
-  assert.ok(cashLimited && cashLimited.shares < 100);
-  assert.equal(simulateTakerBuy([], 100, 100, estimateFee), null);
-  assert.equal(simulateTakerBuy([{ price: .2, size: 100 }], 100, 0, estimateFee), null);
 });

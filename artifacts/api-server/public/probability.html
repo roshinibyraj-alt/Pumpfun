@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080d16">
-  <title>BTC Taker Paper Bot</title>
+  <title>BTC Limit Paper Bot</title>
   <style>
     :root{color-scheme:dark;--bg:#080d16;--panel:#101927;--line:#263447;--muted:#8d9bb0;--text:#edf4ff;--cyan:#51d9ef;--green:#39d99a;--red:#ff6f7e;--amber:#ffc76a}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 8% 0,#102c3a 0,transparent 32%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
@@ -73,19 +73,19 @@
 <body>
 <main>
   <header class="top">
-    <div><div class="brand">BTC TAKER PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
-    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · TAKER ORDERS</span><span id="run" class="pill">Connecting</span></div>
+    <div><div class="brand">BTC LIMIT PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
+    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · LIMIT ORDERS</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">SCHEDULED TAKER STRATEGY · PAPER EXECUTION</div><h1>Buy cheaper early, then higher-priced later.</h1><p>From 3 to 60 seconds, submit a 50-share taker buy every 3 seconds on the side with the lower fresh ask. From 70 to 150 seconds, submit 150 shares every 5 seconds on the side with the higher fresh ask. Orders sweep visible asks immediately; no resting orders remain.</p></div>
+    <div><div class="eyebrow">MIDPOINT-TRIGGERED LIMIT STRATEGY · PAPER EXECUTION</div><h1>Wait for strength, then rest two buy limits.</h1><p>Starting 120 seconds after each window opens, watch fresh UP and DOWN midpoints. The first side to reach $0.80 or higher gets a 1,000-share limit buy at $0.40 and a 2,000-share limit buy at $0.60. Orders stay open until filled or the window ends.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid overview-grid">
-    <article class="card"><div class="label">Lower-ask outcome</div><div class="value" id="cheaperSide">—</div><div class="foot" id="cheaperMid">Waiting for fresh asks on both sides</div></article>
-    <article class="card"><div class="label">Higher-ask outcome</div><div class="value" id="expensiveSide">—</div><div class="foot" id="expensiveMid">Waiting for fresh asks on both sides</div></article>
-    <article class="card"><div class="label">Next taker buy</div><div class="value" id="nextOrder">—</div><div class="foot" id="scheduleHint">First check at 3 seconds</div></article>
-    <article class="card"><div class="label">Taker buys this window</div><div class="value" id="restingSummary">0</div><div class="foot" id="restingHint">Orders execute immediately</div></article>
+    <article class="card"><div class="label">Triggered side</div><div class="value" id="cheaperSide">—</div><div class="foot" id="cheaperMid">Waiting for the 120-second entry window</div></article>
+    <article class="card"><div class="label">Trigger midpoint</div><div class="value" id="expensiveSide">—</div><div class="foot" id="expensiveMid">Requires a fresh midpoint of $0.80+</div></article>
+    <article class="card"><div class="label">Entry status</div><div class="value" id="nextOrder">—</div><div class="foot" id="scheduleHint">Monitoring begins at 120 seconds</div></article>
+    <article class="card"><div class="label">Limit orders this window</div><div class="value" id="restingSummary">0</div><div class="foot" id="restingHint">Two orders remain resting until expiry</div></article>
     <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
   </section>
   <details class="disclosure" id="marketDetails">
@@ -126,8 +126,8 @@
   </section>
   </section>
   <section class="panel">
-    <div class="section-head"><h2>Taker order history</h2><small>Immediate executions; any unfilled amount is cancelled</small></div>
-    <div id="orders" class="table-wrap"><div class="empty">No taker orders yet.</div></div>
+     <div class="section-head"><h2>Limit order history</h2><small>Resting buys · partial fills · expiry cancellations</small></div>
+     <div id="orders" class="table-wrap"><div class="empty">No limit orders yet.</div></div>
   </section>
   <details class="disclosure" id="positionsDetails">
     <summary><span>Completed paper trades</span><small>Filled order lots · outcomes · P&amp;L</small></summary>
@@ -150,12 +150,12 @@
   <details class="disclosure" id="strategyDetails">
     <summary><span>Strategy rules</span><small>Taker entries · existing exits</small></summary>
     <section class="panel">
-      <p>At 3, 6, 9, and every 3 seconds through 60, submit one 50-share taker buy on the side with the lower fresh best ask, only when that ask is at or below $0.40. At 70, 75, 80, and every 5 seconds through 150, submit one 150-share taker buy on the side with the higher fresh best ask, only when that ask is at or above $0.60. No fill may cross its phase price limit. The side is reselected from fresh quotes at each checkpoint. Stale or missing quotes are retried only until that checkpoint interval ends; missed intervals are not backfilled.</p>
-      <p>Each eligible buy immediately sweeps visible ask depth within its phase price limit, up to the requested shares and available paper cash, with taker fees. Any unfilled remainder is cancelled immediately. The maximum scheduled request is 1,000 shares in the first phase and 2,550 shares in the second phase.</p>
+     <p>Do nothing before 120 seconds. From then through the end of the window, monitor fresh UP and DOWN midpoints. When a midpoint first reaches $0.80 or higher, latch that side for the window and submit one 1,000-share limit buy at $0.40 and one 2,000-share limit buy at $0.60. The side is not changed and the trigger does not rearm.</p>
+       <p>Both limit orders remain resting through the window. Fresh visible asks at or below a limit can fill the order, at those ask prices; partial fills stay open and can accumulate. Unfilled shares are cancelled at window expiry. Open orders reserve their maximum limit cost plus a conservative fee estimate, but the reservation does not reduce displayed cash. Existing take-profit, stop-loss timing, and original-market resolution rules remain unchanged.</p>
       <p>Take-profit is checked throughout the active window: a fresh own-side best bid ≥ $0.99 closes that lot and credits $1.00 per share before fees. Stop-loss remains gated until 295 seconds and uses a fresh own-side best bid ≤ $0.01 to credit $0.00 per share. Any lot still unsold at expiry waits for confirmed resolution of its original market; it is not closed at a later or last-seen CLOB price. Older unresolved shares stay out of the active-window accumulation boxes.</p>
     </section>
   </details>
-  <p class="footer">Paper only—no live orders. The first phase buys the lower fresh ask; the second phase buys the higher fresh ask. Existing TP/SL and market-resolution settlement rules remain in place.</p>
+  <p class="footer">Paper only—no live orders. Each window can trigger once and place two resting limit buys on the first qualifying side. Existing TP/SL and market-resolution settlement rules remain in place.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -167,13 +167,13 @@ const time=n=>isNumeric(n)?new Date(n).toLocaleTimeString('en-AU',{timeZone:'UTC
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const resultLabel=t=>t.status==='OPEN'?(t.settlementStatus==='AWAITING_SETTLEMENT'?'AWAITING SETTLEMENT':'OPEN'):t.finalOutcome==='TAKE_PROFIT'?'TP · $1.00':t.finalOutcome==='STOP_LOSS'?'SL · $0.00':['WINDOW_PRICE_EXIT','WINDOW_RECOVERY_EXIT'].includes(t.finalOutcome)?'WINDOW · '+money(t.exitPrice):t.finalOutcome==='MARKET_RESOLUTION'?'RESOLVED · '+money(t.exitPrice):t.finalOutcome||'—';
 function renderTrades(trades){
-   if(!trades?.length){$('trades').innerHTML='<div class="empty">No taker buys yet.</div>';return}
-   $('trades').innerHTML='<table><thead><tr><th>Filled at</th><th>Side</th><th>Phase</th><th>Shares</th><th>Average fill</th><th>Order type</th><th>Peak bid</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${safe(t.phase||'—')}</td><td>${Number(t.shares).toFixed(2)}</td><td>${money(t.entryPrice,4)}</td><td>TAKER</td><td>${money(t.peakBid,4)}<div class="muted">${time(t.peakBidAt)}</div></td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
+  if(!trades?.length){$('trades').innerHTML='<div class="empty">No filled limit buys yet.</div>';return}
+   $('trades').innerHTML='<table><thead><tr><th>Filled at</th><th>Side</th><th>Entry type</th><th>Shares</th><th>Average fill</th><th>Limit price</th><th>Peak bid</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${safe(t.entryKind||'—')}</td><td>${Number(t.shares).toFixed(2)}</td><td>${money(t.entryPrice,4)}</td><td>${money(t.limitPrice,4)}</td><td>${money(t.peakBid,4)}<div class="muted">${time(t.peakBidAt)}</div></td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
 }
 function renderOrders(orders){
  const sorted=(orders||[]).slice().sort((a,b)=>Number(b.placedAt)-Number(a.placedAt));
-  if(!sorted.length){$('orders').innerHTML='<div class="empty">No taker orders in this window.</div>';return}
-  $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Side</th><th>Phase</th><th>Type</th><th>Requested</th><th>Filled</th><th>Average fill</th><th>Status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>`<tr><td>${time(o.placedAt)}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.phase||'—')}</td><td>${safe(o.orderType||'MARKET')}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${Number(o.filledShares||0).toFixed(2)}</td><td>${money(o.averageFillPrice,4)}</td><td>${safe(o.status)}${o.cancelledRemainderShares?`<div class="muted">${Number(o.cancelledRemainderShares).toFixed(2)} unfilled shares cancelled</div>`:''}</td></tr>`).join('')+'</tbody></table>';
+   if(!sorted.length){$('orders').innerHTML='<div class="empty">No limit orders in this window.</div>';return}
+   $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Side</th><th>Type</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Average fill</th><th>Status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>`<tr><td>${time(o.placedAt)}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.orderType||'LIMIT')}</td><td>${money(o.limitPrice,2)}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${Number(o.filledShares||0).toFixed(2)}</td><td>${Number(o.remainingShares||0).toFixed(2)}</td><td>${money(o.averageFillPrice,4)}</td><td>${safe(o.status)}${o.cancelledRemainderShares?`<div class="muted">${Number(o.cancelledRemainderShares).toFixed(2)} unfilled shares cancelled</div>`:''}</td></tr>`).join('')+'</tbody></table>';
 }
 function renderEvents(events){
  $('events').innerHTML=events?.length?events.slice(0,10).map(e=>`<div class="trade"><span>${safe(e.event.replaceAll('_',' '))} · ${safe(e.side||'')}</span><span class="muted">${time(e.ts)}${e.edge!=null?' · edge '+pct(e.edge):''}${e.realizedPnl!=null?' · '+signed(e.realizedPnl):''}</span></div>`).join(''):'<div class="empty">No signal activity yet.</div>';
@@ -184,7 +184,7 @@ async function pollLearning(){
   if(!response.ok)throw Error('Learning API HTTP '+response.status);
   const state=await response.json();
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
-     $('learningSummary').innerHTML='<div class="trade"><span>Fixed taker schedule</span><span class="muted">50 shares every 3s through 60s on the lower fresh ask, then 150 every 5s through 150s on the higher fresh ask; no automatic tuning.</span></div><div class="trade"><span>Stored data</span><span class="muted">Market samples and account analytics are logged for review; they do not alter order placement.</span></div>';
+     $('learningSummary').innerHTML='<div class="trade"><span>Fixed limit strategy</span><span class="muted">From 120s, latch the first side with a fresh midpoint at $0.80+ and place 1,000 at $0.40 plus 2,000 at $0.60; no automatic tuning.</span></div><div class="trade"><span>Stored data</span><span class="muted">Market samples and account analytics are logged for review; they do not alter order placement.</span></div>';
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -241,13 +241,15 @@ async function pollAnalytics(){
  setTimeout(pollAnalytics,15000);
 }
 function renderMarket(state){
-  const selection=state.entrySideSelection||{};
- const hasUpcomingBuy=Boolean(state.orderSchedule?.nextOrderAt);
+  const selection=state.entrySideSelection||{},schedule=state.orderSchedule||{};
  for(const side of ['UP','DOWN']){
   const prefix=side.toLowerCase(),quote=state.quotes?.[side]||{};
-   const role=selection.status==='READY'
-       ?hasUpcomingBuy&&selection.selectedSide===side?'SCHEDULED BUY':selection.cheapSide===side?'LOWER ASK':'HIGHER ASK'
-      :'WAITING';
+    const midpoint=Number(quote.midpoint);
+    const role=selection.status==='TRIGGERED'&&selection.selectedSide===side
+      ?'TRIGGERED SIDE'
+      :schedule.status==='MONITORING_TRIGGER'&&Number.isFinite(midpoint)&&midpoint>=Number(schedule.triggerPrice)
+        ?'TRIGGER CANDIDATE'
+        :'MONITORING';
   $(prefix+'Role').textContent=role;
   $(prefix+'Midpoint').textContent=money(quote.midpoint,4);
   $(prefix+'Bid').textContent=money(quote.bestBid,4);
@@ -255,27 +257,34 @@ function renderMarket(state){
   const age=Number.isFinite(Number(quote.updatedAt))?Math.max(0,Math.round((Number(state.now)-Number(quote.updatedAt))/1000))+'s':'—';
   $(prefix+'Age').textContent=age;
  }
- const cheaper=selection.cheapSide,expensive=selection.expensiveSide;
- $('cheaperSide').textContent=selection.status==='READY'?cheaper:'WAITING';
-  $('cheaperMid').textContent=selection.status==='READY'?`Best ask ${money(selection.asks?.[cheaper],4)}`:String(selection.status||'Waiting for fresh asks on both sides').replaceAll('_',' ');
- $('expensiveSide').textContent=selection.status==='READY'?expensive:'WAITING';
-  $('expensiveMid').textContent=selection.status==='READY'?`Best ask ${money(selection.asks?.[expensive],4)}`:String(selection.status||'Waiting for fresh asks on both sides').replaceAll('_',' ');
+  const triggeredSide=selection.selectedSide;
+  $('cheaperSide').textContent=triggeredSide||'WAITING';
+  $('cheaperMid').textContent=triggeredSide
+    ?`Latched ${triggeredSide} after the midpoint trigger`
+    :`UP ${money(selection.prices?.UP,4)} · DOWN ${money(selection.prices?.DOWN,4)}`;
+  $('expensiveSide').textContent=money(selection.triggeringPrice??schedule.triggerPrice,2);
+  $('expensiveMid').textContent=triggeredSide
+    ?`Triggered ${time(selection.triggeredAt)} UTC`
+    :`Current midpoint threshold · ${Number(schedule.triggerSeconds??120)} seconds onward`;
 }
 function renderSchedule(state){
  const schedule=state.orderSchedule||{};
- const phase=schedule.phase;
- if(schedule.nextOrderAt){
-   $('nextOrder').textContent=schedule.due?'DUE NOW':`${phase==='FIRST'?'50-SHARE':'150-SHARE'} · ${time(schedule.nextOrderAt)} UTC`;
-    const sidePolicy=phase==='SECOND'?'higher-ask':'lower-ask';
-    const priceRule=phase==='SECOND'?'ask ≥ $0.60':'ask ≤ $0.40';
-    $('scheduleHint').textContent=`${Number(schedule.shares||0).toLocaleString()} shares · ${sidePolicy} side · ${priceRule} · at ${schedule.nextScheduledSeconds}s`;
- }else{
-  $('nextOrder').textContent='COMPLETE';
-  $('scheduleHint').textContent='All scheduled checks have passed';
- }
+  if(schedule.triggered){
+   $('nextOrder').textContent='TRIGGERED';
+   $('scheduleHint').textContent=`${safe(schedule.triggerSide)} latched · 1,000 @ $0.40 + 2,000 @ $0.60`;
+  }else if(schedule.status==='WAITING_FOR_DELAY'){
+   $('nextOrder').textContent='WAITING';
+   $('scheduleHint').textContent=`Monitoring starts at ${time(schedule.nextOrderAt)} UTC (120s)`;
+  }else if(schedule.status==='MONITORING_TRIGGER'){
+   $('nextOrder').textContent='WATCHING';
+   $('scheduleHint').textContent='First fresh midpoint at $0.80+ triggers both limit orders';
+  }else{
+   $('nextOrder').textContent='WINDOW CLOSED';
+   $('scheduleHint').textContent='No new orders can trigger in this window';
+  }
   const placed=Number(schedule.ordersPlaced||0);
   $('restingSummary').textContent=String(placed);
-  $('restingHint').textContent='Taker orders execute immediately; none remain resting';
+   $('restingHint').textContent=`${Number(schedule.openOrders||0)} still open · ${Number(schedule.filledShares||0).toLocaleString()} shares filled`;
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){

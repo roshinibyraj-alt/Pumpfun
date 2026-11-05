@@ -337,175 +337,162 @@ function setMidpointBooks(bot, at, { upBid, upAsk, upSize = 500, downBid, downAs
   };
 }
 
-test('first-phase scheduled taker buys choose the lower best ask at each checkpoint', () => {
-  const { bot, start } = fixture();
-  const firstAt = start + 3_000;
-  setMidpointBooks(bot, firstAt, { upBid: .28, upAsk: .30, downBid: .68, downAsk: .70 });
-  bot.processScheduledTakerOrder(firstAt);
-  bot.processScheduledTakerOrder(firstAt + 500);
-  assert.equal(bot.takerOrders.length, 1);
-  assert.equal(bot.takerOrders[0].phase, 'FIRST');
-  assert.equal(bot.takerOrders[0].orderType, 'MARKET');
-  assert.equal(bot.takerOrders[0].side, 'UP');
-  assert.equal(bot.takerOrders[0].sideSelectionPolicy, 'LOWER_ASK');
-  assert.equal(bot.takerOrders[0].requestedShares, 50);
-  assert.equal(bot.takerOrders[0].filledShares, 50);
-  assert.equal(bot.takerOrders[0].averageFillPrice, .30);
-  assert.equal(bot.trades[0].entryKind, 'SCHEDULED_TAKER');
-  assert.equal(bot.snapshot().paperAccount.openOrders, 0);
-  assert.equal(bot.snapshot().openOrders.length, 0);
-
-  const secondAt = start + 6_000;
-  setMidpointBooks(bot, secondAt, { upBid: .68, upAsk: .70, downBid: .28, downAsk: .30 });
-  bot.processScheduledTakerOrder(secondAt);
-  assert.equal(bot.takerOrders.length, 2);
-  assert.equal(bot.takerOrders[0].side, 'DOWN');
-  assert.equal(bot.takerOrders[0].requestedShares, 50);
-  assert.equal(bot.lastOrderSlot, 1);
-});
-
-test('cheap-side phase skips asks above 0.40 and never sweeps depth above 0.40', () => {
-  const { bot, start } = fixture();
-  const firstAt = start + 3_000;
+function setTriggerBooks(bot, at, {
+  upBid = .80, upAsk = .81, downBid = .18, downAsk = .20,
+  upSize = 5000, downSize = 5000,
+} = {}) {
   bot.quotes = {
     UP: bot.quote({
-      bids: [{ price: .39, size: 500 }],
-      asks: [{ price: .40, size: 20 }, { price: .4001, size: 100 }],
-    }, firstAt),
+      bids: [{ price: upBid, size: upSize }],
+      asks: [{ price: upAsk, size: upSize }],
+    }, at),
     DOWN: bot.quote({
-      bids: [{ price: .69, size: 500 }],
-      asks: [{ price: .70, size: 500 }],
-    }, firstAt),
+      bids: [{ price: downBid, size: downSize }],
+      asks: [{ price: downAsk, size: downSize }],
+    }, at),
   };
-  bot.processScheduledTakerOrder(firstAt);
-  assert.equal(bot.takerOrders[0].side, 'UP');
-  assert.equal(bot.takerOrders[0].bestAskAtSubmission, .40);
-  assert.equal(bot.takerOrders[0].filledShares, 20);
-  assert.equal(bot.takerOrders[0].averageFillPrice, .40);
-  assert.equal(bot.takerOrders[0].status, 'PARTIALLY_FILLED_CANCELLED');
+}
 
-  const { bot: filteredBot, start: filteredStart } = fixture();
-  const filteredAt = filteredStart + 3_000;
-  setMidpointBooks(filteredBot, filteredAt, {
-    upBid: .39, upAsk: .4001, downBid: .69, downAsk: .70,
+function processLimitTick(bot, at) {
+  bot.processLimitOrderStrategy(at);
+  bot.processRestingLimitOrders(at);
+}
+
+test('waits 120 seconds, then latches the first fresh midpoint at or above 0.80', () => {
+  const { bot, start } = fixture();
+  const beforeTrigger = start + 119_500;
+  setTriggerBooks(bot, beforeTrigger);
+  processLimitTick(bot, beforeTrigger);
+  assert.equal(bot.limitOrders.length, 0);
+  assert.equal(bot.snapshot().orderSchedule.status, 'WAITING_FOR_DELAY');
+
+  const triggerAt = start + 120_000;
+  setTriggerBooks(bot, triggerAt, {
+    upBid: .79, upAsk: .81,
+    downBid: .18, downAsk: .20,
   });
-  filteredBot.processScheduledTakerOrder(filteredAt);
-  assert.equal(filteredBot.takerOrders[0].status, 'SKIPPED_PRICE_FILTER');
-  assert.equal(filteredBot.takerOrders[0].filledShares, 0);
-  assert.equal(filteredBot.lastOrderSlot, 0);
+  processLimitTick(bot, triggerAt);
+  assert.equal(bot.limitOrderTriggerSide, 'UP');
+  assert.equal(bot.limitOrderTriggeredAt, triggerAt);
+  assert.equal(bot.limitOrders.length, 2);
+  assert.deepEqual(bot.limitOrders.slice().reverse().map(order => [
+    order.side, order.limitPrice, order.requestedShares, order.status,
+  ]), [
+    ['UP', .40, 1000, 'OPEN'],
+    ['UP', .60, 2000, 'OPEN'],
+  ]);
+  assert.equal(bot.trades.length, 0, 'high-midpoint signal does not immediately fill lower-priced limit buys');
+  assert.equal(bot.snapshot().paperAccount.openOrders, 2);
+  assert.equal(bot.snapshot().paperAccount.cash, 10_000, 'open orders reserve funds without deducting cash');
+  assert.ok(bot.snapshot().paperAccount.reservedOrderFunds > 1600);
 });
 
-test('later-phase buys switch to the higher ask without changing checkpoint sizes', () => {
+test('threshold equality qualifies and a later opposite-side spike cannot rearm or switch orders', () => {
   const { bot, start } = fixture();
-  const beforeBoundary = start + 60_000;
-  setMidpointBooks(bot, beforeBoundary, { upBid: .28, upAsk: .30, downBid: .68, downAsk: .70 });
-  bot.processScheduledTakerOrder(beforeBoundary);
-  assert.equal(bot.takerOrders[0].phase, 'FIRST');
-  assert.equal(bot.takerOrders[0].side, 'UP');
-  assert.equal(bot.takerOrders[0].sideSelectionPolicy, 'LOWER_ASK');
-  assert.equal(bot.takerOrders[0].requestedShares, 50);
-  assert.equal(bot.lastOrderSlot, 19);
-
-  const secondPhase = start + 70_000;
-  setMidpointBooks(bot, secondPhase, { upBid: .68, upAsk: .70, downBid: .28, downAsk: .30 });
-  bot.processScheduledTakerOrder(secondPhase);
-  assert.equal(bot.takerOrders[0].phase, 'SECOND');
-  assert.equal(bot.takerOrders[0].side, 'UP', 'second phase buys the higher-ask side');
-  assert.equal(bot.takerOrders[0].sideSelectionPolicy, 'HIGHER_ASK');
-  assert.equal(bot.takerOrders[0].requestedShares, 150);
-  assert.equal(bot.lastOrderSlot, 20);
-  assert.equal(bot.takerOrders[0].priceFilter.minimumAsk, .60);
-
-  const finalAt = start + 150_000;
-  setMidpointBooks(bot, finalAt, { upBid: .28, upAsk: .30, downBid: .68, downAsk: .70 });
-  bot.processScheduledTakerOrder(finalAt);
-  assert.equal(bot.takerOrders[0].side, 'DOWN', 'higher-ask selection is recalculated at each checkpoint');
-  assert.equal(bot.takerOrders[0].sideSelectionPolicy, 'HIGHER_ASK');
-  assert.equal(bot.takerOrders[0].requestedShares, 150);
-  assert.equal(bot.lastOrderSlot, 36);
-  assert.match(bot.snapshot().strategy.orderModel, /higher fresh best ask/);
-  assert.equal(bot.snapshot().strategy.secondPhaseIntervalSeconds, 5);
-  assert.equal(bot.snapshot().strategy.maxOrdersPerWindow, 37);
-  assert.equal(bot.snapshot().strategy.firstPhaseMaxAsk, .40);
-  assert.equal(bot.snapshot().strategy.secondPhaseMinAsk, .60);
-});
-
-test('expensive-side phase skips asks below 0.60 and permits the boundary price', () => {
-  const { bot, start } = fixture();
-  const belowLimitAt = start + 70_000;
-  setMidpointBooks(bot, belowLimitAt, {
-    upBid: .58, upAsk: .5999, downBid: .53, downAsk: .55,
+  const triggerAt = start + 120_000;
+  setTriggerBooks(bot, triggerAt, {
+    upBid: .79, upAsk: .81,
+    downBid: .20, downAsk: .20,
   });
-  bot.processScheduledTakerOrder(belowLimitAt);
-  assert.equal(bot.takerOrders[0].side, 'UP');
-  assert.equal(bot.takerOrders[0].status, 'SKIPPED_PRICE_FILTER');
-  assert.equal(bot.takerOrders[0].filledShares, 0);
+  processLimitTick(bot, triggerAt);
+  assert.equal(bot.quotes.UP.midpoint, .8);
+  assert.equal(bot.limitOrderTriggerSide, 'UP');
+  assert.equal(bot.limitOrders.length, 2);
 
-  const { bot: boundaryBot, start: boundaryStart } = fixture();
-  const boundaryAt = boundaryStart + 70_000;
-  setMidpointBooks(boundaryBot, boundaryAt, {
-    upBid: .59, upAsk: .60, downBid: .53, downAsk: .55,
+  const laterAt = start + 180_000;
+  setTriggerBooks(bot, laterAt, {
+    upBid: .19, upAsk: .21,
+    downBid: .94, downAsk: .96,
   });
-  boundaryBot.processScheduledTakerOrder(boundaryAt);
-  assert.equal(boundaryBot.takerOrders[0].side, 'UP');
-  assert.equal(boundaryBot.takerOrders[0].averageFillPrice, .60);
-  assert.equal(boundaryBot.takerOrders[0].filledShares, 150);
+  processLimitTick(bot, laterAt);
+  assert.equal(bot.limitOrderTriggerSide, 'UP');
+  assert.equal(bot.limitOrders.length, 2);
+  assert.ok(bot.limitOrders.every(order => order.side === 'UP'));
 });
 
-test('stale quotes may recover during the active checkpoint without duplicating the taker buy', () => {
+test('resting limits fill only at or below their price, accumulate partial fills, and charge fees', () => {
   const { bot, start } = fixture();
-  const firstAt = start + 3_000;
-  setMidpointBooks(bot, firstAt - 6_000, { upBid: .28, upAsk: .30, downBid: .68, downAsk: .70 });
-  bot.processScheduledTakerOrder(firstAt);
-  assert.equal(bot.takerOrders.length, 0);
-  assert.equal(bot.lastOrderSlot, -1);
+  const triggerAt = start + 120_000;
+  setTriggerBooks(bot, triggerAt);
+  processLimitTick(bot, triggerAt);
 
-  const recoveredAt = start + 5_000;
-  setMidpointBooks(bot, recoveredAt, { upBid: .28, upAsk: .30, downBid: .68, downAsk: .70 });
-  bot.processScheduledTakerOrder(recoveredAt);
-  bot.processScheduledTakerOrder(recoveredAt + 500);
-  assert.equal(bot.takerOrders.length, 1);
-  assert.equal(bot.takerOrders[0].filledShares, 50);
-  assert.equal(bot.lastOrderSlot, 0);
-});
-
-test('taker buys sweep visible ask depth and cancel any unfilled remainder immediately', () => {
-  const { bot, start } = fixture();
-  const placedAt = start + 3_000;
-  bot.quotes = {
-    UP: bot.quote({
-      bids: [{ price: .28, size: 500 }],
-      asks: [{ price: .29, size: 20 }, { price: .30, size: 10 }],
-    }, placedAt),
-    DOWN: bot.quote({
-      bids: [{ price: .68, size: 500 }],
-      asks: [{ price: .70, size: 500 }],
-    }, placedAt),
-  };
-  bot.processScheduledTakerOrder(placedAt);
-  const order = bot.takerOrders[0];
-  assert.equal(order.orderType, 'MARKET');
-  assert.equal(order.requestedShares, 50);
-  assert.equal(order.filledShares, 30);
-  assert.equal(order.cancelledRemainderShares, 20);
-  assert.equal(order.remainingShares, 0);
-  assert.equal(order.status, 'PARTIALLY_FILLED_CANCELLED');
-  assert.equal(bot.trades[0].shares, 30);
+  const partialAt = start + 130_000;
+  bot.quotes.UP = bot.quote({
+    bids: [{ price: .54, size: 5000 }],
+    asks: [{ price: .55, size: 500 }],
+  }, partialAt);
+  processLimitTick(bot, partialAt);
+  const highLimit = bot.limitOrders.find(order => order.limitPrice === .60);
+  const lowLimit = bot.limitOrders.find(order => order.limitPrice === .40);
+  assert.equal(highLimit.filledShares, 500);
+  assert.equal(highLimit.remainingShares, 1500);
+  assert.equal(highLimit.status, 'PARTIALLY_FILLED');
+  assert.equal(highLimit.averageFillPrice, .55);
+  assert.equal(lowLimit.filledShares, 0, 'the $0.40 order does not cross above its limit');
+  assert.equal(bot.trades.length, 1);
   assert.ok(bot.trades[0].fees > 0);
-  assert.equal(bot.snapshot().paperAccount.openOrders, 0);
-  assert.equal(bot.snapshot().openOrders.length, 0);
+
+  const fillAt = start + 131_000;
+  bot.quotes.UP = bot.quote({
+    bids: [{ price: .59, size: 5000 }],
+    asks: [{ price: .60, size: 1500 }],
+  }, fillAt);
+  processLimitTick(bot, fillAt);
+  assert.equal(highLimit.status, 'FILLED');
+  assert.equal(highLimit.filledShares, 2000);
+  assert.equal(highLimit.remainingShares, 0);
+  assert.equal(highLimit.averageFillPrice, .5875);
+  assert.equal(bot.trades.length, 2, 'partial fill lots remain separately manageable by the existing exits');
+
+  const lowFillAt = start + 132_000;
+  bot.quotes.UP = bot.quote({
+    bids: [{ price: .39, size: 5000 }],
+    asks: [{ price: .40, size: 1000 }],
+  }, lowFillAt);
+  processLimitTick(bot, lowFillAt);
+  assert.equal(lowLimit.status, 'FILLED');
+  assert.equal(lowLimit.averageFillPrice, .40);
+  assert.equal(bot.trades.reduce((sum, trade) => sum + trade.shares, 0), 3000);
+  assert.ok(bot.cash < 10_000);
 });
 
-test('taker-filled positions can take profit before the 295-second stop-loss gate', () => {
+test('unfilled limit shares remain resting until window end, then cancel without changing exits', () => {
   const { bot, start } = fixture();
-  const placedAt = start + 3_000;
-  setMidpointBooks(bot, placedAt, { upBid: .3, upAsk: .3, downBid: .7, downAsk: .7 });
-  bot.processScheduledTakerOrder(placedAt);
+  const triggerAt = start + 120_000;
+  setTriggerBooks(bot, triggerAt);
+  processLimitTick(bot, triggerAt);
+  const order = bot.limitOrders.find(item => item.limitPrice === .60);
+  assert.equal(order.status, 'OPEN');
+
+  bot.cancelExpiredLimitOrders(start + 300_000);
+  assert.equal(order.status, 'CANCELLED_WINDOW_END');
+  assert.equal(order.cancelledRemainderShares, 2000);
+  assert.equal(order.remainingShares, 0);
+  assert.equal(bot.snapshot().paperAccount.openOrders, 0);
+  assert.equal(bot.snapshot().strategy.takeProfitBid, .99);
+  assert.equal(bot.snapshot().strategy.stopLossBid, .01);
+  assert.equal(bot.snapshot().strategy.exitStartSeconds, 295);
+});
+
+test('limit-filled positions retain the existing take-profit behavior', () => {
+  const { bot, start } = fixture();
+  const triggerAt = start + 120_000;
+  setTriggerBooks(bot, triggerAt);
+  processLimitTick(bot, triggerAt);
+  const fillAt = start + 130_000;
+  bot.quotes.UP = bot.quote({
+    bids: [{ price: .59, size: 5000 }],
+    asks: [{ price: .60, size: 2000 }],
+  }, fillAt);
+  processLimitTick(bot, fillAt);
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].status, 'OPEN');
 
-  const earlyTakeProfit = start + 4_000;
-  setMidpointBooks(bot, earlyTakeProfit, { upBid: .99, upAsk: 1, downBid: .01, downAsk: .02 });
+  const earlyTakeProfit = start + 131_000;
+  setTriggerBooks(bot, earlyTakeProfit, {
+    upBid: .99, upAsk: .999,
+    downBid: .01, downAsk: .02,
+  });
   bot.processPositionExits(earlyTakeProfit);
   assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
   assert.equal(bot.trades[0].status, 'SETTLED');

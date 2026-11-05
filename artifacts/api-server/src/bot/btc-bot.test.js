@@ -148,19 +148,17 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents scheduled taker buys, visible inventory and preserved exits", () => {
+test("dashboard presents the midpoint-triggered limit ladder, inventory and preserved exits", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
-  assert.match(html, /BTC TAKER PAPER BOT/);
+  assert.match(html, /BTC LIMIT PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
-  assert.match(html, /50-share taker buy every 3 seconds on the side with the lower fresh ask/);
-  assert.match(html, /150 shares every 5 seconds on the side with the higher fresh ask/);
-  assert.match(html, /At 3, 6, 9, and every 3 seconds through 60/);
-  assert.match(html, /At 70, 75, 80, and every 5 seconds through 150/);
-  assert.match(html, /lower fresh best ask, only when that ask is at or below \$0\.40/);
-  assert.match(html, /higher fresh best ask, only when that ask is at or above \$0\.60/);
-  assert.match(html, /No fill may cross its phase price limit/);
-  assert.match(html, /1,000 shares in the first phase and 2,550 shares in the second phase/);
-  assert.match(html, /unfilled remainder is cancelled immediately/i);
+  assert.match(html, /Starting 120 seconds after each window opens/);
+  assert.match(html, /fresh UP and DOWN midpoints/);
+  assert.match(html, /first side to reach \$0\.80 or higher/);
+  assert.match(html, /1,000-share limit buy at \$0\.40 and a 2,000-share limit buy at \$0\.60/);
+  assert.match(html, /Orders stay open until filled or the window ends/);
+  assert.match(html, /partial fills stay open and can accumulate/i);
+  assert.match(html, /unfilled shares are cancelled at window expiry/i);
   assert.doesNotMatch(html, /\bScenario A\b|\bScenario B\b|\bEMA\d*\b|\bRSI\b|\bBollinger\b|\bStoch(?:astic)?\b|\bMACD\b|\bHybrid signal\b|\bindicators?\b/i);
   assert.match(html, /UP · ACCUMULATED POSITION/);
   assert.match(html, /DOWN · ACCUMULATED POSITION/);
@@ -169,7 +167,7 @@ test("dashboard presents scheduled taker buys, visible inventory and preserved e
   assert.match(html, /Current DOWN midpoint/);
   assert.match(html, /position-current-price/);
   assert.match(html, /Active window only/);
-  assert.match(html, /Taker order history/);
+  assert.match(html, /Limit order history/);
   assert.match(html, /Filled shares only/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
@@ -189,7 +187,7 @@ test("dashboard presents scheduled taker buys, visible inventory and preserved e
   assert.doesNotMatch(html, /Manual limit order/);
 });
 
-test("dashboard renders lower-ask side, taker schedule, filled inventory and analytics", () => {
+test("dashboard renders triggered side, resting order ladder, filled inventory and analytics", () => {
   const vm = require("node:vm");
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
   const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m => [m[1], { style: {} }]));
@@ -203,21 +201,23 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
   }
   const state = {
     now: 120000,
-    window: { start: 120000 },
+    window: { start: 0 },
     entrySideSelection: {
-      status: "READY", cheapSide: "UP", expensiveSide: "DOWN",
-      selectedSide: "UP", selectedPhase: "FIRST", sidePreference: "LOWER_ASK",
-      asks: { UP: .32, DOWN: .7 }, midpoints: { UP: .31, DOWN: .69 },
+      status: "TRIGGERED", selectedSide: "UP", triggeringPrice: .81,
+      triggeredAt: 120000, prices: { UP: .81, DOWN: .69 },
     },
     quotes: {
-      UP: { midpoint: .31, bestBid: .3, bestAsk: .32, updatedAt: 120000 },
+      UP: { midpoint: .81, bestBid: .8, bestAsk: .82, updatedAt: 120000 },
       DOWN: { midpoint: .69, bestBid: .68, bestAsk: .7, updatedAt: 120000 },
     },
-    orderSchedule: { phase: "FIRST", shares: 50, nextOrderAt: 120000, nextScheduledSeconds: 3, due: true, ordersPlaced: 2 },
-    takerOrders: [
-      { side: "UP", windowStart: 120000, phase: "FIRST", orderType: "MARKET", requestedShares: 50, filledShares: 20, averageFillPrice: .31, status: "PARTIALLY_FILLED_CANCELLED", placedAt: 120000 },
-      { side: "DOWN", windowStart: 120000, phase: "SECOND", orderType: "MARKET", requestedShares: 150, filledShares: 150, averageFillPrice: .7, status: "FILLED", placedAt: 120001 },
-      { side: "UP", windowStart: 60000, phase: "FIRST", orderType: "MARKET", requestedShares: 150, filledShares: 150, averageFillPrice: .3, status: "FILLED", placedAt: 60000 },
+    orderSchedule: {
+      status: "TRIGGERED", triggered: true, triggerSide: "UP", triggerPrice: .8,
+      ordersPlaced: 2, openOrders: 1, filledShares: 20,
+    },
+    limitOrders: [
+      { side: "UP", windowStart: 0, orderType: "LIMIT", limitPrice: .4, requestedShares: 1000, filledShares: 20, remainingShares: 980, averageFillPrice: .39, status: "PARTIALLY_FILLED", placedAt: 120000 },
+      { side: "UP", windowStart: 0, orderType: "LIMIT", limitPrice: .6, requestedShares: 2000, filledShares: 0, remainingShares: 2000, averageFillPrice: null, status: "OPEN", placedAt: 120000 },
+      { side: "UP", windowStart: 60000, orderType: "LIMIT", limitPrice: .6, requestedShares: 2000, filledShares: 2000, remainingShares: 0, averageFillPrice: .59, status: "FILLED", placedAt: 60000 },
     ],
   };
   context.renderMarket(state);
@@ -226,16 +226,16 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
     UP: { shares: 80, averageCost: .3, costBasis: 24, midpoint: .31 },
     DOWN: { midpoint: .69 },
   });
-  context.renderPendingBySide(state.takerOrders, state.window.start);
+  context.renderPendingBySide(state.limitOrders, state.window.start);
   context.renderOrders([
-    { side: "UP", phase: "FIRST", orderType: "MARKET", requestedShares: 50, filledShares: 20, averageFillPrice: .31, status: "PARTIALLY_FILLED_CANCELLED", cancelledRemainderShares: 30, placedAt: 120000 },
+    { side: "UP", orderType: "LIMIT", limitPrice: .4, requestedShares: 1000, filledShares: 20, remainingShares: 980, averageFillPrice: .39, status: "PARTIALLY_FILLED", placedAt: 120000 },
   ]);
-  context.renderTrades([{ side: "UP", phase: "FIRST", shares: 20, openedAt: 120000, entryPrice: .3, entryKind: "SCHEDULED_TAKER", status: "OPEN" }]);
-  assert.equal(elements.upRole.textContent, "SCHEDULED BUY");
-  assert.equal(elements.downRole.textContent, "HIGHER ASK");
-  assert.match(elements.cheaperMid.textContent, /\$0\.3200/);
-  assert.match(elements.nextOrder.textContent, /DUE NOW/);
-  assert.match(elements.scheduleHint.textContent, /lower-ask side · ask ≤ \$0\.40/);
+  context.renderTrades([{ side: "UP", shares: 20, openedAt: 120000, entryPrice: .39, limitPrice: .4, entryKind: "RESTING_LIMIT", status: "OPEN" }]);
+  assert.equal(elements.upRole.textContent, "TRIGGERED SIDE");
+  assert.equal(elements.downRole.textContent, "MONITORING");
+  assert.match(elements.cheaperMid.textContent, /Latched UP/);
+  assert.match(elements.nextOrder.textContent, /TRIGGERED/);
+  assert.match(elements.scheduleHint.textContent, /1,000 @ \$0\.40 \+ 2,000 @ \$0\.60/);
   assert.equal(elements.restingSummary.textContent, "2");
   assert.equal(elements.upShares.textContent, "80 shares");
   assert.equal(elements.upCurrentPrice.textContent, "$0.3100");
@@ -243,7 +243,8 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
   assert.equal(elements.upAverageCost.textContent, "$0.3000");
   assert.equal(elements.upOpenOrders.textContent, "1");
   assert.equal(elements.upRestingShares.textContent, "20");
-  assert.match(elements.orders.innerHTML, /PARTIALLY_FILLED_CANCELLED/);
+  assert.match(elements.orders.innerHTML, /PARTIALLY_FILLED/);
+  assert.match(elements.orders.innerHTML, /\$0\.40/);
   assert.match(elements.trades.innerHTML, /Average fill/);
   assert.doesNotMatch(elements.trades.innerHTML, /Model probability/);
   context.renderAnalytics({
@@ -256,7 +257,7 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
   assert.equal(elements.completedWindows.textContent, "3");
   assert.equal(elements.windowWinRate.textContent, "66.7%");
   assert.match(elements.equityChart.innerHTML, /<svg/);
-  state.entrySideSelection.status = "WAITING_FOR_FRESH_ASKS";
+  state.entrySideSelection.status = "WAITING_FOR_TRIGGER";
   context.renderMarket(state);
-  assert.equal(elements.upRole.textContent, "WAITING");
+  assert.equal(elements.upRole.textContent, "MONITORING");
 });
