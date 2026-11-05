@@ -59,18 +59,30 @@ test('expired stale-close lots recover from original-market resolution, not next
   assert.equal(marketRequests, 1);
 });
 
-test('unresolved expired lots use a newly fetched own-token bid and share one book request', async () => {
-  const tokens = [];
+test('unresolved expired lots stay pending and never close at a later CLOB bid', async () => {
+  let bookRequests = 0;
+  let now = 310_000;
+  let resolvedNow = false;
   const paper = bot({
-    fetchMarketDetails: async () => resolved({ umaResolutionStatus: 'proposed' }),
-    fetchBook: async token => { tokens.push(token); return { bids: [{ price: 0.64, size: 1000 }], asks: [] }; },
+    now: () => now,
+    fetchMarketDetails: async () => resolvedNow
+      ? resolved()
+      : resolved({ umaResolutionStatus: 'proposed' }),
+    fetchBook: async () => { bookRequests++; return { bids: [{ price: 0.99, size: 1000 }], asks: [] }; },
   });
   paper.trades = [expired(), expired({ id: 'second-lot' })];
   await recoverExpiredPositions(paper, 310_000);
-  assert.deepEqual(tokens, ['old-up']);
-  assert.ok(paper.trades.every(trade => trade.finalOutcome === 'WINDOW_RECOVERY_EXIT'));
-  assert.ok(Math.abs(paper.trades[0].exitFees - 1.6128) < 1e-9);
-  assert.match(paper.trades[0].settlementSource, /not a historical closing-price claim/);
+  assert.equal(bookRequests, 0);
+  assert.ok(paper.trades.every(trade => trade.status === 'OPEN'
+    && trade.settlementStatus === 'AWAITING_SETTLEMENT'
+    && trade.finalOutcome == null));
+  assert.equal(paper.cash, 10_000);
+
+  resolvedNow = true;
+  now += 10_000;
+  await recoverExpiredPositions(paper, now);
+  assert.equal(bookRequests, 0);
+  assert.ok(paper.trades.every(trade => trade.finalOutcome === 'MARKET_RESOLUTION'));
 });
 
 test('missing market data stays explicitly pending and retries without fabricating a payout', async () => {

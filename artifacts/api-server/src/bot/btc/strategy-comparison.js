@@ -141,7 +141,7 @@ function replay(window, variant, trailing, index) {
     peakPnl = Math.max(peakPnl, realized + mark);
   }
   now = window.windowStart + CANDLE_MS;
-  bot.processPositionExits(now);
+  bot.processPositionExits(now, { allowWindowPriceExit: true });
   if (bot.trades.some(trade => trade.status === 'OPEN')) return null;
   const pnl = bot.trades.reduce((sum, trade) => sum + (trade.realizedPnl || 0), 0);
   return { windowStart: window.windowStart, pnl, trades: bot.entrySequence,

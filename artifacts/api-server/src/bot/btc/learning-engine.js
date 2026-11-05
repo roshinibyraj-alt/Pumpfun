@@ -29,7 +29,7 @@ function simulateWindow(windowSamples) {
     else bot.marketSignal = { status: 'WAITING_HISTORY' };
     bot.processSignals(now);
   }
-  bot.processPositionExits(start + 300_000);
+  bot.processPositionExits(start + 300_000, { allowWindowPriceExit: true });
   if (bot.trades.some(t => t.status === 'OPEN')) return null;
   return {
     pnl: bot.trades.reduce((sum, t) => sum + (t.realizedPnl ?? 0), 0),

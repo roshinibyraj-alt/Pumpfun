@@ -49,12 +49,6 @@ async function recoverExpiredPositions(bot, now) {
     let market = null;
     let error = null;
     try { market = await bot.fetchMarketDetails(marketId); } catch (cause) { error = cause.message; }
-    const books = new Map();
-    await Promise.all([...new Set(trades.map(trade => trade.tokenId).filter(Boolean))].map(async tokenId => {
-      if (trades.filter(trade => trade.tokenId === tokenId).every(trade => resolvedPayout(market, trade) != null)) return;
-      try { books.set(tokenId, bot.quote(await bot.fetchBook(tokenId), bot.now())); }
-      catch (cause) { error = cause.message; }
-    }));
     for (const trade of trades) {
       if (trade.status !== 'OPEN') continue;
       const payout = resolvedPayout(market, trade);
@@ -64,24 +58,17 @@ async function recoverExpiredPositions(bot, now) {
           bot.now(), payout);
         continue;
       }
-      const quote = books.get(trade.tokenId);
-      const bid = quote?.bestBid;
       const checkedAt = bot.now();
-      if (Number.isFinite(bid) && bid >= 0 && bid <= 1 && checkedAt >= quote.updatedAt
-        && checkedAt - quote.updatedAt <= 5_000) {
-        const exit = thresholdExit(bid);
-        trade.lastOutcomeBid = bid;
-        trade.lastOutcomeBidAt = quote.updatedAt;
-        const price = exit?.price ?? bid;
-        bot.closeTrade(trade, price, trade.shares * price, exit?.outcome ?? 'WINDOW_RECOVERY_EXIT',
-          'Expired paper position recovered using a newly fetched original-token CLOB bid; this is not a historical closing-price claim.',
-          checkedAt, bid);
-      } else {
-        const wasPending = trade.settlementStatus === 'AWAITING_SETTLEMENT';
-        trade.settlementStatus = 'AWAITING_SETTLEMENT';
-        trade.settlementLastCheckedAt = checkedAt;
-        trade.settlementError = error || 'No valid original-token bid or confirmed final outcome; retrying.';
-        if (!wasPending) bot.log('EXPIRY_RECOVERY_PENDING', { tradeId: trade.id, marketId, reason: trade.settlementError });
+      const wasPending = trade.settlementStatus === 'AWAITING_SETTLEMENT';
+      trade.settlementStatus = 'AWAITING_SETTLEMENT';
+      trade.settlementLastCheckedAt = checkedAt;
+      trade.settlementError = error || 'Original market is not confirmed resolved yet; retrying.';
+      if (!wasPending) {
+        bot.log('EXPIRY_RECOVERY_PENDING', {
+          tradeId: trade.id,
+          marketId,
+          reason: trade.settlementError,
+        });
       }
     }
   }));

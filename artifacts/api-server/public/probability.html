@@ -22,7 +22,7 @@
     .prob-head{display:flex;justify-content:space-between;align-items:center;color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.prob-price{font:800 clamp(30px,5vw,48px) ui-monospace,monospace;color:var(--text);margin:8px 0 12px}
     .bar{height:7px;border-radius:20px;background:#263345;overflow:hidden}.bar i{display:block;width:0;height:100%;background:var(--accent);border-radius:inherit;transition:width .3s}
     .prob-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.prob-meta span{display:block;color:var(--muted);font-size:10px}.prob-meta strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
-     .position-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.position-card{padding:16px;border-radius:14px;background:#0f1925;border:1px solid var(--line)}.position-card.up{--accent:var(--green)}.position-card.down{--accent:var(--red)}.position-title{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.position-shares{font:800 28px ui-monospace,monospace;margin:7px 0 12px}.position-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.position-metrics span{display:block;color:var(--muted);font-size:10px}.position-metrics strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
+     .position-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}.position-card{padding:16px;border-radius:14px;background:#0f1925;border:1px solid var(--line)}.position-card.up{--accent:var(--green)}.position-card.down{--accent:var(--red)}.position-title{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.12em}.position-price-label{color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.1em;margin-top:10px;text-transform:uppercase}.position-current-price{display:block;color:var(--accent);font:800 clamp(32px,5vw,46px) ui-monospace,monospace;letter-spacing:-.04em;line-height:1.1;margin:3px 0 10px}.position-shares{font:800 28px ui-monospace,monospace;margin:7px 0 12px}.position-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.position-metrics span{display:block;color:var(--muted);font-size:10px}.position-metrics strong{display:block;margin-top:4px;font:700 13px ui-monospace,monospace}
     .panel{padding:18px;margin-top:12px}.section-head{margin-bottom:12px}.section-head h2{font-size:15px;margin:0}.section-head small{font-size:11px}
      .table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:640px}th,td{text-align:left;padding:11px 9px;border-top:1px solid #263447;font-size:12px}th{color:var(--muted);font-size:9px;letter-spacing:.1em;text-transform:uppercase}
      .metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:12px}.metric-grid div{background:#0b121c;border:1px solid #202e40;border-radius:9px;padding:12px}.metric-grid span{display:block;color:var(--muted);font-size:10px;letter-spacing:.1em;text-transform:uppercase}.metric-grid strong{display:block;margin-top:4px;font:800 clamp(19px,2.8vw,28px) ui-monospace,monospace}@media(max-width:800px){.metric-grid{grid-template-columns:1fr 1fr}}
@@ -99,7 +99,7 @@
     <article class="card"><div class="label">Paper cash</div><div class="value" id="cash">—</div><div class="foot">Starting balance $10,000</div></article>
     <article class="card"><div class="label">Realized P&amp;L</div><div class="value" id="pnl">—</div><div class="foot" id="wins">No settled signals yet</div></article>
     <article class="card"><div class="label">Completed-window win rate</div><div class="value" id="windowWinRate">—</div><div class="foot"><span id="windowRateHint">Waiting for completed windows</span></div></article>
-    <article class="card"><div class="label">Open positions / buys</div><div class="value" id="openCount">—</div><div class="foot">Filled positions; taker orders are not left resting</div></article>
+    <article class="card"><div class="label">Active window positions / buys</div><div class="value" id="openCount">—</div><div class="foot" id="resolutionHint">Older unsold positions await market resolution</div></article>
   </section>
   <details class="disclosure" id="performanceDetails">
     <summary><span>Performance and equity</span><small id="analyticsStatus">Loading account history</small></summary>
@@ -119,10 +119,10 @@
   </section>
   </details>
   <section class="panel">
-    <div class="section-head"><h2>Accumulated positions</h2><small>Filled shares only · average cost includes entry fees</small></div>
+    <div class="section-head"><h2>Accumulated positions</h2><small>Active window only · older unsold shares await market resolution</small></div>
   <section class="position-grid" aria-label="Open paper positions by side">
-    <article class="position-card up"><div class="position-title">UP · ACCUMULATED POSITION</div><div class="position-shares" id="upShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="upAverageCost">—</strong></div><div><span>Buy executions</span><strong id="upOpenOrders">0</strong></div><div><span>Shares bought</span><strong id="upRestingShares">0</strong></div><div><span>Unrealized P&amp;L</span><strong id="upUnrealized">—</strong></div><div><span>Open cost basis</span><strong id="upCostBasis">—</strong></div><div><span>Marked value</span><strong id="upMarkedValue">—</strong></div></div></article>
-    <article class="position-card down"><div class="position-title">DOWN · ACCUMULATED POSITION</div><div class="position-shares" id="downShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="downAverageCost">—</strong></div><div><span>Buy executions</span><strong id="downOpenOrders">0</strong></div><div><span>Shares bought</span><strong id="downRestingShares">0</strong></div><div><span>Unrealized P&amp;L</span><strong id="downUnrealized">—</strong></div><div><span>Open cost basis</span><strong id="downCostBasis">—</strong></div><div><span>Marked value</span><strong id="downMarkedValue">—</strong></div></div></article>
+    <article class="position-card up"><div class="position-title">UP · ACCUMULATED POSITION</div><div class="position-price-label">Current UP midpoint</div><strong class="position-current-price" id="upCurrentPrice">—</strong><div class="position-shares" id="upShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="upAverageCost">—</strong></div><div><span>Buy executions</span><strong id="upOpenOrders">0</strong></div><div><span>Shares bought</span><strong id="upRestingShares">0</strong></div><div><span>Unrealized P&amp;L</span><strong id="upUnrealized">—</strong></div><div><span>Open cost basis</span><strong id="upCostBasis">—</strong></div><div><span>Marked value</span><strong id="upMarkedValue">—</strong></div></div></article>
+    <article class="position-card down"><div class="position-title">DOWN · ACCUMULATED POSITION</div><div class="position-price-label">Current DOWN midpoint</div><strong class="position-current-price" id="downCurrentPrice">—</strong><div class="position-shares" id="downShares">0 shares</div><div class="position-metrics"><div><span>Average cost / share</span><strong id="downAverageCost">—</strong></div><div><span>Buy executions</span><strong id="downOpenOrders">0</strong></div><div><span>Shares bought</span><strong id="downRestingShares">0</strong></div><div><span>Unrealized P&amp;L</span><strong id="downUnrealized">—</strong></div><div><span>Open cost basis</span><strong id="downCostBasis">—</strong></div><div><span>Marked value</span><strong id="downMarkedValue">—</strong></div></div></article>
   </section>
   </section>
   <section class="panel">
@@ -151,8 +151,8 @@
     <summary><span>Strategy rules</span><small>Taker entries · existing exits</small></summary>
     <section class="panel">
       <p>At 3, 6, 9, and every 3 seconds through 60, submit one 50-share taker buy. At 70, 80, 90, and every 10 seconds through 150, submit one 150-share taker buy. Each checkpoint selects whichever side has the lower fresh best ask at that moment. Stale or missing quotes are retried only until that checkpoint interval ends; missed intervals are not backfilled.</p>
-      <p>Each buy immediately sweeps visible ask depth from the lowest price upward, up to the requested shares and available paper cash, with taker fees. Any unfilled remainder is cancelled immediately. The maximum scheduled request is 1,000 shares in the first phase and 1,350 shares in the second phase. Existing take-profit, stop-loss, and window-resolution handling is unchanged.</p>
-      <p>TP/SL are disabled before 295 seconds. After that, TP uses a fresh own-side bid ≥ $0.99 to credit $1.00 per share; SL uses a fresh own-side bid ≤ $0.01 to credit $0.00 per share, before fees. A missing or stale bid does not trigger a sale; the position stays open for expiry handling. Signal changes do not close existing positions, and learning logs do not change the fixed execution settings.</p>
+      <p>Each buy immediately sweeps visible ask depth from the lowest price upward, up to the requested shares and available paper cash, with taker fees. Any unfilled remainder is cancelled immediately. The maximum scheduled request is 1,000 shares in the first phase and 1,350 shares in the second phase.</p>
+      <p>Take-profit is checked throughout the active window: a fresh own-side best bid ≥ $0.99 closes that lot and credits $1.00 per share before fees. Stop-loss remains gated until 295 seconds and uses a fresh own-side best bid ≤ $0.01 to credit $0.00 per share. Any lot still unsold at expiry waits for confirmed resolution of its original market; it is not closed at a later or last-seen CLOB price. Older unresolved shares stay out of the active-window accumulation boxes.</p>
     </section>
   </details>
   <p class="footer">Paper only—no live orders. The lower fresh best ask selects the taker side; existing TP/SL and market-resolution settlement rules remain in place.</p>
@@ -277,6 +277,7 @@ function renderSchedule(state){
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
   const p=positions?.[side]||{},prefix=side.toLowerCase();
+  $(prefix+'CurrentPrice').textContent=money(p.midpoint,4);
   $(prefix+'Shares').textContent=`${Number(p.shares||0).toLocaleString()} shares`;
   $(prefix+'AverageCost').textContent=money(p.averageCost,4);
   $(prefix+'Unrealized').textContent=signed(p.unrealizedPnl);
@@ -285,10 +286,11 @@ function renderPositions(positions){
   $(prefix+'Unrealized').className=p.unrealizedPnl==null?'':Number(p.unrealizedPnl)>=0?'pnl pos':'pnl neg';
  }
 }
-function renderPendingBySide(orders){
+ function renderPendingBySide(orders, activeWindowStart){
  for(const side of ['UP','DOWN']){
   const prefix=side.toLowerCase();
-   const items=(orders||[]).filter(order=>order.side===side&&Number(order.filledShares)>0);
+    const items=(orders||[]).filter(order=>order.side===side&&Number(order.filledShares)>0
+     &&Number(order.windowStart)===Number(activeWindowStart));
   $(prefix+'OpenOrders').textContent=String(items.length);
    $(prefix+'RestingShares').textContent=items.reduce((sum,order)=>sum+Number(order.filledShares||0),0).toLocaleString(undefined,{maximumFractionDigits:2});
  }
@@ -305,10 +307,12 @@ async function poll(){
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
   $('spot').textContent=money(s.spotPrice,2);
   $('gap').textContent=isNumeric(s.priceGap)?`Difference from reference ${money(s.priceGap,2)}`:'BTC reference difference —';
-   renderMarket(s);renderSchedule(s);renderPositions(account.positions);renderPendingBySide(s.takerOrders);
+    renderMarket(s);renderSchedule(s);renderPositions(account.positions);renderPendingBySide(s.takerOrders,s.window?.start);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
-  $('settled').textContent=String(account.settled??0);$('openCount').textContent=`${account.openPositions??0} positions · ${account.openOrders??0} orders`;
+   $('settled').textContent=String(account.settled??0);
+   $('openCount').textContent=`${account.activeWindowPositions??account.openPositions??0} positions · ${account.openOrders??0} orders`;
+   $('resolutionHint').textContent=`${account.awaitingSettlement??0} older lots · ${Number(account.awaitingSettlementShares??0).toLocaleString()} shares awaiting resolution`;
   $('wins').textContent=`${account.wins??0} wins · ${account.losses??0} losses`;
   $('feedState').textContent=s.priceFeed?.status||'—';
   $('updated').textContent=s.statusReason|| (s.lastUpdateAt?'Updated '+time(s.lastUpdateAt):'Waiting for first scan');

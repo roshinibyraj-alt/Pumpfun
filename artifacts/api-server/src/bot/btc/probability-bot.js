@@ -931,7 +931,7 @@ class ProbabilityBot {
     };
   }
 
-  processPositionExits(now) {
+  processPositionExits(now, { allowWindowPriceExit = false } = {}) {
     for (const trade of this.trades) {
       if (trade.status !== 'OPEN') continue;
       const exitStartAt = (Number.isFinite(trade.windowStart)
@@ -955,33 +955,48 @@ class ProbabilityBot {
       if (now < trade.windowEnd && fresh) {
         trade.lastOutcomeBid = bid;
         trade.lastOutcomeBidAt = quote.updatedAt;
-        if (now >= exitStartAt) {
-          const exit = thresholdExit(bid);
-          if (exit) {
-            this.closeTrade(trade, exit.price, trade.shares * exit.price, exit.outcome,
-              `Own-side bid reached the ${exit.outcome === 'TAKE_PROFIT' ? '$0.99 TP' : '$0.01 SL'} after the 295-second exit gate; credited $${exit.price.toFixed(2)} per share before fees.`,
-              now, bid);
-          }
+        const exit = thresholdExit(bid);
+        const takeProfitHit = exit?.outcome === 'TAKE_PROFIT';
+        const stopLossEligible = exit?.outcome === 'STOP_LOSS' && now >= exitStartAt;
+        if (takeProfitHit || stopLossEligible) {
+          const gateDescription = takeProfitHit
+            ? 'Take-profit triggered during the active window'
+            : 'Stop-loss triggered after the 295-second exit gate';
+          this.closeTrade(trade, exit.price, trade.shares * exit.price, exit.outcome,
+            `${gateDescription}; credited $${exit.price.toFixed(2)} per share before fees.`,
+            now, bid);
         }
         continue;
       }
 
       if (now < trade.windowEnd) continue;
-      const closeQuoteFresh = Number.isFinite(trade.lastOutcomeBid)
-        && Number.isFinite(trade.lastOutcomeBidAt)
-        && trade.lastOutcomeBidAt <= trade.windowEnd
-        && trade.windowEnd - trade.lastOutcomeBidAt <= EXIT_QUOTE_MAX_AGE_MS;
-      if (closeQuoteFresh) {
-        const payout = trade.shares * trade.lastOutcomeBid;
-        this.closeTrade(
-          trade,
-          trade.lastOutcomeBid,
-          payout,
-          'WINDOW_PRICE_EXIT',
-          'Window ended; marked at the last own-side best bid before close, less taker fee.',
-          now,
-          trade.lastOutcomeBid,
-        );
+      if (allowWindowPriceExit) {
+        const closeQuoteFresh = Number.isFinite(trade.lastOutcomeBid)
+          && Number.isFinite(trade.lastOutcomeBidAt)
+          && trade.lastOutcomeBidAt <= trade.windowEnd
+          && trade.windowEnd - trade.lastOutcomeBidAt <= EXIT_QUOTE_MAX_AGE_MS;
+        if (closeQuoteFresh) {
+          this.closeTrade(
+            trade,
+            trade.lastOutcomeBid,
+            trade.shares * trade.lastOutcomeBid,
+            'WINDOW_PRICE_EXIT',
+            'Historical replay only: marked at the last own-side bid before window close.',
+            now,
+            trade.lastOutcomeBid,
+          );
+        }
+        continue;
+      }
+      const wasPending = trade.settlementStatus === 'AWAITING_SETTLEMENT';
+      trade.settlementStatus = 'AWAITING_SETTLEMENT';
+      trade.settlementError = 'Window ended without an exit; waiting for confirmed original-market resolution.';
+      if (!wasPending) {
+        this.log('EXPIRY_RECOVERY_PENDING', {
+          tradeId: trade.id,
+          marketId: trade.marketId,
+          reason: trade.settlementError,
+        }, trade.windowStart);
       }
     }
   }
@@ -1139,23 +1154,29 @@ class ProbabilityBot {
   snapshot() {
     const now = this.now();
     const openTrades = this.trades.filter(trade => trade.status === 'OPEN');
+    const activeWindowTrades = this.market
+      ? openTrades.filter(trade => trade.marketId === this.market.id
+        && trade.windowStart === this.market.start
+        && trade.windowEnd > now
+        && trade.settlementStatus !== 'AWAITING_SETTLEMENT')
+      : [];
+    const awaitingSettlementTrades = openTrades.filter(
+      trade => trade.settlementStatus === 'AWAITING_SETTLEMENT',
+    );
     const openCost = openTrades.reduce((sum, trade) => sum + trade.totalCost, 0);
     // Reconcile against the cash ledger, not the bounded display history.
     const realizedPnl = this.cash + openCost - STARTING_CASH;
     const globalEquity = this.calculateGlobalEquity(now);
     const positions = Object.fromEntries(['UP', 'DOWN'].map(side => {
-      const sideOpenTrades = openTrades.filter(trade => trade.side === side);
+      const sideOpenTrades = activeWindowTrades.filter(trade => trade.side === side);
       const shares = sideOpenTrades.reduce((sum, trade) => sum + trade.shares, 0);
       const costBasis = sideOpenTrades.reduce((sum, trade) => sum + trade.totalCost, 0);
       const currentQuote = this.market ? this.quotes[side] : null;
       const bid = currentQuote?.bestBid;
-      const quoteFresh = Number.isFinite(currentQuote?.updatedAt)
+      const quoteFresh = Boolean(this.market) && Number.isFinite(currentQuote?.updatedAt)
         && now >= currentQuote.updatedAt
         && now - currentQuote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS
-        && Number.isFinite(bid)
-        && bid >= 0
-        && bid <= 1
-        && sideOpenTrades.every(trade => trade.marketId === this.market?.id);
+        && Number.isFinite(bid) && bid >= 0 && bid <= 1;
       const markedValue = quoteFresh
         ? sideOpenTrades.reduce((sum, trade) => sum
           + trade.shares * bid
@@ -1166,7 +1187,10 @@ class ProbabilityBot {
         shares,
         costBasis,
         averageCost: shares > 0 ? costBasis / shares : null,
+        midpoint: quoteFresh && Number.isFinite(currentQuote?.midpoint)
+          ? currentQuote.midpoint : null,
         bestBid: quoteFresh ? bid : null,
+        bestAsk: quoteFresh ? currentQuote.bestAsk : null,
         markedValue,
         unrealizedPnl: markedValue == null ? null : markedValue - costBasis,
         realizedPnl: sideRealizedPnl,
@@ -1201,7 +1225,7 @@ class ProbabilityBot {
         orderSchedule: TAKER_ORDER_CHECKPOINTS.map(item => ({ ...item })),
         orderModel: 'At seconds 3, 6, 9, ..., 60, submit an immediate 50-share taker buy on the side with the lower fresh best ask. At seconds 70, 80, 90, ..., 150, submit an immediate 150-share taker buy on the side with the lower fresh best ask. Each checkpoint is attempted once; no resting limit orders are placed.',
         fillModel: 'Paper taker buys consume currently visible fresh ask depth from lowest ask upward and include taker fees. Any unfilled remainder is cancelled immediately; it never rests.',
-        exitModel: 'No TP or SL exits before 295 seconds. From 295 seconds, TP uses a fresh own-side best bid >= $0.99 to credit $1; SL uses a fresh own-side best bid <= $0.01 to credit $0, before fees. Missing or stale bids do not trigger a sale. No opposite-signal exits or reversals. At expiry, retry the original market when needed; unavailable data remains explicitly pending.',
+        exitModel: 'During the active window, a fresh own-side best bid >= $0.99 triggers take-profit and credits $1 per share before fees. Stop-loss remains gated until 295 seconds and uses a fresh own-side best bid <= $0.01 to credit $0. Missing or stale bids do not trigger a sale. No opposite-signal exits or reversals. Unsold positions at expiry remain pending until the original market confirms its binary resolution; later CLOB bids do not liquidate them.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,
       referencePrice: this.referencePrice,
@@ -1219,8 +1243,13 @@ class ProbabilityBot {
         unrealizedPnl: globalEquity.unrealizedPnl,
         equityMarkStatus: globalEquity.valid ? 'FRESH' : 'WAITING_FOR_FRESH_MARKS',
         wins: this.settledWins, losses: this.settledLosses,
-        settled: this.settledCount, openPositions: openTrades.length, openOrders: 0, positions,
-        awaitingSettlement: openTrades.filter(trade => trade.settlementStatus === 'AWAITING_SETTLEMENT').length,
+        settled: this.settledCount,
+        openPositions: openTrades.length,
+        activeWindowPositions: activeWindowTrades.length,
+        openOrders: 0,
+        positions,
+        awaitingSettlement: awaitingSettlementTrades.length,
+        awaitingSettlementShares: awaitingSettlementTrades.reduce((sum, trade) => sum + trade.shares, 0),
       },
       trades: this.trades.slice(0, 50),
       takerOrders: this.takerOrders.slice(0, 50),

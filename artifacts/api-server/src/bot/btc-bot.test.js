@@ -161,6 +161,10 @@ test("dashboard presents scheduled taker buys, visible inventory and preserved e
   assert.match(html, /UP · ACCUMULATED POSITION/);
   assert.match(html, /DOWN · ACCUMULATED POSITION/);
   assert.match(html, /Average cost \/ share/);
+  assert.match(html, /Current UP midpoint/);
+  assert.match(html, /Current DOWN midpoint/);
+  assert.match(html, /position-current-price/);
+  assert.match(html, /Active window only/);
   assert.match(html, /Taker order history/);
   assert.match(html, /Filled shares only/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
@@ -170,10 +174,12 @@ test("dashboard presents scheduled taker buys, visible inventory and preserved e
   assert.match(html, /Equity = cash \+ open positions marked at fresh own-side best bids/);
   assert.doesNotMatch(html, /latest closed 5m candle|doji after .*consecutive|price-filter carry/i);
   assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
-  assert.match(html, /TP uses a fresh own-side bid ≥ \$0.99/);
-  assert.match(html, /SL uses a fresh own-side bid ≤ \$0.01/);
-  assert.match(html, /TP\/SL are disabled before 295 seconds/);
-  assert.match(html, /missing or stale bid does not trigger a sale/i);
+  assert.match(html, /Take-profit is checked throughout the active window/);
+  assert.match(html, /fresh own-side best bid ≥ \$0.99 closes that lot and credits \$1\.00 per share/);
+  assert.match(html, /Stop-loss remains gated until 295 seconds/);
+  assert.match(html, /Stop-loss remains gated until 295 seconds/);
+  assert.match(html, /waits for confirmed resolution of its original market/);
+  assert.match(html, /Older unresolved shares stay out of the active-window accumulation boxes/);
   assert.match(html, /AWAITING SETTLEMENT/);
   assert.match(html, /Paper trade history/);
   assert.doesNotMatch(html, /Manual limit order/);
@@ -193,6 +199,7 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
   }
   const state = {
     now: 120000,
+    window: { start: 120000 },
     entrySideSelection: {
       status: "READY", cheapSide: "UP", expensiveSide: "DOWN",
       asks: { UP: .32, DOWN: .7 }, midpoints: { UP: .31, DOWN: .69 },
@@ -203,14 +210,18 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
     },
     orderSchedule: { phase: "FIRST", shares: 50, nextOrderAt: 120000, nextScheduledSeconds: 3, due: true, ordersPlaced: 2 },
     takerOrders: [
-      { side: "UP", phase: "FIRST", orderType: "MARKET", requestedShares: 50, filledShares: 20, averageFillPrice: .31, status: "PARTIALLY_FILLED_CANCELLED", placedAt: 120000 },
-      { side: "DOWN", phase: "SECOND", orderType: "MARKET", requestedShares: 150, filledShares: 150, averageFillPrice: .7, status: "FILLED", placedAt: 120001 },
+      { side: "UP", windowStart: 120000, phase: "FIRST", orderType: "MARKET", requestedShares: 50, filledShares: 20, averageFillPrice: .31, status: "PARTIALLY_FILLED_CANCELLED", placedAt: 120000 },
+      { side: "DOWN", windowStart: 120000, phase: "SECOND", orderType: "MARKET", requestedShares: 150, filledShares: 150, averageFillPrice: .7, status: "FILLED", placedAt: 120001 },
+      { side: "UP", windowStart: 60000, phase: "FIRST", orderType: "MARKET", requestedShares: 150, filledShares: 150, averageFillPrice: .3, status: "FILLED", placedAt: 60000 },
     ],
   };
   context.renderMarket(state);
   context.renderSchedule(state);
-  context.renderPositions({ UP: { shares: 80, averageCost: .3, costBasis: 24 }, DOWN: {} });
-  context.renderPendingBySide(state.takerOrders);
+  context.renderPositions({
+    UP: { shares: 80, averageCost: .3, costBasis: 24, midpoint: .31 },
+    DOWN: { midpoint: .69 },
+  });
+  context.renderPendingBySide(state.takerOrders, state.window.start);
   context.renderOrders([
     { side: "UP", phase: "FIRST", orderType: "MARKET", requestedShares: 50, filledShares: 20, averageFillPrice: .31, status: "PARTIALLY_FILLED_CANCELLED", cancelledRemainderShares: 30, placedAt: 120000 },
   ]);
@@ -221,6 +232,8 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
   assert.match(elements.nextOrder.textContent, /DUE NOW/);
   assert.equal(elements.restingSummary.textContent, "2");
   assert.equal(elements.upShares.textContent, "80 shares");
+  assert.equal(elements.upCurrentPrice.textContent, "$0.3100");
+  assert.equal(elements.downCurrentPrice.textContent, "$0.6900");
   assert.equal(elements.upAverageCost.textContent, "$0.3000");
   assert.equal(elements.upOpenOrders.textContent, "1");
   assert.equal(elements.upRestingShares.textContent, "20");

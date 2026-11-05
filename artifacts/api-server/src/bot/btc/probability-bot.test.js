@@ -142,24 +142,30 @@ test('cash, real depth, fresh book and the existing both-sides price floor remai
   }
 });
 
-for (const [bid, outcome, price] of [[.99, 'TAKE_PROFIT', 1], [.01, 'STOP_LOSS', 0]]) {
-  test(`${outcome} stays blocked before 295 seconds, then exits on a fresh own-side bid`, () => {
-    const { bot, at } = fixture();
-    assert.equal(bot.snapshot().strategy.exitStartSeconds, 295);
-    bot.applyTechnicalSignal(technicalSignal('UP'));
-    bot.processSignals(at(1, .4, .3));
-    bot.processSignals(at(61, .4, .3));
-    bot.processPositionExits(at(121, bid));
-    bot.processPositionExits(at(294.999, bid));
-    assert.equal(bot.trades.length, 2, 'scheduled entries remain available before the exit window');
-    assert.ok(bot.trades.every(trade => trade.status === 'OPEN'));
-    bot.processPositionExits(at(295, bid));
-    assert.ok(bot.trades.every(trade => trade.finalOutcome === outcome));
-    assert.ok(bot.trades.every(trade => trade.exitPrice === price));
-    assert.ok(bot.trades.every(trade => trade.status === 'SETTLED'));
-    assert.equal(bot.activeSide, 'UP');
-  });
-}
+test('take-profit at 0.99 closes during the active window and credits one dollar per share', () => {
+  const { bot, at } = fixture();
+  bot.applyTechnicalSignal(technicalSignal('UP'));
+  bot.processSignals(at(1, .4, .3));
+  bot.processSignals(at(61, .4, .3));
+  bot.processPositionExits(at(121, .99));
+  assert.ok(bot.trades.every(trade => trade.finalOutcome === 'TAKE_PROFIT'));
+  assert.ok(bot.trades.every(trade => trade.exitPrice === 1));
+  assert.ok(bot.trades.every(trade => trade.grossPayout === trade.shares));
+  assert.ok(bot.trades.every(trade => trade.status === 'SETTLED'));
+});
+
+test('stop-loss remains blocked before 295 seconds and exits on a fresh own-side bid after', () => {
+  const { bot, at } = fixture();
+  bot.applyTechnicalSignal(technicalSignal('UP'));
+  bot.processSignals(at(1, .4, .3));
+  bot.processPositionExits(at(121, .01));
+  bot.processPositionExits(at(294.999, .01));
+  assert.equal(bot.trades[0].status, 'OPEN');
+  bot.processPositionExits(at(295, .01));
+  assert.equal(bot.trades[0].finalOutcome, 'STOP_LOSS');
+  assert.equal(bot.trades[0].exitPrice, 0);
+  assert.equal(bot.trades[0].status, 'SETTLED');
+});
 
 test('missing or stale bid at the 295-second gate holds positions until a fresh bid arrives', () => {
   const { bot, at } = fixture();
@@ -202,15 +208,18 @@ test('peak bid follows fresh own-side quotes only; stale/missing bids cannot tri
   assert.equal(bot.trades[0].status, 'OPEN');
 });
 
-test('window expiry settles using the old market own-side bid, not the BTC price', () => {
+test('window expiry holds unsold trades for resolution and excludes them from active accumulation', () => {
   const { bot, at } = fixture();
   bot.applyTechnicalSignal(technicalSignal('UP'));
   bot.processSignals(at(60, .4, .3));
   bot.processPositionExits(at(299, .8));
   bot.processPositionExits(at(300, .1));
-  assert.equal(bot.trades[0].finalOutcome, 'WINDOW_PRICE_EXIT');
-  assert.equal(bot.trades[0].exitPrice, .8);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].settlementStatus, 'AWAITING_SETTLEMENT');
+  assert.equal(bot.trades[0].finalOutcome, undefined);
   assert.equal(bot.snapshot().paperAccount.positions.UP.shares, 0);
+  assert.equal(bot.snapshot().paperAccount.awaitingSettlement, 1);
+  assert.equal(bot.snapshot().paperAccount.activeWindowPositions, 0);
 });
 
 test('completed traded-window results persist only after all positions settle', async () => {
@@ -225,6 +234,12 @@ test('completed traded-window results persist only after all positions settle', 
   bot.processSignals(at(60, .4, .3));
   bot.processPositionExits(at(299, .8, .3));
   bot.processPositionExits(at(300, .1, .3));
+  bot.maybeFinalizeCompletedWindows(START + 300_000);
+  assert.equal(bot.trades[0].settlementStatus, 'AWAITING_SETTLEMENT');
+  bot.closeTrade(
+    bot.trades[0], 1, bot.trades[0].shares, 'MARKET_RESOLUTION',
+    'Test confirmed original-market resolution.', START + 300_000, 1, 0,
+  );
   bot.maybeFinalizeCompletedWindows(START + 300_000);
   await bot.persistenceQueue;
   assert.equal(persisted.length, 1);
@@ -257,6 +272,30 @@ test('position accounting includes every open lot even beyond dashboard history 
   assert.equal(state.trades.length, 50);
   assert.equal(state.paperAccount.positions.UP.shares, 110000);
   assert.equal(state.paperAccount.positions.DOWN.shares, 0);
+});
+
+test('active accumulation includes only current-window lots while pending-resolution shares stay separate', () => {
+  const { bot, at } = fixture();
+  bot.applyTechnicalSignal(technicalSignal('UP'));
+  bot.processSignals(at(60, .4, .3));
+  const currentTrade = bot.trades[0];
+  bot.trades.push({
+    ...currentTrade,
+    id: 'expired-pending-lot',
+    marketId: 'old-market',
+    windowStart: START - 300_000,
+    windowEnd: START,
+    shares: 120,
+    totalCost: 60,
+    settlementStatus: 'AWAITING_SETTLEMENT',
+  });
+
+  const account = bot.snapshot().paperAccount;
+  assert.equal(account.openPositions, 2);
+  assert.equal(account.activeWindowPositions, 1);
+  assert.equal(account.awaitingSettlement, 1);
+  assert.equal(account.awaitingSettlementShares, 120);
+  assert.equal(account.positions.UP.shares, 500);
 });
 
 test('realized P&L reconciles to cash after settled trade details are pruned', () => {
@@ -391,7 +430,7 @@ test('taker buys sweep visible ask depth and cancel any unfilled remainder immed
   assert.equal(bot.snapshot().openOrders.length, 0);
 });
 
-test('taker-filled positions retain the existing 295-second take-profit and window result handling', () => {
+test('taker-filled positions can take profit before the 295-second stop-loss gate', () => {
   const { bot, start } = fixture();
   const placedAt = start + 3_000;
   setMidpointBooks(bot, placedAt, { upBid: .3, upAsk: .3, downBid: .7, downAsk: .7 });
@@ -399,14 +438,9 @@ test('taker-filled positions retain the existing 295-second take-profit and wind
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].status, 'OPEN');
 
-  const beforeGate = start + 294_999;
-  setMidpointBooks(bot, beforeGate, { upBid: .98, upAsk: .99, downBid: .01, downAsk: .02 });
-  bot.processPositionExits(beforeGate);
-  assert.equal(bot.trades[0].status, 'OPEN');
-
-  const afterGate = start + 295_000;
-  setMidpointBooks(bot, afterGate, { upBid: .99, upAsk: 1, downBid: .01, downAsk: .02 });
-  bot.processPositionExits(afterGate);
+  const earlyTakeProfit = start + 4_000;
+  setMidpointBooks(bot, earlyTakeProfit, { upBid: .99, upAsk: 1, downBid: .01, downAsk: .02 });
+  bot.processPositionExits(earlyTakeProfit);
   assert.equal(bot.trades[0].finalOutcome, 'TAKE_PROFIT');
   assert.equal(bot.trades[0].status, 'SETTLED');
 
