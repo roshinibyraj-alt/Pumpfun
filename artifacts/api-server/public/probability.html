@@ -77,13 +77,13 @@
     <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · TAKER ORDERS</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">SCHEDULED TAKER STRATEGY · PAPER EXECUTION</div><h1>Buy the side with the lower live ask.</h1><p>From 3 to 60 seconds, submit a 50-share taker buy every 3 seconds. From 70 to 150 seconds, submit 150 shares every 10 seconds. Orders sweep visible asks immediately; no resting orders remain.</p></div>
+    <div><div class="eyebrow">SCHEDULED TAKER STRATEGY · PAPER EXECUTION</div><h1>Buy cheaper early, then higher-priced later.</h1><p>From 3 to 60 seconds, submit a 50-share taker buy every 3 seconds on the side with the lower fresh ask. From 70 to 150 seconds, submit 150 shares every 10 seconds on the side with the higher fresh ask. Orders sweep visible asks immediately; no resting orders remain.</p></div>
     <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid overview-grid">
     <article class="card"><div class="label">Lower-ask outcome</div><div class="value" id="cheaperSide">—</div><div class="foot" id="cheaperMid">Waiting for fresh asks on both sides</div></article>
-    <article class="card"><div class="label">Other outcome</div><div class="value" id="expensiveSide">—</div><div class="foot" id="expensiveMid">Waiting for fresh asks on both sides</div></article>
+    <article class="card"><div class="label">Higher-ask outcome</div><div class="value" id="expensiveSide">—</div><div class="foot" id="expensiveMid">Waiting for fresh asks on both sides</div></article>
     <article class="card"><div class="label">Next taker buy</div><div class="value" id="nextOrder">—</div><div class="foot" id="scheduleHint">First check at 3 seconds</div></article>
     <article class="card"><div class="label">Taker buys this window</div><div class="value" id="restingSummary">0</div><div class="foot" id="restingHint">Orders execute immediately</div></article>
     <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
@@ -150,12 +150,12 @@
   <details class="disclosure" id="strategyDetails">
     <summary><span>Strategy rules</span><small>Taker entries · existing exits</small></summary>
     <section class="panel">
-      <p>At 3, 6, 9, and every 3 seconds through 60, submit one 50-share taker buy. At 70, 80, 90, and every 10 seconds through 150, submit one 150-share taker buy. Each checkpoint selects whichever side has the lower fresh best ask at that moment. Stale or missing quotes are retried only until that checkpoint interval ends; missed intervals are not backfilled.</p>
+      <p>At 3, 6, 9, and every 3 seconds through 60, submit one 50-share taker buy on the side with the lower fresh best ask. At 70, 80, 90, and every 10 seconds through 150, submit one 150-share taker buy on the side with the higher fresh best ask. The side is reselected from fresh quotes at each checkpoint. Stale or missing quotes are retried only until that checkpoint interval ends; missed intervals are not backfilled.</p>
       <p>Each buy immediately sweeps visible ask depth from the lowest price upward, up to the requested shares and available paper cash, with taker fees. Any unfilled remainder is cancelled immediately. The maximum scheduled request is 1,000 shares in the first phase and 1,350 shares in the second phase.</p>
       <p>Take-profit is checked throughout the active window: a fresh own-side best bid ≥ $0.99 closes that lot and credits $1.00 per share before fees. Stop-loss remains gated until 295 seconds and uses a fresh own-side best bid ≤ $0.01 to credit $0.00 per share. Any lot still unsold at expiry waits for confirmed resolution of its original market; it is not closed at a later or last-seen CLOB price. Older unresolved shares stay out of the active-window accumulation boxes.</p>
     </section>
   </details>
-  <p class="footer">Paper only—no live orders. The lower fresh best ask selects the taker side; existing TP/SL and market-resolution settlement rules remain in place.</p>
+  <p class="footer">Paper only—no live orders. The first phase buys the lower fresh ask; the second phase buys the higher fresh ask. Existing TP/SL and market-resolution settlement rules remain in place.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -184,7 +184,7 @@ async function pollLearning(){
   if(!response.ok)throw Error('Learning API HTTP '+response.status);
   const state=await response.json();
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
-    $('learningSummary').innerHTML='<div class="trade"><span>Fixed taker schedule</span><span class="muted">50 shares every 3s through 60s, then 150 every 10s through 150s on the lower fresh ask; no automatic tuning.</span></div><div class="trade"><span>Stored data</span><span class="muted">Market samples and account analytics are logged for review; they do not alter order placement.</span></div>';
+     $('learningSummary').innerHTML='<div class="trade"><span>Fixed taker schedule</span><span class="muted">50 shares every 3s through 60s on the lower fresh ask, then 150 every 10s through 150s on the higher fresh ask; no automatic tuning.</span></div><div class="trade"><span>Stored data</span><span class="muted">Market samples and account analytics are logged for review; they do not alter order placement.</span></div>';
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -242,10 +242,11 @@ async function pollAnalytics(){
 }
 function renderMarket(state){
   const selection=state.entrySideSelection||{};
+ const hasUpcomingBuy=Boolean(state.orderSchedule?.nextOrderAt);
  for(const side of ['UP','DOWN']){
   const prefix=side.toLowerCase(),quote=state.quotes?.[side]||{};
-  const role=selection.status==='READY'
-      ?selection.cheapSide===side?'LOWER ASK':'OTHER SIDE'
+   const role=selection.status==='READY'
+       ?hasUpcomingBuy&&selection.selectedSide===side?'SCHEDULED BUY':selection.cheapSide===side?'LOWER ASK':'HIGHER ASK'
       :'WAITING';
   $(prefix+'Role').textContent=role;
   $(prefix+'Midpoint').textContent=money(quote.midpoint,4);
@@ -265,7 +266,8 @@ function renderSchedule(state){
  const phase=schedule.phase;
  if(schedule.nextOrderAt){
    $('nextOrder').textContent=schedule.due?'DUE NOW':`${phase==='FIRST'?'50-SHARE':'150-SHARE'} · ${time(schedule.nextOrderAt)} UTC`;
-   $('scheduleHint').textContent=`${Number(schedule.shares||0).toLocaleString()} shares · at ${schedule.nextScheduledSeconds}s`;
+    const sidePolicy=phase==='SECOND'?'higher-ask':'lower-ask';
+    $('scheduleHint').textContent=`${Number(schedule.shares||0).toLocaleString()} shares · ${sidePolicy} side · at ${schedule.nextScheduledSeconds}s`;
  }else{
   $('nextOrder').textContent='COMPLETE';
   $('scheduleHint').textContent='All scheduled checks have passed';

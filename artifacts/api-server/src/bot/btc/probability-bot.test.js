@@ -337,7 +337,7 @@ function setMidpointBooks(bot, at, { upBid, upAsk, upSize = 500, downBid, downAs
   };
 }
 
-test('scheduled taker buys choose the lower best ask and execute only once per checkpoint', () => {
+test('first-phase scheduled taker buys choose the lower best ask at each checkpoint', () => {
   const { bot, start } = fixture();
   const firstAt = start + 3_000;
   setMidpointBooks(bot, firstAt, { upBid: .28, upAsk: .30, downBid: .68, downAsk: .70 });
@@ -347,6 +347,7 @@ test('scheduled taker buys choose the lower best ask and execute only once per c
   assert.equal(bot.takerOrders[0].phase, 'FIRST');
   assert.equal(bot.takerOrders[0].orderType, 'MARKET');
   assert.equal(bot.takerOrders[0].side, 'UP');
+  assert.equal(bot.takerOrders[0].sideSelectionPolicy, 'LOWER_ASK');
   assert.equal(bot.takerOrders[0].requestedShares, 50);
   assert.equal(bot.takerOrders[0].filledShares, 50);
   assert.equal(bot.takerOrders[0].averageFillPrice, .30);
@@ -363,12 +364,14 @@ test('scheduled taker buys choose the lower best ask and execute only once per c
   assert.equal(bot.lastOrderSlot, 1);
 });
 
-test('phase boundary keeps the 60-second 50-share buy and starts 150-share buys at 70 seconds', () => {
+test('later-phase buys switch to the higher ask without changing checkpoint sizes', () => {
   const { bot, start } = fixture();
   const beforeBoundary = start + 60_000;
   setMidpointBooks(bot, beforeBoundary, { upBid: .28, upAsk: .30, downBid: .68, downAsk: .70 });
   bot.processScheduledTakerOrder(beforeBoundary);
   assert.equal(bot.takerOrders[0].phase, 'FIRST');
+  assert.equal(bot.takerOrders[0].side, 'UP');
+  assert.equal(bot.takerOrders[0].sideSelectionPolicy, 'LOWER_ASK');
   assert.equal(bot.takerOrders[0].requestedShares, 50);
   assert.equal(bot.lastOrderSlot, 19);
 
@@ -376,14 +379,19 @@ test('phase boundary keeps the 60-second 50-share buy and starts 150-share buys 
   setMidpointBooks(bot, secondPhase, { upBid: .68, upAsk: .70, downBid: .28, downAsk: .30 });
   bot.processScheduledTakerOrder(secondPhase);
   assert.equal(bot.takerOrders[0].phase, 'SECOND');
+  assert.equal(bot.takerOrders[0].side, 'UP', 'second phase buys the higher-ask side');
+  assert.equal(bot.takerOrders[0].sideSelectionPolicy, 'HIGHER_ASK');
   assert.equal(bot.takerOrders[0].requestedShares, 150);
   assert.equal(bot.lastOrderSlot, 20);
 
   const finalAt = start + 150_000;
   setMidpointBooks(bot, finalAt, { upBid: .28, upAsk: .30, downBid: .68, downAsk: .70 });
   bot.processScheduledTakerOrder(finalAt);
+  assert.equal(bot.takerOrders[0].side, 'DOWN', 'higher-ask selection is recalculated at each checkpoint');
+  assert.equal(bot.takerOrders[0].sideSelectionPolicy, 'HIGHER_ASK');
   assert.equal(bot.takerOrders[0].requestedShares, 150);
   assert.equal(bot.lastOrderSlot, 28);
+  assert.match(bot.snapshot().strategy.orderModel, /higher fresh best ask/);
 });
 
 test('stale quotes may recover during the active checkpoint without duplicating the taker buy', () => {

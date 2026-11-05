@@ -152,8 +152,8 @@ test("dashboard presents scheduled taker buys, visible inventory and preserved e
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
   assert.match(html, /BTC TAKER PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
-  assert.match(html, /50-share taker buy every 3 seconds/);
-  assert.match(html, /150 shares every 10 seconds/);
+  assert.match(html, /50-share taker buy every 3 seconds on the side with the lower fresh ask/);
+  assert.match(html, /150 shares every 10 seconds on the side with the higher fresh ask/);
   assert.match(html, /At 3, 6, 9, and every 3 seconds through 60/);
   assert.match(html, /At 70, 80, 90, and every 10 seconds through 150/);
   assert.match(html, /unfilled remainder is cancelled immediately/i);
@@ -202,6 +202,7 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
     window: { start: 120000 },
     entrySideSelection: {
       status: "READY", cheapSide: "UP", expensiveSide: "DOWN",
+      selectedSide: "UP", selectedPhase: "FIRST", sidePreference: "LOWER_ASK",
       asks: { UP: .32, DOWN: .7 }, midpoints: { UP: .31, DOWN: .69 },
     },
     quotes: {
@@ -226,10 +227,11 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
     { side: "UP", phase: "FIRST", orderType: "MARKET", requestedShares: 50, filledShares: 20, averageFillPrice: .31, status: "PARTIALLY_FILLED_CANCELLED", cancelledRemainderShares: 30, placedAt: 120000 },
   ]);
   context.renderTrades([{ side: "UP", phase: "FIRST", shares: 20, openedAt: 120000, entryPrice: .3, entryKind: "SCHEDULED_TAKER", status: "OPEN" }]);
-  assert.equal(elements.upRole.textContent, "LOWER ASK");
-  assert.equal(elements.downRole.textContent, "OTHER SIDE");
+  assert.equal(elements.upRole.textContent, "SCHEDULED BUY");
+  assert.equal(elements.downRole.textContent, "HIGHER ASK");
   assert.match(elements.cheaperMid.textContent, /\$0\.3200/);
   assert.match(elements.nextOrder.textContent, /DUE NOW/);
+  assert.match(elements.scheduleHint.textContent, /lower-ask side/);
   assert.equal(elements.restingSummary.textContent, "2");
   assert.equal(elements.upShares.textContent, "80 shares");
   assert.equal(elements.upCurrentPrice.textContent, "$0.3100");

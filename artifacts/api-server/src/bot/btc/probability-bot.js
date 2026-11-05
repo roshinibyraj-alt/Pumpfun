@@ -47,6 +47,20 @@ function entrySlotAt(start, now) {
   return Math.min(ENTRY_CHECKPOINTS.length,
     Math.floor((elapsedMs - ENTRY_CHECKPOINTS[0].seconds * 1000) / 60_000));
 }
+
+function applyScheduledSidePreference(selection, phase) {
+  const sidePreference = phase === 'SECOND' ? 'HIGHER_ASK' : 'LOWER_ASK';
+  const selectedSide = selection.status !== 'READY'
+    ? null
+    : sidePreference === 'HIGHER_ASK' ? selection.expensiveSide : selection.cheapSide;
+  return {
+    ...selection,
+    selectedSide,
+    selectedPhase: phase,
+    sidePreference,
+  };
+}
+
 const DEFAULT_STRATEGY_SETTINGS = Object.freeze({
   openingDelaySeconds: OPENING_DELAY_SECONDS,
   minimumNetEdge: MIN_EDGE,
@@ -331,10 +345,12 @@ class ProbabilityBot {
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
       const scanAt = this.now();
-      this.entrySideSelection = selectCheapestAskSide(
+      const schedule = this.orderSchedule(scanAt);
+      const phase = schedule.phase ?? TAKER_ORDER_CHECKPOINTS[this.lastOrderSlot]?.phase ?? 'FIRST';
+      this.entrySideSelection = applyScheduledSidePreference(selectCheapestAskSide(
         this.quotes, scanAt, EXIT_QUOTE_MAX_AGE_MS,
         this.lastOrderSlot % 2 === 0 ? 'DOWN' : 'UP',
-      );
+      ), phase);
       this.statusReason = this.entrySideStatusReason(this.entrySideSelection, scanAt);
       this.probabilityUp = null;
       this.edges = { UP: null, DOWN: null };
@@ -479,12 +495,16 @@ class ProbabilityBot {
   }
 
   entrySideStatusReason(selection, now) {
-    if (selection.status !== 'READY') {
-      return 'Waiting for fresh UP and DOWN asks to choose the lower-cost taker side.';
-    }
     const schedule = this.orderSchedule(now);
-    const ask = selection.asks[selection.cheapSide];
-    return `Cheapest taker ask: ${selection.cheapSide} ${ask.toFixed(3)}${schedule.nextOrderAt
+    const phase = selection.selectedPhase ?? schedule.phase;
+    const preference = phase === 'SECOND' ? 'higher-ask' : 'lower-ask';
+    if (selection.status !== 'READY') {
+      return `Waiting for fresh UP and DOWN asks to choose the ${preference} taker side.`;
+    }
+    const selectedSide = selection.selectedSide
+      ?? (preference === 'higher-ask' ? selection.expensiveSide : selection.cheapSide);
+    const ask = selection.asks[selectedSide];
+    return `${preference === 'higher-ask' ? 'Higher' : 'Lower'}-ask taker side: ${selectedSide} ${ask.toFixed(3)}${schedule.nextOrderAt
       ? ` · next ${schedule.phase} buy at ${new Date(schedule.nextOrderAt).toISOString()}`
       : ' · scheduled buys complete'}.`;
   }
@@ -569,6 +589,7 @@ class ProbabilityBot {
         : 'SKIPPED_NO_EXECUTABLE_DEPTH',
       tradeId: null,
       selectionReason: selection.selectionReason,
+      sideSelectionPolicy: selection.sidePreference,
       bestAskAtSubmission: selection.asks[side],
     };
     this.takerOrders.unshift(order);
@@ -585,6 +606,7 @@ class ProbabilityBot {
       this.log('PAPER_TAKER_BUY_SKIPPED', {
         orderId: id, slot, phase: checkpoint.phase, side, requestedShares,
         bestAsk: selection.asks[side], cash: this.cash,
+        sideSelectionPolicy: selection.sidePreference,
         reason: 'No executable ask shares were available within the paper cash balance.',
       }, this.market.start);
       return order;
@@ -600,6 +622,7 @@ class ProbabilityBot {
       marketTitle: this.market.title,
       side,
       phase: checkpoint.phase,
+      sideSelectionPolicy: selection.sidePreference,
       entryKind: 'SCHEDULED_TAKER',
       scheduledAt: order.scheduledAt,
       entrySlot: slot,
@@ -640,6 +663,7 @@ class ProbabilityBot {
       fillCost: fill.cost,
       fillFees: fill.fees,
       selectionReason: selection.selectionReason,
+      sideSelectionPolicy: selection.sidePreference,
       status: order.status,
     }, this.market.start);
     return order;
@@ -680,15 +704,15 @@ class ProbabilityBot {
       return;
     }
 
-    const selection = selectCheapestAskSide(
+    const selection = applyScheduledSidePreference(selectCheapestAskSide(
       this.quotes, now, EXIT_QUOTE_MAX_AGE_MS, slot % 2 === 0 ? 'UP' : 'DOWN',
-    );
+    ), checkpoint.phase);
     this.entrySideSelection = selection;
     if (selection.status !== 'READY') {
       this.logOrderSlotWaiting(slot, selection.status);
       return;
     }
-    const side = selection.cheapSide;
+    const side = selection.selectedSide;
     const quote = this.quotes[side];
     const asks = this.orderBookAsksAvailable(side, quote);
     const fill = simulateTakerBuy(asks, checkpoint.shares, this.cash, estimateTakerFee);
@@ -1223,7 +1247,7 @@ class ProbabilityBot {
         stopLossPayoutPerShare: 0,
         exitStartSeconds: EXIT_START_SECONDS,
         orderSchedule: TAKER_ORDER_CHECKPOINTS.map(item => ({ ...item })),
-        orderModel: 'At seconds 3, 6, 9, ..., 60, submit an immediate 50-share taker buy on the side with the lower fresh best ask. At seconds 70, 80, 90, ..., 150, submit an immediate 150-share taker buy on the side with the lower fresh best ask. Each checkpoint is attempted once; no resting limit orders are placed.',
+        orderModel: 'At seconds 3, 6, 9, ..., 60, submit an immediate 50-share taker buy on the side with the lower fresh best ask. At seconds 70, 80, 90, ..., 150, submit an immediate 150-share taker buy on the side with the higher fresh best ask. Each checkpoint is attempted once; no resting limit orders are placed.',
         fillModel: 'Paper taker buys consume currently visible fresh ask depth from lowest ask upward and include taker fees. Any unfilled remainder is cancelled immediately; it never rests.',
         exitModel: 'During the active window, a fresh own-side best bid >= $0.99 triggers take-profit and credits $1 per share before fees. Stop-loss remains gated until 295 seconds and uses a fresh own-side best bid <= $0.01 to credit $0. Missing or stale bids do not trigger a sale. No opposite-signal exits or reversals. Unsold positions at expiry remain pending until the original market confirms its binary resolution; later CLOB bids do not liquidate them.',
       },
