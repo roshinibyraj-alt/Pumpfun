@@ -178,14 +178,14 @@ function renderTrades(trades){
 function renderOrders(orders){
  const sorted=(orders||[]).slice().sort((a,b)=>Number(b.placedAt)-Number(a.placedAt));
    if(!sorted.length){$('orders').innerHTML='<div class="empty">No limit orders in this window.</div>';return}
-    $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Side</th><th>Type</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Average fill</th><th>Maker fee · rebate basis</th><th>Order status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>{
+    $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Side</th><th>Type</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Average fill</th><th>Maker fee · rebate fee-equivalent</th><th>Order status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>{
       const filled=Number(o.filledShares||0),remaining=Number(o.remainingShares||0),raw=String(o.status||'').toUpperCase();
       const skipped=raw.startsWith('SKIPPED_');
       const cancelled=raw==='CANCELLED'||raw==='CANCELLED_WINDOW_END';
       const partialCancelled=raw==='PARTIALLY_FILLED_CANCELLED';
       const status=skipped?'NOT PLACED · '+(o.skipReason||raw.replaceAll('_',' ')):partialCancelled?'PARTIAL · REMAINDER CANCELLED':cancelled?'CANCELLED':raw==='FILLED'||(remaining===0&&filled>=Number(o.requestedShares||0))?'FILLED':filled>0&&remaining>0?'PARTIAL':raw==='OPEN'||raw==='PARTIALLY_FILLED'?'SUBMITTED / OPEN':raw||'SUBMITTED';
       const stateClass=skipped?'not-placed':cancelled?'cancelled':partialCancelled||status==='PARTIAL'?'partial':status==='FILLED'?'filled':'open';
-      const makerInfo=`$0${filled>0?` · basis ${money(o.rebateFeeEquivalent||0,4)}; not credited`:' · no fill yet'}`;
+      const makerInfo=`$0${filled>0?` · fee-equivalent ${money(o.rebateFeeEquivalent||0,4)}; not rebate paid`:' · no fill yet'}`;
       return `<tr><td>${time(o.placedAt)}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.orderType||'LIMIT')}</td><td>${money(o.limitPrice,2)}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${filled.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${remaining.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${money(o.averageFillPrice,4)}</td><td>Maker fee ${makerInfo}</td><td><span class="order-state ${stateClass}">${safe(status)}</span>${Number(o.cancelledRemainderShares||0)>0?`<div class="muted">${Number(o.cancelledRemainderShares).toLocaleString(undefined,{maximumFractionDigits:2})} unfilled shares cancelled</div>`:''}</td></tr>`;
     }).join('')+'</tbody></table>';
 }
@@ -256,7 +256,7 @@ function renderStrategy(state){
   $('strategyOrderDetails').textContent=strategy.orderModel||'Strategy rules are not available.';
   $('strategyFillDetails').textContent=strategy.fillModel||'Paper fill model is not available.';
   $('strategyExitDetails').textContent=strategy.exitModel||'Exit and settlement model is not available.';
-  $('strategyFeeDetails').textContent=`Maker entry fee: ${pct(strategy.makerFeeRate)}. Polymarket maker rebates are paid from a daily market pool and vary; paper mode does not credit actual rebates. Exit fee model uses taker rate ${pct(strategy.takerFeeRate)}.`;
+  $('strategyFeeDetails').textContent=`Maker entry fee: ${pct(strategy.makerFeeRate)}. Crypto maker rebates come from a daily pool funded at ${pct(strategy.makerRebatePoolShareRate)} of taker fee-equivalents; your payout varies by eligible share of that pool. Paper mode does not credit rebates. Exit fee model uses taker rate ${pct(strategy.takerFeeRate)}.`;
   $('strategyBadge').textContent=`${safe(state.mode||'PAPER ONLY')} · ${safe(strategy.orderType||'LIMIT')} ORDERS`;
 }
 async function pollAnalytics(){
