@@ -148,17 +148,18 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents the midpoint-triggered limit ladder, inventory and preserved exits", () => {
+test("dashboard focuses on current limit orders, paper fills, and strategy-specific analytics", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
-  assert.match(html, /BTC LIMIT PAPER BOT/);
-  assert.match(html, /PAPER ONLY/);
-  assert.match(html, /Starting 120 seconds after each window opens/);
-  assert.match(html, /fresh UP and DOWN midpoints/);
-  assert.match(html, /first side to reach \$0\.80 or higher/);
-  assert.match(html, /1,000-share limit buy at \$0\.40 and a 2,000-share limit buy at \$0\.60/);
-  assert.match(html, /Orders stay open until filled or the window ends/);
-  assert.match(html, /partial fills stay open and can accumulate/i);
-  assert.match(html, /unfilled shares are cancelled at window expiry/i);
+  assert.match(html, /BTC \/ 5 MIN · PAPER EXECUTION/);
+  assert.match(html, /PAPER ONLY · RESTING LIMITS/);
+  assert.match(html, /Orders placed · this window/);
+  assert.match(html, /exact-price fills/);
+  assert.match(html, /Maker fee · rebate fee-equivalent/);
+  assert.match(html, /strategyFeeDetails/);
+  assert.match(html, /Current strategy performance and equity/);
+  assert.match(html, /current-strategy history/);
+  assert.match(html, /id="orders"/);
+  assert.match(html, /id="nextOrder"/);
   assert.doesNotMatch(html, /\bScenario A\b|\bScenario B\b|\bEMA\d*\b|\bRSI\b|\bBollinger\b|\bStoch(?:astic)?\b|\bMACD\b|\bHybrid signal\b|\bindicators?\b/i);
   assert.match(html, /UP · ACCUMULATED POSITION/);
   assert.match(html, /DOWN · ACCUMULATED POSITION/);
@@ -168,21 +169,9 @@ test("dashboard presents the midpoint-triggered limit ladder, inventory and pres
   assert.match(html, /position-current-price/);
   assert.match(html, /Active window only/);
   assert.match(html, /Limit order history/);
-  assert.match(html, /Filled shares only/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
-  assert.match(html, /Completed-window performance &amp; global equity/);
-  assert.match(html, /Window win rate/);
   assert.match(html, /Equity = cash \+ open positions marked at fresh own-side best bids/);
-  assert.doesNotMatch(html, /latest closed 5m candle|doji after .*consecutive|price-filter carry/i);
-  assert.doesNotMatch(html, /WAIT EDGE RESET|MODEL PROBABILITY|P\(UP\) =/);
-  assert.match(html, /Take-profit is checked throughout the active window/);
-  assert.match(html, /fresh own-side best bid ≥ \$0.99 closes that lot and credits \$1\.00 per share/);
-  assert.match(html, /Stop-loss remains gated until 295 seconds/);
-  assert.match(html, /Stop-loss remains gated until 295 seconds/);
-  assert.match(html, /waits for confirmed resolution of its original market/);
-  assert.match(html, /Older unresolved shares stay out of the active-window accumulation boxes/);
-  assert.match(html, /AWAITING SETTLEMENT/);
   assert.match(html, /Paper trade history/);
   assert.doesNotMatch(html, /Manual limit order/);
 });
@@ -201,7 +190,7 @@ test("dashboard renders triggered side, resting order ladder, filled inventory a
   }
   const state = {
     now: 120000,
-    window: { start: 0 },
+    window: { start: 120000 },
     entrySideSelection: {
       status: "TRIGGERED", selectedSide: "UP", triggeringPrice: .81,
       triggeredAt: 120000, prices: { UP: .81, DOWN: .69 },
@@ -215,9 +204,9 @@ test("dashboard renders triggered side, resting order ladder, filled inventory a
       ordersPlaced: 2, openOrders: 1, filledShares: 20,
     },
     limitOrders: [
-      { side: "UP", windowStart: 0, orderType: "LIMIT", limitPrice: .4, requestedShares: 1000, filledShares: 20, remainingShares: 980, averageFillPrice: .39, status: "PARTIALLY_FILLED", placedAt: 120000 },
-      { side: "UP", windowStart: 0, orderType: "LIMIT", limitPrice: .6, requestedShares: 2000, filledShares: 0, remainingShares: 2000, averageFillPrice: null, status: "OPEN", placedAt: 120000 },
-      { side: "UP", windowStart: 60000, orderType: "LIMIT", limitPrice: .6, requestedShares: 2000, filledShares: 2000, remainingShares: 0, averageFillPrice: .59, status: "FILLED", placedAt: 60000 },
+      { side: "UP", windowStart: 120000, orderType: "LIMIT", limitPrice: .4, requestedShares: 1000, filledShares: 20, remainingShares: 980, averageFillPrice: .4, rebateFeeEquivalent: .336, status: "PARTIALLY_FILLED", placedAt: 120000 },
+      { side: "UP", windowStart: 120000, orderType: "LIMIT", limitPrice: .6, requestedShares: 2000, filledShares: 0, remainingShares: 2000, averageFillPrice: null, status: "OPEN", placedAt: 120000 },
+      { side: "UP", windowStart: 60000, orderType: "LIMIT", limitPrice: .6, requestedShares: 2000, filledShares: 2000, remainingShares: 0, averageFillPrice: .6, status: "FILLED", placedAt: 60000 },
     ],
   };
   context.renderMarket(state);
@@ -234,17 +223,18 @@ test("dashboard renders triggered side, resting order ladder, filled inventory a
   assert.equal(elements.upRole.textContent, "TRIGGERED SIDE");
   assert.equal(elements.downRole.textContent, "MONITORING");
   assert.match(elements.cheaperMid.textContent, /Latched UP/);
-  assert.match(elements.nextOrder.textContent, /TRIGGERED/);
-  assert.match(elements.scheduleHint.textContent, /1,000 @ \$0\.40 \+ 2,000 @ \$0\.60/);
-  assert.equal(elements.restingSummary.textContent, "2");
+  assert.equal(elements.nextOrder.textContent, "PARTIAL");
+  assert.match(elements.scheduleHint.textContent, /some fills; remainder resting/);
+  assert.equal(elements.restingSummary.textContent, "2 / 2");
   assert.equal(elements.upShares.textContent, "80 shares");
   assert.equal(elements.upCurrentPrice.textContent, "$0.3100");
   assert.equal(elements.downCurrentPrice.textContent, "$0.6900");
   assert.equal(elements.upAverageCost.textContent, "$0.3000");
   assert.equal(elements.upOpenOrders.textContent, "1");
   assert.equal(elements.upRestingShares.textContent, "20");
-  assert.match(elements.orders.innerHTML, /PARTIALLY_FILLED/);
+  assert.match(elements.orders.innerHTML, />PARTIAL</);
   assert.match(elements.orders.innerHTML, /\$0\.40/);
+  assert.match(elements.orders.innerHTML, /rebate/i);
   assert.match(elements.trades.innerHTML, /Average fill/);
   assert.doesNotMatch(elements.trades.innerHTML, /Model probability/);
   context.renderAnalytics({

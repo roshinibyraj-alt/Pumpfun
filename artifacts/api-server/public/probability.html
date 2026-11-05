@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080d16">
   <title>BTC Limit Paper Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root{color-scheme:dark;--bg:#080d16;--panel:#101927;--line:#263447;--muted:#8d9bb0;--text:#edf4ff;--cyan:#51d9ef;--green:#39d99a;--red:#ff6f7e;--amber:#ffc76a}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 8% 0,#102c3a 0,transparent 32%),var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
@@ -34,59 +37,60 @@
      @media(max-width:520px){main{width:min(100% - 22px,1180px);padding-top:16px}.top{align-items:flex-start}.top-right{gap:6px}.badge,.pill{padding:6px 8px;font-size:9px}.grid{gap:8px}.card{padding:12px}.prob-grid,.position-grid{gap:8px}.prob,.position-card{padding:13px}.prob-meta{grid-template-columns:1fr 1fr}.position-metrics{grid-template-columns:1fr 1fr}.panel{padding:13px}}
   </style>
   <style>
-    :root{color-scheme:light;--bg:#f2f4ef;--panel:#fbfcf9;--line:#d9e0d8;--muted:#78847c;--text:#24332b;--cyan:#3c846b;--green:#39866d;--red:#b66360;--amber:#a37c39}
-    body{background:radial-gradient(ellipse at 8% 0,#e5ede5 0,transparent 35%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}
-    main{width:min(1240px,calc(100% - 36px));padding:28px 0 48px}
-    .top{border-color:var(--line);padding-bottom:18px}.brand{letter-spacing:.11em}.subbrand{color:var(--muted)}
-    .badge,.pill{border-color:#c8dcd0;color:#39735d;background:#eaf3ed}.pill{color:#4b6557}
-    .hero{padding:28px 0 22px;align-items:center}.eyebrow{color:#74867a;font-size:10px;letter-spacing:.13em}
-    h1{font:500 clamp(32px,5vw,54px)/1.04 Georgia,"Times New Roman",serif;letter-spacing:-.045em;color:#203128;margin:8px 0}
-    .hero p{max-width:680px;color:#758078;margin-top:10px}
-    .window{color:#7a857d}.window strong{font-size:20px;color:#24332b}
-    .error{color:#8d3434;background:#fff0ef;border-color:#e4c2c0}
-    .card,.panel{background:rgba(251,252,249,.94);border-color:var(--line);box-shadow:0 5px 20px rgba(32,49,39,.035);border-radius:13px}
-    .card{padding:15px 17px}.label{color:#77847b;letter-spacing:.09em}.value{color:#26372e;font-size:clamp(18px,2.3vw,25px)}
-    .foot,.muted,small{color:var(--muted)}
-    .prob{background:#f6f8f4;border-color:var(--line)}.prob.up{--accent:#39866d}.prob.down{--accent:#b66360}.prob-price{color:#28372f}
-    .bar{background:#e4e9e3}.bar i{background:var(--accent)}
-    .position-card{background:#f6f8f4;border-color:var(--line)}
-    .panel{padding:17px}.section-head h2{font-size:14px;color:#2e3e34}
-    .metric-grid div{background:#f5f7f3;border-color:#e0e5de}.metric-grid span{color:#78847c}.metric-grid strong{color:#2b3a31}
-    .equity-chart{background:#f7f9f5;border-color:#e0e5de}.equity-gridline{stroke:#e0e5de}.equity-line{stroke:#39866d}.equity-axis{fill:#77847b}.equity-point{fill:#39866d;stroke:#f7f9f5}
-    .formula{color:#64736a;background:#f4f7f2;border-color:#e0e5de}
-    .empty{border-color:#e3e8e1;color:#78847c}
-    .side.UP,.pnl.pos{color:#328064}.side.DOWN,.pnl.neg{color:#b45a58}
-    .disclosure{margin-top:12px;border:1px solid var(--line);border-radius:13px;background:rgba(251,252,249,.94);box-shadow:0 5px 20px rgba(32,49,39,.035);overflow:hidden}
-    .disclosure>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:15px 18px;cursor:pointer;list-style:none;color:#34443a;font-size:13px;font-weight:750}
-    .disclosure>summary::-webkit-details-marker{display:none}.disclosure>summary:after{content:"＋";color:#63806e;font:16px ui-monospace,monospace}
-    .disclosure[open]>summary:after{content:"−"}.disclosure[open]>summary{border-bottom:1px solid var(--line)}
-    .disclosure>summary small{font-size:10px;font-weight:500;margin-left:auto}
-    .disclosure>.panel{margin-top:0;border:0;box-shadow:none;background:transparent;border-radius:0}
-    .disclosure>.prob-grid,.disclosure>.position-grid{padding:14px 16px 16px;margin-top:0}
-    .disclosure>.position-grid{padding-top:16px}
-    .disclosure>.panel+.panel{padding-top:0}
-    .footer{color:#78847c}
-    @media(max-width:800px){main{width:min(100% - 28px,1240px)}.hero{align-items:flex-start}.disclosure>summary{align-items:flex-start}.disclosure>summary small{text-align:right}}
-    @media(max-width:520px){main{width:calc(100% - 22px);padding-top:16px}.hero{gap:12px}.disclosure>summary{padding:13px}.disclosure>.prob-grid,.disclosure>.position-grid{padding:10px}.disclosure>summary small{max-width:48%}}
+    :root{color-scheme:light;--bg:#e9eee9;--panel:#f8faf6;--line:#d2dcd5;--muted:#68796f;--text:#172b25;--cyan:#267966;--green:#197659;--red:#b74c46;--amber:#a16d22;--ink:#18372e;--signal:#d67a36}
+    *{box-sizing:border-box}body{background:linear-gradient(125deg,#edf2ed 0%,#e6ece7 48%,#f1f0e8 100%);color:var(--text);font:14px/1.5 Manrope,ui-sans-serif,system-ui,sans-serif}
+    main{width:min(1320px,calc(100% - 48px));padding:24px 0 54px}
+    .top{border-color:#bdcbc2;padding-bottom:15px}.brand{letter-spacing:.13em;font-size:11px;color:#21483b}.subbrand{font-size:11px;color:var(--muted)}
+    .badge,.pill{border:1px solid #bfd3c7;color:#245f4c;background:#e0eee5;border-radius:4px;padding:6px 10px;font-size:9px;letter-spacing:.12em}.pill{color:#496258;background:#f5f8f4;border-color:#d0dbd3}.dot{box-shadow:none}
+    .hero{padding:30px 0 22px;align-items:center}.eyebrow{color:#52766a;font-size:9px;letter-spacing:.18em}
+    h1{font:800 clamp(31px,4.4vw,50px)/1.05 Manrope,sans-serif;letter-spacing:-.055em;color:#19352c;margin:9px 0}
+    .hero p{max-width:720px;color:#63746a;margin-top:10px;font-size:13px}
+    .window{text-align:right;color:#64756b;font:10px 'DM Mono',monospace;letter-spacing:.04em}.window strong{font-size:20px;color:#19352c;margin:5px 0}
+    .error{color:#8d3434;background:#fff0ef;border-color:#e4c2c0;border-radius:5px}
+    .grid{gap:10px}.overview-grid{grid-template-columns:1.15fr 1fr 1.2fr 1fr .9fr}
+    .card,.panel{background:rgba(249,251,247,.9);border:1px solid var(--line);box-shadow:0 4px 16px rgba(32,49,39,.035);border-radius:7px}
+    .card{padding:14px 16px}.label{color:#6f8076;font-size:9px;letter-spacing:.13em}.value{color:#19352c;font:700 clamp(17px,2vw,23px) 'DM Mono',monospace;letter-spacing:-.04em;margin-top:8px}
+    .foot,.muted,small{color:var(--muted)}.foot{font-size:10px}
+    .overview-grid .card:nth-child(3){background:#e3eee5;border-color:#b9cfc1}
+    .overview-grid .card:nth-child(3) .value{color:#1d674e}
+    .prob-grid{gap:10px;margin-top:10px}.prob{background:#f5f8f4;border-color:var(--line);border-radius:7px;padding:16px}.prob.up{--accent:#197659}.prob.down{--accent:#b74c46}.prob-price{color:#19352c;font-family:'DM Mono',monospace}
+    .prob-head{font-size:10px;letter-spacing:.15em}.bar{background:#dce5de;height:5px}.bar i{background:var(--accent)}
+    .position-grid{gap:10px;margin-top:10px}.position-card{background:#f5f8f4;border-color:var(--line);border-radius:7px}.position-card.up{--accent:#197659}.position-card.down{--accent:#b74c46}
+    .position-title{font-size:10px;letter-spacing:.15em}.position-price-label{font-size:9px}.position-current-price,.position-shares,.position-metrics strong{font-family:'DM Mono',monospace}
+    .panel{padding:16px;margin-top:10px}.section-head{margin-bottom:11px}.section-head h2{font-size:13px;color:#263f34;font-weight:800;letter-spacing:-.02em}.section-head small{font-size:10px}
+    .table-wrap{overflow:auto;overscroll-behavior-x:contain}table{min-width:880px}th,td{padding:10px 9px;border-top:1px solid #dce4dd;font-family:'DM Mono',monospace;font-size:11px}th{font:700 9px Manrope,sans-serif;color:#718178;letter-spacing:.12em}td{color:#30463b}
+    .metric-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.metric-grid div{background:#f1f6f1;border:1px solid #dce5de;border-radius:5px}.metric-grid span{color:#718178}.metric-grid strong{color:#254135;font-family:'DM Mono',monospace}
+    .equity-chart{background:#f3f7f3;border-color:#dce5de;border-radius:6px}.equity-gridline{stroke:#dce5de}.equity-line{stroke:#267966}.equity-axis{fill:#718178;font-family:'DM Mono',monospace}.equity-point{fill:#267966;stroke:#f3f7f3}
+    .formula{color:#64756b;background:#f1f6f1;border-color:#dce5de}.empty{border-color:#dce5de;color:#738278}.side.UP,.pnl.pos{color:#197659}.side.DOWN,.pnl.neg{color:#b74c46}
+    .disclosure{margin-top:10px;border:1px solid var(--line);border-radius:7px;background:rgba(249,251,247,.9);box-shadow:0 4px 16px rgba(32,49,39,.035);overflow:hidden}
+    .disclosure>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 17px;cursor:pointer;list-style:none;color:#294337;font-size:12px;font-weight:800}
+    .disclosure>summary::-webkit-details-marker{display:none}.disclosure>summary:after{content:"＋";color:#52766a;font:14px 'DM Mono',monospace}.disclosure[open]>summary:after{content:"−"}.disclosure[open]>summary{border-bottom:1px solid var(--line)}
+    .disclosure>summary small{font-size:9px;font-weight:500;margin-left:auto}.disclosure>.panel{margin-top:0;border:0;box-shadow:none;background:transparent;border-radius:0}
+    .disclosure>.prob-grid,.disclosure>.position-grid{padding:12px 14px 14px;margin-top:0}.disclosure>.position-grid{padding-top:14px}.disclosure>.panel+.panel{padding-top:0}.footer{color:#718178;font-size:10px}
+    .order-state{display:inline-flex;padding:4px 7px;border-radius:3px;background:#e8eee9;color:#476154;font:700 9px 'DM Mono',monospace;letter-spacing:.05em;white-space:nowrap}
+    .order-state.open,.order-state.submitted{background:#e2efe7;color:#176347}.order-state.partial{background:#f8eedb;color:#8c5a15}.order-state.filled{background:#dcefe6;color:#155d43}.order-state.cancelled{background:#f6e5e2;color:#a1423c}.order-state.not-placed{background:#edf0eb;color:#78847c}
+    .trade{padding:9px 0;border-top:1px solid #dce4dd;font-size:11px}.trade:first-child{border-top:0}
+    @media(max-width:850px){main{width:min(100% - 30px,1320px)}.overview-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{align-items:flex-start}.window{text-align:left}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+    @media(max-width:520px){main{width:calc(100% - 22px);padding:14px 0 36px}.top{align-items:flex-start}.top-right{gap:5px;flex-direction:column;align-items:flex-end}.badge,.pill{padding:5px 7px;font-size:8px}.hero{gap:13px;padding:23px 0 16px}h1{font-size:32px}.hero p{font-size:12px}.window strong{font-size:17px}.overview-grid{gap:7px}.card{padding:11px}.value{font-size:16px}.foot{font-size:9px}.prob-grid,.position-grid{grid-template-columns:1fr 1fr;gap:7px}.prob,.position-card{padding:11px}.prob-price{font-size:29px}.prob-meta{grid-template-columns:1fr 1fr}.position-metrics{grid-template-columns:1fr 1fr}.panel{padding:12px}.section-head{align-items:flex-start}.section-head small{text-align:right}.disclosure>summary{padding:12px}.disclosure>summary small{max-width:48%;text-align:right}.disclosure>.prob-grid,.disclosure>.position-grid{padding:9px}.metric-grid{gap:7px}.metric-grid div{padding:10px}.metric-grid strong{font-size:18px}}
   </style>
 </head>
 <body>
 <main>
   <header class="top">
-    <div><div class="brand">BTC LIMIT PAPER BOT</div><div class="subbrand">Polymarket · BTC Up or Down · 5-minute windows</div></div>
-    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · LIMIT ORDERS</span><span id="run" class="pill">Connecting</span></div>
+    <div><div class="brand">BTC / 5 MIN · PAPER EXECUTION</div><div class="subbrand">Polymarket binary market · single fixed limit strategy</div></div>
+    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · RESTING LIMITS</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">MIDPOINT-TRIGGERED LIMIT STRATEGY · PAPER EXECUTION</div><h1>Wait for strength, then rest two buy limits.</h1><p>Starting 120 seconds after each window opens, watch fresh UP and DOWN midpoints. The first side to reach $0.80 or higher gets a 1,000-share limit buy at $0.40 and a 2,000-share limit buy at $0.60. Orders stay open until filled or the window ends.</p></div>
-    <div class="window"><span>ACTIVE WINDOW</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
+    <div><div class="eyebrow">FIXED POLICY · NO REARM · PAPER ONLY</div><h1>Trigger once. Rest two limits.</h1><p id="heroStrategy">Connecting to live strategy state.</p></div>
+    <div class="window"><span>WINDOW CLOSES IN</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid overview-grid">
-    <article class="card"><div class="label">Triggered side</div><div class="value" id="cheaperSide">—</div><div class="foot" id="cheaperMid">Waiting for the 120-second entry window</div></article>
+    <article class="card"><div class="label">Latched side</div><div class="value" id="cheaperSide">—</div><div class="foot" id="cheaperMid">Waiting for the 120-second entry window</div></article>
     <article class="card"><div class="label">Trigger midpoint</div><div class="value" id="expensiveSide">—</div><div class="foot" id="expensiveMid">Requires a fresh midpoint of $0.80+</div></article>
-    <article class="card"><div class="label">Entry status</div><div class="value" id="nextOrder">—</div><div class="foot" id="scheduleHint">Monitoring begins at 120 seconds</div></article>
-    <article class="card"><div class="label">Limit orders this window</div><div class="value" id="restingSummary">0</div><div class="foot" id="restingHint">Two orders remain resting until expiry</div></article>
-    <article class="card"><div class="label">Current BTC</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
+    <article class="card"><div class="label">Paper order state</div><div class="value" id="nextOrder">NOT PLACED</div><div class="foot" id="scheduleHint">Monitoring begins at second 120</div></article>
+    <article class="card"><div class="label">Orders placed · this window</div><div class="value" id="restingSummary">0 / 2</div><div class="foot" id="restingHint">0 filled shares · no order submitted</div></article>
+    <article class="card"><div class="label">BTC spot</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
   </section>
   <details class="disclosure" id="marketDetails">
     <summary><span>Market prices</span><small>Fresh UP/DOWN midpoint, best ask, and quote age</small></summary>
@@ -96,22 +100,22 @@
   </section>
   </details>
   <section class="grid" style="margin-top:12px">
-    <article class="card"><div class="label">Paper cash</div><div class="value" id="cash">—</div><div class="foot">Starting balance $10,000</div></article>
+    <article class="card"><div class="label">Paper cash</div><div class="value" id="cash">—</div><div class="foot">Starting balance <span id="startingCash">—</span></div></article>
     <article class="card"><div class="label">Realized P&amp;L</div><div class="value" id="pnl">—</div><div class="foot" id="wins">No settled signals yet</div></article>
     <article class="card"><div class="label">Completed-window win rate</div><div class="value" id="windowWinRate">—</div><div class="foot"><span id="windowRateHint">Waiting for completed windows</span></div></article>
     <article class="card"><div class="label">Active window positions / buys</div><div class="value" id="openCount">—</div><div class="foot" id="resolutionHint">Older unsold positions await market resolution</div></article>
   </section>
   <details class="disclosure" id="performanceDetails">
-    <summary><span>Performance and equity</span><small id="analyticsStatus">Loading account history</small></summary>
+    <summary><span>Current strategy performance and equity</span><small id="analyticsStatus">Loading account history</small></summary>
   <section class="panel">
-    <div class="section-head"><h2>Completed-window performance &amp; global equity</h2><small id="analyticsStatus">Loading persistent account history</small></div>
+     <div class="section-head"><h2>Completed windows &amp; paper-account equity</h2><small id="analyticsStatusDetail">Loading current-strategy history</small></div>
     <div class="metric-grid">
       <div><span>Completed traded windows</span><strong id="completedWindows">—</strong></div>
       <div><span>Settled signals</span><strong id="settled">—</strong></div>
       <div><span>Window win rate</span><strong id="windowWinRateDetail">—</strong></div>
       <div><span>Wins · losses · flat</span><strong id="windowOutcomes">—</strong></div>
       <div><span>Net window P&amp;L</span><strong id="windowNetPnl">—</strong></div>
-      <div><span>Signal outcomes</span><strong id="wins">—</strong></div>
+      <div><span>Settled outcomes</span><strong id="winsDetail">—</strong></div>
     </div>
     <div class="section-head"><h2>Account equity</h2><small id="equityCurrent">Latest marked value —</small></div>
     <div id="equityChart" class="equity-chart"><div class="empty">Waiting for fresh equity snapshots.</div></div>
@@ -126,20 +130,20 @@
   </section>
   </section>
   <section class="panel">
-     <div class="section-head"><h2>Limit order history</h2><small>Resting buys · partial fills · expiry cancellations</small></div>
+     <div class="section-head"><h2>Limit order history</h2><small>Submitted status · exact-price fills · cancellations</small></div>
      <div id="orders" class="table-wrap"><div class="empty">No limit orders yet.</div></div>
   </section>
   <details class="disclosure" id="positionsDetails">
     <summary><span>Completed paper trades</span><small>Filled order lots · outcomes · P&amp;L</small></summary>
   <section class="panel">
-    <div class="section-head"><h2>Paper trade history</h2><small>Filled shares only</small></div>
-    <div id="trades" class="table-wrap"><div class="empty">No taker buys yet.</div></div>
+     <div class="section-head"><h2>Paper trade history</h2><small>Executed shares only</small></div>
+     <div id="trades" class="table-wrap"><div class="empty">No filled limit buys yet.</div></div>
   </section>
   </details>
   <details class="disclosure" id="activityDetails">
     <summary><span>Learning and activity</span><small id="feedStatus">Awaiting live data</small></summary>
   <section class="panel">
-    <div class="section-head"><h2>Paper execution log</h2><small id="learningStatus">Connecting to persistent log</small></div>
+     <div class="section-head"><h2>Fixed-policy logging</h2><small id="learningStatus">Connecting to persistent log</small></div>
     <div id="learningSummary" class="empty">Waiting for learning service.</div>
   </section>
   <section class="panel">
@@ -148,14 +152,15 @@
   </section>
   </details>
   <details class="disclosure" id="strategyDetails">
-    <summary><span>Strategy rules</span><small>Taker entries · existing exits</small></summary>
+     <summary><span>Strategy rules</span><small>One trigger · two resting BUY limits</small></summary>
     <section class="panel">
-     <p>Do nothing before 120 seconds. From then through the end of the window, monitor fresh UP and DOWN midpoints. When a midpoint first reaches $0.80 or higher, latch that side for the window and submit one 1,000-share limit buy at $0.40 and one 2,000-share limit buy at $0.60. The side is not changed and the trigger does not rearm.</p>
-       <p>Both limit orders remain resting through the window. Fresh visible asks at or below a limit can fill the order, at those ask prices; partial fills stay open and can accumulate. Unfilled shares are cancelled at window expiry. Open orders reserve their maximum limit cost plus a conservative fee estimate, but the reservation does not reduce displayed cash. Existing take-profit, stop-loss timing, and original-market resolution rules remain unchanged.</p>
-      <p>Take-profit is checked throughout the active window: a fresh own-side best bid ≥ $0.99 closes that lot and credits $1.00 per share before fees. Stop-loss remains gated until 295 seconds and uses a fresh own-side best bid ≤ $0.01 to credit $0.00 per share. Any lot still unsold at expiry waits for confirmed resolution of its original market; it is not closed at a later or last-seen CLOB price. Older unresolved shares stay out of the active-window accumulation boxes.</p>
+      <p id="strategyOrderDetails">Loading strategy rules from live state.</p>
+        <p id="strategyFillDetails">Loading paper fill model.</p>
+       <p id="strategyExitDetails">Loading exit and settlement rules.</p>
+       <p id="strategyFeeDetails">Loading fee and rebate model.</p>
     </section>
   </details>
-  <p class="footer">Paper only—no live orders. Each window can trigger once and place two resting limit buys on the first qualifying side. Existing TP/SL and market-resolution settlement rules remain in place.</p>
+   <p class="footer">PAPER ONLY · This monitor does not send live orders. Statuses and fills shown below reflect the strategy API’s recorded paper execution state.</p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -173,7 +178,16 @@ function renderTrades(trades){
 function renderOrders(orders){
  const sorted=(orders||[]).slice().sort((a,b)=>Number(b.placedAt)-Number(a.placedAt));
    if(!sorted.length){$('orders').innerHTML='<div class="empty">No limit orders in this window.</div>';return}
-   $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Side</th><th>Type</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Average fill</th><th>Status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>`<tr><td>${time(o.placedAt)}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.orderType||'LIMIT')}</td><td>${money(o.limitPrice,2)}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${Number(o.filledShares||0).toFixed(2)}</td><td>${Number(o.remainingShares||0).toFixed(2)}</td><td>${money(o.averageFillPrice,4)}</td><td>${safe(o.status)}${o.cancelledRemainderShares?`<div class="muted">${Number(o.cancelledRemainderShares).toFixed(2)} unfilled shares cancelled</div>`:''}</td></tr>`).join('')+'</tbody></table>';
+    $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Side</th><th>Type</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Average fill</th><th>Maker fee · rebate fee-equivalent</th><th>Order status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>{
+      const filled=Number(o.filledShares||0),remaining=Number(o.remainingShares||0),raw=String(o.status||'').toUpperCase();
+      const skipped=raw.startsWith('SKIPPED_');
+      const cancelled=raw==='CANCELLED'||raw==='CANCELLED_WINDOW_END';
+      const partialCancelled=raw==='PARTIALLY_FILLED_CANCELLED';
+      const status=skipped?'NOT PLACED · '+(o.skipReason||raw.replaceAll('_',' ')):partialCancelled?'PARTIAL · REMAINDER CANCELLED':cancelled?'CANCELLED':raw==='FILLED'||(remaining===0&&filled>=Number(o.requestedShares||0))?'FILLED':filled>0&&remaining>0?'PARTIAL':raw==='OPEN'||raw==='PARTIALLY_FILLED'?'SUBMITTED / OPEN':raw||'SUBMITTED';
+      const stateClass=skipped?'not-placed':cancelled?'cancelled':partialCancelled||status==='PARTIAL'?'partial':status==='FILLED'?'filled':'open';
+      const makerInfo=`$0${filled>0?` · fee-equivalent ${money(o.rebateFeeEquivalent||0,4)}; not rebate paid`:' · no fill yet'}`;
+      return `<tr><td>${time(o.placedAt)}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.orderType||'LIMIT')}</td><td>${money(o.limitPrice,2)}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${filled.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${remaining.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${money(o.averageFillPrice,4)}</td><td>Maker fee ${makerInfo}</td><td><span class="order-state ${stateClass}">${safe(status)}</span>${Number(o.cancelledRemainderShares||0)>0?`<div class="muted">${Number(o.cancelledRemainderShares).toLocaleString(undefined,{maximumFractionDigits:2})} unfilled shares cancelled</div>`:''}</td></tr>`;
+    }).join('')+'</tbody></table>';
 }
 function renderEvents(events){
  $('events').innerHTML=events?.length?events.slice(0,10).map(e=>`<div class="trade"><span>${safe(e.event.replaceAll('_',' '))} · ${safe(e.side||'')}</span><span class="muted">${time(e.ts)}${e.edge!=null?' · edge '+pct(e.edge):''}${e.realizedPnl!=null?' · '+signed(e.realizedPnl):''}</span></div>`).join(''):'<div class="empty">No signal activity yet.</div>';
@@ -230,7 +244,20 @@ function renderAnalytics(data){
  $('windowNetPnl').textContent=signed(stats.netPnl);
  $('windowNetPnl').className='pnl '+(Number(stats.netPnl)>=0?'pos':'neg');
  renderEquityChart(data?.equityHistory);
- $('analyticsStatus').textContent=`A window counts after all its paper positions close · ${Number(stats.completed||0)} completed traded windows`;
+  const summary=`${Number(stats.completed||0)} completed traded windows`;
+  $('analyticsStatus').textContent=summary;
+  $('analyticsStatusDetail').textContent=`A window counts after all its paper positions close · ${summary}`;
+}
+function renderStrategy(state){
+  const strategy=state.strategy||{},ladder=strategy.limitOrderLadder||[];
+  const seconds=Number(strategy.entryTriggerSeconds??120),threshold=money(strategy.entryTriggerMidpoint??0.8,2);
+  const orders=ladder.map(item=>`${Number(item.shares||0).toLocaleString()} shares at ${money(item.price,2)}`).join(' and ');
+  $('heroStrategy').textContent=`From second ${seconds}, the first fresh UP or DOWN midpoint at ${threshold} is latched. The strategy places exactly two BUY limits on that side: ${orders||'waiting for ladder data'}. No live orders are sent.`;
+  $('strategyOrderDetails').textContent=strategy.orderModel||'Strategy rules are not available.';
+  $('strategyFillDetails').textContent=strategy.fillModel||'Paper fill model is not available.';
+  $('strategyExitDetails').textContent=strategy.exitModel||'Exit and settlement model is not available.';
+  $('strategyFeeDetails').textContent=`Paper entry assumption: ${pct(strategy.makerFeeRate)} maker fee; simulated fills require the exact rung price. Live Polymarket limit orders may fill at a better price, and a crossing order can be a fee-paying taker. Crypto maker rebates come from a daily pool funded at ${pct(strategy.makerRebatePoolShareRate)} of taker fee-equivalents; payout varies by eligible pool share and is not credited in paper mode. Exit fee model uses taker rate ${pct(strategy.takerFeeRate)}.`;
+  $('strategyBadge').textContent=`${safe(state.mode||'PAPER ONLY')} · ${safe(strategy.orderType||'LIMIT')} ORDERS`;
 }
 async function pollAnalytics(){
  try{
@@ -242,12 +269,13 @@ async function pollAnalytics(){
 }
 function renderMarket(state){
   const selection=state.entrySideSelection||{},schedule=state.orderSchedule||{};
+  const trigger=Number(state.strategy?.entryTriggerMidpoint??schedule.triggerPrice??0.8);
  for(const side of ['UP','DOWN']){
   const prefix=side.toLowerCase(),quote=state.quotes?.[side]||{};
     const midpoint=Number(quote.midpoint);
     const role=selection.status==='TRIGGERED'&&selection.selectedSide===side
       ?'TRIGGERED SIDE'
-      :schedule.status==='MONITORING_TRIGGER'&&Number.isFinite(midpoint)&&midpoint>=Number(schedule.triggerPrice)
+       :schedule.status==='MONITORING_TRIGGER'&&Number.isFinite(midpoint)&&midpoint>=trigger
         ?'TRIGGER CANDIDATE'
         :'MONITORING';
   $(prefix+'Role').textContent=role;
@@ -263,28 +291,51 @@ function renderMarket(state){
     ?`Latched ${triggeredSide} after the midpoint trigger`
     :`UP ${money(selection.prices?.UP,4)} · DOWN ${money(selection.prices?.DOWN,4)}`;
   $('expensiveSide').textContent=money(selection.triggeringPrice??schedule.triggerPrice,2);
-  $('expensiveMid').textContent=triggeredSide
+   $('expensiveMid').textContent=triggeredSide
     ?`Triggered ${time(selection.triggeredAt)} UTC`
-    :`Current midpoint threshold · ${Number(schedule.triggerSeconds??120)} seconds onward`;
+     :`Threshold $${trigger.toFixed(2)} · from second ${Number(state.strategy?.entryTriggerSeconds??120)}`;
 }
 function renderSchedule(state){
  const schedule=state.orderSchedule||{};
-  if(schedule.triggered){
-   $('nextOrder').textContent='TRIGGERED';
-   $('scheduleHint').textContent=`${safe(schedule.triggerSide)} latched · 1,000 @ $0.40 + 2,000 @ $0.60`;
+   const allOrders=state.limitOrders||[];
+   const windowOrders=allOrders.filter(order=>!state.window?.start||Number(order.windowStart)===Number(state.window.start));
+   const placedOrders=windowOrders.filter(order=>!String(order.status||'').toUpperCase().startsWith('SKIPPED_'));
+   const open=windowOrders.filter(order=>['OPEN','PARTIALLY_FILLED'].includes(String(order.status).toUpperCase())&&Number(order.remainingShares)>0).length;
+   const filled=windowOrders.reduce((sum,order)=>sum+Number(order.filledShares||0),0);
+   const allCancelled=placedOrders.length>0&&placedOrders.every(order=>['CANCELLED','CANCELLED_WINDOW_END'].includes(String(order.status).toUpperCase()))&&filled===0;
+   const allFilled=placedOrders.length>0&&placedOrders.every(order=>Number(order.filledShares)>=Number(order.requestedShares));
+   const anyFilled=windowOrders.some(order=>Number(order.filledShares||0)>0);
+   const anyPartial=windowOrders.some(order=>Number(order.filledShares||0)>0&&Number(order.remainingShares||0)>0);
+   if(allCancelled){
+    $('nextOrder').textContent='CANCELLED';
+    $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} latched · unfilled remainder cancelled`;
+   }else if(allFilled){
+    $('nextOrder').textContent='FILLED';
+    $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} · all submitted limits filled`;
+   }else if(anyPartial||anyFilled){
+    $('nextOrder').textContent='PARTIAL';
+    $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} · ${anyPartial?'some fills; remainder resting':'some fills; other shares cancelled or skipped'}`;
+   }else if(open>0){
+    $('nextOrder').textContent='SUBMITTED / OPEN';
+    $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} · ${open} resting limit${open===1?'':'s'}`;
+  }else if(windowOrders.length>0&&placedOrders.length===0){
+    $('nextOrder').textContent='SKIPPED';
+    $('scheduleHint').textContent='No orders were submitted · see order history for the exact reason';
+  }else if(schedule.triggered){
+    $('nextOrder').textContent='NOT PLACED';
+    $('scheduleHint').textContent=`${safe(schedule.triggerSide||'—')} latched · no limit order record yet`;
   }else if(schedule.status==='WAITING_FOR_DELAY'){
-   $('nextOrder').textContent='WAITING';
-   $('scheduleHint').textContent=`Monitoring starts at ${time(schedule.nextOrderAt)} UTC (120s)`;
+    $('nextOrder').textContent='NOT PLACED';
+    $('scheduleHint').textContent=`Waiting for second ${Number(state.strategy?.entryTriggerSeconds??120)} to begin monitoring`;
   }else if(schedule.status==='MONITORING_TRIGGER'){
-   $('nextOrder').textContent='WATCHING';
-   $('scheduleHint').textContent='First fresh midpoint at $0.80+ triggers both limit orders';
+    $('nextOrder').textContent='NOT PLACED';
+    $('scheduleHint').textContent='Watching fresh UP and DOWN midpoints for the first $0.80+ trigger';
   }else{
-   $('nextOrder').textContent='WINDOW CLOSED';
-   $('scheduleHint').textContent='No new orders can trigger in this window';
+    $('nextOrder').textContent='NOT PLACED';
+    $('scheduleHint').textContent='No qualifying trigger or no order submitted this window';
   }
-  const placed=Number(schedule.ordersPlaced||0);
-  $('restingSummary').textContent=String(placed);
-   $('restingHint').textContent=`${Number(schedule.openOrders||0)} still open · ${Number(schedule.filledShares||0).toLocaleString()} shares filled`;
+   $('restingSummary').textContent=`${placedOrders.length} / 2`;
+   $('restingHint').textContent=`${open} open · ${filled.toLocaleString(undefined,{maximumFractionDigits:2})} filled shares · ${windowOrders.length-placedOrders.length} skipped`;
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
@@ -308,28 +359,29 @@ function renderPositions(positions){
  }
 }
 
-async function poll(){
+ async function poll(){
  try{
   const response=await fetch('/api/strategy/state',{cache:'no-store'});if(!response.ok)throw Error('API HTTP '+response.status);
    const s=await response.json(),account=s.paperAccount||{};window.latestStrategyState=s;
   $('error').style.display=s.error?'block':'none';$('error').textContent=s.error||'';
   $('run').innerHTML=`<i class="dot"></i>${s.running?'SCANNER RUNNING':'SCANNER STOPPED'}`;
-   $('strategyBadge').textContent='PAPER ONLY · TAKER ORDERS';
   $('remaining').textContent=s.window?`${Math.ceil(s.window.secondsRemaining)} seconds`:'—';
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
   $('spot').textContent=money(s.spotPrice,2);
   $('gap').textContent=isNumeric(s.priceGap)?`Difference from reference ${money(s.priceGap,2)}`:'BTC reference difference —';
-    renderMarket(s);renderSchedule(s);renderPositions(account.positions);renderPendingBySide(s.takerOrders,s.window?.start);
+     renderStrategy(s);renderMarket(s);renderSchedule(s);renderPositions(account.positions);renderPendingBySide(s.limitOrders,s.window?.start);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
+    $('startingCash').textContent=money(account.startingCash);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
    $('settled').textContent=String(account.settled??0);
    $('openCount').textContent=`${account.activeWindowPositions??account.openPositions??0} positions · ${account.openOrders??0} orders`;
    $('resolutionHint').textContent=`${account.awaitingSettlement??0} older lots · ${Number(account.awaitingSettlementShares??0).toLocaleString()} shares awaiting resolution`;
-  $('wins').textContent=`${account.wins??0} wins · ${account.losses??0} losses`;
+   $('wins').textContent=`${account.wins??0} wins · ${account.losses??0} losses`;
+   $('winsDetail').textContent=`${account.wins??0} · ${account.losses??0}`;
   $('feedState').textContent=s.priceFeed?.status||'—';
   $('updated').textContent=s.statusReason|| (s.lastUpdateAt?'Updated '+time(s.lastUpdateAt):'Waiting for first scan');
    $('feedStatus').textContent=s.priceFeed?`BTC reference feed · ${s.priceFeed.history?.status||'connected'}`:'Awaiting BTC reference feed';
-   renderOrders(s.takerOrders);renderTrades(s.trades);renderEvents(s.events);
+    renderOrders(s.limitOrders);renderTrades(s.trades);renderEvents(s.events);
  }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
  setTimeout(poll,1000);
 }

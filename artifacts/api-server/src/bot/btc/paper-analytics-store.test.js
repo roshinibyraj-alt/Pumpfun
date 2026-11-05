@@ -32,13 +32,20 @@ test('paper analytics returns completed-window totals and chronological equity h
     },
   };
   const store = new LearningStore(pool);
-  const analytics = await store.getPaperAnalytics(500);
+  const analytics = await store.getPaperAnalytics(500, 'current-v2');
 
+  assert.equal(analytics.strategyVersion, 'current-v2');
+  assert.equal(analytics.historyScope, 'current-strategy-version');
   assert.deepEqual(analytics.windowPerformance, {
     completed: 4, wins: 3, losses: 1, flats: 0, winRate: .75, netPnl: 12.5,
   });
   assert.deepEqual(analytics.equityHistory.map(point => point.equity), [10000, 10012.5]);
-  assert.equal(calls.find(call => call.sql.includes('FROM btc_paper_equity_snapshots')).params[0], 500);
+  const performanceQuery = calls.find(call => call.sql.includes('FROM btc_paper_window_results'));
+  assert.match(performanceQuery.sql, /WHERE strategy_version = \$1/);
+  assert.deepEqual(performanceQuery.params, ['current-v2']);
+  const equityQuery = calls.find(call => call.sql.includes('FROM btc_paper_equity_snapshots'));
+  assert.match(equityQuery.sql, /WHERE strategy_version = \$2/);
+  assert.deepEqual(equityQuery.params, [500, 'current-v2']);
 });
 
 test('completed-window and equity writes retain their window and account-session keys', async () => {
@@ -56,6 +63,7 @@ test('completed-window and equity writes retain their window and account-session
     tradeCount: 2,
     netPnl: -3.25,
     outcome: 'LOSS',
+    strategyVersion: 'current-v2',
   });
   await store.recordEquitySnapshot({
     ts: 1800000310000,
@@ -66,14 +74,17 @@ test('completed-window and equity writes retain their window and account-session
     markedValue: 196.75,
     realizedPnl: -3.25,
     unrealizedPnl: 0,
+    strategyVersion: 'current-v2',
   });
 
   assert.match(calls[0].sql, /ON CONFLICT \(window_start\)/);
   assert.deepEqual(calls[0].params.slice(0, 5), [
     1800000000000, 1800000300000, 1800000305000, 2, -3.25,
   ]);
+  assert.equal(calls[0].params[6], 'current-v2');
   assert.match(calls[1].sql, /btc_paper_equity_snapshots/);
   assert.deepEqual(calls[1].params.slice(0, 3), [
     1800000310000, 1800000000000, 1800000300000,
   ]);
+  assert.equal(calls[1].params[8], 'current-v2');
 });

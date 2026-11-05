@@ -1,27 +1,6 @@
 'use strict';
 const { ProbabilityBot } = require('./probability-bot');
-const { METHOD } = require('./macd-signal');
-const CANDLE_MS = 5 * 60_000;
 const START = 1_800_000_000_000;
-function closedCandleSignal(classification = 'SHRINKING_RED', start = START) {
-  const bar = {
-    SOLID_RED: { histogram: -2, previousHistogram: -1, side: 'DOWN' },
-    SHRINKING_RED: { histogram: -1, previousHistogram: -2, side: 'UP' },
-    SOLID_GREEN: { histogram: 2, previousHistogram: 1, side: 'UP' },
-    SHRINKING_GREEN: { histogram: 1, previousHistogram: 2, side: 'DOWN' },
-    NEUTRAL: { histogram: 1, previousHistogram: 1, side: null },
-  }[classification];
-  return {
-    method: METHOD, timeframe: '5m', status: 'READY', signalAt: start,
-    side: bar.side, classification, latestHistogram: bar.histogram,
-    previousHistogram: bar.previousHistogram,
-    chart: { bars: [{
-      start: start - CANDLE_MS, end: start,
-      histogram: bar.histogram, previousHistogram: bar.previousHistogram,
-      classification, side: bar.side,
-    }] },
-  };
-}
 function fixture(options = {}) {
   let now = START + 10_000;
   const bot = new ProbabilityBot({
@@ -37,6 +16,6 @@ function fixture(options = {}) {
     return now;
   }
   at(10);
-  return { bot, at, closedCandleSignal, start: START };
+  return { bot, at, start: START };
 }
-module.exports = { START, CANDLE_MS, closedCandleSignal, fixture };
+module.exports = { START, fixture };
