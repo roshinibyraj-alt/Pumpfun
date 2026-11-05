@@ -1247,7 +1247,7 @@ class ProbabilityBot {
         stopLossPayoutPerShare: 0,
         exitStartSeconds: EXIT_START_SECONDS,
         orderSchedule: TAKER_ORDER_CHECKPOINTS.map(item => ({ ...item })),
-        orderModel: 'At seconds 3, 6, 9, ..., 60, submit an immediate 50-share taker buy on the side with the lower fresh best ask. At seconds 70, 80, 90, ..., 150, submit an immediate 150-share taker buy on the side with the higher fresh best ask. Each checkpoint is attempted once; no resting limit orders are placed.',
+        orderModel: 'At seconds 3, 6, 9, ..., 60, submit an immediate 50-share taker buy on the side with the lower fresh best ask. At seconds 70, 75, 80, ..., 150, submit an immediate 150-share taker buy on the side with the higher fresh best ask. Each checkpoint is attempted once; no resting limit orders are placed.',
         fillModel: 'Paper taker buys consume currently visible fresh ask depth from lowest ask upward and include taker fees. Any unfilled remainder is cancelled immediately; it never rests.',
         exitModel: 'During the active window, a fresh own-side best bid >= $0.99 triggers take-profit and credits $1 per share before fees. Stop-loss remains gated until 295 seconds and uses a fresh own-side best bid <= $0.01 to credit $0. Missing or stale bids do not trigger a sale. No opposite-signal exits or reversals. Unsold positions at expiry remain pending until the original market confirms its binary resolution; later CLOB bids do not liquidate them.',
       },

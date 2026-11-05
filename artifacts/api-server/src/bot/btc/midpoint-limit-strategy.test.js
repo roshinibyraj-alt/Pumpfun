@@ -11,19 +11,19 @@ const {
 
 const START = 1_800_000_000_000;
 
-test('taker checkpoints are 50 shares every 3 seconds through 60, then 150 every 10 through 150', () => {
-  assert.equal(TAKER_ORDER_CHECKPOINTS.length, 29);
+test('taker checkpoints are 50 shares every 3 seconds through 60, then 150 every 5 through 150', () => {
+  assert.equal(TAKER_ORDER_CHECKPOINTS.length, 37);
   assert.deepEqual(TAKER_ORDER_CHECKPOINTS.slice(0, 3)
     .map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
     [3, 'FIRST', 50], [6, 'FIRST', 50], [9, 'FIRST', 50],
   ]);
   assert.deepEqual(TAKER_ORDER_CHECKPOINTS.slice(18, 22)
     .map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
-    [57, 'FIRST', 50], [60, 'FIRST', 50], [70, 'SECOND', 150], [80, 'SECOND', 150],
+    [57, 'FIRST', 50], [60, 'FIRST', 50], [70, 'SECOND', 150], [75, 'SECOND', 150],
   ]);
   assert.deepEqual(TAKER_ORDER_CHECKPOINTS.slice(-2)
     .map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
-    [140, 'SECOND', 150], [150, 'SECOND', 150],
+    [145, 'SECOND', 150], [150, 'SECOND', 150],
   ]);
   for (const checkpoint of TAKER_ORDER_CHECKPOINTS) {
     assert.equal(scheduledOrderSlotAt(START, START + checkpoint.seconds * 1000), checkpoint.slot);
@@ -31,6 +31,8 @@ test('taker checkpoints are 50 shares every 3 seconds through 60, then 150 every
     if (next) assert.equal(scheduledOrderSlotAt(START, START + (next.seconds - 1) * 1000), checkpoint.slot);
   }
   assert.equal(scheduledOrderSlotAt(START, START + 2_999), -1);
+  assert.equal(scheduledOrderSlotAt(START, START + 154_999), 36);
+  assert.equal(scheduledOrderSlotAt(START, START + 155_000), -1);
   assert.equal(scheduledOrderSlotAt(START, START + 160_000), -1);
 });
 

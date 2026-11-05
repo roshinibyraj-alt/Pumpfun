@@ -153,9 +153,10 @@ test("dashboard presents scheduled taker buys, visible inventory and preserved e
   assert.match(html, /BTC TAKER PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
   assert.match(html, /50-share taker buy every 3 seconds on the side with the lower fresh ask/);
-  assert.match(html, /150 shares every 10 seconds on the side with the higher fresh ask/);
+  assert.match(html, /150 shares every 5 seconds on the side with the higher fresh ask/);
   assert.match(html, /At 3, 6, 9, and every 3 seconds through 60/);
-  assert.match(html, /At 70, 80, 90, and every 10 seconds through 150/);
+  assert.match(html, /At 70, 75, 80, and every 5 seconds through 150/);
+  assert.match(html, /1,000 shares in the first phase and 2,550 shares in the second phase/);
   assert.match(html, /unfilled remainder is cancelled immediately/i);
   assert.doesNotMatch(html, /\bScenario A\b|\bScenario B\b|\bEMA\d*\b|\bRSI\b|\bBollinger\b|\bStoch(?:astic)?\b|\bMACD\b|\bHybrid signal\b|\bindicators?\b/i);
   assert.match(html, /UP · ACCUMULATED POSITION/);

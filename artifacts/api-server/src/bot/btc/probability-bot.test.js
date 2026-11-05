@@ -390,8 +390,10 @@ test('later-phase buys switch to the higher ask without changing checkpoint size
   assert.equal(bot.takerOrders[0].side, 'DOWN', 'higher-ask selection is recalculated at each checkpoint');
   assert.equal(bot.takerOrders[0].sideSelectionPolicy, 'HIGHER_ASK');
   assert.equal(bot.takerOrders[0].requestedShares, 150);
-  assert.equal(bot.lastOrderSlot, 28);
+  assert.equal(bot.lastOrderSlot, 36);
   assert.match(bot.snapshot().strategy.orderModel, /higher fresh best ask/);
+  assert.equal(bot.snapshot().strategy.secondPhaseIntervalSeconds, 5);
+  assert.equal(bot.snapshot().strategy.maxOrdersPerWindow, 37);
 });
 
 test('stale quotes may recover during the active checkpoint without duplicating the taker buy', () => {
