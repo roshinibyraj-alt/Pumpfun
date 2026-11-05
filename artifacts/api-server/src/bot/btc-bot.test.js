@@ -154,7 +154,7 @@ test("dashboard focuses on current limit orders, paper fills, and strategy-speci
   assert.match(html, /PAPER ONLY · RESTING LIMITS/);
   assert.match(html, /Orders placed · this window/);
   assert.match(html, /exact-price fills/);
-  assert.match(html, /Maker fee · rebate basis/);
+  assert.match(html, /Maker fee · rebate fee-equivalent/);
   assert.match(html, /strategyFeeDetails/);
   assert.match(html, /Current strategy performance and equity/);
   assert.match(html, /current-strategy history/);
