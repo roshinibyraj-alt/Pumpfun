@@ -13,10 +13,13 @@ const {
   SECOND_PHASE_END_SECONDS,
   FIRST_PHASE_SHARES,
   SECOND_PHASE_SHARES,
+  FIRST_PHASE_MAX_ASK,
+  SECOND_PHASE_MIN_ASK,
   TAKER_ORDER_CHECKPOINTS,
   scheduledOrderSlotAt,
   quoteIsFresh,
   selectCheapestAskSide,
+  filterAskLevelsForPhase,
   simulateTakerBuy,
 } = require('./midpoint-limit-strategy');
 
@@ -559,7 +562,7 @@ class ProbabilityBot {
     });
   }
 
-  recordScheduledTakerOrder(checkpoint, slot, side, fill, now, selection) {
+  recordScheduledTakerOrder(checkpoint, slot, side, fill, now, selection, skipReason = null) {
     const requestedShares = checkpoint.shares;
     const filledShares = fill?.shares ?? 0;
     const remainingShares = Math.max(0, requestedShares - filledShares);
@@ -586,11 +589,14 @@ class ProbabilityBot {
       fees: fill?.fees ?? 0,
       status: fill
         ? remainingShares > 1e-8 ? 'PARTIALLY_FILLED_CANCELLED' : 'FILLED'
-        : 'SKIPPED_NO_EXECUTABLE_DEPTH',
+        : skipReason ? 'SKIPPED_PRICE_FILTER' : 'SKIPPED_NO_EXECUTABLE_DEPTH',
       tradeId: null,
       selectionReason: selection.selectionReason,
       sideSelectionPolicy: selection.sidePreference,
       bestAskAtSubmission: selection.asks[side],
+      priceFilter: checkpoint.phase === 'SECOND'
+        ? { minimumAsk: SECOND_PHASE_MIN_ASK }
+        : { maximumAsk: FIRST_PHASE_MAX_ASK },
     };
     this.takerOrders.unshift(order);
     this.takerOrders.length = Math.min(this.takerOrders.length, 200);
@@ -607,7 +613,7 @@ class ProbabilityBot {
         orderId: id, slot, phase: checkpoint.phase, side, requestedShares,
         bestAsk: selection.asks[side], cash: this.cash,
         sideSelectionPolicy: selection.sidePreference,
-        reason: 'No executable ask shares were available within the paper cash balance.',
+        reason: skipReason || 'No executable ask shares were available within the paper cash balance.',
       }, this.market.start);
       return order;
     }
@@ -714,7 +720,19 @@ class ProbabilityBot {
     }
     const side = selection.selectedSide;
     const quote = this.quotes[side];
-    const asks = this.orderBookAsksAvailable(side, quote);
+    const bestAsk = selection.asks[side];
+    const passesPriceFilter = checkpoint.phase === 'SECOND'
+      ? bestAsk >= SECOND_PHASE_MIN_ASK
+      : bestAsk <= FIRST_PHASE_MAX_ASK;
+    if (!passesPriceFilter) {
+      const reason = checkpoint.phase === 'SECOND'
+        ? `Higher-ask buy skipped: best ask ${bestAsk.toFixed(4)} is below the $${SECOND_PHASE_MIN_ASK.toFixed(2)} minimum.`
+        : `Lower-ask buy skipped: best ask ${bestAsk.toFixed(4)} is above the $${FIRST_PHASE_MAX_ASK.toFixed(2)} maximum.`;
+      this.recordScheduledTakerOrder(checkpoint, slot, side, null, now, selection, reason);
+      this.statusReason = reason;
+      return;
+    }
+    const asks = filterAskLevelsForPhase(this.orderBookAsksAvailable(side, quote), checkpoint.phase);
     const fill = simulateTakerBuy(asks, checkpoint.shares, this.cash, estimateTakerFee);
     if (!fill) {
       this.recordScheduledTakerOrder(checkpoint, slot, side, null, now, selection);
@@ -1239,6 +1257,8 @@ class ProbabilityBot {
         secondPhaseStartSeconds: SECOND_PHASE_START_SECONDS,
         secondPhaseEndSeconds: SECOND_PHASE_END_SECONDS,
         secondPhaseShares: SECOND_PHASE_SHARES,
+        firstPhaseMaxAsk: FIRST_PHASE_MAX_ASK,
+        secondPhaseMinAsk: SECOND_PHASE_MIN_ASK,
         maxOrdersPerWindow: TAKER_ORDER_CHECKPOINTS.length,
         takerFeeRate: TAKER_FEE_RATE,
         takeProfitBid: TAKE_PROFIT_BID,
@@ -1247,7 +1267,7 @@ class ProbabilityBot {
         stopLossPayoutPerShare: 0,
         exitStartSeconds: EXIT_START_SECONDS,
         orderSchedule: TAKER_ORDER_CHECKPOINTS.map(item => ({ ...item })),
-        orderModel: 'At seconds 3, 6, 9, ..., 60, submit an immediate 50-share taker buy on the side with the lower fresh best ask. At seconds 70, 75, 80, ..., 150, submit an immediate 150-share taker buy on the side with the higher fresh best ask. Each checkpoint is attempted once; no resting limit orders are placed.',
+        orderModel: 'At seconds 3, 6, 9, ..., 60, submit an immediate 50-share taker buy on the side with the lower fresh best ask only when its ask is at or below $0.40; no fill may exceed $0.40. At seconds 70, 75, 80, ..., 150, submit an immediate 150-share taker buy on the side with the higher fresh best ask only when its ask is at or above $0.60; no fill may be below $0.60. Each checkpoint is attempted once; no resting limit orders are placed.',
         fillModel: 'Paper taker buys consume currently visible fresh ask depth from lowest ask upward and include taker fees. Any unfilled remainder is cancelled immediately; it never rests.',
         exitModel: 'During the active window, a fresh own-side best bid >= $0.99 triggers take-profit and credits $1 per share before fees. Stop-loss remains gated until 295 seconds and uses a fresh own-side best bid <= $0.01 to credit $0. Missing or stale bids do not trigger a sale. No opposite-signal exits or reversals. Unsold positions at expiry remain pending until the original market confirms its binary resolution; later CLOB bids do not liquidate them.',
       },

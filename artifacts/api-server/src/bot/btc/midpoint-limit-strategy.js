@@ -7,6 +7,8 @@ const SECOND_PHASE_START_SECONDS = 70;
 const SECOND_PHASE_END_SECONDS = 150;
 const FIRST_PHASE_SHARES = 50;
 const SECOND_PHASE_SHARES = 150;
+const FIRST_PHASE_MAX_ASK = 0.40;
+const SECOND_PHASE_MIN_ASK = 0.60;
 const TAKER_ORDER_CHECKPOINTS = Object.freeze([
   ...Array.from({ length: FIRST_PHASE_END_SECONDS / FIRST_PHASE_INTERVAL_SECONDS }, (_, index) => ({
     slot: index,
@@ -91,6 +93,13 @@ function normalizeAskLevels(levels) {
     .sort((a, b) => a.price - b.price);
 }
 
+function filterAskLevelsForPhase(levels, phase) {
+  const normalized = normalizeAskLevels(levels);
+  return phase === 'SECOND'
+    ? normalized.filter(level => level.price >= SECOND_PHASE_MIN_ASK)
+    : normalized.filter(level => level.price <= FIRST_PHASE_MAX_ASK);
+}
+
 function affordableShares(price, requestedShares, budget, estimateFee) {
   if (!Number.isFinite(budget)) return requestedShares;
   const fullCost = price * requestedShares + estimateFee(price, requestedShares);
@@ -153,10 +162,13 @@ module.exports = {
   SECOND_PHASE_END_SECONDS,
   FIRST_PHASE_SHARES,
   SECOND_PHASE_SHARES,
+  FIRST_PHASE_MAX_ASK,
+  SECOND_PHASE_MIN_ASK,
   TAKER_ORDER_CHECKPOINTS,
   scheduledOrderSlotAt,
   quoteIsFresh,
   selectCheapestAskSide,
   normalizeAskLevels,
+  filterAskLevelsForPhase,
   simulateTakerBuy,
 };

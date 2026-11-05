@@ -156,6 +156,9 @@ test("dashboard presents scheduled taker buys, visible inventory and preserved e
   assert.match(html, /150 shares every 5 seconds on the side with the higher fresh ask/);
   assert.match(html, /At 3, 6, 9, and every 3 seconds through 60/);
   assert.match(html, /At 70, 75, 80, and every 5 seconds through 150/);
+  assert.match(html, /lower fresh best ask, only when that ask is at or below \$0\.40/);
+  assert.match(html, /higher fresh best ask, only when that ask is at or above \$0\.60/);
+  assert.match(html, /No fill may cross its phase price limit/);
   assert.match(html, /1,000 shares in the first phase and 2,550 shares in the second phase/);
   assert.match(html, /unfilled remainder is cancelled immediately/i);
   assert.doesNotMatch(html, /\bScenario A\b|\bScenario B\b|\bEMA\d*\b|\bRSI\b|\bBollinger\b|\bStoch(?:astic)?\b|\bMACD\b|\bHybrid signal\b|\bindicators?\b/i);
@@ -232,7 +235,7 @@ test("dashboard renders lower-ask side, taker schedule, filled inventory and ana
   assert.equal(elements.downRole.textContent, "HIGHER ASK");
   assert.match(elements.cheaperMid.textContent, /\$0\.3200/);
   assert.match(elements.nextOrder.textContent, /DUE NOW/);
-  assert.match(elements.scheduleHint.textContent, /lower-ask side/);
+  assert.match(elements.scheduleHint.textContent, /lower-ask side · ask ≤ \$0\.40/);
   assert.equal(elements.restingSummary.textContent, "2");
   assert.equal(elements.upShares.textContent, "80 shares");
   assert.equal(elements.upCurrentPrice.textContent, "$0.3100");

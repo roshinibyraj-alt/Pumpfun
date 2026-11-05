@@ -150,8 +150,8 @@
   <details class="disclosure" id="strategyDetails">
     <summary><span>Strategy rules</span><small>Taker entries · existing exits</small></summary>
     <section class="panel">
-      <p>At 3, 6, 9, and every 3 seconds through 60, submit one 50-share taker buy on the side with the lower fresh best ask. At 70, 75, 80, and every 5 seconds through 150, submit one 150-share taker buy on the side with the higher fresh best ask. The side is reselected from fresh quotes at each checkpoint. Stale or missing quotes are retried only until that checkpoint interval ends; missed intervals are not backfilled.</p>
-      <p>Each buy immediately sweeps visible ask depth from the lowest price upward, up to the requested shares and available paper cash, with taker fees. Any unfilled remainder is cancelled immediately. The maximum scheduled request is 1,000 shares in the first phase and 2,550 shares in the second phase.</p>
+      <p>At 3, 6, 9, and every 3 seconds through 60, submit one 50-share taker buy on the side with the lower fresh best ask, only when that ask is at or below $0.40. At 70, 75, 80, and every 5 seconds through 150, submit one 150-share taker buy on the side with the higher fresh best ask, only when that ask is at or above $0.60. No fill may cross its phase price limit. The side is reselected from fresh quotes at each checkpoint. Stale or missing quotes are retried only until that checkpoint interval ends; missed intervals are not backfilled.</p>
+      <p>Each eligible buy immediately sweeps visible ask depth within its phase price limit, up to the requested shares and available paper cash, with taker fees. Any unfilled remainder is cancelled immediately. The maximum scheduled request is 1,000 shares in the first phase and 2,550 shares in the second phase.</p>
       <p>Take-profit is checked throughout the active window: a fresh own-side best bid ≥ $0.99 closes that lot and credits $1.00 per share before fees. Stop-loss remains gated until 295 seconds and uses a fresh own-side best bid ≤ $0.01 to credit $0.00 per share. Any lot still unsold at expiry waits for confirmed resolution of its original market; it is not closed at a later or last-seen CLOB price. Older unresolved shares stay out of the active-window accumulation boxes.</p>
     </section>
   </details>
@@ -267,7 +267,8 @@ function renderSchedule(state){
  if(schedule.nextOrderAt){
    $('nextOrder').textContent=schedule.due?'DUE NOW':`${phase==='FIRST'?'50-SHARE':'150-SHARE'} · ${time(schedule.nextOrderAt)} UTC`;
     const sidePolicy=phase==='SECOND'?'higher-ask':'lower-ask';
-    $('scheduleHint').textContent=`${Number(schedule.shares||0).toLocaleString()} shares · ${sidePolicy} side · at ${schedule.nextScheduledSeconds}s`;
+    const priceRule=phase==='SECOND'?'ask ≥ $0.60':'ask ≤ $0.40';
+    $('scheduleHint').textContent=`${Number(schedule.shares||0).toLocaleString()} shares · ${sidePolicy} side · ${priceRule} · at ${schedule.nextScheduledSeconds}s`;
  }else{
   $('nextOrder').textContent='COMPLETE';
   $('scheduleHint').textContent='All scheduled checks have passed';

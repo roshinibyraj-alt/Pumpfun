@@ -6,6 +6,7 @@ const {
   TAKER_ORDER_CHECKPOINTS,
   scheduledOrderSlotAt,
   selectCheapestAskSide,
+  filterAskLevelsForPhase,
   simulateTakerBuy,
 } = require('./midpoint-limit-strategy');
 
@@ -67,6 +68,25 @@ test('cheapest taker side uses the lower fresh ask and sensible tie breakers', (
     UP: { bestAsk: .3, midpoint: .29, updatedAt: START - 5_001 },
     DOWN: { bestAsk: .7, midpoint: .69, updatedAt: START },
   }, START, 5_000).status, 'WAITING_FOR_FRESH_ASKS');
+});
+
+test('phase filters allow the boundary and exclude disallowed ask depth', () => {
+  assert.deepEqual(filterAskLevelsForPhase([
+    { price: .39, size: 10 },
+    { price: .40, size: 20 },
+    { price: .4001, size: 30 },
+  ], 'FIRST'), [
+    { price: .39, size: 10 },
+    { price: .40, size: 20 },
+  ]);
+  assert.deepEqual(filterAskLevelsForPhase([
+    { price: .5999, size: 10 },
+    { price: .60, size: 20 },
+    { price: .61, size: 30 },
+  ], 'SECOND'), [
+    { price: .60, size: 20 },
+    { price: .61, size: 30 },
+  ]);
 });
 
 test('taker buy sweeps visible asks, charges fees, and records partial depth or cash fills', () => {
