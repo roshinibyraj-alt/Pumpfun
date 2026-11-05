@@ -148,20 +148,20 @@ test("API snapshot exposes both active ladders and 85-cent exit settings", () =>
   assert.deepEqual(snapshot.strategy.entries.sideLadders.DOWN.triggeredRungs, [0.15]);
 });
 
-test("dashboard presents midpoint limit orders, visible inventory and preserved exits", () => {
+test("dashboard presents scheduled taker buys, visible inventory and preserved exits", () => {
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
-  assert.match(html, /BTC MIDPOINT LIMIT PAPER BOT/);
+  assert.match(html, /BTC TAKER PAPER BOT/);
   assert.match(html, /PAPER ONLY/);
-  assert.match(html, /100-share limits at the cheaper outcome’s midpoint/);
-  assert.match(html, /300-share limits at the expensive outcome’s midpoint/);
-  assert.match(html, /seconds 20, 40, 60, 80, 100 and 120/);
-  assert.match(html, /seconds 140, 160, 180, 200, 220 and 240/);
-  assert.match(html, /cancelled at window end/i);
+  assert.match(html, /50-share taker buy every 3 seconds/);
+  assert.match(html, /150 shares every 10 seconds/);
+  assert.match(html, /At 3, 6, 9, and every 3 seconds through 60/);
+  assert.match(html, /At 70, 80, 90, and every 10 seconds through 150/);
+  assert.match(html, /unfilled remainder is cancelled immediately/i);
   assert.doesNotMatch(html, /\bScenario A\b|\bScenario B\b|\bEMA\d*\b|\bRSI\b|\bBollinger\b|\bStoch(?:astic)?\b|\bMACD\b|\bHybrid signal\b|\bindicators?\b/i);
   assert.match(html, /UP · ACCUMULATED POSITION/);
   assert.match(html, /DOWN · ACCUMULATED POSITION/);
   assert.match(html, /Average cost \/ share/);
-  assert.match(html, /Resting limit orders/);
+  assert.match(html, /Taker order history/);
   assert.match(html, /Filled shares only/);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
@@ -179,7 +179,7 @@ test("dashboard presents midpoint limit orders, visible inventory and preserved 
   assert.doesNotMatch(html, /Manual limit order/);
 });
 
-test("dashboard renders midpoint roles, schedule, filled inventory, resting orders and analytics", () => {
+test("dashboard renders lower-ask side, taker schedule, filled inventory and analytics", () => {
   const vm = require("node:vm");
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
   const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m => [m[1], { style: {} }]));
@@ -193,32 +193,38 @@ test("dashboard renders midpoint roles, schedule, filled inventory, resting orde
   }
   const state = {
     now: 120000,
-    midpointSelection: { status: "READY", cheapSide: "UP", expensiveSide: "DOWN", midpoints: { UP: .31, DOWN: .69 } },
+    entrySideSelection: {
+      status: "READY", cheapSide: "UP", expensiveSide: "DOWN",
+      asks: { UP: .32, DOWN: .7 }, midpoints: { UP: .31, DOWN: .69 },
+    },
     quotes: {
       UP: { midpoint: .31, bestBid: .3, bestAsk: .32, updatedAt: 120000 },
       DOWN: { midpoint: .69, bestBid: .68, bestAsk: .7, updatedAt: 120000 },
     },
-    orderSchedule: { phase: "CHEAP", shares: 100, nextOrderAt: 120000, nextScheduledSeconds: 20, due: true },
-    openOrders: [{ side: "UP", remainingShares: 80 }, { side: "DOWN", remainingShares: 300 }],
+    orderSchedule: { phase: "FIRST", shares: 50, nextOrderAt: 120000, nextScheduledSeconds: 3, due: true, ordersPlaced: 2 },
+    takerOrders: [
+      { side: "UP", phase: "FIRST", orderType: "MARKET", requestedShares: 50, filledShares: 20, averageFillPrice: .31, status: "PARTIALLY_FILLED_CANCELLED", placedAt: 120000 },
+      { side: "DOWN", phase: "SECOND", orderType: "MARKET", requestedShares: 150, filledShares: 150, averageFillPrice: .7, status: "FILLED", placedAt: 120001 },
+    ],
   };
   context.renderMarket(state);
   context.renderSchedule(state);
   context.renderPositions({ UP: { shares: 80, averageCost: .3, costBasis: 24 }, DOWN: {} });
-  context.renderPendingBySide(state.openOrders);
+  context.renderPendingBySide(state.takerOrders);
   context.renderOrders([
-    { side: "UP", phase: "CHEAP", limitPrice: .31, requestedShares: 100, filledShares: 20, remainingShares: 80, status: "PARTIALLY_FILLED", placedAt: 120000 },
+    { side: "UP", phase: "FIRST", orderType: "MARKET", requestedShares: 50, filledShares: 20, averageFillPrice: .31, status: "PARTIALLY_FILLED_CANCELLED", cancelledRemainderShares: 30, placedAt: 120000 },
   ]);
-  context.renderTrades([{ side: "UP", phase: "CHEAP", shares: 20, openedAt: 120000, entryPrice: .3, entryPriceLimit: .31, status: "OPEN" }]);
-  assert.equal(elements.upRole.textContent, "CHEAPER");
-  assert.equal(elements.downRole.textContent, "EXPENSIVE");
-  assert.match(elements.cheaperMid.textContent, /\$0\.3100/);
+  context.renderTrades([{ side: "UP", phase: "FIRST", shares: 20, openedAt: 120000, entryPrice: .3, entryKind: "SCHEDULED_TAKER", status: "OPEN" }]);
+  assert.equal(elements.upRole.textContent, "LOWER ASK");
+  assert.equal(elements.downRole.textContent, "OTHER SIDE");
+  assert.match(elements.cheaperMid.textContent, /\$0\.3200/);
   assert.match(elements.nextOrder.textContent, /DUE NOW/);
   assert.equal(elements.restingSummary.textContent, "2");
   assert.equal(elements.upShares.textContent, "80 shares");
   assert.equal(elements.upAverageCost.textContent, "$0.3000");
   assert.equal(elements.upOpenOrders.textContent, "1");
-  assert.equal(elements.upRestingShares.textContent, "80");
-  assert.match(elements.orders.innerHTML, /PARTIALLY_FILLED/);
+  assert.equal(elements.upRestingShares.textContent, "20");
+  assert.match(elements.orders.innerHTML, /PARTIALLY_FILLED_CANCELLED/);
   assert.match(elements.trades.innerHTML, /Average fill/);
   assert.doesNotMatch(elements.trades.innerHTML, /Model probability/);
   context.renderAnalytics({
@@ -231,11 +237,7 @@ test("dashboard renders midpoint roles, schedule, filled inventory, resting orde
   assert.equal(elements.completedWindows.textContent, "3");
   assert.equal(elements.windowWinRate.textContent, "66.7%");
   assert.match(elements.equityChart.innerHTML, /<svg/);
-  state.midpointSelection.status = "MIDPOINTS_TIED";
-  context.renderMarket(state);
-  assert.equal(elements.upRole.textContent, "TIED");
-  assert.equal(elements.downRole.textContent, "TIED");
-  state.midpointSelection.status = "WAITING_FOR_FRESH_MIDPOINTS";
+  state.entrySideSelection.status = "WAITING_FOR_FRESH_ASKS";
   context.renderMarket(state);
   assert.equal(elements.upRole.textContent, "WAITING");
 });

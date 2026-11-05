@@ -3,63 +3,88 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  LIMIT_ORDER_CHECKPOINTS,
+  TAKER_ORDER_CHECKPOINTS,
   scheduledOrderSlotAt,
-  selectMidpointSides,
-  simulateLimitBuy,
+  selectCheapestAskSide,
+  simulateTakerBuy,
 } = require('./midpoint-limit-strategy');
 
 const START = 1_800_000_000_000;
 
-test('scheduled order slots cover 20–120 seconds and 140–240 seconds', () => {
-  assert.deepEqual(LIMIT_ORDER_CHECKPOINTS.map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
-    [20, 'CHEAP', 100], [40, 'CHEAP', 100], [60, 'CHEAP', 100],
-    [80, 'CHEAP', 100], [100, 'CHEAP', 100], [120, 'CHEAP', 100],
-    [140, 'EXPENSIVE', 300], [160, 'EXPENSIVE', 300],
-    [180, 'EXPENSIVE', 300], [200, 'EXPENSIVE', 300],
-    [220, 'EXPENSIVE', 300], [240, 'EXPENSIVE', 300],
+test('taker checkpoints are 50 shares every 3 seconds through 60, then 150 every 10 through 150', () => {
+  assert.equal(TAKER_ORDER_CHECKPOINTS.length, 29);
+  assert.deepEqual(TAKER_ORDER_CHECKPOINTS.slice(0, 3)
+    .map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
+    [3, 'FIRST', 50], [6, 'FIRST', 50], [9, 'FIRST', 50],
   ]);
-  for (const checkpoint of LIMIT_ORDER_CHECKPOINTS) {
+  assert.deepEqual(TAKER_ORDER_CHECKPOINTS.slice(18, 22)
+    .map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
+    [57, 'FIRST', 50], [60, 'FIRST', 50], [70, 'SECOND', 150], [80, 'SECOND', 150],
+  ]);
+  assert.deepEqual(TAKER_ORDER_CHECKPOINTS.slice(-2)
+    .map(({ seconds, phase, shares }) => [seconds, phase, shares]), [
+    [140, 'SECOND', 150], [150, 'SECOND', 150],
+  ]);
+  for (const checkpoint of TAKER_ORDER_CHECKPOINTS) {
     assert.equal(scheduledOrderSlotAt(START, START + checkpoint.seconds * 1000), checkpoint.slot);
-    assert.equal(scheduledOrderSlotAt(START, START + (checkpoint.seconds + 19.999) * 1000), checkpoint.slot);
+    const next = TAKER_ORDER_CHECKPOINTS[checkpoint.slot + 1];
+    if (next) assert.equal(scheduledOrderSlotAt(START, START + (next.seconds - 1) * 1000), checkpoint.slot);
   }
-  assert.equal(scheduledOrderSlotAt(START, START + 139_999), 5);
-  assert.equal(scheduledOrderSlotAt(START, START + 260_000), -1);
+  assert.equal(scheduledOrderSlotAt(START, START + 2_999), -1);
+  assert.equal(scheduledOrderSlotAt(START, START + 160_000), -1);
 });
 
-test('midpoint side selection requires two fresh distinct prices', () => {
+test('cheapest taker side uses the lower fresh ask and sensible tie breakers', () => {
   const quotes = {
-    UP: { midpoint: .31, updatedAt: START + 5_000 },
-    DOWN: { midpoint: .68, updatedAt: START + 5_000 },
+    UP: { bestAsk: .31, midpoint: .30, updatedAt: START + 5_000 },
+    DOWN: { bestAsk: .68, midpoint: .67, updatedAt: START + 5_000 },
   };
-  assert.deepEqual(selectMidpointSides(quotes, START + 5_000, 5_000), {
+  assert.deepEqual(selectCheapestAskSide(quotes, START + 5_000, 5_000), {
     status: 'READY',
     cheapSide: 'UP',
     expensiveSide: 'DOWN',
-    midpoints: { UP: .31, DOWN: .68 },
+    cheapestSide: 'UP',
+    otherSide: 'DOWN',
+    selectionReason: 'LOWER_BEST_ASK',
+    asks: { UP: .31, DOWN: .68 },
+    midpoints: { UP: .30, DOWN: .67 },
   });
-  assert.equal(selectMidpointSides({
-    UP: { midpoint: .5, updatedAt: START },
-    DOWN: { midpoint: .5, updatedAt: START },
-  }, START, 5_000).status, 'MIDPOINTS_TIED');
-  assert.equal(selectMidpointSides({
-    UP: { midpoint: .3, updatedAt: START - 5_001 },
-    DOWN: { midpoint: .7, updatedAt: START },
-  }, START, 5_000).status, 'WAITING_FOR_FRESH_MIDPOINTS');
+  const midpointTieBreak = selectCheapestAskSide({
+    UP: { bestAsk: .4, midpoint: .35, updatedAt: START },
+    DOWN: { bestAsk: .4, midpoint: .39, updatedAt: START },
+  }, START, 5_000);
+  assert.equal(midpointTieBreak.cheapSide, 'UP');
+  assert.equal(midpointTieBreak.selectionReason, 'LOWER_MIDPOINT_TIE_BREAK');
+  const fullTie = selectCheapestAskSide({
+    UP: { bestAsk: .4, midpoint: .39, updatedAt: START },
+    DOWN: { bestAsk: .4, midpoint: .39, updatedAt: START },
+  }, START, 5_000, 'DOWN');
+  assert.equal(fullTie.cheapSide, 'DOWN');
+  assert.equal(fullTie.selectionReason, 'ALTERNATING_FULL_TIE_BREAK');
+  assert.equal(selectCheapestAskSide({
+    UP: { bestAsk: .3, midpoint: .29, updatedAt: START - 5_001 },
+    DOWN: { bestAsk: .7, midpoint: .69, updatedAt: START },
+  }, START, 5_000).status, 'WAITING_FOR_FRESH_ASKS');
 });
 
-test('resting limit buy fills only eligible visible asks and respects cash plus fees', () => {
+test('taker buy sweeps visible asks, charges fees, and records partial depth or cash fills', () => {
   const estimateFee = (price, shares) => price * (1 - price) * shares * .001;
-  const fill = simulateLimitBuy([
+  const fill = simulateTakerBuy([
     { price: .24, size: 20 },
     { price: .25, size: 50 },
     { price: .26, size: 500 },
-  ], .25, 100, 18, estimateFee);
+  ], 100, 100, estimateFee);
   assert.ok(fill);
-  assert.equal(fill.shares, 70);
-  assert.equal(fill.remainingShares, 30);
-  assert.equal(fill.cost, 17.3);
+  assert.equal(fill.shares, 100);
+  assert.equal(fill.remainingShares, 0);
+  assert.ok(Math.abs(fill.cost - 25.1) < 1e-10);
+  assert.equal(fill.fills.length, 3);
   assert.ok(fill.fees > 0);
-  assert.equal(simulateLimitBuy([{ price: .251, size: 100 }], .25, 100, 100, estimateFee), null);
-  assert.equal(simulateLimitBuy([{ price: .2, size: 100 }], .25, 100, 0, estimateFee), null);
+  const partial = simulateTakerBuy([{ price: .24, size: 20 }, { price: .25, size: 40 }], 100, 100, estimateFee);
+  assert.equal(partial.shares, 60);
+  assert.equal(partial.remainingShares, 40);
+  const cashLimited = simulateTakerBuy([{ price: .24, size: 100 }], 100, .5, estimateFee);
+  assert.ok(cashLimited && cashLimited.shares < 100);
+  assert.equal(simulateTakerBuy([], 100, 100, estimateFee), null);
+  assert.equal(simulateTakerBuy([{ price: .2, size: 100 }], 100, 0, estimateFee), null);
 });

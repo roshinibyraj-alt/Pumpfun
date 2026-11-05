@@ -1,33 +1,42 @@
 'use strict';
 
-const ORDER_INTERVAL_SECONDS = 20;
-const CHEAP_PHASE_END_SECONDS = 120;
-const EXPENSIVE_PHASE_START_SECONDS = 140;
-const EXPENSIVE_PHASE_END_SECONDS = 240;
-const CHEAP_ORDER_SHARES = 100;
-const EXPENSIVE_ORDER_SHARES = 300;
-const LIMIT_ORDER_CHECKPOINTS = Object.freeze([
-  ...Array.from({ length: 6 }, (_, index) => ({
+const FIRST_PHASE_INTERVAL_SECONDS = 3;
+const FIRST_PHASE_END_SECONDS = 60;
+const SECOND_PHASE_INTERVAL_SECONDS = 10;
+const SECOND_PHASE_START_SECONDS = 70;
+const SECOND_PHASE_END_SECONDS = 150;
+const FIRST_PHASE_SHARES = 50;
+const SECOND_PHASE_SHARES = 150;
+const TAKER_ORDER_CHECKPOINTS = Object.freeze([
+  ...Array.from({ length: FIRST_PHASE_END_SECONDS / FIRST_PHASE_INTERVAL_SECONDS }, (_, index) => ({
     slot: index,
-    seconds: (index + 1) * ORDER_INTERVAL_SECONDS,
-    phase: 'CHEAP',
-    shares: CHEAP_ORDER_SHARES,
+    seconds: (index + 1) * FIRST_PHASE_INTERVAL_SECONDS,
+    phase: 'FIRST',
+    shares: FIRST_PHASE_SHARES,
   })),
-  ...Array.from({ length: 6 }, (_, index) => ({
-    slot: index + 6,
-    seconds: EXPENSIVE_PHASE_START_SECONDS + index * ORDER_INTERVAL_SECONDS,
-    phase: 'EXPENSIVE',
-    shares: EXPENSIVE_ORDER_SHARES,
+  ...Array.from({
+    length: (SECOND_PHASE_END_SECONDS - SECOND_PHASE_START_SECONDS) / SECOND_PHASE_INTERVAL_SECONDS + 1,
+  }, (_, index) => ({
+    slot: FIRST_PHASE_END_SECONDS / FIRST_PHASE_INTERVAL_SECONDS + index,
+    seconds: SECOND_PHASE_START_SECONDS + index * SECOND_PHASE_INTERVAL_SECONDS,
+    phase: 'SECOND',
+    shares: SECOND_PHASE_SHARES,
   })),
 ]);
 
 function scheduledOrderSlotAt(start, now) {
   if (!Number.isFinite(start) || !Number.isFinite(now)) return -1;
   const elapsedMs = now - start;
-  const firstOrderAt = ORDER_INTERVAL_SECONDS * 1000;
-  const scheduleEnd = (EXPENSIVE_PHASE_END_SECONDS + ORDER_INTERVAL_SECONDS) * 1000;
-  if (elapsedMs < firstOrderAt || elapsedMs >= scheduleEnd) return -1;
-  return Math.floor((elapsedMs - firstOrderAt) / (ORDER_INTERVAL_SECONDS * 1000));
+  if (elapsedMs < TAKER_ORDER_CHECKPOINTS[0].seconds * 1000) return -1;
+  for (let index = 0; index < TAKER_ORDER_CHECKPOINTS.length; index++) {
+    const checkpoint = TAKER_ORDER_CHECKPOINTS[index];
+    const next = TAKER_ORDER_CHECKPOINTS[index + 1];
+    const intervalSeconds = next
+      ? next.seconds - checkpoint.seconds
+      : SECOND_PHASE_INTERVAL_SECONDS;
+    if (elapsedMs < (checkpoint.seconds + intervalSeconds) * 1000) return checkpoint.slot;
+  }
+  return -1;
 }
 
 function quoteIsFresh(quote, now, maxAgeMs) {
@@ -36,25 +45,40 @@ function quoteIsFresh(quote, now, maxAgeMs) {
     && now - quote.updatedAt <= maxAgeMs;
 }
 
-function selectMidpointSides(quotes, now, maxAgeMs) {
+function selectCheapestAskSide(quotes, now, maxAgeMs, tieBreakSide = 'UP') {
+  const asks = {};
   const midpoints = {};
   for (const side of ['UP', 'DOWN']) {
     const quote = quotes?.[side];
+    const ask = Number(quote?.bestAsk);
     const midpoint = Number(quote?.midpoint);
     if (!quoteIsFresh(quote, now, maxAgeMs)
-      || !Number.isFinite(midpoint) || midpoint <= 0 || midpoint >= 1) {
-      return { status: 'WAITING_FOR_FRESH_MIDPOINTS', cheapSide: null, expensiveSide: null, midpoints };
+      || !Number.isFinite(ask) || ask <= 0 || ask >= 1) {
+      return { status: 'WAITING_FOR_FRESH_ASKS', cheapSide: null, expensiveSide: null, asks, midpoints };
     }
+    asks[side] = ask;
     midpoints[side] = midpoint;
   }
-  if (Math.abs(midpoints.UP - midpoints.DOWN) < 1e-9) {
-    return { status: 'MIDPOINTS_TIED', cheapSide: null, expensiveSide: null, midpoints };
+  let cheapSide;
+  let selectionReason = 'LOWER_BEST_ASK';
+  if (Math.abs(asks.UP - asks.DOWN) > 1e-9) {
+    cheapSide = asks.UP < asks.DOWN ? 'UP' : 'DOWN';
+  } else if (Number.isFinite(midpoints.UP) && Number.isFinite(midpoints.DOWN)
+    && Math.abs(midpoints.UP - midpoints.DOWN) > 1e-9) {
+    cheapSide = midpoints.UP < midpoints.DOWN ? 'UP' : 'DOWN';
+    selectionReason = 'LOWER_MIDPOINT_TIE_BREAK';
+  } else {
+    cheapSide = tieBreakSide === 'DOWN' ? 'DOWN' : 'UP';
+    selectionReason = 'ALTERNATING_FULL_TIE_BREAK';
   }
-  const cheapSide = midpoints.UP < midpoints.DOWN ? 'UP' : 'DOWN';
   return {
     status: 'READY',
     cheapSide,
     expensiveSide: cheapSide === 'UP' ? 'DOWN' : 'UP',
+    cheapestSide: cheapSide,
+    otherSide: cheapSide === 'UP' ? 'DOWN' : 'UP',
+    selectionReason,
+    asks,
     midpoints,
   };
 }
@@ -82,9 +106,8 @@ function affordableShares(price, requestedShares, budget, estimateFee) {
   return low;
 }
 
-function simulateLimitBuy(asks, limitPrice, requestedShares, maxCost, estimateFee) {
-  if (!Number.isFinite(limitPrice) || limitPrice <= 0 || limitPrice >= 1
-    || !Number.isFinite(requestedShares) || requestedShares <= 0
+function simulateTakerBuy(asks, requestedShares, maxCost, estimateFee) {
+  if (!Number.isFinite(requestedShares) || requestedShares <= 0
     || typeof estimateFee !== 'function') return null;
 
   const budget = Number.isFinite(maxCost) ? Math.max(0, maxCost) : Infinity;
@@ -95,7 +118,6 @@ function simulateLimitBuy(asks, limitPrice, requestedShares, maxCost, estimateFe
   const fills = [];
 
   for (const level of normalizeAskLevels(asks)) {
-    if (level.price > limitPrice + 1e-9) break;
     const requestedAtLevel = Math.min(remaining, level.size);
     const fillShares = affordableShares(level.price, requestedAtLevel,
       budget - cost - fees, estimateFee);
@@ -124,16 +146,17 @@ function simulateLimitBuy(asks, limitPrice, requestedShares, maxCost, estimateFe
 }
 
 module.exports = {
-  ORDER_INTERVAL_SECONDS,
-  CHEAP_PHASE_END_SECONDS,
-  EXPENSIVE_PHASE_START_SECONDS,
-  EXPENSIVE_PHASE_END_SECONDS,
-  CHEAP_ORDER_SHARES,
-  EXPENSIVE_ORDER_SHARES,
-  LIMIT_ORDER_CHECKPOINTS,
+  FIRST_PHASE_INTERVAL_SECONDS,
+  FIRST_PHASE_END_SECONDS,
+  SECOND_PHASE_INTERVAL_SECONDS,
+  SECOND_PHASE_START_SECONDS,
+  SECOND_PHASE_END_SECONDS,
+  FIRST_PHASE_SHARES,
+  SECOND_PHASE_SHARES,
+  TAKER_ORDER_CHECKPOINTS,
   scheduledOrderSlotAt,
   quoteIsFresh,
-  selectMidpointSides,
+  selectCheapestAskSide,
   normalizeAskLevels,
-  simulateLimitBuy,
+  simulateTakerBuy,
 };
