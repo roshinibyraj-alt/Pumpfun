@@ -256,7 +256,7 @@ function renderStrategy(state){
   $('strategyOrderDetails').textContent=strategy.orderModel||'Strategy rules are not available.';
   $('strategyFillDetails').textContent=strategy.fillModel||'Paper fill model is not available.';
   $('strategyExitDetails').textContent=strategy.exitModel||'Exit and settlement model is not available.';
-  $('strategyFeeDetails').textContent=`Maker entry fee: ${pct(strategy.makerFeeRate)}. Crypto maker rebates come from a daily pool funded at ${pct(strategy.makerRebatePoolShareRate)} of taker fee-equivalents; your payout varies by eligible share of that pool. Paper mode does not credit rebates. Exit fee model uses taker rate ${pct(strategy.takerFeeRate)}.`;
+  $('strategyFeeDetails').textContent=`Paper entry assumption: ${pct(strategy.makerFeeRate)} maker fee; simulated fills require the exact rung price. Live Polymarket limit orders may fill at a better price, and a crossing order can be a fee-paying taker. Crypto maker rebates come from a daily pool funded at ${pct(strategy.makerRebatePoolShareRate)} of taker fee-equivalents; payout varies by eligible pool share and is not credited in paper mode. Exit fee model uses taker rate ${pct(strategy.takerFeeRate)}.`;
   $('strategyBadge').textContent=`${safe(state.mode||'PAPER ONLY')} · ${safe(strategy.orderType||'LIMIT')} ORDERS`;
 }
 async function pollAnalytics(){
