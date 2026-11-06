@@ -47,7 +47,7 @@
     .hero p{max-width:720px;color:#63746a;margin-top:10px;font-size:13px}
     .window{text-align:right;color:#64756b;font:10px 'DM Mono',monospace;letter-spacing:.04em}.window strong{font-size:20px;color:#19352c;margin:5px 0}
     .error{color:#8d3434;background:#fff0ef;border-color:#e4c2c0;border-radius:5px}
-    .grid{gap:10px}.overview-grid{grid-template-columns:1.15fr 1fr 1.2fr 1fr .9fr}
+    .grid{gap:10px}.overview-grid{grid-template-columns:1.15fr 1fr 1.2fr 1fr .9fr}.account-grid{grid-template-columns:repeat(5,minmax(0,1fr))}
     .card,.panel{background:rgba(249,251,247,.9);border:1px solid var(--line);box-shadow:0 4px 16px rgba(32,49,39,.035);border-radius:7px}
     .card{padding:14px 16px}.label{color:#6f8076;font-size:9px;letter-spacing:.13em}.value{color:#19352c;font:700 clamp(17px,2vw,23px) 'DM Mono',monospace;letter-spacing:-.04em;margin-top:8px}
     .foot,.muted,small{color:var(--muted)}.foot{font-size:10px}
@@ -70,7 +70,7 @@
     .order-state{display:inline-flex;padding:4px 7px;border-radius:3px;background:#e8eee9;color:#476154;font:700 9px 'DM Mono',monospace;letter-spacing:.05em;white-space:nowrap}
     .order-state.open,.order-state.submitted{background:#e2efe7;color:#176347}.order-state.partial{background:#f8eedb;color:#8c5a15}.order-state.filled{background:#dcefe6;color:#155d43}.order-state.cancelled{background:#f6e5e2;color:#a1423c}.order-state.not-placed{background:#edf0eb;color:#78847c}
     .trade{padding:9px 0;border-top:1px solid #dce4dd;font-size:11px}.trade:first-child{border-top:0}
-    @media(max-width:850px){main{width:min(100% - 30px,1320px)}.overview-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{align-items:flex-start}.window{text-align:left}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+      @media(max-width:850px){main{width:min(100% - 30px,1320px)}.overview-grid,.account-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{align-items:flex-start}.window{text-align:left}.metric-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
     @media(max-width:520px){main{width:calc(100% - 22px);padding:14px 0 36px}.top{align-items:flex-start}.top-right{gap:5px;flex-direction:column;align-items:flex-end}.badge,.pill{padding:5px 7px;font-size:8px}.hero{gap:13px;padding:23px 0 16px}h1{font-size:32px}.hero p{font-size:12px}.window strong{font-size:17px}.overview-grid{gap:7px}.card{padding:11px}.value{font-size:16px}.foot{font-size:9px}.prob-grid,.position-grid{grid-template-columns:1fr 1fr;gap:7px}.prob,.position-card{padding:11px}.prob-price{font-size:29px}.prob-meta{grid-template-columns:1fr 1fr}.position-metrics{grid-template-columns:1fr 1fr}.panel{padding:12px}.section-head{align-items:flex-start}.section-head small{text-align:right}.disclosure>summary{padding:12px}.disclosure>summary small{max-width:48%;text-align:right}.disclosure>.prob-grid,.disclosure>.position-grid{padding:9px}.metric-grid{gap:7px}.metric-grid div{padding:10px}.metric-grid strong{font-size:18px}}
   </style>
 </head>
@@ -99,11 +99,12 @@
     <article class="prob down"><div class="prob-head"><span>DOWN MIDPOINT</span><span id="downRole">—</span></div><div class="prob-price" id="downMidpoint">—</div><div class="prob-meta"><div><span>Best bid</span><strong id="downBid">—</strong></div><div><span>Best ask</span><strong id="downAsk">—</strong></div><div><span>Quote age</span><strong id="downAge">—</strong></div></div></article>
   </section>
   </details>
-  <section class="grid" style="margin-top:12px">
+   <section class="grid account-grid" style="margin-top:12px">
     <article class="card"><div class="label">Paper cash</div><div class="value" id="cash">—</div><div class="foot">Starting balance <span id="startingCash">—</span></div></article>
     <article class="card"><div class="label">Realized P&amp;L</div><div class="value" id="pnl">—</div><div class="foot" id="wins">No settled signals yet</div></article>
     <article class="card"><div class="label">Completed-window win rate</div><div class="value" id="windowWinRate">—</div><div class="foot"><span id="windowRateHint">Waiting for completed windows</span></div></article>
     <article class="card"><div class="label">Active window positions / buys</div><div class="value" id="openCount">—</div><div class="foot" id="resolutionHint">Older unsold positions await market resolution</div></article>
+     <article class="card"><div class="label">Maker rebate estimate · this window</div><div class="value" id="windowRebateEstimate">$0.0000</div><div class="foot" id="windowRebateHint">No maker shares filled yet</div></article>
   </section>
   <details class="disclosure" id="performanceDetails">
     <summary><span>Current strategy performance and equity</span><small id="analyticsStatus">Loading account history</small></summary>
@@ -178,15 +179,16 @@ function renderTrades(trades){
 function renderOrders(orders){
  const sorted=(orders||[]).slice().sort((a,b)=>Number(b.placedAt)-Number(a.placedAt));
    if(!sorted.length){$('orders').innerHTML='<div class="empty">No limit orders in this window.</div>';return}
-    $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Side</th><th>Type</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Average fill</th><th>Maker fee · rebate fee-equivalent</th><th>Order status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>{
+    $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Side</th><th>Type</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Average fill</th><th>Maker fee · rebate estimate</th><th>Order status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>{
       const filled=Number(o.filledShares||0),remaining=Number(o.remainingShares||0),raw=String(o.status||'').toUpperCase();
       const skipped=raw.startsWith('SKIPPED_');
       const cancelled=raw==='CANCELLED'||raw==='CANCELLED_WINDOW_END';
-      const partialCancelled=raw==='PARTIALLY_FILLED_CANCELLED';
-      const status=skipped?'NOT PLACED · '+(o.skipReason||raw.replaceAll('_',' ')):partialCancelled?'PARTIAL · REMAINDER CANCELLED':cancelled?'CANCELLED':raw==='FILLED'||(remaining===0&&filled>=Number(o.requestedShares||0))?'FILLED':filled>0&&remaining>0?'PARTIAL':raw==='OPEN'||raw==='PARTIALLY_FILLED'?'SUBMITTED / OPEN':raw||'SUBMITTED';
-      const stateClass=skipped?'not-placed':cancelled?'cancelled':partialCancelled||status==='PARTIAL'?'partial':status==='FILLED'?'filled':'open';
-      const makerInfo=`$0${filled>0?` · fee-equivalent ${money(o.rebateFeeEquivalent||0,4)}; not rebate paid`:' · no fill yet'}`;
-      return `<tr><td>${time(o.placedAt)}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.orderType||'LIMIT')}</td><td>${money(o.limitPrice,2)}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${filled.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${remaining.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${money(o.averageFillPrice,4)}</td><td>Maker fee ${makerInfo}</td><td><span class="order-state ${stateClass}">${safe(status)}</span>${Number(o.cancelledRemainderShares||0)>0?`<div class="muted">${Number(o.cancelledRemainderShares).toLocaleString(undefined,{maximumFractionDigits:2})} unfilled shares cancelled</div>`:''}</td></tr>`;
+      const partialComplete=raw==='FILLED'&&Number(o.cancelledRemainderShares||0)>0&&filled<Number(o.requestedShares||0);
+      const status=skipped?'NOT PLACED · '+(o.skipReason||raw.replaceAll('_',' ')):cancelled?'CANCELLED':raw==='FILLED'||(remaining===0&&filled>=Number(o.requestedShares||0))?'FILLED':filled>0&&remaining>0?'PARTIAL':raw==='OPEN'||raw==='PARTIALLY_FILLED'?'SUBMITTED / OPEN':raw||'SUBMITTED';
+      const displayedStatus=partialComplete?'FILLED · PARTIAL COMPLETE':status;
+      const stateClass=skipped?'not-placed':cancelled?'cancelled':status==='PARTIAL'?'partial':status==='FILLED'?'filled':'open';
+      const makerInfo=`$0 fee${filled>0?` · ${money(o.estimatedMakerRebate||0,4)} est. rebate<div class="muted">fee-equivalent ${money(o.rebateFeeEquivalent||0,4)}</div>`:' · no fill yet'}`;
+      return `<tr><td>${time(o.placedAt)}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.orderType||'LIMIT')}</td><td>${money(o.limitPrice,2)}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${filled.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${remaining.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${money(o.averageFillPrice,4)}</td><td>${makerInfo}</td><td><span class="order-state ${stateClass}">${safe(displayedStatus)}</span>${Number(o.cancelledRemainderShares||0)>0?`<div class="muted">${Number(o.cancelledRemainderShares).toLocaleString(undefined,{maximumFractionDigits:2})} unfilled shares cancelled after first fill</div>`:''}</td></tr>`;
     }).join('')+'</tbody></table>';
 }
 function renderEvents(events){
@@ -256,7 +258,7 @@ function renderStrategy(state){
   $('strategyOrderDetails').textContent=strategy.orderModel||'Strategy rules are not available.';
   $('strategyFillDetails').textContent=strategy.fillModel||'Paper fill model is not available.';
   $('strategyExitDetails').textContent=strategy.exitModel||'Exit and settlement model is not available.';
-  $('strategyFeeDetails').textContent=`Paper entry assumption: ${pct(strategy.makerFeeRate)} maker fee; simulated fills require the exact rung price. Live Polymarket limit orders may fill at a better price, and a crossing order can be a fee-paying taker. Crypto maker rebates come from a daily pool funded at ${pct(strategy.makerRebatePoolShareRate)} of taker fee-equivalents; payout varies by eligible pool share and is not credited in paper mode. Exit fee model uses taker rate ${pct(strategy.takerFeeRate)}.`;
+   $('strategyFeeDetails').textContent=`Maker fee: ${pct(strategy.makerFeeRate)}. Estimated crypto rebate uses fee-equivalent = shares × 7% × price × (1 − price), then the 20% crypto rebate-pool share. Polymarket pays rebates daily, with each maker’s actual amount determined by its share of that market’s fee-equivalent and pool. The dashboard estimate is not a confirmed payout and is excluded from paper cash/P&L. A live marketable limit can take liquidity and incur taker fees. Exit fee model uses taker rate ${pct(strategy.takerFeeRate)}.`;
   $('strategyBadge').textContent=`${safe(state.mode||'PAPER ONLY')} · ${safe(strategy.orderType||'LIMIT')} ORDERS`;
 }
 async function pollAnalytics(){
@@ -303,7 +305,7 @@ function renderSchedule(state){
    const open=windowOrders.filter(order=>['OPEN','PARTIALLY_FILLED'].includes(String(order.status).toUpperCase())&&Number(order.remainingShares)>0).length;
    const filled=windowOrders.reduce((sum,order)=>sum+Number(order.filledShares||0),0);
    const allCancelled=placedOrders.length>0&&placedOrders.every(order=>['CANCELLED','CANCELLED_WINDOW_END'].includes(String(order.status).toUpperCase()))&&filled===0;
-   const allFilled=placedOrders.length>0&&placedOrders.every(order=>Number(order.filledShares)>=Number(order.requestedShares));
+    const allFilled=placedOrders.length>0&&placedOrders.every(order=>String(order.status).toUpperCase()==='FILLED');
    const anyFilled=windowOrders.some(order=>Number(order.filledShares||0)>0);
    const anyPartial=windowOrders.some(order=>Number(order.filledShares||0)>0&&Number(order.remainingShares||0)>0);
    if(allCancelled){
@@ -311,7 +313,7 @@ function renderSchedule(state){
     $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} latched · unfilled remainder cancelled`;
    }else if(allFilled){
     $('nextOrder').textContent='FILLED';
-    $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} · all submitted limits filled`;
+     $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} · all rungs complete; actual shares shown below`;
    }else if(anyPartial||anyFilled){
     $('nextOrder').textContent='PARTIAL';
     $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} · ${anyPartial?'some fills; remainder resting':'some fills; other shares cancelled or skipped'}`;
@@ -336,6 +338,11 @@ function renderSchedule(state){
   }
    $('restingSummary').textContent=`${placedOrders.length} / 2`;
    $('restingHint').textContent=`${open} open · ${filled.toLocaleString(undefined,{maximumFractionDigits:2})} filled shares · ${windowOrders.length-placedOrders.length} skipped`;
+    const estimatedRebate=windowOrders.reduce((sum,order)=>sum+Number(order.estimatedMakerRebate||0),0);
+    $('windowRebateEstimate').textContent=money(estimatedRebate,4);
+    $('windowRebateHint').textContent=estimatedRebate>0
+      ?'Estimate from actual fills · daily payout varies by market'
+      :'No maker shares filled yet';
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
