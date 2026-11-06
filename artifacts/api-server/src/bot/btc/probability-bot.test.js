@@ -56,7 +56,7 @@ test('current strategy waits 120 seconds, latches the first qualifying midpoint,
   assert.equal(state.limitOrders.length, 2);
 });
 
-test('paper maker buys fill only at the exact limit and book no fee or guaranteed rebate', () => {
+test('partial maker fill completes its rung, books actual shares, and estimates rebate separately', () => {
   const { bot, at } = fixture();
   const triggerAt = at(120);
   setBooks(bot, triggerAt, {
@@ -83,11 +83,16 @@ test('paper maker buys fill only at the exact limit and book no fee or guarantee
   const [lowRung, highRung] = bot.limitOrders.slice().sort((a, b) => a.slot - b.slot);
   assert.equal(lowRung.filledShares, 0);
   assert.equal(highRung.filledShares, 500);
+  assert.equal(highRung.remainingShares, 0);
+  assert.equal(highRung.cancelledRemainderShares, 1500);
+  assert.equal(highRung.status, 'FILLED');
   assert.equal(highRung.averageFillPrice, 0.6);
   assert.equal(highRung.fees, 0);
   assert.equal(highRung.makerFees, 0);
-  assert.equal(highRung.rebateStatus, 'PAPER_ONLY_NOT_CREDITED');
+  assert.equal(highRung.rebateStatus, 'PAPER_ESTIMATE_NOT_ACTUAL');
   assert.ok(highRung.rebateFeeEquivalent > 0);
+  assert.equal(highRung.estimatedMakerRebate, highRung.rebateFeeEquivalent * 0.2);
+  assert.equal(bot.trades.find(trade => trade.orderId === highRung.id).shares, 500);
   assert.equal(bot.cash, 9700);
 
   now = at(122);
@@ -102,13 +107,14 @@ test('paper maker buys fill only at the exact limit and book no fee or guarantee
 
   assert.equal(lowRung.filledShares, 1000);
   assert.equal(lowRung.averageFillPrice, 0.4);
-  assert.equal(highRung.filledShares, 2000);
+  assert.equal(highRung.filledShares, 500);
   assert.equal(highRung.averageFillPrice, 0.6);
-  assert.equal(bot.cash, 8400);
+  assert.equal(bot.cash, 9300);
+  assert.equal(bot.trades.find(trade => trade.orderId === highRung.id).shares, 500);
   assert.equal(bot.trades.reduce((sum, trade) => sum + trade.fees, 0), 0);
 });
 
-test('maker rebate is not credited as a fixed share of fees; exit taker fees remain modeled separately', () => {
+test('paper does not credit estimated rebates; exit taker fees remain modeled separately', () => {
   assert.ok(Math.abs(estimateTakerFee(0.5, 10) - 0.175) < 1e-12);
   assert.ok(Math.abs(estimateTakerFee(0.99, 10) - 0.00693) < 1e-12);
 });
@@ -131,9 +137,10 @@ test('unfilled limits cancel at expiry and positions keep the existing resolutio
     downAsks: [{ price: 0.21, size: 10_000 }],
   });
   bot.processLimitOrderStrategy(now);
-  bot.limitOrders[0].filledShares = 1;
-  bot.limitOrders[0].remainingShares = 999;
-  bot.limitOrders[0].filledCost = 0.4;
+  bot.limitOrders[0].status = 'OPEN';
+  bot.limitOrders[0].filledShares = 0;
+  bot.limitOrders[0].remainingShares = 1000;
+  bot.limitOrders[0].filledCost = 0;
   bot.trades.push({
     id: 'paper-position',
     marketId: bot.market.id,
@@ -155,7 +162,7 @@ test('unfilled limits cancel at expiry and positions keep the existing resolutio
   now = at(300);
   bot.cancelExpiredLimitOrders(now);
   bot.processPositionExits(now);
-  assert.equal(bot.limitOrders[0].status, 'PARTIALLY_FILLED_CANCELLED');
+  assert.equal(bot.limitOrders[0].status, 'CANCELLED_WINDOW_END');
   assert.equal(bot.limitOrders[1].status, 'CANCELLED_WINDOW_END');
   assert.equal(bot.trades[0].settlementStatus, 'AWAITING_SETTLEMENT');
 

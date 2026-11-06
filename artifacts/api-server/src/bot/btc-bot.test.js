@@ -154,7 +154,9 @@ test("dashboard focuses on current limit orders, paper fills, and strategy-speci
   assert.match(html, /PAPER ONLY · RESTING LIMITS/);
   assert.match(html, /Orders placed · this window/);
   assert.match(html, /exact-price fills/);
-  assert.match(html, /Maker fee · rebate fee-equivalent/);
+  assert.match(html, /Maker fee · rebate estimate/);
+  assert.match(html, /Maker rebate estimate · this window/);
+  assert.match(html, /Estimated crypto rebate uses fee-equivalent/i);
   assert.match(html, /strategyFeeDetails/);
   assert.match(html, /Current strategy performance and equity/);
   assert.match(html, /current-strategy history/);
@@ -204,7 +206,7 @@ test("dashboard renders triggered side, resting order ladder, filled inventory a
       ordersPlaced: 2, openOrders: 1, filledShares: 20,
     },
     limitOrders: [
-      { side: "UP", windowStart: 120000, orderType: "LIMIT", limitPrice: .4, requestedShares: 1000, filledShares: 20, remainingShares: 980, averageFillPrice: .4, rebateFeeEquivalent: .336, status: "PARTIALLY_FILLED", placedAt: 120000 },
+      { side: "UP", windowStart: 120000, orderType: "LIMIT", limitPrice: .4, requestedShares: 1000, filledShares: 20, remainingShares: 980, averageFillPrice: .4, rebateFeeEquivalent: .336, estimatedMakerRebate: .0672, status: "PARTIALLY_FILLED", placedAt: 120000 },
       { side: "UP", windowStart: 120000, orderType: "LIMIT", limitPrice: .6, requestedShares: 2000, filledShares: 0, remainingShares: 2000, averageFillPrice: null, status: "OPEN", placedAt: 120000 },
       { side: "UP", windowStart: 60000, orderType: "LIMIT", limitPrice: .6, requestedShares: 2000, filledShares: 2000, remainingShares: 0, averageFillPrice: .6, status: "FILLED", placedAt: 60000 },
     ],
@@ -234,9 +236,14 @@ test("dashboard renders triggered side, resting order ladder, filled inventory a
   assert.equal(elements.upRestingShares.textContent, "20");
   assert.match(elements.orders.innerHTML, />PARTIAL</);
   assert.match(elements.orders.innerHTML, /\$0\.40/);
-  assert.match(elements.orders.innerHTML, /rebate/i);
+  assert.match(elements.orders.innerHTML, /est\. rebate/);
+  assert.equal(elements.windowRebateEstimate.textContent, "$0.0672");
   assert.match(elements.trades.innerHTML, /Average fill/);
   assert.doesNotMatch(elements.trades.innerHTML, /Model probability/);
+  context.renderOrders([
+    { side: "UP", orderType: "LIMIT", limitPrice: .4, requestedShares: 1000, filledShares: 20, remainingShares: 0, cancelledRemainderShares: 980, estimatedMakerRebate: .0672, rebateFeeEquivalent: .336, status: "FILLED", placedAt: 120000 },
+  ]);
+  assert.match(elements.orders.innerHTML, /FILLED · PARTIAL COMPLETE/);
   context.renderAnalytics({
     windowPerformance: { completed: 3, wins: 2, losses: 1, flats: 0, winRate: 2 / 3, netPnl: 12.5 },
     equityHistory: [
