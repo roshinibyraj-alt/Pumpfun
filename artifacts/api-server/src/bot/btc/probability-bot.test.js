@@ -114,7 +114,7 @@ test('partial maker fill completes its rung, books actual shares, and estimates 
   assert.equal(bot.trades.reduce((sum, trade) => sum + trade.fees, 0), 0);
 });
 
-test('maker rebate is not credited as a fixed share of fees; exit taker fees remain modeled separately', () => {
+test('paper does not credit estimated rebates; exit taker fees remain modeled separately', () => {
   assert.ok(Math.abs(estimateTakerFee(0.5, 10) - 0.175) < 1e-12);
   assert.ok(Math.abs(estimateTakerFee(0.99, 10) - 0.00693) < 1e-12);
 });
