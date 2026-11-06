@@ -291,6 +291,7 @@ class ProbabilityBot {
       placedAt: now,
       requestedShares,
       filledShares: 0,
+      observedFillShares: 0,
       remainingShares: hasFunds ? requestedShares : 0,
       cancelledRemainderShares: 0,
       averageFillPrice: null,
@@ -384,23 +385,40 @@ class ProbabilityBot {
   }
 
   recordLimitOrderFill(order, fill, now) {
+    const observedFillShares = fill.shares;
+    const sharesToBook = Math.max(0, order.requestedShares - order.filledShares);
+    if (observedFillShares <= 1e-8 || sharesToBook <= 1e-8) return;
+    const fillScale = sharesToBook / observedFillShares;
+    const bookedFill = {
+      ...fill,
+      shares: sharesToBook,
+      remainingShares: 0,
+      cost: fill.averagePrice * sharesToBook,
+      fees: fill.fees * fillScale,
+      makerFees: fill.makerFees * fillScale,
+      rebateFeeEquivalent: fill.rebateFeeEquivalent * fillScale,
+      totalCost: fill.totalCost * fillScale,
+    };
     const orderCostBeforeFill = order.filledCost;
-    const totalFilledCost = orderCostBeforeFill + fill.cost;
-    order.filledShares += fill.shares;
+    const totalFilledCost = orderCostBeforeFill + bookedFill.cost;
+    order.observedFillShares = (order.observedFillShares || 0) + observedFillShares;
+    order.filledShares += bookedFill.shares;
     const unfilledShares = Math.max(0, order.requestedShares - order.filledShares);
-    const completesOnPartialFill = unfilledShares > 1e-8;
+    const completesOnPartialFill = observedFillShares + 1e-8 < sharesToBook;
     order.cancelledRemainderShares += unfilledShares;
     order.remainingShares = 0;
     order.filledCost = totalFilledCost;
     order.fees = 0;
     order.makerFees = 0;
-    order.rebateFeeEquivalent += fill.rebateFeeEquivalent;
-    order.estimatedMakerRebate += fill.rebateFeeEquivalent * CRYPTO_MAKER_REBATE_RATE;
+    order.rebateFeeEquivalent += bookedFill.rebateFeeEquivalent;
+    order.estimatedMakerRebate += bookedFill.rebateFeeEquivalent * CRYPTO_MAKER_REBATE_RATE;
     order.averageFillPrice = order.filledShares > 0 ? totalFilledCost / order.filledShares : null;
     order.fillCount += 1;
     order.lastFillAt = now;
     order.status = 'FILLED';
-    order.completionReason = completesOnPartialFill ? 'FIRST_PARTIAL_FILL_COMPLETES_ORDER' : 'FULL_QUANTITY_FILLED';
+    order.completionReason = completesOnPartialFill
+      ? 'FIRST_PARTIAL_FILL_CREDITS_FULL_PAPER_QUANTITY'
+      : 'FULL_QUANTITY_FILLED';
     order.reservedFunds = 0;
 
     const trade = {
@@ -416,16 +434,18 @@ class ProbabilityBot {
       orderType: 'LIMIT',
       limitPrice: order.limitPrice,
       requestedShares: order.requestedShares,
-      shares: fill.shares,
-      entryPrice: fill.averagePrice,
-      cost: fill.cost,
+      shares: bookedFill.shares,
+      observedFillShares,
+      simulatedFullOrderFill: completesOnPartialFill,
+      entryPrice: bookedFill.averagePrice,
+      cost: bookedFill.cost,
       fees: 0,
       makerFees: 0,
-      rebateFeeEquivalent: fill.rebateFeeEquivalent,
-      estimatedMakerRebate: fill.rebateFeeEquivalent * CRYPTO_MAKER_REBATE_RATE,
+      rebateFeeEquivalent: bookedFill.rebateFeeEquivalent,
+      estimatedMakerRebate: bookedFill.rebateFeeEquivalent * CRYPTO_MAKER_REBATE_RATE,
       rebatePoolShareRate: CRYPTO_MAKER_REBATE_RATE,
       rebateStatus: 'PAPER_ESTIMATE_NOT_ACTUAL',
-      totalCost: fill.totalCost,
+      totalCost: bookedFill.totalCost,
       openedAt: now,
       status: 'OPEN',
       peakBid: null,
@@ -440,7 +460,7 @@ class ProbabilityBot {
       ?? { entryCount: 0, settledCount: 0, netPnl: 0 };
     windowResult.entryCount += 1;
     this.windowResults.set(order.windowStart, windowResult);
-    this.cash -= fill.totalCost;
+    this.cash -= bookedFill.totalCost;
     this.equitySnapshotRequested = true;
     let retainedSettled = 0;
     this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
@@ -450,13 +470,15 @@ class ProbabilityBot {
       side: order.side,
       limitPrice: order.limitPrice,
       requestedShares: order.requestedShares,
-      filledShares: fill.shares,
+      observedFillShares,
+      filledShares: order.filledShares,
+      simulatedFullOrderFill: completesOnPartialFill,
       remainingShares: 0,
       cancelledRemainderShares: order.cancelledRemainderShares,
-      averageFillPrice: fill.averagePrice,
-      fillCost: fill.cost,
-      fillFees: fill.fees,
-      estimatedMakerRebate: fill.rebateFeeEquivalent * CRYPTO_MAKER_REBATE_RATE,
+      averageFillPrice: bookedFill.averagePrice,
+      fillCost: bookedFill.cost,
+      fillFees: bookedFill.fees,
+      estimatedMakerRebate: bookedFill.rebateFeeEquivalent * CRYPTO_MAKER_REBATE_RATE,
       status: order.status,
     }, order.windowStart);
   }
@@ -831,7 +853,7 @@ class ProbabilityBot {
         exitStartSeconds: EXIT_START_SECONDS,
         orderSchedule: LIMIT_ORDER_LADDER.map(item => ({ ...item })),
         orderModel: 'Starting 120 seconds after each window opens, monitor fresh UP/DOWN midpoints. The first side reaching $0.80 or higher is latched for that window and receives one 1,000-share limit buy at $0.40 and one 2,000-share limit buy at $0.60. Orders are not rearmed.',
-        fillModel: 'Paper maker buys fill only when visible ask depth is exactly at the posted limit price. No price improvement or worse-price fills are simulated. Maker fees are zero. Any partial fill completes that rung and cancels its unfilled remainder; only shares actually filled are booked. Rebate is estimated for display and is not credited to paper cash or P&L. A live marketable limit can instead take liquidity.',
+        fillModel: 'Paper maker buys fill only when visible ask depth is exactly at the posted limit price. No price improvement or worse-price fills are simulated. Maker fees are zero. Any positive observed fill completes the full requested paper quantity for that rung; only observed book depth is consumed, and the entire rung share count and cost are booked. Rebate is estimated for display and is not credited to paper cash or P&L. A live marketable limit can instead take liquidity.',
         exitModel: 'During the active window, a fresh own-side best bid >= $0.99 triggers take-profit and credits $1 per share. After 295 seconds, a fresh own-side best bid <= $0.01 triggers the stop-loss. These simulated bid-triggered exits use the taker-fee estimate. Missing or stale bids do not trigger a sale. Unsold positions at expiry wait for confirmed resolution of the original market.',
       },
       window: this.market ? { title: this.market.title, slug: this.market.slug, start: this.market.start, end: this.market.end, secondsRemaining: Math.max(0, (this.market.end - now) / 1000) } : null,

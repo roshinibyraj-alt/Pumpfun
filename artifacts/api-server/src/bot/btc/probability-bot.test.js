@@ -56,7 +56,7 @@ test('current strategy waits 120 seconds, latches the first qualifying midpoint,
   assert.equal(state.limitOrders.length, 2);
 });
 
-test('partial maker fill completes its rung, books actual shares, and estimates rebate separately', () => {
+test('one observed share completes the full paper rung and estimates rebate on credited shares', () => {
   const { bot, at } = fixture();
   const triggerAt = at(120);
   setBooks(bot, triggerAt, {
@@ -74,7 +74,7 @@ test('partial maker fill completes its rung, books actual shares, and estimates 
       { price: 0.3999, size: 1000 },
       { price: 0.4001, size: 1000 },
       { price: 0.5999, size: 1000 },
-      { price: 0.6, size: 500 },
+      { price: 0.6, size: 1 },
       { price: 0.6001, size: 1000 },
     ],
   });
@@ -82,9 +82,10 @@ test('partial maker fill completes its rung, books actual shares, and estimates 
 
   const [lowRung, highRung] = bot.limitOrders.slice().sort((a, b) => a.slot - b.slot);
   assert.equal(lowRung.filledShares, 0);
-  assert.equal(highRung.filledShares, 500);
+  assert.equal(highRung.filledShares, 2000);
+  assert.equal(highRung.observedFillShares, 1);
   assert.equal(highRung.remainingShares, 0);
-  assert.equal(highRung.cancelledRemainderShares, 1500);
+  assert.equal(highRung.cancelledRemainderShares, 0);
   assert.equal(highRung.status, 'FILLED');
   assert.equal(highRung.averageFillPrice, 0.6);
   assert.equal(highRung.fees, 0);
@@ -92,8 +93,11 @@ test('partial maker fill completes its rung, books actual shares, and estimates 
   assert.equal(highRung.rebateStatus, 'PAPER_ESTIMATE_NOT_ACTUAL');
   assert.ok(highRung.rebateFeeEquivalent > 0);
   assert.equal(highRung.estimatedMakerRebate, highRung.rebateFeeEquivalent * 0.2);
-  assert.equal(bot.trades.find(trade => trade.orderId === highRung.id).shares, 500);
-  assert.equal(bot.cash, 9700);
+  assert.equal(bot.trades.find(trade => trade.orderId === highRung.id).shares, 2000);
+  assert.equal(bot.trades.find(trade => trade.orderId === highRung.id).observedFillShares, 1);
+  assert.equal(bot.trades.find(trade => trade.orderId === highRung.id).simulatedFullOrderFill, true);
+  assert.equal(highRung.filledCost, 1200);
+  assert.equal(bot.cash, 8800);
 
   now = at(122);
   setBooks(bot, now, {
@@ -107,10 +111,10 @@ test('partial maker fill completes its rung, books actual shares, and estimates 
 
   assert.equal(lowRung.filledShares, 1000);
   assert.equal(lowRung.averageFillPrice, 0.4);
-  assert.equal(highRung.filledShares, 500);
+  assert.equal(highRung.filledShares, 2000);
   assert.equal(highRung.averageFillPrice, 0.6);
-  assert.equal(bot.cash, 9300);
-  assert.equal(bot.trades.find(trade => trade.orderId === highRung.id).shares, 500);
+  assert.equal(bot.cash, 8400);
+  assert.equal(bot.trades.find(trade => trade.orderId === highRung.id).shares, 2000);
   assert.equal(bot.trades.reduce((sum, trade) => sum + trade.fees, 0), 0);
 });
 
