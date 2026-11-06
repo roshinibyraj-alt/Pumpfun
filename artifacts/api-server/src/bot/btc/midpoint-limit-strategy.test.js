@@ -72,7 +72,7 @@ test('limit fill accepts only asks exactly at the order price and has zero maker
   assert.equal(simulateLimitBuyFill(asks, 0.39, 100, makerFeeRate), null);
 });
 
-test('limit matcher does not fill at a better or worse price than the posted limit', () => {
+test('limit matcher only fills at the exact posted rung price', () => {
   const fill = simulateLimitBuyFill([
     { price: 0.55, size: 500 },
     { price: 0.60, size: 1500 },
