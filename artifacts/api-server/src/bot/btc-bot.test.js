@@ -155,7 +155,7 @@ test("dashboard focuses on the current candle-signal taker strategy and archived
   assert.match(html, /Entry orders · this window/);
   assert.match(html, /next tick/i);
   assert.match(html, /Taker fees · this window/);
-  assert.match(html, /Taker entry fee uses the market’s fee schedule/i);
+  assert.match(html, /Taker entry fees use the market’s fee schedule/i);
   assert.match(html, /strategyFeeDetails/);
   assert.match(html, /Current strategy performance and equity/);
   assert.match(html, /current-strategy history/);
@@ -169,7 +169,9 @@ test("dashboard focuses on the current candle-signal taker strategy and archived
   assert.match(html, /Current DOWN midpoint/);
   assert.match(html, /position-current-price/);
   assert.match(html, /Active window only/);
-  assert.match(html, /Order history/);
+  assert.match(html, /Entry order history/);
+  assert.match(html, /official Polymarket resolution/i);
+  assert.doesNotMatch(html, /TP limit|take-profit limit/i);
   assert.doesNotMatch(html, /120 seconds|0\.80\+|two resting BUY limits|RESTING LIMITS/i);
   assert.doesNotMatch(html, /MACD|histogram|\$0\.20|20–60¢/i);
   assert.doesNotMatch(html, /trendline|swing-structure|HH breakout|LL breakout/i);
@@ -178,7 +180,7 @@ test("dashboard focuses on the current candle-signal taker strategy and archived
   assert.doesNotMatch(html, /Manual limit order/);
 });
 
-test("dashboard renders the signal, taker fill, TP order, inventory and analytics", () => {
+test("dashboard renders the signal, taker entry, inventory and analytics without exit orders", () => {
   const vm = require("node:vm");
   const html = fs.readFileSync(path.join(__dirname, "../../public/probability.html"), "utf8");
   const elements = Object.fromEntries([...html.matchAll(/id="([^"]+)"/g)].map(m => [m[1], { style: {} }]));
@@ -210,9 +212,6 @@ test("dashboard renders the signal, taker fill, TP order, inventory and analytic
       { side: "UP", action: "BUY", windowStart: 120000, orderType: "TAKER", requestedShares: 500, filledShares: 20, remainingShares: 0, averageFillPrice: .4, fees: .2, cancelledRemainderShares: 480, status: "PARTIALLY_FILLED_REMAINDER_CANCELLED", placedAt: 120000 },
       { side: "UP", action: "BUY", windowStart: 60000, orderType: "TAKER", requestedShares: 500, filledShares: 500, remainingShares: 0, averageFillPrice: .4, fees: 2, status: "FILLED", placedAt: 60000 },
     ],
-    takeProfitOrders: [
-      { side: "UP", action: "SELL", windowStart: 120000, orderType: "LIMIT", limitPrice: .99, requestedShares: 20, filledShares: 0, remainingShares: 20, status: "PENDING", placedAt: 120001 },
-    ],
   };
   context.renderMarket(state);
   context.renderSchedule(state);
@@ -221,11 +220,8 @@ test("dashboard renders the signal, taker fill, TP order, inventory and analytic
     DOWN: { midpoint: .69 },
   });
   context.renderPendingBySide(state.entryOrders, state.window.start);
-  context.renderOrders([
-    ...state.entryOrders.slice(0, 1),
-    ...state.takeProfitOrders,
-  ]);
-  context.renderTrades([{ side: "UP", shares: 20, openedAt: 120000, entryPrice: .39, fees: .2, takeProfitLimitPrice: .99, entryKind: "TAKER_MARKET", status: "OPEN" }]);
+  context.renderOrders(state.entryOrders.slice(0, 1));
+  context.renderTrades([{ side: "UP", shares: 20, openedAt: 120000, entryPrice: .39, fees: .2, entryKind: "TAKER_MARKET", status: "OPEN" }]);
   assert.equal(elements.upRole.textContent, "SIGNAL SIDE");
   assert.equal(elements.downRole.textContent, "MONITORING");
   assert.match(elements.cheaperMid.textContent, /BTC \$101\.00/);
@@ -240,10 +236,12 @@ test("dashboard renders the signal, taker fill, TP order, inventory and analytic
   assert.equal(elements.upOpenOrders.textContent, "1");
   assert.equal(elements.upRestingShares.textContent, "20");
   assert.match(elements.orders.innerHTML, /PARTIAL · REMAINDER CANCELLED/);
-  assert.match(elements.orders.innerHTML, /\$0\.99/);
+  assert.doesNotMatch(elements.orders.innerHTML, /SELL|TAKE_PROFIT/);
   assert.match(elements.orders.innerHTML, /taker fee/);
   assert.equal(elements.windowTakerFees.textContent, "$0.2000");
   assert.match(elements.trades.innerHTML, /Average fill/);
+  assert.match(elements.trades.innerHTML, /Settlement/);
+  assert.doesNotMatch(elements.trades.innerHTML, /TP limit/);
   assert.doesNotMatch(elements.trades.innerHTML, /Model probability/);
   context.renderOrders([
     { side: "UP", action: "BUY", orderType: "TAKER", requestedShares: 500, filledShares: 20, remainingShares: 0, cancelledRemainderShares: 480, fees: .2, status: "PARTIALLY_FILLED_REMAINDER_CANCELLED", placedAt: 120000 },

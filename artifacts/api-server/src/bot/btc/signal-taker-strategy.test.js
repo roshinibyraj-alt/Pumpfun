@@ -6,7 +6,6 @@ const {
   STRATEGY_VERSION,
   SIGNAL_COMPARE_LEAD_MS,
   ENTRY_SHARES,
-  TAKE_PROFIT_LIMIT_PRICE,
   getWindowToScan,
   selectClosedCandleSignal,
   simulateTakerBuyFill,
@@ -16,10 +15,9 @@ const {
 const START = 1_800_000_000_000;
 
 test('strategy is BTC five-minute only with a pre-open closed-candle comparison', () => {
-  assert.equal(STRATEGY_VERSION, 'btc-5m-candle-signal-taker-v1');
+  assert.equal(STRATEGY_VERSION, 'btc-5m-candle-signal-taker-resolution-v2');
   assert.equal(SIGNAL_COMPARE_LEAD_MS, 3_000);
   assert.equal(ENTRY_SHARES, 500);
-  assert.equal(TAKE_PROFIT_LIMIT_PRICE, 0.99);
   assert.equal(getWindowToScan(START - 10_000), START);
   assert.equal(getWindowToScan(START - 10_001), START - 300_000);
 });

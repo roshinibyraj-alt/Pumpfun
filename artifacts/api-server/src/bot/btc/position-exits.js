@@ -1,13 +1,6 @@
 'use strict';
 
-const TAKE_PROFIT_BID = 0.99;
 const RECOVERY_INTERVAL_MS = 10_000;
-
-function thresholdExit(bid) {
-  if (!Number.isFinite(bid) || bid < 0 || bid > 1) return null;
-  if (bid >= TAKE_PROFIT_BID) return { price: 1, outcome: 'TAKE_PROFIT' };
-  return null;
-}
 
 function array(value) {
   if (Array.isArray(value)) return value;
@@ -72,4 +65,4 @@ async function recoverExpiredPositions(bot, now) {
   }));
 }
 
-module.exports = { TAKE_PROFIT_BID, thresholdExit, resolvedPayout, recoverExpiredPositions };
+module.exports = { resolvedPayout, recoverExpiredPositions };

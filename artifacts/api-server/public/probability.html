@@ -131,8 +131,8 @@
   </section>
   </section>
   <section class="panel">
-     <div class="section-head"><h2>Order history</h2><small>Taker entries · resting take-profit limits · confirmations</small></div>
-     <div id="orders" class="table-wrap"><div class="empty">No entry or take-profit orders yet.</div></div>
+     <div class="section-head"><h2>Entry order history</h2><small>Taker buys · next-tick fill confirmations</small></div>
+     <div id="orders" class="table-wrap"><div class="empty">No entry orders yet.</div></div>
   </section>
   <details class="disclosure" id="positionsDetails">
     <summary><span>Completed paper trades</span><small>Filled order lots · outcomes · P&amp;L</small></summary>
@@ -171,14 +171,14 @@ const signed=(n,d=2)=>isNumeric(n)?(Number(n)>=0?'+':'')+money(n,d):'—';
 const pct=n=>isNumeric(n)?(Number(n)*100).toFixed(1)+'%':'—';
 const time=n=>isNumeric(n)?new Date(n).toLocaleTimeString('en-AU',{timeZone:'UTC',hour12:false}):'—';
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const resultLabel=t=>t.status==='OPEN'?(t.settlementStatus==='AWAITING_SETTLEMENT'?'AWAITING SETTLEMENT':'OPEN'):t.finalOutcome==='TAKE_PROFIT_LIMIT'?'TP · $1.00':t.finalOutcome==='MARKET_RESOLUTION'?'RESOLVED · '+money(t.exitPrice):t.finalOutcome||'—';
+const resultLabel=t=>t.status==='OPEN'?(t.settlementStatus==='AWAITING_SETTLEMENT'?'AWAITING POLYMARKET RESOLUTION':'OPEN'):t.finalOutcome==='MARKET_RESOLUTION'?'RESOLVED · '+money(t.exitPrice):t.finalOutcome||'—';
 function renderTrades(trades){
   if(!trades?.length){$('trades').innerHTML='<div class="empty">No confirmed taker entries yet.</div>';return}
-   $('trades').innerHTML='<table><thead><tr><th>Filled at</th><th>Side</th><th>Entry type</th><th>Shares</th><th>Average fill</th><th>Entry fees</th><th>TP limit</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${safe(t.entryKind||'—')}</td><td>${Number(t.shares).toFixed(2)}</td><td>${money(t.entryPrice,4)}</td><td>${money(t.fees,4)}</td><td>${money(t.takeProfitLimitPrice,2)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
+   $('trades').innerHTML='<table><thead><tr><th>Filled at</th><th>Side</th><th>Entry type</th><th>Shares</th><th>Average fill</th><th>Entry fees</th><th>Settlement</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${safe(t.entryKind||'—')}</td><td>${Number(t.shares).toFixed(2)}</td><td>${money(t.entryPrice,4)}</td><td>${money(t.fees,4)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
 }
 function renderOrders(orders){
  const sorted=(orders||[]).slice().sort((a,b)=>Number(b.placedAt)-Number(a.placedAt));
-   if(!sorted.length){$('orders').innerHTML='<div class="empty">No entry or take-profit orders yet.</div>';return}
+   if(!sorted.length){$('orders').innerHTML='<div class="empty">No entry orders yet.</div>';return}
     $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Action</th><th>Side</th><th>Type</th><th>Price</th><th>Requested</th><th>Filled</th><th>Average fill</th><th>Fees / rebate</th><th>Order status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>{
       const filled=Number(o.filledShares||0),remaining=Number(o.remainingShares||0),raw=String(o.status||'').toUpperCase();
       const cancelled=raw.startsWith('CANCELLED')||raw==='EXPIRED_WINDOW_END';
@@ -257,7 +257,7 @@ function renderStrategy(state){
   $('strategyOrderDetails').textContent=strategy.orderModel||'Strategy rules are not available.';
   $('strategyFillDetails').textContent=strategy.fillModel||'Paper fill model is not available.';
   $('strategyExitDetails').textContent=strategy.exitModel||'Exit and settlement model is not available.';
-    $('strategyFeeDetails').textContent=`Taker entry fee uses the market’s fee schedule when available (fallback ${pct(strategy.takerFeeRate)}). The $0.99 resting take-profit has no modeled fee; estimated maker rebate is shown and included in paper P&L, but is not guaranteed.`;
+    $('strategyFeeDetails').textContent=`Taker entry fees use the market’s fee schedule when available (fallback ${pct(strategy.takerFeeRate)}). There are no sell orders, take-profit exits, or stop-loss exits; every filled position waits for its original market’s official Polymarket resolution.`;
    $('strategyBadge').textContent=`${safe(state.mode||'PAPER ONLY')} · ${safe(strategy.orderType||'TAKER')} ENTRIES`;
 }
 async function pollAnalytics(){
@@ -293,7 +293,6 @@ function renderMarket(state){
 function renderSchedule(state){
  const schedule=state.orderSchedule||{};
   const entryOrders=(state.entryOrders||[]).filter(order=>!state.window?.start||Number(order.windowStart)===Number(state.window.start));
-  const takeProfitOrders=(state.takeProfitOrders||[]).filter(order=>!state.window?.start||Number(order.windowStart)===Number(state.window.start));
   const entry=entryOrders[0],filled=Number(entry?.filledShares||0);
   const pending=entry?.status==='PENDING_CONFIRMATION';
   if(pending){
@@ -315,8 +314,7 @@ function renderSchedule(state){
      :'Waiting for the final 3-second BTC comparison';
   }
   $('restingSummary').textContent=`${entryOrders.length} / 1`;
-  const activeTp=takeProfitOrders.filter(order=>order.status==='PENDING').length;
-  $('restingHint').textContent=`${filled.toLocaleString(undefined,{maximumFractionDigits:2})} shares confirmed · ${activeTp} active $0.99 take-profit`;
+  $('restingHint').textContent=`${filled.toLocaleString(undefined,{maximumFractionDigits:2})} shares confirmed · held for official market resolution`;
   const takerFees=entryOrders.reduce((sum,order)=>sum+Number(order.fees||0),0);
   $('windowTakerFees').textContent=money(takerFees,4);
   $('windowTakerFeesHint').textContent=filled>0?'Fee charged on the confirmed taker fill':'No taker fill confirmed yet';
@@ -368,7 +366,7 @@ function renderPositions(positions){
   $('feedState').textContent=s.priceFeed?.status||'—';
   $('updated').textContent=s.statusReason|| (s.lastUpdateAt?'Updated '+time(s.lastUpdateAt):'Waiting for first scan');
    $('feedStatus').textContent=s.priceFeed?`BTC reference feed · ${s.priceFeed.history?.status||'connected'}`:'Awaiting BTC reference feed';
-     renderOrders([...(s.entryOrders||[]),...(s.takeProfitOrders||[])]);renderTrades(s.trades);renderEvents(s.events);
+     renderOrders(s.entryOrders||[]);renderTrades(s.trades);renderEvents(s.events);
  }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
  setTimeout(poll,1000);
 }

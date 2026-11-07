@@ -3,22 +3,18 @@
 const { CRYPTO_TAKER_FEE_RATE } = require('./config');
 const marketData = require('./wick-market-data');
 const { feed } = require('./chainlink-price-feed');
-const { TAKE_PROFIT_BID, recoverExpiredPositions } = require('./position-exits');
+const { recoverExpiredPositions } = require('./position-exits');
 const {
   STRATEGY_VERSION,
   WINDOW_MS,
   SIGNAL_SCAN_LEAD_MS,
   SIGNAL_COMPARE_LEAD_MS,
   ENTRY_SHARES,
-  TAKE_PROFIT_LIMIT_PRICE,
-  TAKE_PROFIT_PAYOUT_PER_SHARE,
   POLL_INTERVAL_MS,
   MAX_QUOTE_AGE_MS,
-  MAKER_REBATE_POOL_SHARE_RATE,
   quoteIsFresh,
   feeParameters,
   estimateTakerFee,
-  estimateMakerRebate,
   simulateTakerBuyFill,
   selectClosedCandleSignal,
   getWindowToScan,
@@ -73,7 +69,6 @@ class ProbabilityBot {
     this.persistenceError = null;
     this.lastSampledAt = null;
     this.entryOrders = [];
-    this.takeProfitOrders = [];
     this.orderWindowStart = null;
     this.orderSequence = 0;
     this.tickCount = 0;
@@ -458,30 +453,6 @@ class ProbabilityBot {
       this.windowResults.set(order.windowStart, windowResult);
       this.cash -= fill.totalCost;
       this.equitySnapshotRequested = true;
-      const takeProfitOrder = {
-        id: `${trade.id}-tp`,
-        marketId: trade.marketId,
-        tokenId: trade.tokenId,
-        windowStart: trade.windowStart,
-        windowEnd: trade.windowEnd,
-        side: trade.side,
-        action: 'SELL',
-        orderType: 'LIMIT',
-        executionRole: 'MAKER',
-        limitPrice: TAKE_PROFIT_LIMIT_PRICE,
-        payoutPerShare: TAKE_PROFIT_PAYOUT_PER_SHARE,
-        requestedShares: trade.shares,
-        filledShares: 0,
-        remainingShares: trade.shares,
-        estimatedMakerRebate: 0,
-        placedAt: now,
-        status: 'PENDING',
-        fillModel: 'OWN_SIDE_BID_AT_OR_ABOVE_LIMIT',
-      };
-      trade.takeProfitOrderId = takeProfitOrder.id;
-      trade.takeProfitLimitPrice = TAKE_PROFIT_LIMIT_PRICE;
-      this.takeProfitOrders.unshift(takeProfitOrder);
-      this.takeProfitOrders.length = Math.min(this.takeProfitOrders.length, 200);
       this.log('PAPER_TAKER_BUY_FILLED', {
         orderId: order.id,
         tradeId: trade.id,
@@ -495,15 +466,7 @@ class ProbabilityBot {
         confirmationTick: this.tickCount,
         fillLevels: fill.fills,
       }, order.windowStart);
-      this.log('PAPER_TAKE_PROFIT_LIMIT_PLACED', {
-        orderId: takeProfitOrder.id,
-        tradeId: trade.id,
-        side: trade.side,
-        shares: trade.shares,
-        limitPrice: TAKE_PROFIT_LIMIT_PRICE,
-        payoutPerShare: TAKE_PROFIT_PAYOUT_PER_SHARE,
-      }, trade.windowStart);
-      this.statusReason = `${fill.shares.toLocaleString()} ${order.side} shares confirmed at a ${fill.averagePrice.toFixed(4)} weighted average on the next tick; ${remainder.toLocaleString()} unfilled shares were cancelled. A $0.99 limit take-profit is active.`;
+      this.statusReason = `${fill.shares.toLocaleString()} ${order.side} shares confirmed at a ${fill.averagePrice.toFixed(4)} weighted average on the next tick; ${remainder.toLocaleString()} unfilled shares were cancelled. Filled shares will be held until the original market’s official Polymarket resolution.`;
       let retainedSettled = 0;
       this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     }
@@ -539,7 +502,6 @@ class ProbabilityBot {
       openOrders: openOrders.length,
       filledShares: currentOrders.reduce((sum, order) => sum + order.filledShares, 0),
       requestedShares: currentOrders.reduce((sum, order) => sum + order.requestedShares, 0),
-      takeProfitOrders: this.takeProfitOrders.filter(order => order.windowStart === start).length,
       signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
       signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
       entryOrderType: 'TAKER',
@@ -550,9 +512,6 @@ class ProbabilityBot {
   processPositionExits(now) {
     for (const trade of this.trades) {
       if (trade.status !== 'OPEN') continue;
-      const takeProfitOrder = this.takeProfitOrders.find(
-        order => order.id === trade.takeProfitOrderId,
-      );
       const quote = trade.marketId === this.market?.id ? this.quotes[trade.side] : null;
       const bid = quote?.bestBid == null ? NaN : Number(quote.bestBid);
       const fresh = Number.isFinite(quote?.updatedAt)
@@ -571,41 +530,13 @@ class ProbabilityBot {
       if (now < trade.windowEnd && fresh) {
         trade.lastOutcomeBid = bid;
         trade.lastOutcomeBidAt = quote.updatedAt;
-        if (bid >= TAKE_PROFIT_BID && takeProfitOrder?.status === 'PENDING') {
-          const rebate = estimateMakerRebate(TAKE_PROFIT_LIMIT_PRICE, trade.shares, {
-            raw: { feeSchedule: { rate: trade.feeRate ?? TAKER_FEE_RATE, exponent: trade.feeExponent ?? 1 } },
-          });
-          takeProfitOrder.status = 'FILLED';
-          takeProfitOrder.filledAt = now;
-          takeProfitOrder.fillPrice = TAKE_PROFIT_LIMIT_PRICE;
-          takeProfitOrder.filledShares = trade.shares;
-          takeProfitOrder.remainingShares = 0;
-          takeProfitOrder.estimatedMakerRebate = rebate;
-          this.closeTrade(
-            trade,
-            TAKE_PROFIT_LIMIT_PRICE,
-            trade.shares * TAKE_PROFIT_PAYOUT_PER_SHARE,
-            'TAKE_PROFIT_LIMIT',
-            'Fresh own-side bid reached the resting $0.99 limit; paper payout is $1 per share.',
-            now,
-            TAKE_PROFIT_LIMIT_PRICE,
-            0,
-            'MAKER',
-            rebate,
-          );
-        }
         continue;
       }
 
       if (now < trade.windowEnd) continue;
-      if (takeProfitOrder?.status === 'PENDING') {
-        takeProfitOrder.status = 'EXPIRED_WINDOW_END';
-        takeProfitOrder.expiredAt = now;
-        takeProfitOrder.remainingShares = 0;
-      }
       const wasPending = trade.settlementStatus === 'AWAITING_SETTLEMENT';
       trade.settlementStatus = 'AWAITING_SETTLEMENT';
-      trade.settlementError = 'Window ended without an exit; waiting for confirmed original-market resolution.';
+      trade.settlementError = 'Window ended; no take-profit or stop-loss exit is active. Waiting for confirmed original-market resolution.';
       if (!wasPending) {
         this.log('EXPIRY_RECOVERY_PENDING', {
           tradeId: trade.id,
@@ -823,10 +754,7 @@ class ProbabilityBot {
     const pendingEntryOrders = this.entryOrders.filter(order => (
       order.status === 'PENDING_CONFIRMATION' && order.remainingShares > 0
     ));
-    const pendingTakeProfitOrders = this.takeProfitOrders.filter(order => (
-      order.status === 'PENDING' && order.remainingShares > 0
-    ));
-    const openOrders = [...pendingEntryOrders, ...pendingTakeProfitOrders];
+    const openOrders = pendingEntryOrders;
     return {
       mode: 'PAPER ONLY',
       running: this.running,
@@ -842,15 +770,10 @@ class ProbabilityBot {
         sharesPerTrade: ENTRY_SHARES,
         signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
         signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
-        takeProfitOrderType: 'LIMIT',
-        takeProfitLimitPrice: TAKE_PROFIT_LIMIT_PRICE,
-        takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT_PER_SHARE,
         takerFeeRate: TAKER_FEE_RATE,
-        makerRebatePoolShareRate: MAKER_REBATE_POOL_SHARE_RATE,
-        rebateAccounting: 'Taker buys are charged the market fee estimate. The resting $0.99 take-profit is fee-free in this paper model; its estimated crypto maker rebate is shown and included in paper P&L but is not a guaranteed Polymarket payout.',
         orderModel: 'Use the most recent closed BTC 1-minute candle. Three seconds before the 5-minute window opens, compare the live BTC price with that candle close: higher selects UP; equal or lower selects DOWN. At window open, submit one 500-share paper taker buy on that side.',
         fillModel: 'The taker entry is confirmed on the next 500 ms bot tick from fresh visible asks, sweeping asks from lowest to highest. Only available shares are booked at their actual weighted average price; the unfilled remainder is cancelled. Taker fees use the market fee schedule when available.',
-        exitModel: 'After entry confirmation, place a resting $0.99 limit take-profit. If the own-side best bid reaches $0.99, book the limit exit as $1 per share and estimate the maker rebate. There is no stop loss. Shares not sold by the end of the original window remain open until that exact market is confirmed resolved.',
+        exitModel: 'There is no take-profit or stop-loss. Filled shares remain open through the window and settle only when the original Polymarket market is officially confirmed resolved.',
       },
       window: this.market ? {
         title: this.market.title,
@@ -899,7 +822,6 @@ class ProbabilityBot {
       },
       trades: this.trades.slice(0, 50),
       entryOrders: this.entryOrders.slice(0, 100),
-      takeProfitOrders: this.takeProfitOrders.slice(0, 100),
       openOrders,
       events: this.events,
       entrySideSelection: this.entrySideSelection,

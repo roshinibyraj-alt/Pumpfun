@@ -14,8 +14,6 @@ const {
   SIGNAL_SCAN_LEAD_MS,
   SIGNAL_COMPARE_LEAD_MS,
   ENTRY_SHARES,
-  TAKE_PROFIT_LIMIT_PRICE,
-  TAKE_PROFIT_PAYOUT_PER_SHARE,
   POLL_INTERVAL_MS,
 } = require(
   "./bot/btc/signal-taker-strategy.js",
@@ -24,8 +22,6 @@ const {
   SIGNAL_SCAN_LEAD_MS: number;
   SIGNAL_COMPARE_LEAD_MS: number;
   ENTRY_SHARES: number;
-  TAKE_PROFIT_LIMIT_PRICE: number;
-  TAKE_PROFIT_PAYOUT_PER_SHARE: number;
   POLL_INTERVAL_MS: number;
 };
 const { LearningStore } = require("./bot/btc/learning-store.js") as {
@@ -57,9 +53,7 @@ router.get("/strategy/learning", async (_req, res) => {
       signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
       sharesPerTrade: ENTRY_SHARES,
       pollIntervalMs: POLL_INTERVAL_MS,
-      takeProfitOrderType: "LIMIT",
-      takeProfitLimitPrice: TAKE_PROFIT_LIMIT_PRICE,
-      takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT_PER_SHARE,
+      exitPolicy: "POLYMARKET_RESOLUTION_ONLY",
       stopLoss: false,
     },
   });

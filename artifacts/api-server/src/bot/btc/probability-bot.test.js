@@ -84,9 +84,10 @@ test('one pre-open candle signal submits one taker buy at open and confirms on t
   assert.equal(trade.side, 'UP');
   assert.equal(trade.orderType, 'TAKER');
   assert.equal(trade.shares, 500);
-  assert.equal(trade.takeProfitLimitPrice, 0.99);
+  assert.equal(bot.takeProfitOrders, undefined);
   assert.ok(Math.abs(bot.cash - (10_000 - 263.6625)) < 1e-9);
-  assert.equal(bot.takeProfitOrders[0].status, 'PENDING');
+  assert.equal(bot.snapshot().takeProfitOrders, undefined);
+  assert.match(bot.snapshot().strategy.exitModel, /no take-profit or stop-loss/i);
   assert.equal(bot.snapshot().strategy.version, STRATEGY_VERSION);
 });
 
@@ -191,7 +192,7 @@ test('a bot that starts after the window opens skips it rather than inventing a 
   assert.equal(bot.entrySideSelection.status, 'MISSED_PREOPEN_SIGNAL');
 });
 
-test('no stop loss is applied; the $0.99 limit TP credits $1 per share', () => {
+test('neither take profit nor stop loss closes positions before official resolution', () => {
   const { bot, setNow } = createBot();
   const trade = {
     id: 'test-trade',
@@ -208,34 +209,25 @@ test('no stop loss is applied; the $0.99 limit TP credits $1 per share', () => {
     openedAt: START,
     status: 'OPEN',
     settlementStatus: 'OPEN',
-    takeProfitOrderId: 'test-tp',
   };
   bot.trades = [trade];
   bot.cash -= trade.totalCost;
-  bot.takeProfitOrders = [{
-    id: 'test-tp',
-    windowStart: START,
-    side: 'UP',
-    orderType: 'LIMIT',
-    limitPrice: 0.99,
-    requestedShares: 10,
-    remainingShares: 10,
-    status: 'PENDING',
-  }];
 
   setNow(START + 10_000);
-  setAsks(bot, START + 10_000, 'UP', [], 0.01);
+  setAsks(bot, START + 10_000, 'UP', [], 0.99);
   bot.processPositionExits(START + 10_000);
   assert.equal(trade.status, 'OPEN');
 
   setNow(START + 20_000);
-  setAsks(bot, START + 20_000, 'UP', [], 0.99);
+  setAsks(bot, START + 20_000, 'UP', [], 0.01);
   bot.processPositionExits(START + 20_000);
-  assert.equal(trade.status, 'SETTLED');
-  assert.equal(trade.finalOutcome, 'TAKE_PROFIT_LIMIT');
-  assert.equal(trade.exitPrice, 0.99);
-  assert.equal(trade.grossPayout, 10);
-  assert.equal(trade.exitFees, 0);
-  assert.ok(trade.estimatedMakerRebate > 0);
-  assert.equal(bot.takeProfitOrders[0].status, 'FILLED');
+  assert.equal(trade.status, 'OPEN');
+  assert.equal(trade.finalOutcome, undefined);
+  assert.equal(trade.exitPrice, undefined);
+
+  setNow(START + 300_000);
+  bot.processPositionExits(START + 300_000);
+  assert.equal(trade.status, 'OPEN');
+  assert.equal(trade.settlementStatus, 'AWAITING_SETTLEMENT');
+  assert.match(trade.settlementError, /original-market resolution/);
 });

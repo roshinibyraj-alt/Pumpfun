@@ -1,18 +1,15 @@
 'use strict';
 
-const STRATEGY_VERSION = 'btc-5m-candle-signal-taker-v1';
+const STRATEGY_VERSION = 'btc-5m-candle-signal-taker-resolution-v2';
 const WINDOW_MS = 5 * 60 * 1000;
 const SIGNAL_SCAN_LEAD_MS = 10_000;
 const SIGNAL_COMPARE_LEAD_MS = 3_000;
 const MAX_REFERENCE_CANDLE_AGE_MS = 90_000;
 const ENTRY_SHARES = 500;
-const TAKE_PROFIT_LIMIT_PRICE = 0.99;
-const TAKE_PROFIT_PAYOUT_PER_SHARE = 1;
 const POLL_INTERVAL_MS = 500;
 const MAX_QUOTE_AGE_MS = 5_000;
 const DEFAULT_TAKER_FEE_RATE = 0.07;
 const DEFAULT_TAKER_FEE_EXPONENT = 1;
-const MAKER_REBATE_POOL_SHARE_RATE = 0.20;
 
 function quoteIsFresh(quote, now, maxAgeMs = MAX_QUOTE_AGE_MS) {
   return Number.isFinite(quote?.updatedAt)
@@ -48,11 +45,6 @@ function takerFeeAt(price, shares, parameters = {}) {
 
 function estimateTakerFee(price, shares, market) {
   return takerFeeAt(price, shares, feeParameters(market));
-}
-
-function estimateMakerRebate(price, shares, market) {
-  const feeEquivalent = estimateTakerFee(price, shares, market);
-  return feeEquivalent * MAKER_REBATE_POOL_SHARE_RATE;
 }
 
 function simulateTakerBuyFill(asks, requestedShares, market) {
@@ -162,18 +154,14 @@ module.exports = {
   SIGNAL_COMPARE_LEAD_MS,
   MAX_REFERENCE_CANDLE_AGE_MS,
   ENTRY_SHARES,
-  TAKE_PROFIT_LIMIT_PRICE,
-  TAKE_PROFIT_PAYOUT_PER_SHARE,
   POLL_INTERVAL_MS,
   MAX_QUOTE_AGE_MS,
   DEFAULT_TAKER_FEE_RATE,
   DEFAULT_TAKER_FEE_EXPONENT,
-  MAKER_REBATE_POOL_SHARE_RATE,
   quoteIsFresh,
   feeParameters,
   takerFeeAt,
   estimateTakerFee,
-  estimateMakerRebate,
   simulateTakerBuyFill,
   selectClosedCandleSignal,
   getWindowToScan,

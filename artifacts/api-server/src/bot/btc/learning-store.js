@@ -181,7 +181,7 @@ class LearningStore {
     );
   }
 
-  async getPaperAnalytics(limit = 1000, strategyVersion = 'btc-5m-candle-signal-taker-v1') {
+  async getPaperAnalytics(limit = 1000, strategyVersion = 'btc-5m-candle-signal-taker-resolution-v2') {
     const boundedLimit = Number.isInteger(limit) ? Math.min(1200, Math.max(50, limit)) : 1000;
     const [performance, equity] = await Promise.all([
       this.pool.query(
