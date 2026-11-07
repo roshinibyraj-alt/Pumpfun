@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080d16">
-  <title>BTC Limit Paper Bot</title>
+  <title>BTC Candle Signal Paper Bot</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -77,19 +77,19 @@
 <body>
 <main>
   <header class="top">
-    <div><div class="brand">BTC / 5 MIN · PAPER EXECUTION</div><div class="subbrand">Polymarket binary market · single fixed limit strategy</div></div>
-    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · RESTING LIMITS</span><span id="run" class="pill">Connecting</span></div>
+    <div><div class="brand">BTC / 5 MIN · PAPER EXECUTION</div><div class="subbrand">Polymarket binary market · single fixed candle-signal strategy</div></div>
+    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · TAKER ENTRIES</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">FIXED POLICY · NO REARM · PAPER ONLY</div><h1>Trigger once. Rest two limits.</h1><p id="heroStrategy">Connecting to live strategy state.</p></div>
-    <div class="window"><span>WINDOW CLOSES IN</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
+    <div><div class="eyebrow">FIXED POLICY · ONE ENTRY · PAPER ONLY</div><h1>Signal once. Confirm taker fill.</h1><p id="heroStrategy">Connecting to live strategy state.</p></div>
+    <div class="window"><span id="windowLabel">WINDOW CLOSES IN</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid overview-grid">
-    <article class="card"><div class="label">Latched side</div><div class="value" id="cheaperSide">—</div><div class="foot" id="cheaperMid">Waiting for the 120-second entry window</div></article>
-    <article class="card"><div class="label">Trigger midpoint</div><div class="value" id="expensiveSide">—</div><div class="foot" id="expensiveMid">Requires a fresh midpoint of $0.80+</div></article>
-    <article class="card"><div class="label">Paper order state</div><div class="value" id="nextOrder">NOT PLACED</div><div class="foot" id="scheduleHint">Monitoring begins at second 120</div></article>
-    <article class="card"><div class="label">Orders placed · this window</div><div class="value" id="restingSummary">0 / 2</div><div class="foot" id="restingHint">0 filled shares · no order submitted</div></article>
+    <article class="card"><div class="label">Signal side</div><div class="value" id="cheaperSide">—</div><div class="foot" id="cheaperMid">Waiting for the pre-open BTC comparison</div></article>
+    <article class="card"><div class="label">Previous 1m close</div><div class="value" id="expensiveSide">—</div><div class="foot" id="expensiveMid">Compared three seconds before open</div></article>
+    <article class="card"><div class="label">Paper entry state</div><div class="value" id="nextOrder">NOT PLACED</div><div class="foot" id="scheduleHint">Waiting for a valid pre-open signal</div></article>
+    <article class="card"><div class="label">Entry orders · this window</div><div class="value" id="restingSummary">0 / 1</div><div class="foot" id="restingHint">No entry order submitted</div></article>
     <article class="card"><div class="label">BTC spot</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
   </section>
   <details class="disclosure" id="marketDetails">
@@ -104,7 +104,7 @@
     <article class="card"><div class="label">Realized P&amp;L</div><div class="value" id="pnl">—</div><div class="foot" id="wins">No settled signals yet</div></article>
     <article class="card"><div class="label">Completed-window win rate</div><div class="value" id="windowWinRate">—</div><div class="foot"><span id="windowRateHint">Waiting for completed windows</span></div></article>
     <article class="card"><div class="label">Active window positions / buys</div><div class="value" id="openCount">—</div><div class="foot" id="resolutionHint">Older unsold positions await market resolution</div></article>
-     <article class="card"><div class="label">Maker rebate estimate · this window</div><div class="value" id="windowRebateEstimate">$0.0000</div><div class="foot" id="windowRebateHint">No maker shares filled yet</div></article>
+     <article class="card"><div class="label">Taker fees · this window</div><div class="value" id="windowTakerFees">$0.0000</div><div class="foot" id="windowTakerFeesHint">No taker fill confirmed yet</div></article>
   </section>
   <details class="disclosure" id="performanceDetails">
     <summary><span>Current strategy performance and equity</span><small id="analyticsStatus">Loading account history</small></summary>
@@ -131,14 +131,14 @@
   </section>
   </section>
   <section class="panel">
-     <div class="section-head"><h2>Limit order history</h2><small>Submitted status · exact-price fills · cancellations</small></div>
-     <div id="orders" class="table-wrap"><div class="empty">No limit orders yet.</div></div>
+     <div class="section-head"><h2>Order history</h2><small>Taker entries · resting take-profit limits · confirmations</small></div>
+     <div id="orders" class="table-wrap"><div class="empty">No entry or take-profit orders yet.</div></div>
   </section>
   <details class="disclosure" id="positionsDetails">
     <summary><span>Completed paper trades</span><small>Filled order lots · outcomes · P&amp;L</small></summary>
   <section class="panel">
      <div class="section-head"><h2>Paper trade history</h2><small>Executed shares only</small></div>
-     <div id="trades" class="table-wrap"><div class="empty">No filled limit buys yet.</div></div>
+     <div id="trades" class="table-wrap"><div class="empty">No confirmed taker entries yet.</div></div>
   </section>
   </details>
   <details class="disclosure" id="activityDetails">
@@ -153,7 +153,7 @@
   </section>
   </details>
   <details class="disclosure" id="strategyDetails">
-     <summary><span>Strategy rules</span><small>One trigger · two resting BUY limits</small></summary>
+     <summary><span>Strategy rules</span><small>Closed-candle signal · one taker entry</small></summary>
     <section class="panel">
       <p id="strategyOrderDetails">Loading strategy rules from live state.</p>
         <p id="strategyFillDetails">Loading paper fill model.</p>
@@ -171,24 +171,25 @@ const signed=(n,d=2)=>isNumeric(n)?(Number(n)>=0?'+':'')+money(n,d):'—';
 const pct=n=>isNumeric(n)?(Number(n)*100).toFixed(1)+'%':'—';
 const time=n=>isNumeric(n)?new Date(n).toLocaleTimeString('en-AU',{timeZone:'UTC',hour12:false}):'—';
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const resultLabel=t=>t.status==='OPEN'?(t.settlementStatus==='AWAITING_SETTLEMENT'?'AWAITING SETTLEMENT':'OPEN'):t.finalOutcome==='TAKE_PROFIT'?'TP · $1.00':t.finalOutcome==='STOP_LOSS'?'SL · $0.00':['WINDOW_PRICE_EXIT','WINDOW_RECOVERY_EXIT'].includes(t.finalOutcome)?'WINDOW · '+money(t.exitPrice):t.finalOutcome==='MARKET_RESOLUTION'?'RESOLVED · '+money(t.exitPrice):t.finalOutcome||'—';
+const resultLabel=t=>t.status==='OPEN'?(t.settlementStatus==='AWAITING_SETTLEMENT'?'AWAITING SETTLEMENT':'OPEN'):t.finalOutcome==='TAKE_PROFIT_LIMIT'?'TP · $1.00':t.finalOutcome==='MARKET_RESOLUTION'?'RESOLVED · '+money(t.exitPrice):t.finalOutcome||'—';
 function renderTrades(trades){
-  if(!trades?.length){$('trades').innerHTML='<div class="empty">No filled limit buys yet.</div>';return}
-   $('trades').innerHTML='<table><thead><tr><th>Filled at</th><th>Side</th><th>Entry type</th><th>Shares</th><th>Average fill</th><th>Limit price</th><th>Peak bid</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${safe(t.entryKind||'—')}</td><td>${Number(t.shares).toFixed(2)}</td><td>${money(t.entryPrice,4)}</td><td>${money(t.limitPrice,4)}</td><td>${money(t.peakBid,4)}<div class="muted">${time(t.peakBidAt)}</div></td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
+  if(!trades?.length){$('trades').innerHTML='<div class="empty">No confirmed taker entries yet.</div>';return}
+   $('trades').innerHTML='<table><thead><tr><th>Filled at</th><th>Side</th><th>Entry type</th><th>Shares</th><th>Average fill</th><th>Entry fees</th><th>TP limit</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${safe(t.entryKind||'—')}</td><td>${Number(t.shares).toFixed(2)}</td><td>${money(t.entryPrice,4)}</td><td>${money(t.fees,4)}</td><td>${money(t.takeProfitLimitPrice,2)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
 }
 function renderOrders(orders){
  const sorted=(orders||[]).slice().sort((a,b)=>Number(b.placedAt)-Number(a.placedAt));
-   if(!sorted.length){$('orders').innerHTML='<div class="empty">No limit orders in this window.</div>';return}
-    $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Side</th><th>Type</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Average fill</th><th>Maker fee · rebate estimate</th><th>Order status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>{
+   if(!sorted.length){$('orders').innerHTML='<div class="empty">No entry or take-profit orders yet.</div>';return}
+    $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Action</th><th>Side</th><th>Type</th><th>Price</th><th>Requested</th><th>Filled</th><th>Average fill</th><th>Fees / rebate</th><th>Order status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>{
       const filled=Number(o.filledShares||0),remaining=Number(o.remainingShares||0),raw=String(o.status||'').toUpperCase();
-      const skipped=raw.startsWith('SKIPPED_');
-      const cancelled=raw==='CANCELLED'||raw==='CANCELLED_WINDOW_END';
-      const partialComplete=raw==='FILLED'&&Number(o.cancelledRemainderShares||0)>0&&filled<Number(o.requestedShares||0);
-      const status=skipped?'NOT PLACED · '+(o.skipReason||raw.replaceAll('_',' ')):cancelled?'CANCELLED':raw==='FILLED'||(remaining===0&&filled>=Number(o.requestedShares||0))?'FILLED':filled>0&&remaining>0?'PARTIAL':raw==='OPEN'||raw==='PARTIALLY_FILLED'?'SUBMITTED / OPEN':raw||'SUBMITTED';
-      const displayedStatus=partialComplete?'FILLED · PARTIAL COMPLETE':status;
-      const stateClass=skipped?'not-placed':cancelled?'cancelled':status==='PARTIAL'?'partial':status==='FILLED'?'filled':'open';
-      const makerInfo=`$0 fee${filled>0?` · ${money(o.estimatedMakerRebate||0,4)} est. rebate<div class="muted">fee-equivalent ${money(o.rebateFeeEquivalent||0,4)}</div>`:' · no fill yet'}`;
-      return `<tr><td>${time(o.placedAt)}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.orderType||'LIMIT')}</td><td>${money(o.limitPrice,2)}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${filled.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${remaining.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${money(o.averageFillPrice,4)}</td><td>${makerInfo}</td><td><span class="order-state ${stateClass}">${safe(displayedStatus)}</span>${Number(o.cancelledRemainderShares||0)>0?`<div class="muted">${Number(o.cancelledRemainderShares).toLocaleString(undefined,{maximumFractionDigits:2})} unfilled shares cancelled after first fill</div>`:''}</td></tr>`;
+      const cancelled=raw.startsWith('CANCELLED')||raw==='EXPIRED_WINDOW_END';
+      const pending=raw==='PENDING_CONFIRMATION';
+      const resting=raw==='PENDING';
+      const partial=filled>0&&filled<Number(o.requestedShares||0);
+      const status=raw==='FILLED'?'FILLED':cancelled?'CANCELLED':pending?'PENDING CONFIRMATION':resting?'RESTING':partial?'PARTIAL · REMAINDER CANCELLED':raw.replaceAll('_',' ');
+      const stateClass=cancelled?'cancelled':partial?'partial':raw==='FILLED'?'filled':pending?'submitted':'not-placed';
+      const price=o.action==='SELL'?money(o.limitPrice,2):money(o.averageFillPrice,4);
+      const fees=o.action==='SELL'?`${money(o.estimatedMakerRebate||0,4)} estimated rebate`:money(o.fees,4)+' taker fee';
+      return `<tr><td>${time(o.placedAt)}</td><td>${safe(o.action||'BUY')}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.orderType||'—')}</td><td>${price}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${filled.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${money(o.averageFillPrice??o.fillPrice,4)}</td><td>${fees}</td><td><span class="order-state ${stateClass}">${safe(status)}</span>${Number(o.cancelledRemainderShares||0)>0?`<div class="muted">${Number(o.cancelledRemainderShares).toLocaleString(undefined,{maximumFractionDigits:2})} unfilled shares cancelled</div>`:''}</td></tr>`;
     }).join('')+'</tbody></table>';
 }
 function renderEvents(events){
@@ -200,7 +201,7 @@ async function pollLearning(){
   if(!response.ok)throw Error('Learning API HTTP '+response.status);
   const state=await response.json();
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
-     $('learningSummary').innerHTML='<div class="trade"><span>Fixed limit strategy</span><span class="muted">From 120s, latch the first side with a fresh midpoint at $0.80+ and place 1,000 at $0.40 plus 2,000 at $0.60; no automatic tuning.</span></div><div class="trade"><span>Stored data</span><span class="muted">Market samples and account analytics are logged for review; they do not alter order placement.</span></div>';
+     $('learningSummary').innerHTML='<div class="trade"><span>Fixed candle-signal strategy</span><span class="muted">Compare BTC with the previous closed 1-minute candle three seconds before each 5-minute window. One 500-share taker entry is confirmed from the next tick’s visible asks; no re-entry.</span></div><div class="trade"><span>Stored data</span><span class="muted">Samples and account analytics are saved for review; they do not alter order placement. Previous strategy history remains archived separately.</span></div>';
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -251,15 +252,13 @@ function renderAnalytics(data){
   $('analyticsStatusDetail').textContent=`A window counts after all its paper positions close · ${summary}`;
 }
 function renderStrategy(state){
-  const strategy=state.strategy||{},ladder=strategy.limitOrderLadder||[];
-  const seconds=Number(strategy.entryTriggerSeconds??120),threshold=money(strategy.entryTriggerMidpoint??0.8,2);
-  const orders=ladder.map(item=>`${Number(item.shares||0).toLocaleString()} shares at ${money(item.price,2)}`).join(' and ');
-  $('heroStrategy').textContent=`From second ${seconds}, the first fresh UP or DOWN midpoint at ${threshold} is latched. The strategy places exactly two BUY limits on that side: ${orders||'waiting for ladder data'}. No live orders are sent.`;
+   const strategy=state.strategy||{};
+   $('heroStrategy').textContent=`At ${Number(strategy.signalCompareLeadMs??3000)/1000} seconds before each BTC 5-minute window opens, compare the current BTC price with the previous closed 1-minute candle: higher selects UP; equal or lower selects DOWN. At open, submit one ${Number(strategy.sharesPerTrade??500)}-share taker buy.`;
   $('strategyOrderDetails').textContent=strategy.orderModel||'Strategy rules are not available.';
   $('strategyFillDetails').textContent=strategy.fillModel||'Paper fill model is not available.';
   $('strategyExitDetails').textContent=strategy.exitModel||'Exit and settlement model is not available.';
-   $('strategyFeeDetails').textContent=`Maker fee: ${pct(strategy.makerFeeRate)}. Estimated crypto rebate uses fee-equivalent = shares × 7% × price × (1 − price), then the 20% crypto rebate-pool share. Polymarket pays rebates daily, with each maker’s actual amount determined by its share of that market’s fee-equivalent and pool. The dashboard estimate is not a confirmed payout and is excluded from paper cash/P&L. A live marketable limit can take liquidity and incur taker fees. Exit fee model uses taker rate ${pct(strategy.takerFeeRate)}.`;
-  $('strategyBadge').textContent=`${safe(state.mode||'PAPER ONLY')} · ${safe(strategy.orderType||'LIMIT')} ORDERS`;
+    $('strategyFeeDetails').textContent=`Taker entry fee uses the market’s fee schedule when available (fallback ${pct(strategy.takerFeeRate)}). The $0.99 resting take-profit has no modeled fee; estimated maker rebate is shown and included in paper P&L, but is not guaranteed.`;
+   $('strategyBadge').textContent=`${safe(state.mode||'PAPER ONLY')} · ${safe(strategy.orderType||'TAKER')} ENTRIES`;
 }
 async function pollAnalytics(){
  try{
@@ -271,15 +270,9 @@ async function pollAnalytics(){
 }
 function renderMarket(state){
   const selection=state.entrySideSelection||{},schedule=state.orderSchedule||{};
-  const trigger=Number(state.strategy?.entryTriggerMidpoint??schedule.triggerPrice??0.8);
  for(const side of ['UP','DOWN']){
   const prefix=side.toLowerCase(),quote=state.quotes?.[side]||{};
-    const midpoint=Number(quote.midpoint);
-    const role=selection.status==='TRIGGERED'&&selection.selectedSide===side
-      ?'TRIGGERED SIDE'
-       :schedule.status==='MONITORING_TRIGGER'&&Number.isFinite(midpoint)&&midpoint>=trigger
-        ?'TRIGGER CANDIDATE'
-        :'MONITORING';
+     const role=selection.selectedSide===side?'SIGNAL SIDE':quote.status==='ERROR'?'BOOK ERROR':'MONITORING';
   $(prefix+'Role').textContent=role;
   $(prefix+'Midpoint').textContent=money(quote.midpoint,4);
   $(prefix+'Bid').textContent=money(quote.bestBid,4);
@@ -287,62 +280,46 @@ function renderMarket(state){
   const age=Number.isFinite(Number(quote.updatedAt))?Math.max(0,Math.round((Number(state.now)-Number(quote.updatedAt))/1000))+'s':'—';
   $(prefix+'Age').textContent=age;
  }
-  const triggeredSide=selection.selectedSide;
-  $('cheaperSide').textContent=triggeredSide||'WAITING';
-  $('cheaperMid').textContent=triggeredSide
-    ?`Latched ${triggeredSide} after the midpoint trigger`
-    :`UP ${money(selection.prices?.UP,4)} · DOWN ${money(selection.prices?.DOWN,4)}`;
-  $('expensiveSide').textContent=money(selection.triggeringPrice??schedule.triggerPrice,2);
-   $('expensiveMid').textContent=triggeredSide
-    ?`Triggered ${time(selection.triggeredAt)} UTC`
-     :`Threshold $${trigger.toFixed(2)} · from second ${Number(state.strategy?.entryTriggerSeconds??120)}`;
+   const signalSide=selection.selectedSide||schedule.signalSide;
+   $('cheaperSide').textContent=signalSide||'WAITING';
+   $('cheaperMid').textContent=signalSide
+     ?`BTC ${money(selection.signalPrice??schedule.signalPrice,2)} · ${selection.rule?.replaceAll('_',' ').toLowerCase()||'signal latched'}`
+     :'Waiting for the final 3-second BTC comparison';
+   $('expensiveSide').textContent=money(selection.referenceClose??schedule.referenceClose,2);
+   $('expensiveMid').textContent=selection.referenceCandleAt
+     ?`Closed candle · ${time(Number(selection.referenceCandleAt)+60_000)} UTC`
+     :'Previous completed 1-minute candle close';
 }
 function renderSchedule(state){
  const schedule=state.orderSchedule||{};
-   const allOrders=state.limitOrders||[];
-   const windowOrders=allOrders.filter(order=>!state.window?.start||Number(order.windowStart)===Number(state.window.start));
-   const placedOrders=windowOrders.filter(order=>!String(order.status||'').toUpperCase().startsWith('SKIPPED_'));
-   const open=windowOrders.filter(order=>['OPEN','PARTIALLY_FILLED'].includes(String(order.status).toUpperCase())&&Number(order.remainingShares)>0).length;
-   const filled=windowOrders.reduce((sum,order)=>sum+Number(order.filledShares||0),0);
-   const allCancelled=placedOrders.length>0&&placedOrders.every(order=>['CANCELLED','CANCELLED_WINDOW_END'].includes(String(order.status).toUpperCase()))&&filled===0;
-    const allFilled=placedOrders.length>0&&placedOrders.every(order=>String(order.status).toUpperCase()==='FILLED');
-   const anyFilled=windowOrders.some(order=>Number(order.filledShares||0)>0);
-   const anyPartial=windowOrders.some(order=>Number(order.filledShares||0)>0&&Number(order.remainingShares||0)>0);
-   if(allCancelled){
-    $('nextOrder').textContent='CANCELLED';
-    $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} latched · unfilled remainder cancelled`;
-   }else if(allFilled){
-    $('nextOrder').textContent='FILLED';
-     $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} · all rungs complete; actual shares shown below`;
-   }else if(anyPartial||anyFilled){
-    $('nextOrder').textContent='PARTIAL';
-    $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} · ${anyPartial?'some fills; remainder resting':'some fills; other shares cancelled or skipped'}`;
-   }else if(open>0){
-    $('nextOrder').textContent='SUBMITTED / OPEN';
-    $('scheduleHint').textContent=`${safe(schedule.triggerSide||windowOrders[0]?.side||'—')} · ${open} resting limit${open===1?'':'s'}`;
-  }else if(windowOrders.length>0&&placedOrders.length===0){
-    $('nextOrder').textContent='SKIPPED';
-    $('scheduleHint').textContent='No orders were submitted · see order history for the exact reason';
-  }else if(schedule.triggered){
-    $('nextOrder').textContent='NOT PLACED';
-    $('scheduleHint').textContent=`${safe(schedule.triggerSide||'—')} latched · no limit order record yet`;
-  }else if(schedule.status==='WAITING_FOR_DELAY'){
-    $('nextOrder').textContent='NOT PLACED';
-    $('scheduleHint').textContent=`Waiting for second ${Number(state.strategy?.entryTriggerSeconds??120)} to begin monitoring`;
-  }else if(schedule.status==='MONITORING_TRIGGER'){
-    $('nextOrder').textContent='NOT PLACED';
-    $('scheduleHint').textContent='Watching fresh UP and DOWN midpoints for the first $0.80+ trigger';
+  const entryOrders=(state.entryOrders||[]).filter(order=>!state.window?.start||Number(order.windowStart)===Number(state.window.start));
+  const takeProfitOrders=(state.takeProfitOrders||[]).filter(order=>!state.window?.start||Number(order.windowStart)===Number(state.window.start));
+  const entry=entryOrders[0],filled=Number(entry?.filledShares||0);
+  const pending=entry?.status==='PENDING_CONFIRMATION';
+  if(pending){
+   $('nextOrder').textContent='CONFIRMING';
+   $('scheduleHint').textContent=`${safe(entry.side)} · checking the next tick’s visible asks`;
+  }else if(filled>0){
+   $('nextOrder').textContent=entry.status==='FILLED'?'FILLED':'PARTIAL';
+   $('scheduleHint').textContent=`${safe(entry.side)} · ${filled.toLocaleString()} shares at ${money(entry.averageFillPrice,4)} average`;
+  }else if(entry){
+   $('nextOrder').textContent=entry.status.startsWith('CANCELLED')?'NOT FILLED':'SUBMITTED';
+   $('scheduleHint').textContent=entry.cancelReason||entry.status.replaceAll('_',' ').toLowerCase();
+  }else if(schedule.signalSide){
+   $('nextOrder').textContent='SIGNAL LATCHED';
+   $('scheduleHint').textContent=`${safe(schedule.signalSide)} · entry will be submitted at window open`;
   }else{
-    $('nextOrder').textContent='NOT PLACED';
-    $('scheduleHint').textContent='No qualifying trigger or no order submitted this window';
+   $('nextOrder').textContent='NOT PLACED';
+   $('scheduleHint').textContent=schedule.status==='MISSED_PREOPEN_SIGNAL'
+     ?'No valid signal was captured before this window opened'
+     :'Waiting for the final 3-second BTC comparison';
   }
-   $('restingSummary').textContent=`${placedOrders.length} / 2`;
-   $('restingHint').textContent=`${open} open · ${filled.toLocaleString(undefined,{maximumFractionDigits:2})} filled shares · ${windowOrders.length-placedOrders.length} skipped`;
-    const estimatedRebate=windowOrders.reduce((sum,order)=>sum+Number(order.estimatedMakerRebate||0),0);
-    $('windowRebateEstimate').textContent=money(estimatedRebate,4);
-    $('windowRebateHint').textContent=estimatedRebate>0
-      ?'Estimate from actual fills · daily payout varies by market'
-      :'No maker shares filled yet';
+  $('restingSummary').textContent=`${entryOrders.length} / 1`;
+  const activeTp=takeProfitOrders.filter(order=>order.status==='PENDING').length;
+  $('restingHint').textContent=`${filled.toLocaleString(undefined,{maximumFractionDigits:2})} shares confirmed · ${activeTp} active $0.99 take-profit`;
+  const takerFees=entryOrders.reduce((sum,order)=>sum+Number(order.fees||0),0);
+  $('windowTakerFees').textContent=money(takerFees,4);
+  $('windowTakerFeesHint').textContent=filled>0?'Fee charged on the confirmed taker fill':'No taker fill confirmed yet';
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
@@ -372,11 +349,14 @@ function renderPositions(positions){
    const s=await response.json(),account=s.paperAccount||{};window.latestStrategyState=s;
   $('error').style.display=s.error?'block':'none';$('error').textContent=s.error||'';
   $('run').innerHTML=`<i class="dot"></i>${s.running?'SCANNER RUNNING':'SCANNER STOPPED'}`;
-  $('remaining').textContent=s.window?`${Math.ceil(s.window.secondsRemaining)} seconds`:'—';
+  $('windowLabel').textContent=s.window?.secondsUntilOpen>0?'WINDOW OPENS IN':'WINDOW CLOSES IN';
+  $('remaining').textContent=s.window
+    ?`${Math.ceil(s.window.secondsUntilOpen>0?s.window.secondsUntilOpen:s.window.secondsRemaining)} seconds`
+    :'—';
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
   $('spot').textContent=money(s.spotPrice,2);
   $('gap').textContent=isNumeric(s.priceGap)?`Difference from reference ${money(s.priceGap,2)}`:'BTC reference difference —';
-     renderStrategy(s);renderMarket(s);renderSchedule(s);renderPositions(account.positions);renderPendingBySide(s.limitOrders,s.window?.start);
+     renderStrategy(s);renderMarket(s);renderSchedule(s);renderPositions(account.positions);renderPendingBySide(s.entryOrders,s.window?.start);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
     $('startingCash').textContent=money(account.startingCash);
   $('pnl').className='value '+(Number(account.realizedPnl)>=0?'pnl pos':'pnl neg');
@@ -388,7 +368,7 @@ function renderPositions(positions){
   $('feedState').textContent=s.priceFeed?.status||'—';
   $('updated').textContent=s.statusReason|| (s.lastUpdateAt?'Updated '+time(s.lastUpdateAt):'Waiting for first scan');
    $('feedStatus').textContent=s.priceFeed?`BTC reference feed · ${s.priceFeed.history?.status||'connected'}`:'Awaiting BTC reference feed';
-    renderOrders(s.limitOrders);renderTrades(s.trades);renderEvents(s.events);
+     renderOrders([...(s.entryOrders||[]),...(s.takeProfitOrders||[])]);renderTrades(s.trades);renderEvents(s.events);
  }catch(error){$('error').style.display='block';$('error').textContent=error.message;$('run').textContent='API unavailable'}
  setTimeout(poll,1000);
 }

@@ -181,7 +181,7 @@ class LearningStore {
     );
   }
 
-  async getPaperAnalytics(limit = 1000, strategyVersion = 'btc-midpoint-ladder-maker-v2') {
+  async getPaperAnalytics(limit = 1000, strategyVersion = 'btc-5m-candle-signal-taker-v1') {
     const boundedLimit = Number.isInteger(limit) ? Math.min(1200, Math.max(50, limit)) : 1000;
     const [performance, equity] = await Promise.all([
       this.pool.query(
@@ -247,7 +247,7 @@ class LearningStore {
     ]);
     return {
       strategyVersion,
-      mode: 'fixed-limit-strategy-logging-only',
+      mode: 'fixed-candle-signal-taker-logging-only',
       tuningEnabled: false,
       sampleCount: Number(samples.rows[0]?.sample_count ?? 0),
       completedWindows: Number(windows.rows[0]?.completed_windows ?? 0),

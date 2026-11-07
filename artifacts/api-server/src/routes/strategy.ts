@@ -9,35 +9,38 @@ const { ProbabilityBot } = require("./bot/btc/probability-bot.js") as {
     snapshot: () => unknown;
   };
 };
-const { STRATEGY_VERSION, ENTRY_TRIGGER_SECONDS, ENTRY_TRIGGER_PRICE, LIMIT_ORDER_LADDER } = require(
-  "./bot/btc/midpoint-limit-strategy.js",
+const {
+  STRATEGY_VERSION,
+  SIGNAL_SCAN_LEAD_MS,
+  SIGNAL_COMPARE_LEAD_MS,
+  ENTRY_SHARES,
+  TAKE_PROFIT_LIMIT_PRICE,
+  TAKE_PROFIT_PAYOUT_PER_SHARE,
+  POLL_INTERVAL_MS,
+} = require(
+  "./bot/btc/signal-taker-strategy.js",
 ) as {
   STRATEGY_VERSION: string;
-  ENTRY_TRIGGER_SECONDS: number;
-  ENTRY_TRIGGER_PRICE: number;
-  LIMIT_ORDER_LADDER: Array<{ slot: number; price: number; shares: number }>;
+  SIGNAL_SCAN_LEAD_MS: number;
+  SIGNAL_COMPARE_LEAD_MS: number;
+  ENTRY_SHARES: number;
+  TAKE_PROFIT_LIMIT_PRICE: number;
+  TAKE_PROFIT_PAYOUT_PER_SHARE: number;
+  POLL_INTERVAL_MS: number;
 };
 const { LearningStore } = require("./bot/btc/learning-store.js") as {
   LearningStore: new (pool: unknown) => {
     initialize: () => Promise<void>;
     getLearningSummary: (strategyVersion: string) => Promise<Record<string, unknown>>;
     getPaperAnalytics: (limit?: number, strategyVersion?: string) => Promise<unknown>;
-    resetHistoryOnce: (requestId: string) => Promise<boolean>;
-    clearHistoryResetMarkers: () => Promise<void>;
   };
 };
 
 const router: IRouter = Router();
 const learningStore = new LearningStore(pool);
 await learningStore.initialize();
-const historyResetRequestId = process.env.BTC_HISTORY_RESET_REQUEST_ID?.trim() || null;
-if (historyResetRequestId) {
-  await learningStore.resetHistoryOnce(historyResetRequestId);
-} else {
-  await learningStore.clearHistoryResetMarkers();
-}
 const bot = new ProbabilityBot({ learningStore });
-if (!historyResetRequestId) bot.start();
+bot.start();
 
 router.get("/strategy/state", (_req, res) => {
   res.set("Cache-Control", "no-store").json(bot.snapshot());
@@ -48,10 +51,16 @@ router.get("/strategy/learning", async (_req, res) => {
   res.set("Cache-Control", "no-store").json({
     ...summary,
     settings: {
-      orderType: "RESTING_LIMIT",
-      entryTriggerSeconds: ENTRY_TRIGGER_SECONDS,
-      entryTriggerMidpoint: ENTRY_TRIGGER_PRICE,
-      limitOrderLadder: LIMIT_ORDER_LADDER,
+      timeframe: "5m",
+      orderType: "TAKER",
+      signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
+      signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
+      sharesPerTrade: ENTRY_SHARES,
+      pollIntervalMs: POLL_INTERVAL_MS,
+      takeProfitOrderType: "LIMIT",
+      takeProfitLimitPrice: TAKE_PROFIT_LIMIT_PRICE,
+      takeProfitPayoutPerShare: TAKE_PROFIT_PAYOUT_PER_SHARE,
+      stopLoss: false,
     },
   });
 });

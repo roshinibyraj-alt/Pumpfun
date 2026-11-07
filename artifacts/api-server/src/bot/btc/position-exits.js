@@ -1,13 +1,11 @@
 'use strict';
 
 const TAKE_PROFIT_BID = 0.99;
-const STOP_LOSS_BID = 0.01;
 const RECOVERY_INTERVAL_MS = 10_000;
 
 function thresholdExit(bid) {
   if (!Number.isFinite(bid) || bid < 0 || bid > 1) return null;
   if (bid >= TAKE_PROFIT_BID) return { price: 1, outcome: 'TAKE_PROFIT' };
-  if (bid <= STOP_LOSS_BID) return { price: 0, outcome: 'STOP_LOSS' };
   return null;
 }
 
@@ -55,7 +53,7 @@ async function recoverExpiredPositions(bot, now) {
       if (payout != null) {
         bot.closeTrade(trade, payout, trade.shares * payout, 'MARKET_RESOLUTION',
           'Original market confirmed closed and resolved; redeemed the exact outcome-token payout (no CLOB sale fee).',
-          bot.now(), payout);
+          bot.now(), payout, 0, 'SETTLEMENT');
         continue;
       }
       const checkedAt = bot.now();
@@ -74,4 +72,4 @@ async function recoverExpiredPositions(bot, now) {
   }));
 }
 
-module.exports = { TAKE_PROFIT_BID, STOP_LOSS_BID, thresholdExit, resolvedPayout, recoverExpiredPositions };
+module.exports = { TAKE_PROFIT_BID, thresholdExit, resolvedPayout, recoverExpiredPositions };
