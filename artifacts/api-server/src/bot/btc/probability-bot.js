@@ -10,6 +10,7 @@ const {
   SIGNAL_SCAN_LEAD_MS,
   SIGNAL_COMPARE_LEAD_MS,
   ENTRY_SHARES,
+  VARIANT_PROFIT_TARGET,
   POLL_INTERVAL_MS,
   MAX_QUOTE_AGE_MS,
   quoteIsFresh,
@@ -61,7 +62,8 @@ class ProbabilityBot {
     this.referencePrice = null;
     this.latestPrice = null;
     this.priceAt = null;
-    this.cash = STARTING_CASH;
+    this.startingCash = STARTING_CASH * 2;
+    this.cash = this.startingCash;
     this.trades = [];
     this.settledCount = 0;
     this.settledWins = 0;
@@ -93,7 +95,116 @@ class ProbabilityBot {
     this.statusReason = 'Starting BTC market and order-book feeds.';
     this.lastUpdateAt = null;
     this.startedAt = this.now();
+    this.activeVariantId = 'signal';
+    this.variants = {
+      signal: {
+        id: 'signal', name: 'With signal', mode: 'SIGNAL',
+        startingCash: STARTING_CASH, cash: STARTING_CASH,
+        shareSize: ENTRY_SHARES, cycleNumber: 1, cycleProfit: 0,
+        active: true, settledTrades: 0, wins: 0, losses: 0, totalTrades: 0,
+        equityCurve: [{ ts: this.startedAt, equity: STARTING_CASH }],
+      },
+      against: {
+        id: 'against', name: 'Against signal', mode: 'AGAINST_SIGNAL',
+        startingCash: STARTING_CASH, cash: STARTING_CASH,
+        shareSize: ENTRY_SHARES, cycleNumber: 0, cycleProfit: 0,
+        active: false, settledTrades: 0, wins: 0, losses: 0, totalTrades: 0,
+        equityCurve: [{ ts: this.startedAt, equity: STARTING_CASH }],
+      },
+    };
     this.priceFeed.start();
+  }
+
+  tradeSideFor(signalSide, variantId = this.activeVariantId) {
+    const variant = this.variants[variantId];
+    return variant?.mode === 'SIGNAL' ? signalSide : oppositeSide(signalSide);
+  }
+
+  activateNextVariant(currentVariant, now) {
+    if (currentVariant.id !== this.activeVariantId
+      || currentVariant.cycleProfit < VARIANT_PROFIT_TARGET) return false;
+    for (const order of this.entryOrders) {
+      if (order.variantId !== currentVariant.id || order.status !== 'PENDING_CONFIRMATION') continue;
+      order.status = 'CANCELLED_VARIANT_PAUSED';
+      order.remainingShares = 0;
+      order.cancelledRemainderShares = order.requestedShares;
+      order.cancelReason = 'The strategy version reached its profit target and was paused before fill confirmation.';
+      this.log('PAPER_ENTRY_CANCELLED_VARIANT_PAUSED', {
+        orderId: order.id, variantId: currentVariant.id,
+        cancelledShares: order.cancelledRemainderShares,
+      }, order.windowStart);
+    }
+    const nextId = currentVariant.id === 'signal' ? 'against' : 'signal';
+    currentVariant.active = false;
+    currentVariant.shareSize = ENTRY_SHARES;
+    const next = this.variants[nextId];
+    next.cycleNumber += 1;
+    next.cycleProfit = 0;
+    next.shareSize = nextId === 'against' ? ENTRY_SHARES * 2 : ENTRY_SHARES;
+    next.active = true;
+    next.activatedAt = now;
+    this.activeVariantId = nextId;
+    this.statusReason = `${currentVariant.name} reached its $${VARIANT_PROFIT_TARGET} realized-profit target. New entries switched to ${next.name} at ${next.shareSize} shares.`;
+    this.log('PAPER_VARIANT_TARGET_REACHED', {
+      completedVariantId: currentVariant.id,
+      completedCycle: currentVariant.cycleNumber,
+      cycleProfit: currentVariant.cycleProfit,
+      targetProfit: VARIANT_PROFIT_TARGET,
+      activatedVariantId: next.id,
+      activatedCycle: next.cycleNumber,
+      activatedShareSize: next.shareSize,
+    }, this.market?.start);
+    return true;
+  }
+
+  snapshotVariants(now = this.now()) {
+    return Object.fromEntries(Object.entries(this.variants).map(([id, variant]) => {
+      const trades = this.trades.filter(trade => trade.variantId === id);
+      const openTrades = trades.filter(trade => trade.status === 'OPEN');
+      const openCost = openTrades.reduce((sum, trade) => sum + trade.totalCost, 0);
+      const realizedPnl = variant.cash + openCost - variant.startingCash;
+      let markedValue = 0;
+      let marksFresh = true;
+      for (const trade of openTrades) {
+        const quote = trade.marketId === this.market?.id ? this.quotes[trade.side] : null;
+        const bid = Number(quote?.bestBid);
+        const fresh = Number.isFinite(bid) && Number.isFinite(quote?.updatedAt)
+          && now >= quote.updatedAt && now - quote.updatedAt <= EXIT_QUOTE_MAX_AGE_MS;
+        if (!fresh) {
+          marksFresh = false;
+          break;
+        }
+        markedValue += trade.shares * bid - estimateTakerFee(bid, trade.shares);
+      }
+      const settledTrades = variant.settledTrades;
+      return [id, {
+        id,
+        name: variant.name,
+        mode: variant.mode,
+        active: variant.active,
+        status: variant.active ? 'ACTIVE' : 'PAUSED',
+        startingCash: variant.startingCash,
+        cash: variant.cash,
+        realizedPnl,
+        equity: marksFresh ? variant.cash + markedValue : null,
+        unrealizedPnl: marksFresh ? markedValue - openCost : null,
+        markedValue: marksFresh ? markedValue : null,
+        shareSize: variant.shareSize,
+        baseShareSize: ENTRY_SHARES,
+        targetProfit: VARIANT_PROFIT_TARGET,
+        cycleNumber: variant.cycleNumber,
+        cycleProfit: variant.cycleProfit,
+        remainingToTarget: Math.max(0, VARIANT_PROFIT_TARGET - variant.cycleProfit),
+        totalTrades: variant.totalTrades,
+        settledTrades,
+        wins: variant.wins,
+        losses: variant.losses,
+        winRate: settledTrades ? variant.wins / settledTrades * 100 : 0,
+        openPositions: openTrades.length,
+        trades,
+        equityCurve: variant.equityCurve,
+      }];
+    }));
   }
 
   log(event, details = {}, windowStart = this.market?.start) {
@@ -124,6 +235,8 @@ class ProbabilityBot {
       secondsSinceOpen: Math.max(0, (now - this.market.start) / 1000),
       secondsRemaining: Math.max(0, (this.market.end - now) / 1000),
       orderStrategy: STRATEGY_VERSION,
+      activeVariantId: this.activeVariantId,
+      activeVariantMode: this.variants[this.activeVariantId]?.mode,
       entrySideSelection: this.entrySideSelection,
       orderSchedule: this.orderSchedule(now),
       referencePrice: this.entrySignal?.referenceClose ?? this.referencePrice,
@@ -245,7 +358,7 @@ class ProbabilityBot {
       windowStart: start,
       signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
       signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
-      shares: ENTRY_SHARES,
+      shares: this.variants[this.activeVariantId]?.shareSize ?? ENTRY_SHARES,
       entryOrderType: 'TAKER',
       startedAfterOpen: now >= start,
     });
@@ -276,7 +389,9 @@ class ProbabilityBot {
           this.log('PAPER_CANDLE_SIGNAL_LATCHED', {
             side: signal.selectedSide,
             signalSide: signal.selectedSide,
-            tradeSide: oppositeSide(signal.selectedSide),
+            tradeSide: this.tradeSideFor(signal.selectedSide),
+            activeVariantId: this.activeVariantId,
+            variantMode: this.variants[this.activeVariantId]?.mode,
             signalPrice: signal.signalPrice,
             referenceClose: signal.referenceClose,
             signalAt: signal.signalAt,
@@ -320,14 +435,19 @@ class ProbabilityBot {
     }
 
     const signalSide = this.entrySignal.selectedSide;
-    const side = oppositeSide(signalSide);
+    const variant = this.variants[this.activeVariantId];
+    const side = this.tradeSideFor(signalSide, variant.id);
     if (!side) {
       this.statusReason = 'The latched BTC signal has no valid opposite outcome side; no entry was submitted.';
       return;
     }
-    const id = `paper-taker-${this.market.start}-${++this.orderSequence}`;
+    const id = `paper-taker-${this.market.start}-${variant.id}-${++this.orderSequence}`;
     const order = {
       id,
+      variantId: variant.id,
+      variantName: variant.name,
+      cycleNumber: variant.cycleNumber,
+      variantMode: variant.mode,
       marketId: this.market.id,
       tokenId: this.market.tokens?.[side] ?? null,
       windowStart: this.market.start,
@@ -338,9 +458,9 @@ class ProbabilityBot {
       action: 'BUY',
       orderType: 'TAKER',
       executionRole: 'TAKER',
-      requestedShares: ENTRY_SHARES,
+      requestedShares: variant.shareSize,
       filledShares: 0,
-      remainingShares: ENTRY_SHARES,
+      remainingShares: variant.shareSize,
       cancelledRemainderShares: 0,
       averageFillPrice: null,
       filledCost: 0,
@@ -355,13 +475,19 @@ class ProbabilityBot {
     };
     this.entryOrders.unshift(order);
     this.entryOrders.length = Math.min(this.entryOrders.length, 200);
-    this.entrySideSelection = { ...this.entrySignal, status: 'ENTRY_SUBMITTED', tradeSide: side };
-    this.statusReason = `${signalSide} signal latched; submitted one paper taker buy on the opposite ${side} side for ${ENTRY_SHARES} shares. Fill price and actual quantity will be confirmed from the next tick's visible ask depth.`;
+    this.entrySideSelection = {
+      ...this.entrySignal, status: 'ENTRY_SUBMITTED', tradeSide: side,
+      activeVariantId: variant.id, variantMode: variant.mode,
+    };
+    this.statusReason = `${signalSide} signal latched; ${variant.name} submitted one paper taker buy on ${side} for ${variant.shareSize} shares. Fill price and actual quantity will be confirmed from the next tick's visible ask depth.`;
     this.log('PAPER_TAKER_BUY_SUBMITTED', {
       orderId: id,
       side,
       signalSide,
-      requestedShares: ENTRY_SHARES,
+      variantId: variant.id,
+      variantMode: variant.mode,
+      cycleNumber: variant.cycleNumber,
+      requestedShares: variant.shareSize,
       confirmationDueTick: order.confirmationDueTick,
       fillModel: order.fillModel,
       signalPrice: this.entrySignal.signalPrice,
@@ -402,7 +528,8 @@ class ProbabilityBot {
         }, order.windowStart);
         continue;
       }
-      if (fill.totalCost > this.cash + 1e-8) {
+      const variant = this.variants[order.variantId];
+      if (!variant || fill.totalCost > variant.cash + 1e-8) {
         order.status = 'CANCELLED_INSUFFICIENT_CASH';
         order.cancelledRemainderShares = order.requestedShares;
         order.remainingShares = 0;
@@ -413,7 +540,7 @@ class ProbabilityBot {
           side: order.side,
           requestedShares: order.requestedShares,
           confirmedCost: fill.totalCost,
-          availableCash: this.cash,
+          availableCash: variant?.cash ?? 0,
           reason: order.cancelReason,
         }, order.windowStart);
         continue;
@@ -434,6 +561,9 @@ class ProbabilityBot {
       const trade = {
         id: `paper-${order.id}`,
         orderId: order.id,
+        variantId: order.variantId,
+        variantName: order.variantName,
+        cycleNumber: order.cycleNumber,
         marketId: order.marketId,
         tokenId: order.tokenId,
         slug: this.market.slug,
@@ -463,10 +593,13 @@ class ProbabilityBot {
       };
       this.trades.unshift(trade);
       const windowResult = this.windowResults.get(order.windowStart)
-        ?? { entryCount: 0, settledCount: 0, netPnl: 0 };
+        ?? { entryCount: 0, settledCount: 0, netPnl: 0,
+          variantId: order.variantId, cycleNumber: order.cycleNumber };
       windowResult.entryCount += 1;
       this.windowResults.set(order.windowStart, windowResult);
       this.cash -= fill.totalCost;
+      variant.cash -= fill.totalCost;
+      variant.totalTrades += 1;
       this.equitySnapshotRequested = true;
       this.log('PAPER_TAKER_BUY_FILLED', {
         orderId: order.id,
@@ -510,7 +643,9 @@ class ProbabilityBot {
       status,
       signalAt,
       signalSide: this.entrySignal?.selectedSide ?? null,
-        tradeSide: oppositeSide(this.entrySignal?.selectedSide),
+      tradeSide: this.tradeSideFor(this.entrySignal?.selectedSide),
+      activeVariantId: this.activeVariantId,
+      variantMode: this.variants[this.activeVariantId]?.mode,
       signalPrice: this.entrySignal?.signalPrice ?? null,
       referenceClose: this.entrySignal?.referenceClose ?? null,
       nextTickConfirmation: Boolean(openOrders.length),
@@ -521,7 +656,7 @@ class ProbabilityBot {
       signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
       signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
       entryOrderType: 'TAKER',
-      entryShares: ENTRY_SHARES,
+      entryShares: this.variants[this.activeVariantId]?.shareSize ?? ENTRY_SHARES,
     };
   }
 
@@ -586,6 +721,24 @@ class ProbabilityBot {
     trade.realizedPnl = netPayout - trade.totalCost;
     trade.settledAt = now;
     this.cash += netPayout;
+    const variant = this.variants[trade.variantId];
+    if (variant) {
+      variant.cash += netPayout;
+      variant.settledTrades += 1;
+      if (trade.realizedPnl > 0) variant.wins += 1;
+      else if (trade.realizedPnl < 0) variant.losses += 1;
+      if (trade.cycleNumber === variant.cycleNumber) {
+        variant.cycleProfit = Number((variant.cycleProfit + trade.realizedPnl).toFixed(8));
+      }
+      const previousEquity = variant.equityCurve.at(-1)?.equity ?? variant.startingCash;
+      variant.equityCurve.push({
+        ts: now,
+        equity: Number((previousEquity + trade.realizedPnl).toFixed(8)),
+      });
+      if (variant.equityCurve.length > 1000) {
+        variant.equityCurve.splice(1, variant.equityCurve.length - 1000);
+      }
+    }
     this.settledCount += 1;
     if (trade.realizedPnl > 0) this.settledWins += 1;
     else if (trade.realizedPnl < 0) this.settledLosses += 1;
@@ -600,6 +753,7 @@ class ProbabilityBot {
     this.equitySnapshotRequested = true;
     this.log('PAPER_EXIT', {
       tradeId: trade.id,
+      variantId: trade.variantId,
       entryPrice: trade.entryPrice,
       side: trade.side,
       outcome,
@@ -612,6 +766,7 @@ class ProbabilityBot {
       realizedPnl: trade.realizedPnl,
       windowStart: trade.windowStart,
     }, trade.windowStart ?? this.market?.start);
+    if (variant) this.activateNextVariant(variant, now);
   }
 
   maybeFinalizeCompletedWindows(now) {
@@ -683,7 +838,7 @@ class ProbabilityBot {
     this.equitySnapshotRequested = false;
     const openCost = this.trades.filter(trade => trade.status === 'OPEN')
       .reduce((sum, trade) => sum + trade.totalCost, 0);
-    const realizedPnl = this.cash + openCost - STARTING_CASH;
+    const realizedPnl = this.cash + openCost - this.startingCash;
     const snapshot = {
       ts: now,
       accountSessionStartedAt: this.accountSessionStartedAt,
@@ -735,7 +890,7 @@ class ProbabilityBot {
     );
     const openCost = openTrades.reduce((sum, trade) => sum + trade.totalCost, 0);
     // Reconcile against the cash ledger, not the bounded display history.
-    const realizedPnl = this.cash + openCost - STARTING_CASH;
+    const realizedPnl = this.cash + openCost - this.startingCash;
     const globalEquity = this.calculateGlobalEquity(now);
     const positions = Object.fromEntries(['UP', 'DOWN'].map(side => {
       const sideOpenTrades = activeWindowTrades.filter(trade => trade.side === side);
@@ -783,11 +938,14 @@ class ProbabilityBot {
         timeframe: '5m',
         pollIntervalMs: POLL_INTERVAL_MS,
         orderType: 'TAKER',
-        sharesPerTrade: ENTRY_SHARES,
+        activeVariantId: this.activeVariantId,
+        variantMode: this.variants[this.activeVariantId]?.mode,
+        sharesPerTrade: this.variants[this.activeVariantId]?.shareSize ?? ENTRY_SHARES,
+        targetProfit: VARIANT_PROFIT_TARGET,
         signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
         signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
         takerFeeRate: TAKER_FEE_RATE,
-        orderModel: 'Use the most recent closed BTC 1-minute candle. Three seconds before the 5-minute window opens, compare the live BTC price with that candle close: higher signals UP; equal or lower signals DOWN. At window open, submit one 100-share paper taker buy on the opposite side of the signal.',
+        orderModel: `Use the most recent closed BTC 1-minute candle. Three seconds before the 5-minute window opens, compare the live BTC price with that candle close: higher signals UP; equal or lower signals DOWN. At window open, the active version buys ${this.variants[this.activeVariantId]?.mode === 'SIGNAL' ? 'the signal side' : 'the opposite side'} using its current share size.`,
         fillModel: 'The taker entry is confirmed on the next 500 ms bot tick from fresh visible asks, sweeping asks from lowest to highest. Only available shares are booked at their actual weighted average price; the unfilled remainder is cancelled. Taker fees use the market fee schedule when available.',
         exitModel: 'There is no take-profit or stop-loss. Filled shares remain open through the window and settle only when the original Polymarket market is officially confirmed resolved.',
       },
@@ -820,7 +978,7 @@ class ProbabilityBot {
         } : null,
       },
       paperAccount: {
-        startingCash: STARTING_CASH, cash: this.cash, openCost, realizedPnl,
+        startingCash: this.startingCash, cash: this.cash, openCost, realizedPnl,
         reservedOrderFunds: 0,
         availableCashAfterReservations: this.cash,
         equity: globalEquity.valid ? globalEquity.equity : null,
@@ -837,6 +995,8 @@ class ProbabilityBot {
         awaitingSettlementShares: awaitingSettlementTrades.reduce((sum, trade) => sum + trade.shares, 0),
       },
       trades: this.trades.slice(0, 50),
+      activeVariantId: this.activeVariantId,
+      variants: this.snapshotVariants(now),
       entryOrders: this.entryOrders.slice(0, 100),
       openOrders,
       events: this.events,

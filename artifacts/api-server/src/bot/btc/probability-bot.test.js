@@ -62,7 +62,7 @@ test('one pre-open candle signal submits one taker buy at open and confirms on t
 
   setNow(START);
   bot.tickCount = 2;
-  setAsks(bot, START, 'DOWN', [{ price: 0.45, size: 200 }, { price: 0.55, size: 400 }]);
+  setAsks(bot, START, 'UP', [{ price: 0.45, size: 200 }, { price: 0.55, size: 400 }]);
   bot.processCandleSignalStrategy(START);
   bot.processPendingTakerOrders(START);
   assert.equal(bot.entryOrders.length, 1);
@@ -71,7 +71,7 @@ test('one pre-open candle signal submits one taker buy at open and confirms on t
 
   setNow(START + 500);
   bot.tickCount = 3;
-  setAsks(bot, START + 500, 'DOWN', [{ price: 0.55, size: 400 }, { price: 0.45, size: 200 }]);
+  setAsks(bot, START + 500, 'UP', [{ price: 0.55, size: 400 }, { price: 0.45, size: 200 }]);
   bot.processPendingTakerOrders(START + 500);
 
   const [order] = bot.entryOrders;
@@ -82,16 +82,67 @@ test('one pre-open candle signal submits one taker buy at open and confirms on t
   assert.equal(order.averageFillPrice, 0.45);
   assert.ok(Math.abs(order.fees - 1.7325) < 1e-12);
   assert.equal(order.signalSide, 'UP');
-  assert.equal(order.side, 'DOWN');
+  assert.equal(order.side, 'UP');
   assert.equal(trade.signalSide, 'UP');
-  assert.equal(trade.side, 'DOWN');
+  assert.equal(trade.side, 'UP');
   assert.equal(trade.orderType, 'TAKER');
   assert.equal(trade.shares, 100);
   assert.equal(bot.takeProfitOrders, undefined);
-  assert.ok(Math.abs(bot.cash - (10_000 - 46.7325)) < 1e-9);
+  assert.ok(Math.abs(bot.cash - (20_000 - 46.7325)) < 1e-9);
   assert.equal(bot.snapshot().takeProfitOrders, undefined);
   assert.match(bot.snapshot().strategy.exitModel, /no take-profit or stop-loss/i);
   assert.equal(bot.snapshot().strategy.version, STRATEGY_VERSION);
+});
+
+test('isolated versions rotate at $300 net realized profit and double only the activated opposite size', () => {
+  const { bot } = createBot();
+  let state = bot.snapshot();
+  assert.equal(state.paperAccount.startingCash, 20_000);
+  assert.equal(state.activeVariantId, 'signal');
+  assert.equal(state.variants.signal.startingCash, 10_000);
+  assert.equal(state.variants.against.startingCash, 10_000);
+  assert.equal(state.variants.signal.shareSize, 100);
+  assert.equal(state.variants.against.active, false);
+  bot.entryOrders.push({
+    id: 'pending-signal-order', variantId: 'signal', status: 'PENDING_CONFIRMATION',
+    requestedShares: 100, remainingShares: 100, windowStart: START,
+  });
+
+  const signalTrade = {
+    id: 'signal-target', variantId: 'signal', cycleNumber: 1,
+    shares: 300, totalCost: 0, feeRate: 0, feeExponent: 1,
+    side: 'UP', windowStart: START, windowEnd: START + 300_000,
+  };
+  bot.trades = [signalTrade];
+  bot.closeTrade(signalTrade, 1, 300, 'UP', 'CONFIRMED_MARKET_RESOLUTION',
+    START + 300_000, 0, 0, 'RESOLUTION');
+  state = bot.snapshot();
+  assert.equal(state.activeVariantId, 'against');
+  assert.equal(state.variants.signal.realizedPnl, 300);
+  assert.equal(state.variants.against.active, true);
+  assert.equal(state.variants.against.shareSize, 200);
+  assert.equal(state.variants.signal.active, false);
+  assert.equal(bot.tradeSideFor('UP'), 'DOWN');
+  assert.equal(bot.orderSchedule(START).entryShares, 200);
+  assert.equal(bot.entryOrders[0].status, 'CANCELLED_VARIANT_PAUSED');
+  assert.equal(bot.entryOrders[0].remainingShares, 0);
+
+  const againstTrade = {
+    id: 'against-target', variantId: 'against', cycleNumber: 1,
+    shares: 300, totalCost: 0, feeRate: 0, feeExponent: 1,
+    side: 'DOWN', windowStart: START + 300_000, windowEnd: START + 600_000,
+  };
+  bot.trades = [againstTrade];
+  bot.closeTrade(againstTrade, 1, 300, 'DOWN', 'CONFIRMED_MARKET_RESOLUTION',
+    START + 600_000, 0, 0, 'RESOLUTION');
+  state = bot.snapshot();
+  assert.equal(state.activeVariantId, 'signal');
+  assert.equal(state.variants.against.shareSize, 100);
+  assert.equal(state.variants.against.active, false);
+  assert.equal(state.variants.signal.active, true);
+  assert.equal(state.variants.signal.shareSize, 100);
+  assert.equal(state.variants.signal.cycleNumber, 2);
+  assert.equal(state.variants.signal.cycleProfit, 0);
 });
 
 test('the bot scans the upcoming market before open and confirms the entry one poll later', async () => {
@@ -132,18 +183,18 @@ test('the bot scans the upcoming market before open and confirms the entry one p
   assert.equal(bot.entryOrders.length, 1);
   assert.equal(bot.entryOrders[0].status, 'PENDING_CONFIRMATION');
   assert.equal(bot.entryOrders[0].signalSide, 'UP');
-  assert.equal(bot.entryOrders[0].side, 'DOWN');
+  assert.equal(bot.entryOrders[0].side, 'UP');
   assert.equal(bot.trades.length, 0);
 
   now = START + 500;
   await bot.tick();
   assert.equal(bot.entryOrders[0].status, 'FILLED');
   assert.equal(bot.trades[0].shares, 100);
-  assert.equal(bot.trades[0].side, 'DOWN');
+  assert.equal(bot.trades[0].side, 'UP');
   assert.equal(bot.trades[0].entryPrice, 0.45);
 });
 
-test('a DOWN signal buys UP and keeps the signal separate from the traded side', () => {
+test('the signal version buys DOWN on a DOWN signal', () => {
   const { bot, setNow } = createBot({ signalPrice: 99 });
   setNow(START - 2_500);
   bot.tickCount = 1;
@@ -152,14 +203,14 @@ test('a DOWN signal buys UP and keeps the signal separate from the traded side',
 
   setNow(START);
   bot.tickCount = 2;
-  setAsks(bot, START, 'UP', [{ price: 0.45, size: 10 }]);
+  setAsks(bot, START, 'DOWN', [{ price: 0.45, size: 10 }]);
   bot.processCandleSignalStrategy(START);
   assert.equal(bot.entryOrders[0].signalSide, 'DOWN');
-  assert.equal(bot.entryOrders[0].side, 'UP');
-  assert.equal(bot.entryOrders[0].tokenId, market.tokens.UP);
+  assert.equal(bot.entryOrders[0].side, 'DOWN');
+  assert.equal(bot.entryOrders[0].tokenId, market.tokens.DOWN);
 });
 
-test('an UP signal buys DOWN, then next-tick taker fill books only visible shares and cancels remainder', () => {
+test('an UP signal buys UP, then next-tick taker fill books only visible shares and cancels remainder', () => {
   const { bot, setNow } = createBot();
   setNow(START - 2_500);
   bot.tickCount = 1;
@@ -167,26 +218,26 @@ test('an UP signal buys DOWN, then next-tick taker fill books only visible share
   assert.equal(bot.entrySignal.selectedSide, 'UP');
   setNow(START);
   bot.tickCount = 2;
-  setAsks(bot, START, 'DOWN', [{ price: 0.45, size: 20 }]);
+  setAsks(bot, START, 'UP', [{ price: 0.45, size: 20 }]);
   bot.processCandleSignalStrategy(START);
   bot.processPendingTakerOrders(START);
 
   setNow(START + 500);
   bot.tickCount = 3;
-  setAsks(bot, START + 500, 'DOWN', [{ price: 0.45, size: 20 }]);
+  setAsks(bot, START + 500, 'UP', [{ price: 0.45, size: 20 }]);
   bot.processPendingTakerOrders(START + 500);
   bot.processCandleSignalStrategy(START + 500);
 
   assert.equal(bot.entryOrders.length, 1);
   assert.equal(bot.entryOrders[0].signalSide, 'UP');
-  assert.equal(bot.entryOrders[0].side, 'DOWN');
+  assert.equal(bot.entryOrders[0].side, 'UP');
   assert.equal(bot.entryOrders[0].status, 'PARTIALLY_FILLED_REMAINDER_CANCELLED');
   assert.equal(bot.entryOrders[0].filledShares, 20);
   assert.equal(bot.entryOrders[0].cancelledRemainderShares, 80);
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].shares, 20);
   assert.equal(bot.trades[0].signalSide, 'UP');
-  assert.equal(bot.trades[0].side, 'DOWN');
+  assert.equal(bot.trades[0].side, 'UP');
 });
 
 test('entry is not fabricated when the next-tick book is empty', () => {
@@ -201,7 +252,7 @@ test('entry is not fabricated when the next-tick book is empty', () => {
 
   setNow(START + 500);
   bot.tickCount = 3;
-  setAsks(bot, START + 500, 'DOWN', []);
+  setAsks(bot, START + 500, 'UP', []);
   bot.processPendingTakerOrders(START + 500);
   bot.processCandleSignalStrategy(START + 500);
 
