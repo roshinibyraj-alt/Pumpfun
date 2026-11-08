@@ -23,10 +23,12 @@
     .signal-value{font-size:32px;font-weight:950;line-height:1.1;margin-top:6px}
     .up{color:var(--up)}.down{color:var(--down)}
     .price-grid,.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+    .stats{grid-template-columns:repeat(3,minmax(0,1fr))}
     .price,.stat{background:#0c1424;border:1px solid var(--line);border-radius:12px;padding:13px}
     .price.up-border{border-top:3px solid var(--up)}.price.down-border{border-top:3px solid var(--down)}
     .price-value{font-size:25px;font-weight:950;margin-top:4px}
     .stat-value{font-size:20px;font-weight:900;margin-top:5px;overflow-wrap:anywhere}
+    .stat-note{color:var(--muted);font-size:10px;line-height:1.35;margin-top:5px}
     .signal-meta{display:flex;gap:18px;flex-wrap:wrap;margin-top:11px;font-size:12px;color:var(--muted)}
     .chart{padding:5px 2px 0}.chart svg{width:100%;height:auto;display:block}
     .chart-grid{stroke:#26364e;stroke-width:1}.chart-line{fill:none;stroke:#78c3ff;stroke-width:3}
@@ -67,7 +69,9 @@
     <section class="panel" aria-labelledby="account-title">
       <h2 id="account-title">Paper account</h2>
       <div class="stats">
-        <div class="stat"><div class="label">Equity</div><div class="stat-value" id="equity">—</div></div>
+        <div class="stat"><div class="label">Starting capital</div><div class="stat-value" id="startingCapital">—</div></div>
+        <div class="stat"><div class="label">Cash</div><div class="stat-value" id="cash">—</div></div>
+        <div class="stat"><div class="label">Current equity</div><div class="stat-value" id="equity">—</div><div class="stat-note" id="equityStatus">Waiting for account marks.</div></div>
         <div class="stat"><div class="label">Realized P&amp;L</div><div class="stat-value" id="pnl">—</div></div>
         <div class="stat"><div class="label">Win rate</div><div class="stat-value" id="winRate">—</div></div>
         <div class="stat"><div class="label">Open / settled</div><div class="stat-value" id="counts">—</div></div>
@@ -143,7 +147,14 @@
         $('#downPrice').textContent=price(state.quotes?.DOWN?.midpoint??state.quotes?.DOWN?.bestAsk);
         $('#heldSide').textContent=schedule.heldSide||'None';
         $('#reason').textContent=state.statusReason||'Scanning';
-        $('#equity').textContent=money(account.equity);
+        $('#startingCapital').textContent=money(account.startingCash);
+        $('#cash').textContent=money(account.cash);
+        const hasCurrentEquity=account.equity!=null&&Number.isFinite(Number(account.equity));
+        $('#equity').textContent=hasCurrentEquity?money(account.equity):'Awaiting marks';
+        if(hasCurrentEquity)$('#equityStatus').textContent='Cash plus fresh position marks';
+        else if(Number(account.awaitingSettlement||0)>0)$('#equityStatus').textContent=`${Number(account.awaitingSettlement)} expired position(s) awaiting resolution`;
+        else if(Number(account.openPositions||0)>0)$('#equityStatus').textContent='Waiting for fresh marks on open positions';
+        else $('#equityStatus').textContent='No fresh account mark available';
         $('#pnl').textContent=money(account.realizedPnl);
         $('#winRate').textContent=account.settled?`${(100*Number(account.wins||0)/Number(account.settled)).toFixed(1)}%`:'—';
         $('#counts').textContent=`${account.openPositions??0} / ${account.settled??0}`;

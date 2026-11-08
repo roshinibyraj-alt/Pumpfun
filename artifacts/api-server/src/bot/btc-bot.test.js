@@ -277,6 +277,10 @@ test("the public root dashboard is a simple signal-only Renko dashboard", () => 
   assert.match(html, /BTC Renko Bot/);
   assert.match(html, /1-minute Renko/);
   assert.match(html, /trades the Renko signal side/);
+  assert.match(html, /Starting capital/);
+  assert.match(html, /id="cash"/);
+  assert.match(html, /id="equityStatus"/);
+  assert.match(html, /Awaiting marks/);
   assert.match(html, /200 shares at \$0\.40 and 100 at \$0\.30/);
   assert.match(html, /\$0\.99 take-profit/);
   assert.match(html, /Opposite bricks do not sell or reverse/);
