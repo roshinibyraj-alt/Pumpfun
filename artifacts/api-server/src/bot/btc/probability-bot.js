@@ -787,7 +787,7 @@ class ProbabilityBot {
         signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
         signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
         takerFeeRate: TAKER_FEE_RATE,
-        orderModel: 'Use the most recent closed BTC 1-minute candle. Three seconds before the 5-minute window opens, compare the live BTC price with that candle close: higher signals UP; equal or lower signals DOWN. At window open, submit one 500-share paper taker buy on the opposite side of the signal.',
+        orderModel: 'Use the most recent closed BTC 1-minute candle. Three seconds before the 5-minute window opens, compare the live BTC price with that candle close: higher signals UP; equal or lower signals DOWN. At window open, submit one 100-share paper taker buy on the opposite side of the signal.',
         fillModel: 'The taker entry is confirmed on the next 500 ms bot tick from fresh visible asks, sweeping asks from lowest to highest. Only available shares are booked at their actual weighted average price; the unfilled remainder is cancelled. Taker fees use the market fee schedule when available.',
         exitModel: 'There is no take-profit or stop-loss. Filled shares remain open through the window and settle only when the original Polymarket market is officially confirmed resolved.',
       },
