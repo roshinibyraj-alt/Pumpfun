@@ -6,7 +6,6 @@ const { feed } = require('./chainlink-price-feed');
 const { recoverExpiredPositions } = require('./position-exits');
 const {
   WINDOW_MS,
-  ENTRY_ORDER_LADDER,
   ENTRY_SHARES,
   POLL_INTERVAL_MS,
   MAX_QUOTE_AGE_MS,
@@ -100,7 +99,7 @@ class ProbabilityBot {
     this.equitySnapshotRequested = true;
     this.learningStatus = {
       enabled: Boolean(learningStore),
-      mode: learningStore ? 'renko-limit-ladder-paper-logging-only' : 'disabled',
+      mode: learningStore ? 'renko-opposite-signal-taker-paper-logging-only' : 'disabled',
       completedWindows: 0,
     };
     this.error = null;
@@ -110,7 +109,7 @@ class ProbabilityBot {
     this.activeVariantId = 'signal';
     this.variants = {
       signal: {
-        id: 'signal', name: 'BTC Renko signal', mode: 'SIGNAL',
+        id: 'signal', name: 'BTC Renko opposite signal', mode: 'OPPOSITE_SIGNAL',
         startingCash: STARTING_CASH, cash: STARTING_CASH,
         shareSize: ENTRY_SHARES,
         active: true, settledTrades: 0, wins: 0, losses: 0, totalTrades: 0,
@@ -121,7 +120,9 @@ class ProbabilityBot {
   }
 
   tradeSideFor(signalSide) {
-    return signalSide === 'UP' || signalSide === 'DOWN' ? signalSide : null;
+    if (signalSide === 'UP') return 'DOWN';
+    if (signalSide === 'DOWN') return 'UP';
+    return null;
   }
 
   snapshotVariants(now = this.now()) {
@@ -219,7 +220,8 @@ class ProbabilityBot {
           brickAt: order.brickAt,
           averageFillPrice: order.averageFillPrice, remainingShares: order.remainingShares,
           requestedShares: order.requestedShares, filledShares: order.filledShares,
-          fees: order.fees, status: order.status,
+          cancelledRemainderShares: order.cancelledRemainderShares,
+          cancelReason: order.cancelReason, fees: order.fees, status: order.status,
         })),
     };
     this.queuePersistence(() => this.learningStore.recordSample(sample));
@@ -241,7 +243,7 @@ class ProbabilityBot {
         if (this.market?.start !== start) this.market = null;
       }
       if (!this.market) {
-        this.processLimitOrders(now);
+        this.processTakerBuyOrders(now);
         this.processPositionExits(now);
         this.maybeFinalizeCompletedWindows(now);
         this.maybeRecordEquitySnapshot(now);
@@ -277,7 +279,7 @@ class ProbabilityBot {
       this.priceAt = latestTick?.ts ?? null;
       const scanAt = this.now();
       this.processRenkoStrategy(scanAt);
-      this.processLimitOrders(scanAt);
+      this.processTakerBuyOrders(scanAt);
       this.maybeFinalizeCompletedWindows(scanAt);
       this.maybeRecordEquitySnapshot(scanAt);
       await this.captureLearningSample(scanAt);
@@ -341,7 +343,8 @@ class ProbabilityBot {
       windowStart: start,
       atrPeriod: RENKO_ATR_PERIOD,
       shares: ENTRY_SHARES,
-      entryOrderType: 'LIMIT',
+      entryOrderType: 'MARKET',
+      entryExecutionRole: 'TAKER',
       source: 'CLOSED_ONE_MINUTE_BTC_CANDLES',
     });
   }
@@ -433,51 +436,52 @@ class ProbabilityBot {
   queueRenkoBuy(signalSide, side, variant, now, signalKey) {
     if (this.entrySideForWindow) return [];
     this.entrySideForWindow = side;
-    const orders = ENTRY_ORDER_LADDER.map(rung => {
-      const id = `paper-limit-${this.market.start}-${variant.id}-${++this.orderSequence}`;
-      return {
-        id,
-        variantId: variant.id,
-        variantName: variant.name,
-        variantMode: variant.mode,
-        marketId: this.market.id,
-        tokenId: this.market.tokens?.[side] ?? null,
-        windowStart: this.market.start,
-        windowEnd: this.market.end,
-        marketTitle: this.market.title,
-        side,
-        signalSide,
-        action: 'BUY',
-        orderType: 'LIMIT',
-        limitPrice: rung.limitPrice,
-        executionRole: null,
-        requestedShares: rung.shares,
-        filledShares: 0,
-        remainingShares: rung.shares,
-        cancelledRemainderShares: 0,
-        averageFillPrice: null,
-        filledCost: 0,
-        fees: 0,
-        estimatedMakerRebate: 0,
-        placedAt: now,
-        submittedTick: this.tickCount,
-        status: 'RESTING',
-        fillModel: 'VISIBLE_ASK_DEPTH_AT_OR_BELOW_LIMIT',
-        signalPrice: this.renkoState.latestBrick?.close ?? null,
-        brickAt: this.renkoState.latestBrickAt ?? null,
-        renkoSignalKey: signalKey,
-      };
-    });
-    this.entryOrders.unshift(...orders.reverse());
+    const id = `paper-taker-${this.market.start}-${variant.id}-${++this.orderSequence}`;
+    const order = {
+      id,
+      variantId: variant.id,
+      variantName: variant.name,
+      variantMode: variant.mode,
+      marketId: this.market.id,
+      tokenId: this.market.tokens?.[side] ?? null,
+      windowStart: this.market.start,
+      windowEnd: this.market.end,
+      marketTitle: this.market.title,
+      side,
+      targetSide: side,
+      signalSide,
+      action: 'BUY',
+      orderType: 'MARKET',
+      limitPrice: null,
+      executionRole: 'TAKER',
+      requestedShares: ENTRY_SHARES,
+      filledShares: 0,
+      remainingShares: ENTRY_SHARES,
+      cancelledRemainderShares: 0,
+      averageFillPrice: null,
+      filledCost: 0,
+      fees: 0,
+      estimatedMakerRebate: 0,
+      createdAt: now,
+      placedAt: null,
+      submittedAt: null,
+      submittedTick: null,
+      status: 'PENDING_SUBMISSION',
+      fillModel: 'VISIBLE_ASK_DEPTH_TAKER_SWEEP',
+      signalPrice: this.renkoState.latestBrick?.close ?? null,
+      brickAt: this.renkoState.latestBrickAt ?? null,
+      renkoSignalKey: signalKey,
+    };
+    this.entryOrders.unshift(order);
     this.entryOrders.length = Math.min(this.entryOrders.length, 200);
     this.lastRenkoActionKey.set(variant.id, signalKey);
-    this.statusReason = `Renko selected ${side}. Two limit buy orders were submitted on that side: 200 shares at $0.40 and 100 at $0.30. Opposite Renko bricks will not sell or reverse the position.`;
-    this.log('PAPER_RENKO_LIMIT_BUYS_SUBMITTED', {
-      side, signalSide, variantId: variant.id, orders: orders.map(order => ({
-        orderId: order.id, limitPrice: order.limitPrice, requestedShares: order.requestedShares,
-      })), brickSize: this.renkoState.brickSize, brickAt: this.renkoState.latestBrickAt,
+    this.statusReason = `Renko signalled ${signalSide}; one 300-share taker buy is queued on the opposite ${side} side.`;
+    this.log('PAPER_RENKO_OPPOSITE_TAKER_BUY_QUEUED', {
+      side, signalSide, variantId: variant.id,
+      orderId: order.id, requestedShares: order.requestedShares,
+      brickSize: this.renkoState.brickSize, brickAt: this.renkoState.latestBrickAt,
     }, this.market.start);
-    return orders;
+    return [order];
   }
 
   processRenkoStrategy(now) {
@@ -549,22 +553,178 @@ class ProbabilityBot {
       return;
     }
     if (this.entrySideForWindow !== entrySide) {
-      this.statusReason = `Renko now points ${signalSide}, but this window's limit orders remain on the original ${this.entrySideForWindow} side. Opposite bricks do not sell, cancel, or reverse.`;
+      this.statusReason = `Renko now points ${signalSide}, but this window's one-time taker entry remains on ${this.entrySideForWindow}. Opposite bricks do not sell or re-enter.`;
       return;
     }
     const openTrades = this.trades.filter(trade => trade.status === 'OPEN'
       && trade.marketId === this.market.id
       && trade.windowStart === this.market.start
       && trade.variantId === this.activeVariantId);
-    const openLimitOrders = this.entryOrders.filter(order => order.marketId === this.market.id
+    const pendingTakerOrders = this.entryOrders.filter(order => order.marketId === this.market.id
       && order.windowStart === this.market.start
       && order.variantId === this.activeVariantId
-      && ['RESTING', 'PARTIALLY_FILLED_RESTING'].includes(order.status));
-    this.statusReason = openLimitOrders.length
-      ? `The ${this.entrySideForWindow} limit buys remain resting; ${openTrades.length} position(s) keep their $0.99 TP or original-market resolution.`
+      && order.status === 'PENDING_SUBMISSION');
+    this.statusReason = pendingTakerOrders.length
+      ? `The ${this.entrySideForWindow} taker buy is waiting for a fresh ask book; no second entry will be sent.`
       : openTrades.length
         ? `${openTrades.length} ${this.entrySideForWindow} position(s) remain open with $0.99 TP or original-market resolution.`
-        : `The ${this.entrySideForWindow} entry ladder has already been submitted for this window; no re-entry or reversal.`;
+        : `The one-time ${this.entrySideForWindow} taker entry has been handled for this window; no re-entry or reversal.`;
+  }
+
+  processTakerBuyOrders(now) {
+    for (const order of this.entryOrders) {
+      if (order.orderType !== 'MARKET' || order.action !== 'BUY'
+        || order.status !== 'PENDING_SUBMISSION') continue;
+      if (now >= order.windowEnd) {
+        order.status = 'CANCELLED_WINDOW_ENDED';
+        order.cancelledRemainderShares = Number(order.remainingShares || 0);
+        order.remainingShares = 0;
+        order.cancelledAt = now;
+        order.cancelReason = 'The one-time taker order was not submitted before its original window ended.';
+        continue;
+      }
+      if (this.market?.id !== order.marketId) continue;
+      const quote = this.quotes[order.side];
+      if (!quoteIsFresh(quote, now, EXIT_QUOTE_MAX_AGE_MS)) {
+        this.statusReason = `Renko selected ${order.signalSide}; waiting for a fresh ${order.side} ask book to submit the taker buy.`;
+        continue;
+      }
+
+      order.placedAt = now;
+      order.submittedAt = now;
+      order.submittedTick = this.tickCount;
+      const variant = this.variants[order.variantId];
+      if (!variant) {
+        order.status = 'CANCELLED_INVALID_VARIANT';
+        order.remainingShares = 0;
+        order.cancelReason = 'The active paper account for this order no longer exists.';
+        continue;
+      }
+      let fill = simulateTakerBuyFill(quote.asks, order.requestedShares, this.market);
+      if (!fill) {
+        order.status = 'CANCELLED_NO_VISIBLE_ASKS';
+        order.cancelledRemainderShares = Number(order.requestedShares);
+        order.remainingShares = 0;
+        order.cancelledAt = now;
+        order.cancelReason = 'No ask liquidity was visible when the taker order was submitted.';
+        this.statusReason = order.cancelReason;
+        this.log('PAPER_TAKER_BUY_NO_VISIBLE_ASKS', {
+          orderId: order.id, side: order.side, requestedShares: order.requestedShares,
+        }, order.windowStart);
+        continue;
+      }
+
+      if (fill.totalCost > Number(variant.cash) + 1e-8) {
+        let low = 0;
+        let high = Math.floor(fill.shares);
+        let affordable = null;
+        while (low < high) {
+          const middle = Math.ceil((low + high) / 2);
+          const candidate = simulateTakerBuyFill(quote.asks, middle, this.market);
+          if (candidate && candidate.totalCost <= Number(variant.cash) + 1e-8) {
+            affordable = candidate;
+            low = middle;
+          } else {
+            high = middle - 1;
+          }
+        }
+        if (!affordable) {
+          order.status = 'CANCELLED_INSUFFICIENT_CASH';
+          order.cancelledRemainderShares = Number(order.requestedShares);
+          order.remainingShares = 0;
+          order.cancelledAt = now;
+          order.cancelReason = 'Available paper cash could not cover any shares at the visible ask prices.';
+          this.statusReason = order.cancelReason;
+          this.log('PAPER_TAKER_BUY_INSUFFICIENT_CASH', {
+            orderId: order.id, side: order.side, requestedShares: order.requestedShares,
+            availableCash: variant.cash,
+          }, order.windowStart);
+          continue;
+        }
+        fill = affordable;
+      }
+
+      const filledShares = Number(fill.shares);
+      const cancelledShares = Math.max(0, Number(order.requestedShares) - filledShares);
+      order.filledShares = filledShares;
+      order.remainingShares = 0;
+      order.cancelledRemainderShares = cancelledShares;
+      order.averageFillPrice = fill.averagePrice;
+      order.filledCost = fill.cost;
+      order.fees = fill.fees;
+      order.feeRate = fill.feeRate;
+      order.feeExponent = fill.feeExponent;
+      order.fillLevels = fill.fills;
+      order.status = cancelledShares > 1e-8 ? 'PARTIALLY_FILLED_CANCELLED' : 'FILLED';
+      order.cancelReason = cancelledShares > 1e-8
+        ? 'Unfilled market-buy remainder was cancelled immediately after the taker sweep.'
+        : null;
+      order.filledAt = now;
+
+      const trade = {
+        id: `paper-${order.id}`,
+        orderId: order.id,
+        variantId: order.variantId,
+        variantName: order.variantName,
+        marketId: order.marketId,
+        tokenId: order.tokenId,
+        slug: this.market.slug,
+        windowStart: order.windowStart,
+        windowEnd: order.windowEnd,
+        marketTitle: order.marketTitle,
+        side: order.side,
+        signalSide: order.signalSide,
+        entryKind: 'TAKER_BUY',
+        orderType: 'MARKET',
+        requestedShares: order.requestedShares,
+        shares: filledShares,
+        entryPrice: fill.averagePrice,
+        cost: fill.cost,
+        fees: fill.fees,
+        feeRate: fill.feeRate,
+        feeExponent: fill.feeExponent,
+        totalCost: fill.totalCost,
+        openedAt: now,
+        status: 'OPEN',
+        settlementStatus: 'OPEN',
+        takeProfitPrice: TAKE_PROFIT_LIMIT_PRICE,
+        takeProfitOrder: {
+          type: 'LIMIT_SELL',
+          price: TAKE_PROFIT_LIMIT_PRICE,
+          status: 'RESTING',
+          remainingShares: filledShares,
+          placedAt: now,
+        },
+        peakBid: null,
+        peakBidAt: null,
+        lastOutcomeBid: null,
+        lastOutcomeBidAt: null,
+        realizedPnl: null,
+      };
+      this.trades.unshift(trade);
+      const windowResult = this.windowResults.get(order.windowStart)
+        ?? { entryCount: 0, settledCount: 0, netPnl: 0, variantId: order.variantId };
+      windowResult.entryCount += 1;
+      this.windowResults.set(order.windowStart, windowResult);
+      variant.totalTrades += 1;
+      this.cash -= fill.totalCost;
+      variant.cash -= fill.totalCost;
+      this.equitySnapshotRequested = true;
+      this.log('PAPER_TAKER_BUY_FILLED', {
+        orderId: order.id, tradeId: trade.id, signalSide: order.signalSide,
+        side: order.side, requestedShares: order.requestedShares,
+        filledShares, cancelledRemainderShares: cancelledShares,
+        averageFillPrice: fill.averagePrice, fillCost: fill.cost,
+        fees: fill.fees, fillLevels: fill.fills,
+      }, order.windowStart);
+      this.statusReason = `${filledShares.toLocaleString()} ${order.side} shares bought against visible asks at an average $${fill.averagePrice.toFixed(4)}.`
+        + (cancelledShares > 1e-8
+          ? ` The unfilled ${cancelledShares.toLocaleString()}-share market-order remainder was cancelled.`
+          : '')
+        + ' The $0.99 TP remains active; otherwise shares await original-market resolution.';
+      let retainedSettled = 0;
+      this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
+    }
   }
 
   processLimitOrders(now) {
@@ -911,14 +1071,12 @@ class ProbabilityBot {
       };
     }
     const currentOrders = this.entryOrders.filter(order => order.windowStart === start);
-    const openOrders = currentOrders.filter(order =>
-      ['RESTING', 'PARTIALLY_FILLED_RESTING'].includes(order.status));
+    const openOrders = currentOrders.filter(order => order.status === 'PENDING_SUBMISSION');
     const latestOrder = currentOrders[0] ?? null;
     const buyOrders = currentOrders.filter(order => order.action === 'BUY');
     const sellOrders = currentOrders.filter(order => order.action === 'SELL');
     const status = openOrders.length
-      ? openOrders.some(order => order.status === 'PARTIALLY_FILLED_RESTING')
-        ? 'PARTIALLY_FILLED_RESTING' : 'RESTING'
+      ? openOrders[0].status
       : currentOrders[0]?.status
       ?? (this.renkoState.selectedSide ? this.entrySideSelection.status
         : now >= this.market.end ? 'WINDOW_CLOSED' : this.renkoState.status);
@@ -948,9 +1106,9 @@ class ProbabilityBot {
       filledShares: buyOrders.reduce((sum, order) => sum + order.filledShares, 0),
       soldShares: sellOrders.reduce((sum, order) => sum + order.filledShares, 0),
       requestedShares: buyOrders.reduce((sum, order) => sum + order.requestedShares, 0),
-      entryOrderType: 'LIMIT',
+      entryOrderType: 'MARKET',
+      entryExecutionRole: 'TAKER',
       entryShares: ENTRY_SHARES,
-      entryLadder: ENTRY_ORDER_LADDER,
     };
   }
 
@@ -1262,7 +1420,7 @@ class ProbabilityBot {
     }));
     const ticks = (() => { try { return this.priceFeed.snapshot(); } catch { return null; } })();
     const pendingEntryOrders = this.entryOrders.filter(order => (
-      ['RESTING', 'PARTIALLY_FILLED_RESTING'].includes(order.status)
+      order.orderType === 'MARKET' && order.status === 'PENDING_SUBMISSION'
       && Number(order.remainingShares) > 0
     ));
     const openOrders = pendingEntryOrders;
@@ -1279,17 +1437,17 @@ class ProbabilityBot {
         timeframe: '5m',
         signalTimeframe: '1m',
         pollIntervalMs: POLL_INTERVAL_MS,
-        orderType: 'LIMIT',
+        orderType: 'MARKET',
         activeVariantId: this.activeVariantId,
         variantMode: this.variants[this.activeVariantId]?.mode,
         sharesPerTrade: ENTRY_SHARES,
-        entryOrderLadder: ENTRY_ORDER_LADDER,
+        entryExecutionRole: 'TAKER',
         reversalEnabled: false,
         takeProfitPrice: TAKE_PROFIT_LIMIT_PRICE,
         renkoAtrPeriod: RENKO_ATR_PERIOD,
         takerFeeRate: TAKER_FEE_RATE,
-        orderModel: `Build Renko from confirmed 1-minute BTC candle closes. The brick size is fixed for each 5-minute market window at the average true range of the preceding ${RENKO_ATR_PERIOD} one-minute bars. Green means UP and red means DOWN. On the first signal, place 200 shares at a $0.40 limit and 100 shares at a $0.30 limit on that signalled side only. No re-entry or reversal.`,
-        fillModel: 'Limit buys fill only from observed order-book depth at or below their limit. A marketable limit at submission uses visible asks and the current taker fee schedule; a later fill of a resting order is booked at its limit with no taker fee. Partial fills remain resting. Unfilled orders cancel at the original window end; no timeout or synthetic fills.',
+        orderModel: `Build Renko from confirmed 1-minute BTC candle closes. The brick size is fixed for each 5-minute market window at the average true range of the preceding ${RENKO_ATR_PERIOD} one-minute bars. Green signals UP and red signals DOWN. Immediately after the window starts, buy 300 shares on the opposite side with one taker market order. If there is no confirmed Renko side yet, wait for one. No re-entry or reversal.`,
+        fillModel: 'Taker buys sweep only visible asks and apply the market taker fee schedule. Book the actual average fill price and shares; cancel any unfilled market-order remainder immediately. If the ask book is unavailable, wait for a fresh book before submitting once. Never fabricate fills.',
         exitModel: 'A paper limit take-profit triggers when a fresh original-market best bid reaches $0.99 and is credited at $1 per share with no exit fee. No stop-loss and no Renko reversal sell. Any position not sold by take-profit stays open for confirmed resolution of its exact original market.',
       },
       window: this.market ? {

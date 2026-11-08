@@ -1,11 +1,7 @@
 'use strict';
 
 const WINDOW_MS = 5 * 60 * 1000;
-const ENTRY_ORDER_LADDER = Object.freeze([
-  Object.freeze({ limitPrice: 0.40, shares: 200 }),
-  Object.freeze({ limitPrice: 0.30, shares: 100 }),
-]);
-const ENTRY_SHARES = ENTRY_ORDER_LADDER.reduce((sum, rung) => sum + rung.shares, 0);
+const ENTRY_SHARES = 300;
 const POLL_INTERVAL_MS = 500;
 const MAX_QUOTE_AGE_MS = 5_000;
 const DEFAULT_TAKER_FEE_RATE = 0.07;
@@ -151,7 +147,6 @@ function getWindowToScan(now) {
 
 module.exports = {
   WINDOW_MS,
-  ENTRY_ORDER_LADDER,
   ENTRY_SHARES,
   POLL_INTERVAL_MS,
   MAX_QUOTE_AGE_MS,

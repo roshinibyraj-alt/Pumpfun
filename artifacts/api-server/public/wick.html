@@ -46,7 +46,7 @@
 <body>
   <main>
     <header>
-      <div><h1>BTC Renko Bot</h1><p class="sub">One paper account · trades the Renko signal side</p></div>
+      <div><h1>BTC Renko Bot</h1><p class="sub">One paper account · buys opposite to the Renko signal</p></div>
       <span class="status" id="status">CONNECTING</span>
     </header>
 
@@ -82,11 +82,11 @@
     <section class="panel" aria-labelledby="positions-title">
       <h2 id="positions-title">Positions</h2>
       <div class="table-wrap" id="positions"></div>
-      <p class="note">The first Renko signal places two limit buys on that side: 200 shares at $0.40 and 100 at $0.30. Opposite bricks do not sell or reverse. Filled positions use the $0.99 take-profit, credited as $1 per share; anything still open at expiry awaits its exact market’s confirmed Polymarket resolution. No stop-loss.</p>
+      <p class="note">At each 5-minute window start, the latest confirmed 1-minute Renko side is the signal. The bot buys 300 shares on the opposite side with one taker market order, sweeping visible asks and applying taker fees. If no confirmed Renko side is available yet, it waits for one. It sends no second entry, sells, or reverses on later bricks. Filled positions use the $0.99 take-profit, credited as $1 per share; anything still open at expiry awaits its exact market’s confirmed Polymarket resolution. No stop-loss.</p>
     </section>
 
     <section class="panel" aria-labelledby="orders-title">
-      <h2 id="orders-title">Entry limit orders</h2>
+      <h2 id="orders-title">Entry orders</h2>
       <div class="table-wrap" id="entryOrders"></div>
     </section>
     <div class="error" id="error" role="status"></div>
@@ -119,11 +119,11 @@
     }
     function renderEntryOrders(orders,windowStart){
       const rows=(Array.isArray(orders)?orders:[])
-        .filter(order=>order.orderType==='LIMIT'&&order.windowStart===windowStart)
-        .sort((a,b)=>Number(b.limitPrice)-Number(a.limitPrice));
+        .filter(order=>order.orderType==='MARKET'&&order.windowStart===windowStart)
+        .sort((a,b)=>Number(b.placedAt||b.createdAt||0)-Number(a.placedAt||a.createdAt||0));
       if(!rows.length)return '<div class="empty">No entry orders submitted for this window.</div>';
-      const body=rows.map(order=>`<tr><td class="${order.side==='UP'?'up':'down'}">${esc(order.side)}</td><td>${price(order.limitPrice)}</td><td>${Number(order.requestedShares||0).toLocaleString()}</td><td>${Number(order.filledShares||0).toLocaleString()}</td><td>${Number(order.remainingShares||0).toLocaleString()}</td><td>${esc(String(order.status||'').replaceAll('_',' ').toLowerCase())}</td></tr>`).join('');
-      return `<table><thead><tr><th>Side</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Status</th></tr></thead><tbody>${body}</tbody></table>`;
+      const body=rows.map(order=>`<tr><td class="${order.side==='UP'?'up':'down'}">${esc(order.side)}</td><td>${esc(order.executionRole||order.orderType)}</td><td>${Number(order.requestedShares||0).toLocaleString()}</td><td>${Number(order.filledShares||0).toLocaleString()}</td><td>${Number(order.cancelledRemainderShares||0).toLocaleString()}</td><td>${price(order.averageFillPrice)}</td><td>${esc(String(order.status||'').replaceAll('_',' ').toLowerCase())}</td></tr>`).join('');
+      return `<table><thead><tr><th>Side</th><th>Type</th><th>Requested</th><th>Filled</th><th>Cancelled</th><th>Avg fill</th><th>Status</th></tr></thead><tbody>${body}</tbody></table>`;
     }
     async function refresh(){
       try{

@@ -276,15 +276,15 @@ test("the public root dashboard is a simple signal-only Renko dashboard", () => 
   assert.ok(app.indexOf("public/wick.html") < app.indexOf("public/probability.html"));
   assert.match(html, /BTC Renko Bot/);
   assert.match(html, /1-minute Renko/);
-  assert.match(html, /trades the Renko signal side/);
+  assert.match(html, /buys opposite to the Renko signal/);
   assert.match(html, /Starting capital/);
   assert.match(html, /id="cash"/);
   assert.match(html, /id="equityStatus"/);
   assert.match(html, /Awaiting marks/);
-  assert.match(html, /200 shares at \$0\.40 and 100 at \$0\.30/);
+  assert.match(html, /300 shares on the opposite side/);
   assert.match(html, /\$0\.99 take-profit/);
-  assert.match(html, /Opposite bricks do not sell or reverse/);
-  assert.match(html, /Entry limit orders/);
+  assert.match(html, /sends no second entry, sells, or reverses on later bricks/);
+  assert.match(html, /Entry orders/);
   assert.match(html, /exact market.s confirmed Polymarket resolution/);
   assert.doesNotMatch(html, /against.signal|against Renko|strategy comparison|profit target|order activity|Real Polymarket account/i);
 

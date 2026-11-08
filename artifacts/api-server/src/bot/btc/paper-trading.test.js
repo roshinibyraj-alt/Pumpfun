@@ -3,7 +3,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  ENTRY_ORDER_LADDER,
   ENTRY_SHARES,
   POLL_INTERVAL_MS,
   feeParameters,
@@ -13,10 +12,6 @@ const {
 
 test('paper trading uses the configured entry size and polling interval', () => {
   assert.equal(ENTRY_SHARES, 300);
-  assert.deepEqual(ENTRY_ORDER_LADDER, [
-    { limitPrice: 0.40, shares: 200 },
-    { limitPrice: 0.30, shares: 100 },
-  ]);
   assert.equal(POLL_INTERVAL_MS, 500);
 });
 
