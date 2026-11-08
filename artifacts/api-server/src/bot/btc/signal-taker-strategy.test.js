@@ -15,7 +15,7 @@ const {
 const START = 1_800_000_000_000;
 
 test('strategy is BTC five-minute only with a pre-open closed-candle comparison', () => {
-  assert.equal(STRATEGY_VERSION, 'btc-5m-candle-signal-taker-resolution-v2');
+  assert.equal(STRATEGY_VERSION, 'btc-5m-candle-signal-taker-opposite-resolution-v3');
   assert.equal(SIGNAL_COMPARE_LEAD_MS, 3_000);
   assert.equal(ENTRY_SHARES, 500);
   assert.equal(getWindowToScan(START - 10_000), START);

@@ -25,6 +25,10 @@ const TAKER_FEE_RATE = CRYPTO_TAKER_FEE_RATE;
 const EQUITY_SNAPSHOT_INTERVAL_MS = 30_000;
 const EXIT_QUOTE_MAX_AGE_MS = MAX_QUOTE_AGE_MS;
 
+function oppositeSide(side) {
+  return side === 'UP' ? 'DOWN' : side === 'DOWN' ? 'UP' : null;
+}
+
 function parseLevels(levels, direction) {
   return (Array.isArray(levels) ? levels : [])
     .map(level => ({ price: Number(level.price), size: Number(level.size) }))
@@ -271,6 +275,8 @@ class ProbabilityBot {
           this.referencePrice = signal.referenceClose;
           this.log('PAPER_CANDLE_SIGNAL_LATCHED', {
             side: signal.selectedSide,
+            signalSide: signal.selectedSide,
+            tradeSide: oppositeSide(signal.selectedSide),
             signalPrice: signal.signalPrice,
             referenceClose: signal.referenceClose,
             signalAt: signal.signalAt,
@@ -313,7 +319,12 @@ class ProbabilityBot {
       return;
     }
 
-    const side = this.entrySignal.selectedSide;
+    const signalSide = this.entrySignal.selectedSide;
+    const side = oppositeSide(signalSide);
+    if (!side) {
+      this.statusReason = 'The latched BTC signal has no valid opposite outcome side; no entry was submitted.';
+      return;
+    }
     const id = `paper-taker-${this.market.start}-${++this.orderSequence}`;
     const order = {
       id,
@@ -323,6 +334,7 @@ class ProbabilityBot {
       windowEnd: this.market.end,
       marketTitle: this.market.title,
       side,
+      signalSide,
       action: 'BUY',
       orderType: 'TAKER',
       executionRole: 'TAKER',
@@ -343,11 +355,12 @@ class ProbabilityBot {
     };
     this.entryOrders.unshift(order);
     this.entryOrders.length = Math.min(this.entryOrders.length, 200);
-    this.entrySideSelection = { ...this.entrySignal, status: 'ENTRY_SUBMITTED' };
-    this.statusReason = `${side} signal latched; submitted one paper taker buy for ${ENTRY_SHARES} shares. Fill price and actual quantity will be confirmed from the next tick's visible ask depth.`;
+    this.entrySideSelection = { ...this.entrySignal, status: 'ENTRY_SUBMITTED', tradeSide: side };
+    this.statusReason = `${signalSide} signal latched; submitted one paper taker buy on the opposite ${side} side for ${ENTRY_SHARES} shares. Fill price and actual quantity will be confirmed from the next tick's visible ask depth.`;
     this.log('PAPER_TAKER_BUY_SUBMITTED', {
       orderId: id,
       side,
+      signalSide,
       requestedShares: ENTRY_SHARES,
       confirmationDueTick: order.confirmationDueTick,
       fillModel: order.fillModel,
@@ -423,10 +436,12 @@ class ProbabilityBot {
         orderId: order.id,
         marketId: order.marketId,
         tokenId: order.tokenId,
+        slug: this.market.slug,
         windowStart: order.windowStart,
         windowEnd: order.windowEnd,
         marketTitle: order.marketTitle,
         side: order.side,
+        signalSide: order.signalSide,
         entryKind: 'TAKER_MARKET',
         orderType: 'TAKER',
         requestedShares: order.requestedShares,
@@ -495,6 +510,7 @@ class ProbabilityBot {
       status,
       signalAt,
       signalSide: this.entrySignal?.selectedSide ?? null,
+        tradeSide: oppositeSide(this.entrySignal?.selectedSide),
       signalPrice: this.entrySignal?.signalPrice ?? null,
       referenceClose: this.entrySignal?.referenceClose ?? null,
       nextTickConfirmation: Boolean(openOrders.length),
@@ -771,7 +787,7 @@ class ProbabilityBot {
         signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
         signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
         takerFeeRate: TAKER_FEE_RATE,
-        orderModel: 'Use the most recent closed BTC 1-minute candle. Three seconds before the 5-minute window opens, compare the live BTC price with that candle close: higher selects UP; equal or lower selects DOWN. At window open, submit one 500-share paper taker buy on that side.',
+        orderModel: 'Use the most recent closed BTC 1-minute candle. Three seconds before the 5-minute window opens, compare the live BTC price with that candle close: higher signals UP; equal or lower signals DOWN. At window open, submit one 500-share paper taker buy on the opposite side of the signal.',
         fillModel: 'The taker entry is confirmed on the next 500 ms bot tick from fresh visible asks, sweeping asks from lowest to highest. Only available shares are booked at their actual weighted average price; the unfilled remainder is cancelled. Taker fees use the market fee schedule when available.',
         exitModel: 'There is no take-profit or stop-loss. Filled shares remain open through the window and settle only when the original Polymarket market is officially confirmed resolved.',
       },

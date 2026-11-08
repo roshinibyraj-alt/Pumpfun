@@ -1,6 +1,6 @@
 'use strict';
 
-const STRATEGY_VERSION = 'btc-5m-candle-signal-taker-resolution-v2';
+const STRATEGY_VERSION = 'btc-5m-candle-signal-taker-opposite-resolution-v3';
 const WINDOW_MS = 5 * 60 * 1000;
 const SIGNAL_SCAN_LEAD_MS = 10_000;
 const SIGNAL_COMPARE_LEAD_MS = 3_000;
