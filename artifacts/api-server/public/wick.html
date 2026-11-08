@@ -78,7 +78,12 @@
     <section class="panel" aria-labelledby="positions-title">
       <h2 id="positions-title">Positions</h2>
       <div class="table-wrap" id="positions"></div>
-      <p class="note">Buy the active Renko side, 100 shares. On a confirmed opposite brick, sell and follow the new signal. A $0.99 limit take-profit is credited as $1 per share; any position still open at expiry awaits that exact market’s confirmed Polymarket resolution. No stop-loss.</p>
+      <p class="note">The first Renko signal places two limit buys on that side: 200 shares at $0.40 and 100 at $0.30. Opposite bricks do not sell or reverse. Filled positions use the $0.99 take-profit, credited as $1 per share; anything still open at expiry awaits its exact market’s confirmed Polymarket resolution. No stop-loss.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="orders-title">
+      <h2 id="orders-title">Entry limit orders</h2>
+      <div class="table-wrap" id="entryOrders"></div>
     </section>
     <div class="error" id="error" role="status"></div>
   </main>
@@ -108,6 +113,14 @@
       }).join('');
       return `<table><thead><tr><th>Side</th><th>Shares</th><th>Entry</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>${body}</tbody></table>`;
     }
+    function renderEntryOrders(orders,windowStart){
+      const rows=(Array.isArray(orders)?orders:[])
+        .filter(order=>order.orderType==='LIMIT'&&order.windowStart===windowStart)
+        .sort((a,b)=>Number(b.limitPrice)-Number(a.limitPrice));
+      if(!rows.length)return '<div class="empty">No entry orders submitted for this window.</div>';
+      const body=rows.map(order=>`<tr><td class="${order.side==='UP'?'up':'down'}">${esc(order.side)}</td><td>${price(order.limitPrice)}</td><td>${Number(order.requestedShares||0).toLocaleString()}</td><td>${Number(order.filledShares||0).toLocaleString()}</td><td>${Number(order.remainingShares||0).toLocaleString()}</td><td>${esc(String(order.status||'').replaceAll('_',' ').toLowerCase())}</td></tr>`).join('');
+      return `<table><thead><tr><th>Side</th><th>Limit</th><th>Requested</th><th>Filled</th><th>Remaining</th><th>Status</th></tr></thead><tbody>${body}</tbody></table>`;
+    }
     async function refresh(){
       try{
         const [stateResponse,analyticsResponse]=await Promise.all([
@@ -136,6 +149,7 @@
         $('#counts').textContent=`${account.openPositions??0} / ${account.settled??0}`;
         $('#equityCurve').innerHTML=drawEquity(analytics?.equityHistory||[]);
         $('#positions').innerHTML=renderPositions(state.trades);
+        $('#entryOrders').innerHTML=renderEntryOrders(state.entryOrders,window.start);
         $('#error').textContent=state.error||'';
       }catch(error){$('#error').textContent='Dashboard data unavailable: '+error.message}
     }
