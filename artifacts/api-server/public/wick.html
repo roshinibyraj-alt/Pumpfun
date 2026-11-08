@@ -8,7 +8,7 @@ main{max-width:1320px;margin:auto;padding:24px}.head{display:flex;justify-conten
 @media(max-width:850px){main{padding:15px}.strategy-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){main{padding:12px}.head{align-items:flex-start;flex-direction:column}.strategy-card{padding:14px}.strategy-rules{grid-template-columns:1fr}.strategy-quotes,.strategy-inventory{gap:7px}.strategy-quote-price{font-size:21px}.strategy-rules b{max-width:62%}.panel{padding:14px}.value{font-size:20px}}
 </style></head><body><main>
  <header class="head"><div><div class="title">BTC Strategy Lab</div><div class="sub">Two independent BTC 5-minute paper versions · $10,000 each</div></div><span class="pill" id="status">CONNECTING</span></header>
- <section class="panel"><h2>Signal performance comparison</h2><p class="small section-note">Two isolated $10,000 paper accounts. Only the active version opens new positions; paused positions continue to resolve normally.</p><div id="strategy-panels" class="strategy-grid"></div></section>
+ <section class="panel"><h2>Renko strategy comparison</h2><p class="small section-note">Two isolated $10,000 paper accounts. Only the active version opens new positions; paused positions continue to resolve normally.</p><div id="strategy-panels" class="strategy-grid"></div></section>
 <h2 class="overview-title">Demo account overview</h2><section class="grid">
 <div class="card primary"><div class="label">Demo equity</div><div class="value" id="equity">—</div></div><div class="card"><div class="label">Cash</div><div class="value" id="cash">—</div></div><div class="card"><div class="label">Realized P&amp;L</div><div class="value" id="realized">—</div></div><div class="card"><div class="label">Floating P&amp;L</div><div class="value" id="unrealized">—</div></div>
 <div class="card primary"><div class="label">Total trades</div><div class="value" id="totalTrades">—</div><span class="metric-note" id="settledTrades">— settled</span></div><div class="card danger"><div class="label">Taker fees paid</div><div class="value" id="takerFees">—</div><span class="metric-note">entry fills</span></div><div class="card success"><div class="label">Estimated maker rebate</div><div class="value" id="makerRebate">—</div><span class="metric-note">credited paper estimate · entry fills only</span></div><div class="card primary"><div class="label">Win rate</div><div class="value" id="winRate">—</div><span class="metric-note">wins ÷ settled trades</span></div>
@@ -30,7 +30,7 @@ function positionTable(items,open){
  const rows=items.map(p=>{
   const markAge=Date.now()-Number(p.lastOutcomeBidAt);
   const fresh=p.markStatus==='LIVE'&&p.markBid!=null&&p.markValue!=null&&Number.isFinite(markAge)&&markAge>=0&&markAge<=5000;
-  const common=`<td>${esc(p.strategyName||'BTC 5m market strategy')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}${p.signalSide?` <span class="muted">(signal ${esc(p.signalSide)})</span>`:''}</td><td>${sharesFmt(p.shares)}</td><td>${px(p.avgEntry)}</td><td>${usd(Number(p.fees||0)+Number(p.exitFees||0))}</td>`;
+   const common=`<td>${esc(p.variantName||p.strategyName||'BTC 5m market strategy')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}${p.signalSide?` <span class="muted">(signal ${esc(p.signalSide)})</span>`:''}</td><td>${sharesFmt(p.shares)}</td><td>${px(p.avgEntry)}</td><td>${usd(Number(p.fees||0)+Number(p.exitFees||0))}</td>`;
   const result=escResult(p);
   if(open)return `<tr>${common}<td>${esc(result)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${fresh?'LIVE':esc(p.markStatus==='PENDING_RESOLUTION'?'PENDING RESOLUTION':'STALE / UNAVAILABLE')}</td></tr>`;
   const exit=p.settlementBasis==='POLYMARKET_RESOLUTION'?`Resolution · ${esc(p.resolutionWinner||'result')}`:'—';
@@ -39,7 +39,7 @@ function positionTable(items,open){
  return `<table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
 }
 function dashboardModel(s,analytics){
- const a=s.paperAccount||{},w=s.window||{},rawStrategy=s.strategy||{},schedule=s.orderSchedule||{},orders=s.entryOrders||[],latest=orders.find(o=>o.windowStart===w.start)||orders[0],signal=s.entrySideSelection||{},signalSide=latest?.signalSide||signal.selectedSide||schedule.signalSide||null,tradeSide=latest?.side||signal.tradeSide||schedule.tradeSide||null,account={capital:a.startingCash??10000,equity:a.equity,cash:a.cash,realizedPnl:a.realizedPnl,unrealizedPnl:a.unrealizedPnl,openPositions:a.openPositions,totalTrades:a.totalTrades??(s.trades||[]).length,settledTrades:a.settled??0,wins:a.wins??0,losses:a.losses??0,winRate:a.settled?(a.wins||0)/a.settled*100:0,takerFees:a.takerFees??0,estimatedMakerRebate:a.estimatedMakerRebate??0,maxConsecutiveWins:a.maxConsecutiveWins??0,maxConsecutiveLosses:a.maxConsecutiveLosses??0,equityCurve:(analytics?.equityHistory||[]).map(p=>({ts:p.ts,equity:p.equity}))};
+  const a=s.paperAccount||{},w=s.window||{},rawStrategy=s.strategy||{},schedule=s.orderSchedule||{},orders=s.entryOrders||[],latest=orders.find(o=>o.windowStart===w.start)||orders[0],signal=s.entrySideSelection||{},signalSide=latest?.signalSide||signal.selectedSide||schedule.signalSide||null,tradeSide=latest?.side||signal.tradeSide||schedule.tradeSide||null,account={capital:a.startingCash??20000,equity:a.equity,cash:a.cash,realizedPnl:a.realizedPnl,unrealizedPnl:a.unrealizedPnl,openPositions:a.openPositions,totalTrades:a.totalTrades??(s.trades||[]).length,settledTrades:a.settled??0,wins:a.wins??0,losses:a.losses??0,winRate:a.settled?(a.wins||0)/a.settled*100:0,takerFees:a.takerFees??0,estimatedMakerRebate:a.estimatedMakerRebate??0,maxConsecutiveWins:a.maxConsecutiveWins??0,maxConsecutiveLosses:a.maxConsecutiveLosses??0,equityCurve:(analytics?.equityHistory||[]).map(p=>({ts:p.ts,equity:p.equity}))};
  const positions=Object.fromEntries(['UP','DOWN'].map(side=>{const item=a.positions?.[side]||{};return [side,{...item,cost:item.costBasis,shares:item.shares||0}]}));
  const strategy={name:'BTC 5m candle-signal opposite-side taker',timing:'One market buy at the 5-minute window open',trigger:signalSide?`Signal ${signalSide} → buy ${tradeSide||'opposite side'}`:(signal.status||'Waiting for the pre-open BTC comparison'),entries:{sharesPerSide:rawStrategy.sharesPerTrade||100,orderStatus:latest?.status||'NOT_PLACED',signal:{reason:signalSide?`Candle signal ${signalSide}; actual market buy is ${tradeSide||'the opposite side'}.`:rawStrategy.orderModel||'Waiting for signal'}},exit:{orderType:'POLYMARKET_RESOLUTION_ONLY'}};
  return {account,window:w,strategy,signalSide,tradeSide,quotes:s.quotes||{},inventory:positions,status:s.running?(s.error?'blocked_or_error':'scanning'):'stopped',raw:s};
@@ -58,5 +58,21 @@ async function refreshRealBalance(){try{const r=await fetch('/api/real-balance?t
  }
  const singleStrategyPanel=strategyPanel;
  strategyPanel=model=>{const variants=Object.values(model.raw?.variants||{});return variants.length?variants.map(v=>renderVariant(v,model)).join(''):singleStrategyPanel(model)};
- refresh();setInterval(refresh,2000);refreshRealBalance();setInterval(refreshRealBalance,15000);
-</script></body></html>
+  refresh();setInterval(refresh,2000);refreshRealBalance();setInterval(refreshRealBalance,15000);
+ </script><script>
+  const strategyDescription=document.querySelector('main > p.small');
+  if(strategyDescription)strategyDescription.textContent='Paper-only BTC 5-minute strategy using closed one-minute Renko bricks. Brick size is ATR(14) from preceding one-minute candles. Green bricks set UP; red bricks set DOWN. The With Renko version buys that side and the Against Renko version buys the opposite side. On an opposite brick, the bot sells the current-window position before entering the new side; without a new brick, it holds. Positions settle from the original market resolution only; no take-profit or stop-loss.';
+  const originalRenderVariant=window.renderVariant;
+  window.renderVariant=function(v,model){
+   const rendered=originalRenderVariant(v,model),renko=model.raw?.renko||{},direction=renko.selectedSide||model.raw?.entrySideSelection?.selectedSide||null;
+   const tradeSide=direction?(v.mode==='SIGNAL'?direction:direction==='UP'?'DOWN':'UP'):null;
+   const color=direction==='UP'?'#43f0ad':direction==='DOWN'?'#ff6688':'#a5b4d2';
+   const price=renko.brickSize==null?'—':px(renko.brickSize);
+   const brickAt=renko.latestBrickAt?timestamp(renko.latestBrickAt):'No confirmed brick yet';
+   const action=direction?'No new brick: hold. Opposite confirmed brick: sell current side, then enter the new side.':'Waiting for enough closed one-minute candles to confirm a Renko brick.';
+   const panel=`<div data-testid="renko-signal" style="margin-top:12px;padding:14px;border:1px solid ${color};border-radius:14px;background:linear-gradient(120deg,#11172b,#18213b);display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;align-items:center"><div><div class="label">1-minute Renko direction</div><div style="font-size:25px;font-weight:950;color:${color}">${esc(direction||'WAITING')}</div></div><div><div class="label">Trade side · ${esc(v.mode==='SIGNAL'?'with Renko':'against Renko')}</div><div style="font-size:20px;font-weight:900;color:${color}">${esc(tradeSide||'WAITING')}</div></div><div><div class="label">1m ATR(14) box size</div><div style="font-size:20px;font-weight:850">${esc(price)}</div></div><div><div class="label">Latest confirmed brick</div><div style="font-size:12px;font-weight:750">${esc(brickAt)}</div></div><div style="grid-column:1/-1;color:#c2cde4;font-size:12px">${esc(action)}</div></div>`;
+   return rendered.replace('<div class="strategy-rules">',panel+'<div class="strategy-rules">')
+    .replaceAll('Signal handling','Renko handling').replaceAll('With signal','With Renko').replaceAll('Against signal','Against Renko');
+  };
+  refresh();
+ </script></body></html>

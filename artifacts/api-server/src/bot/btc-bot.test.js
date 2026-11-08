@@ -268,3 +268,66 @@ test("dashboard renders Renko direction, taker orders, inventory and analytics",
   context.renderMarket(state);
   assert.equal(elements.upRole.textContent, "MONITORING");
 });
+
+test("the public root dashboard shows one-minute Renko direction for both variants", () => {
+  const vm = require("node:vm");
+  const html = fs.readFileSync(path.join(__dirname, "../../public/wick.html"), "utf8");
+  const app = fs.readFileSync(path.join(__dirname, "../app.ts"), "utf8");
+  assert.ok(app.indexOf("public/wick.html") < app.indexOf("public/probability.html"));
+  assert.match(html, /Renko strategy comparison/);
+  assert.match(html, /data-testid="renko-signal"/);
+
+  const footer = { textContent: "" };
+  const context = {
+    document: { querySelector: () => footer },
+    fetch: () => new Promise(() => {}),
+    setInterval() {},
+    window: null,
+  };
+  context.window = context;
+  vm.createContext(context);
+  for (const script of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) {
+    vm.runInContext(script[1], context);
+  }
+  assert.match(footer.textContent, /closed one-minute Renko bricks/);
+
+  const model = {
+    window: { start: 120000 },
+    raw: {
+      renko: {
+        status: "READY",
+        selectedSide: "DOWN",
+        brickSize: 9.5,
+        atrPeriod: 14,
+        latestBrickAt: 120000,
+      },
+      quotes: { UP: { bestAsk: 0.6 }, DOWN: { bestAsk: 0.4 } },
+    },
+  };
+  const variant = {
+    id: "signal",
+    name: "With signal",
+    mode: "SIGNAL",
+    trades: [],
+    equityCurve: [],
+    startingCash: 10000,
+    cash: 10000,
+    equity: 10000,
+    shareSize: 100,
+    cycleProfit: 0,
+    targetProfit: 300,
+  };
+  const withRenko = context.renderVariant(variant, model);
+  assert.match(withRenko, /1-minute Renko direction/);
+  assert.match(withRenko, /Trade side · with Renko/);
+  assert.match(withRenko, /DOWN/);
+  assert.match(withRenko, /No new brick: hold/);
+  assert.doesNotMatch(withRenko, /With signal|Against signal/);
+
+  const againstRenko = context.renderVariant(
+    { ...variant, id: "against", name: "Against signal", mode: "AGAINST_SIGNAL" },
+    model,
+  );
+  assert.match(againstRenko, /Trade side · against Renko/);
+  assert.match(againstRenko, />UP</);
+});
