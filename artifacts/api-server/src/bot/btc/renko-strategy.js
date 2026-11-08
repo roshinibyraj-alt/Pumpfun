@@ -7,7 +7,7 @@ const {
   takerFeeAt,
 } = require('./paper-trading');
 
-const STRATEGY_VERSION = 'btc-5m-renko-1m-opposite-signal-taker-300-tp099-resolution-v3';
+const STRATEGY_VERSION = 'btc-5m-renko-1m-signal-side-taker-300-tp099-resolution-v4';
 const CANDLE_INTERVAL_MS = 60_000;
 const RENKO_ATR_PERIOD = 14;
 const RENKO_HISTORY_CANDLES = 100;

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#0a1020">
-  <title>BTC Renko Bot</title>
+  <title>BTC Renko Signal-Side Bot</title>
   <style>
     :root{color-scheme:dark;--bg:#0a1020;--panel:#111a2d;--line:#253551;--muted:#a8b6ca;--text:#f5f8ff;--up:#43e3a1;--down:#ff6f83;--blue:#75b9ff}
     *{box-sizing:border-box}
@@ -46,7 +46,7 @@
 <body>
   <main>
     <header>
-      <div><h1>BTC Renko Bot</h1><p class="sub">One paper account · buys opposite to the Renko signal</p></div>
+      <div><h1>BTC Renko Bot</h1><p class="sub">One paper account · buys on the Renko signal side</p></div>
       <span class="status" id="status">CONNECTING</span>
     </header>
 
@@ -82,7 +82,7 @@
     <section class="panel" aria-labelledby="positions-title">
       <h2 id="positions-title">Positions</h2>
       <div class="table-wrap" id="positions"></div>
-      <p class="note">At each 5-minute window start, the latest confirmed 1-minute Renko side is the signal. The bot buys 300 shares on the opposite side with one taker market order, sweeping visible asks and applying taker fees. If no confirmed Renko side is available yet, it waits for one. It sends no second entry, sells, or reverses on later bricks. Filled positions use the $0.99 take-profit, credited as $1 per share; anything still open at expiry awaits its exact market’s confirmed Polymarket resolution. No stop-loss.</p>
+      <p class="note">At each 5-minute window start, the latest confirmed 1-minute Renko side is the signal. The bot buys 300 shares on that same side with one taker market order, sweeping visible asks and applying taker fees. If no confirmed Renko side is available yet, it waits for one. It sends no second entry, sells, or reverses on later bricks. Filled positions use the $0.99 take-profit, credited as $1 per share; anything still open at expiry awaits its exact market’s confirmed Polymarket resolution. No stop-loss.</p>
     </section>
 
     <section class="panel" aria-labelledby="orders-title">

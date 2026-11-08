@@ -57,10 +57,10 @@ function setAsks(bot, now, side, asks, bid = 0.4) {
   }, now);
 }
 
-test('a window-start green signal sends one 300-share DOWN taker buy immediately', () => {
+test('a window-start green signal sends one 300-share UP taker buy immediately', () => {
   const { bot, setHistoricalCandle } = createBot();
   setHistoricalCandle(15, { t: START - 60_000, o: 100, h: 102, l: 100, c: 102 });
-  setAsks(bot, START, 'DOWN', [{ price: 0.40, size: 200 }, { price: 0.45, size: 100 }]);
+  setAsks(bot, START, 'UP', [{ price: 0.40, size: 200 }, { price: 0.45, size: 100 }]);
   bot.processRenkoStrategy(START);
   bot.processTakerBuyOrders(START);
 
@@ -68,7 +68,7 @@ test('a window-start green signal sends one 300-share DOWN taker buy immediately
   const [order] = bot.entryOrders;
   assert.equal(order.orderType, 'MARKET');
   assert.equal(order.executionRole, 'TAKER');
-  assert.equal(order.side, 'DOWN');
+  assert.equal(order.side, 'UP');
   assert.equal(order.signalSide, 'UP');
   assert.equal(order.requestedShares, 300);
   assert.equal(order.filledShares, 300);
@@ -78,7 +78,7 @@ test('a window-start green signal sends one 300-share DOWN taker buy immediately
   assert.ok(order.fees > 0);
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].orderType, 'MARKET');
-  assert.equal(bot.trades[0].side, 'DOWN');
+  assert.equal(bot.trades[0].side, 'UP');
   assert.equal(bot.trades[0].signalSide, 'UP');
   assert.equal(bot.trades[0].shares, 300);
   assert.equal(bot.renkoState.brickSize, 2);
@@ -89,39 +89,42 @@ test('a window-start green signal sends one 300-share DOWN taker buy immediately
   assert.deepEqual(Object.keys(bot.snapshot().variants), ['signal']);
   assert.match(bot.snapshot().strategy.exitModel, /best bid reaches \$0\.99/i);
   assert.match(bot.snapshot().strategy.exitModel, /credited at \$1 per share/i);
-  assert.equal(bot.tradeSideFor('UP'), 'DOWN');
-  assert.equal(bot.tradeSideFor('DOWN'), 'UP');
+  assert.equal(bot.tradeSideFor('UP'), 'UP');
+  assert.equal(bot.tradeSideFor('DOWN'), 'DOWN');
+  assert.equal(bot.snapshot().orderSchedule.signalSide, 'UP');
+  assert.equal(bot.snapshot().orderSchedule.tradeSide, 'UP');
   assert.equal(bot.snapshot().strategy.orderType, 'MARKET');
   assert.equal(bot.snapshot().strategy.entryExecutionRole, 'TAKER');
   assert.equal(bot.snapshot().strategy.version, STRATEGY_VERSION);
 });
 
-test('there is no against-signal account or strategy rotation', () => {
+test('only the signal-side account is active; there is no strategy rotation', () => {
   const { bot } = createBot();
   const state = bot.snapshot();
   assert.equal(state.paperAccount.startingCash, 10_000);
   assert.deepEqual(Object.keys(state.variants), ['signal']);
   assert.equal(state.variants.signal.shareSize, 300);
-  assert.equal(state.variants.signal.mode, 'OPPOSITE_SIGNAL');
+  assert.equal(state.variants.signal.mode, 'SIGNAL_SIDE');
   assert.equal(state.activeVariantId, 'signal');
   assert.equal(state.variants.against, undefined);
 });
 
-test('a red Renko signal sends the opposite-side UP taker buy', () => {
+test('a red Renko signal sends a DOWN taker buy on the signal side', () => {
   const { bot, setNow, addCandle } = createBot();
   addCandle({ t: START, o: 100, h: 100, l: 98, c: 98 });
   setNow(START + 60_000);
   bot.tickCount = 1;
-  setAsks(bot, START + 60_000, 'UP', [{ price: 0.39, size: 300 }]);
+  setAsks(bot, START + 60_000, 'DOWN', [{ price: 0.39, size: 300 }]);
   bot.processRenkoStrategy(START + 60_000);
   bot.processTakerBuyOrders(START + 60_000);
   assert.equal(bot.entrySignal.selectedSide, 'DOWN');
   assert.equal(bot.entryOrders.length, 1);
-  assert.equal(bot.entryOrders[0].side, 'UP');
+  assert.equal(bot.entryOrders[0].side, 'DOWN');
   assert.equal(bot.entryOrders[0].signalSide, 'DOWN');
-  assert.equal(bot.entryOrders[0].tokenId, market.tokens.UP);
+  assert.equal(bot.entryOrders[0].tokenId, market.tokens.DOWN);
   assert.equal(bot.entryOrders[0].executionRole, 'TAKER');
-  assert.equal(bot.trades[0].side, 'UP');
+  assert.equal(bot.trades[0].side, 'DOWN');
+  assert.equal(bot.snapshot().orderSchedule.tradeSide, 'DOWN');
 });
 
 test('the first taker order waits for a fresh book and submits only once', () => {
@@ -134,7 +137,7 @@ test('the first taker order waits for a fresh book and submits only once', () =>
 
   setNow(START + 500);
   bot.tickCount = 1;
-  setAsks(bot, START + 500, 'DOWN', [{ price: 0.41, size: 300 }]);
+  setAsks(bot, START + 500, 'UP', [{ price: 0.41, size: 300 }]);
   bot.processRenkoStrategy(START + 500);
   bot.processTakerBuyOrders(START + 500);
   assert.equal(bot.entryOrders.length, 1);
@@ -146,21 +149,21 @@ test('the first taker order waits for a fresh book and submits only once', () =>
 test('later opposite Renko bricks do not sell or submit another taker buy', () => {
   const { bot, setHistoricalCandle, setNow, addCandle } = createBot();
   setHistoricalCandle(15, { t: START - 60_000, o: 100, h: 102, l: 100, c: 102 });
-  setAsks(bot, START, 'DOWN', [{ price: 0.4, size: 300 }]);
+  setAsks(bot, START, 'UP', [{ price: 0.4, size: 300 }]);
   bot.processRenkoStrategy(START);
   bot.processTakerBuyOrders(START);
-  assert.equal(bot.trades[0].side, 'DOWN');
+  assert.equal(bot.trades[0].side, 'UP');
 
   addCandle({ t: START, o: 102, h: 102, l: 98, c: 98 });
   setNow(START + 60_000);
   bot.tickCount = 1;
-  setAsks(bot, START + 60_000, 'UP', [{ price: 0.4, size: 300 }]);
+  setAsks(bot, START + 60_000, 'DOWN', [{ price: 0.4, size: 300 }]);
   bot.processRenkoStrategy(START + 60_000);
   bot.processTakerBuyOrders(START + 60_000);
   assert.equal(bot.renkoState.selectedSide, 'DOWN');
-  assert.equal(bot.entrySideForWindow, 'DOWN');
+  assert.equal(bot.entrySideForWindow, 'UP');
   assert.equal(bot.entryOrders.filter(order => order.action === 'SELL').length, 0);
-  assert.ok(bot.entryOrders.every(order => order.action === 'BUY' && order.side === 'DOWN'));
+  assert.ok(bot.entryOrders.every(order => order.action === 'BUY' && order.side === 'UP'));
   assert.equal(bot.entryOrders.length, 1);
   assert.equal(bot.trades[0].status, 'OPEN');
   assert.equal(bot.trades[0].shares, 300);
@@ -169,7 +172,7 @@ test('later opposite Renko bricks do not sell or submit another taker buy', () =
 test('an empty ask book cancels the taker order without a later rearm', () => {
   const { bot, setHistoricalCandle, setNow } = createBot();
   setHistoricalCandle(15, { t: START - 60_000, o: 100, h: 102, l: 100, c: 102 });
-  setAsks(bot, START, 'DOWN', []);
+  setAsks(bot, START, 'UP', []);
   bot.processRenkoStrategy(START);
   bot.processTakerBuyOrders(START);
   assert.equal(bot.entryOrders.length, 1);
@@ -177,7 +180,7 @@ test('an empty ask book cancels the taker order without a later rearm', () => {
 
   setNow(START + 500);
   bot.tickCount = 1;
-  setAsks(bot, START + 500, 'DOWN', [{ price: 0.4, size: 300 }]);
+  setAsks(bot, START + 500, 'UP', [{ price: 0.4, size: 300 }]);
   bot.processRenkoStrategy(START + 500);
   bot.processTakerBuyOrders(START + 500);
   assert.equal(bot.entryOrders.length, 1);
@@ -187,7 +190,7 @@ test('an empty ask book cancels the taker order without a later rearm', () => {
 test('a partial taker sweep cancels the unfilled remainder and never re-arms', () => {
   const { bot, setHistoricalCandle, setNow } = createBot();
   setHistoricalCandle(15, { t: START - 60_000, o: 100, h: 102, l: 100, c: 102 });
-  setAsks(bot, START, 'DOWN', [{ price: 0.39, size: 50 }]);
+  setAsks(bot, START, 'UP', [{ price: 0.39, size: 50 }]);
   bot.processRenkoStrategy(START);
   bot.processTakerBuyOrders(START);
   const order = bot.entryOrders[0];
@@ -200,7 +203,7 @@ test('a partial taker sweep cancels the unfilled remainder and never re-arms', (
 
   setNow(START + 500);
   bot.tickCount = 1;
-  setAsks(bot, START + 500, 'DOWN', [{ price: 0.39, size: 250 }]);
+  setAsks(bot, START + 500, 'UP', [{ price: 0.39, size: 250 }]);
   bot.processRenkoStrategy(START + 500);
   bot.processTakerBuyOrders(START + 500);
   assert.equal(bot.entryOrders.length, 1);

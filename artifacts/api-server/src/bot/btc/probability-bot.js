@@ -99,7 +99,7 @@ class ProbabilityBot {
     this.equitySnapshotRequested = true;
     this.learningStatus = {
       enabled: Boolean(learningStore),
-      mode: learningStore ? 'renko-opposite-signal-taker-paper-logging-only' : 'disabled',
+      mode: learningStore ? 'renko-signal-side-taker-paper-logging-only' : 'disabled',
       completedWindows: 0,
     };
     this.error = null;
@@ -109,7 +109,7 @@ class ProbabilityBot {
     this.activeVariantId = 'signal';
     this.variants = {
       signal: {
-        id: 'signal', name: 'BTC Renko opposite signal', mode: 'OPPOSITE_SIGNAL',
+        id: 'signal', name: 'BTC Renko signal side', mode: 'SIGNAL_SIDE',
         startingCash: STARTING_CASH, cash: STARTING_CASH,
         shareSize: ENTRY_SHARES,
         active: true, settledTrades: 0, wins: 0, losses: 0, totalTrades: 0,
@@ -120,9 +120,7 @@ class ProbabilityBot {
   }
 
   tradeSideFor(signalSide) {
-    if (signalSide === 'UP') return 'DOWN';
-    if (signalSide === 'DOWN') return 'UP';
-    return null;
+    return signalSide === 'UP' || signalSide === 'DOWN' ? signalSide : null;
   }
 
   snapshotVariants(now = this.now()) {
@@ -475,8 +473,8 @@ class ProbabilityBot {
     this.entryOrders.unshift(order);
     this.entryOrders.length = Math.min(this.entryOrders.length, 200);
     this.lastRenkoActionKey.set(variant.id, signalKey);
-    this.statusReason = `Renko signalled ${signalSide}; one 300-share taker buy is queued on the opposite ${side} side.`;
-    this.log('PAPER_RENKO_OPPOSITE_TAKER_BUY_QUEUED', {
+    this.statusReason = `Renko signalled ${signalSide}; one 300-share taker buy is queued on the same ${side} side.`;
+    this.log('PAPER_RENKO_SIGNAL_SIDE_TAKER_BUY_QUEUED', {
       side, signalSide, variantId: variant.id,
       orderId: order.id, requestedShares: order.requestedShares,
       brickSize: this.renkoState.brickSize, brickAt: this.renkoState.latestBrickAt,
@@ -553,7 +551,7 @@ class ProbabilityBot {
       return;
     }
     if (this.entrySideForWindow !== entrySide) {
-      this.statusReason = `Renko now points ${signalSide}, but this window's one-time taker entry remains on ${this.entrySideForWindow}. Opposite bricks do not sell or re-enter.`;
+      this.statusReason = `Renko now points ${signalSide}, but this window's one-time entry remains on ${this.entrySideForWindow}. Later bricks do not sell or re-enter.`;
       return;
     }
     const openTrades = this.trades.filter(trade => trade.status === 'OPEN'
@@ -586,7 +584,7 @@ class ProbabilityBot {
       if (this.market?.id !== order.marketId) continue;
       const quote = this.quotes[order.side];
       if (!quoteIsFresh(quote, now, EXIT_QUOTE_MAX_AGE_MS)) {
-        this.statusReason = `Renko selected ${order.signalSide}; waiting for a fresh ${order.side} ask book to submit the taker buy.`;
+        this.statusReason = `Renko selected ${order.signalSide}; waiting for a fresh ask book on the signalled side to submit the taker buy.`;
         continue;
       }
 
@@ -717,7 +715,7 @@ class ProbabilityBot {
         averageFillPrice: fill.averagePrice, fillCost: fill.cost,
         fees: fill.fees, fillLevels: fill.fills,
       }, order.windowStart);
-      this.statusReason = `${filledShares.toLocaleString()} ${order.side} shares bought against visible asks at an average $${fill.averagePrice.toFixed(4)}.`
+      this.statusReason = `${filledShares.toLocaleString()} ${order.side} shares bought on the signalled side against visible asks at an average $${fill.averagePrice.toFixed(4)}.`
         + (cancelledShares > 1e-8
           ? ` The unfilled ${cancelledShares.toLocaleString()}-share market-order remainder was cancelled.`
           : '')
@@ -1446,7 +1444,7 @@ class ProbabilityBot {
         takeProfitPrice: TAKE_PROFIT_LIMIT_PRICE,
         renkoAtrPeriod: RENKO_ATR_PERIOD,
         takerFeeRate: TAKER_FEE_RATE,
-        orderModel: `Build Renko from confirmed 1-minute BTC candle closes. The brick size is fixed for each 5-minute market window at the average true range of the preceding ${RENKO_ATR_PERIOD} one-minute bars. Green signals UP and red signals DOWN. Immediately after the window starts, buy 300 shares on the opposite side with one taker market order. If there is no confirmed Renko side yet, wait for one. No re-entry or reversal.`,
+        orderModel: `Build Renko from confirmed 1-minute BTC candle closes. The brick size is fixed for each 5-minute market window at the average true range of the preceding ${RENKO_ATR_PERIOD} one-minute bars. Green signals UP and red signals DOWN. Immediately after the window starts, buy 300 shares on that signalled side with one taker market order. If there is no confirmed Renko side yet, wait for one. No re-entry or reversal.`,
         fillModel: 'Taker buys sweep only visible asks and apply the market taker fee schedule. Book the actual average fill price and shares; cancel any unfilled market-order remainder immediately. If the ask book is unavailable, wait for a fresh book before submitting once. Never fabricate fills.',
         exitModel: 'A paper limit take-profit triggers when a fresh original-market best bid reaches $0.99 and is credited at $1 per share with no exit fee. No stop-loss and no Renko reversal sell. Any position not sold by take-profit stays open for confirmed resolution of its exact original market.',
       },
