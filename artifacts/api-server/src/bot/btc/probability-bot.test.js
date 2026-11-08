@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ProbabilityBot } = require('./probability-bot');
-const { STRATEGY_VERSION } = require('./signal-taker-strategy');
+const { STRATEGY_VERSION } = require('./renko-strategy');
 
 const START = 1_800_000_000_000;
 const market = {
@@ -15,18 +15,22 @@ const market = {
   raw: { feesEnabled: true, feeSchedule: { rate: 0.07, exponent: 1 } },
 };
 
-function createBot({ signalPrice = 101 } = {}) {
-  let now = START - 10_000;
+function createBot() {
+  let now = START;
+  const historicalCandles = Array.from({ length: 16 }, (_, index) => ({
+    t: START - ((16 - index) * 60_000),
+    o: 100,
+    h: 101,
+    l: 99,
+    c: 100,
+  }));
+  const liveCandles = [];
   const priceFeed = {
     start() {},
     snapshot() { return { status: 'live', ageMs: 1 }; },
-    getMinuteCandles() {
-      return [
-        { t: START - 120_000, c: 100 },
-        { t: START - 60_000, c: 105 }, // Not closed before the signal timestamp.
-      ];
-    },
-    getTicks() { return [{ ts: now, price: signalPrice }]; },
+    getHistoricalMinuteCandles() { return historicalCandles; },
+    getMinuteCandles() { return liveCandles; },
+    getTicks() { return [{ ts: now, price: 100 }]; },
   };
   const bot = new ProbabilityBot({
     now: () => now,
@@ -41,38 +45,36 @@ function createBot({ signalPrice = 101 } = {}) {
     bot,
     setNow(value) { now = value; },
     getNow() { return now; },
+    addCandle(candle) { liveCandles.push(candle); },
   };
 }
 
 function setAsks(bot, now, side, asks, bid = 0.4) {
   bot.quotes[side] = bot.quote({
-    bids: [{ price: bid, size: 10_000 }],
+    bids: bid == null ? [] : [{ price: bid, size: 10_000 }],
     asks,
   }, now);
 }
 
-test('one pre-open candle signal submits one taker buy at open and confirms on the next tick', () => {
-  const { bot, setNow } = createBot();
-  const signalAt = START - 3_000;
-  setNow(signalAt + 500);
+test('a confirmed green one-minute Renko brick submits an UP taker buy and confirms next tick', () => {
+  const { bot, setNow, addCandle } = createBot();
+  const candleAt = START;
+  addCandle({ t: candleAt, o: 100, h: 102, l: 100, c: 102 });
+  setNow(START + 60_000);
   bot.tickCount = 1;
-  bot.processCandleSignalStrategy(signalAt + 500);
-  assert.equal(bot.entrySignal.selectedSide, 'UP');
-  assert.equal(bot.entryOrders.length, 0);
-
-  setNow(START);
-  bot.tickCount = 2;
-  setAsks(bot, START, 'UP', [{ price: 0.45, size: 200 }, { price: 0.55, size: 400 }]);
-  bot.processCandleSignalStrategy(START);
-  bot.processPendingTakerOrders(START);
+  setAsks(bot, START + 60_000, 'UP', [{ price: 0.45, size: 200 }, { price: 0.55, size: 400 }]);
+  bot.processRenkoStrategy(START + 60_000);
   assert.equal(bot.entryOrders.length, 1);
   assert.equal(bot.entryOrders[0].status, 'PENDING_CONFIRMATION');
   assert.equal(bot.trades.length, 0);
+  assert.equal(bot.renkoState.brickSize, 2);
+  assert.equal(bot.renkoState.selectedSide, 'UP');
 
-  setNow(START + 500);
-  bot.tickCount = 3;
-  setAsks(bot, START + 500, 'UP', [{ price: 0.55, size: 400 }, { price: 0.45, size: 200 }]);
-  bot.processPendingTakerOrders(START + 500);
+  setNow(START + 60_500);
+  bot.tickCount = 2;
+  setAsks(bot, START + 60_500, 'UP', [{ price: 0.55, size: 400 }, { price: 0.45, size: 200 }]);
+  bot.processRenkoStrategy(START + 60_500);
+  bot.processPendingTakerOrders(START + 60_500);
 
   const [order] = bot.entryOrders;
   const [trade] = bot.trades;
@@ -90,7 +92,7 @@ test('one pre-open candle signal submits one taker buy at open and confirms on t
   assert.equal(bot.takeProfitOrders, undefined);
   assert.ok(Math.abs(bot.cash - (20_000 - 46.7325)) < 1e-9);
   assert.equal(bot.snapshot().takeProfitOrders, undefined);
-  assert.match(bot.snapshot().strategy.exitModel, /no take-profit or stop-loss/i);
+  assert.match(bot.snapshot().strategy.exitModel, /opposite Renko direction/i);
   assert.equal(bot.snapshot().strategy.version, STRATEGY_VERSION);
 });
 
@@ -145,129 +147,144 @@ test('isolated versions rotate at $300 net realized profit and double only the a
   assert.equal(state.variants.signal.cycleProfit, 0);
 });
 
-test('the bot scans the upcoming market before open and confirms the entry one poll later', async () => {
-  let now = START - 10_000;
-  const priceFeed = {
-    start() {},
-    snapshot() { return { status: 'live', ageMs: 0 }; },
-    getMinuteCandles() {
-      return [
-        { t: START - 120_000, c: 100 },
-        { t: START - 60_000, c: 105 },
-      ];
-    },
-    getTicks() { return [{ ts: now, price: 101 }]; },
-  };
-  const bot = new ProbabilityBot({
-    now: () => now,
-    priceFeed,
-    fetchMarket: async start => ({ ...market, start, end: start + 300_000 }),
-    fetchBook: async () => ({
-      bids: [{ price: 0.4, size: 1000 }],
-      asks: [{ price: 0.45, size: 500 }],
-    }),
-    fetchMarketDetails: async () => null,
-  });
-
-  await bot.tick();
-  assert.equal(bot.market.start, START);
-  assert.equal(bot.entrySideSelection.status, 'WAITING_FOR_PREOPEN_SIGNAL');
-
-  now = START - 2_500;
-  await bot.tick();
-  assert.equal(bot.entrySideSelection.selectedSide, 'UP');
-  assert.equal(bot.entryOrders.length, 0);
-
-  now = START;
-  await bot.tick();
-  assert.equal(bot.entryOrders.length, 1);
-  assert.equal(bot.entryOrders[0].status, 'PENDING_CONFIRMATION');
-  assert.equal(bot.entryOrders[0].signalSide, 'UP');
-  assert.equal(bot.entryOrders[0].side, 'UP');
-  assert.equal(bot.trades.length, 0);
-
-  now = START + 500;
-  await bot.tick();
-  assert.equal(bot.entryOrders[0].status, 'FILLED');
-  assert.equal(bot.trades[0].shares, 100);
-  assert.equal(bot.trades[0].side, 'UP');
-  assert.equal(bot.trades[0].entryPrice, 0.45);
-});
-
-test('the signal version buys DOWN on a DOWN signal', () => {
-  const { bot, setNow } = createBot({ signalPrice: 99 });
-  setNow(START - 2_500);
+test('a closed red Renko brick buys DOWN on the signal-following version', () => {
+  const { bot, setNow, addCandle } = createBot();
+  addCandle({ t: START, o: 100, h: 100, l: 98, c: 98 });
+  setNow(START + 60_000);
   bot.tickCount = 1;
-  bot.processCandleSignalStrategy(START - 2_500);
+  bot.processRenkoStrategy(START + 60_000);
   assert.equal(bot.entrySignal.selectedSide, 'DOWN');
-
-  setNow(START);
-  bot.tickCount = 2;
-  setAsks(bot, START, 'DOWN', [{ price: 0.45, size: 10 }]);
-  bot.processCandleSignalStrategy(START);
   assert.equal(bot.entryOrders[0].signalSide, 'DOWN');
   assert.equal(bot.entryOrders[0].side, 'DOWN');
   assert.equal(bot.entryOrders[0].tokenId, market.tokens.DOWN);
 });
 
-test('an UP signal buys UP, then next-tick taker fill books only visible shares and cancels remainder', () => {
-  const { bot, setNow } = createBot();
-  setNow(START - 2_500);
+test('a flat Renko interval holds an open position without placing a sell', () => {
+  const { bot, setNow, addCandle } = createBot();
+  addCandle({ t: START, o: 100, h: 102, l: 100, c: 102 });
+  setNow(START + 60_000);
   bot.tickCount = 1;
-  bot.processCandleSignalStrategy(START - 2_500);
-  assert.equal(bot.entrySignal.selectedSide, 'UP');
-  setNow(START);
+  setAsks(bot, START + 60_000, 'UP', [{ price: 0.45, size: 100 }]);
+  bot.processRenkoStrategy(START + 60_000);
   bot.tickCount = 2;
-  setAsks(bot, START, 'UP', [{ price: 0.45, size: 20 }]);
-  bot.processCandleSignalStrategy(START);
-  bot.processPendingTakerOrders(START);
+  setNow(START + 60_500);
+  bot.processRenkoStrategy(START + 60_500);
+  bot.processPendingTakerOrders(START + 60_500);
+  assert.equal(bot.trades[0].status, 'OPEN');
 
-  setNow(START + 500);
+  setNow(START + 70_000);
   bot.tickCount = 3;
-  setAsks(bot, START + 500, 'UP', [{ price: 0.45, size: 20 }]);
-  bot.processPendingTakerOrders(START + 500);
-  bot.processCandleSignalStrategy(START + 500);
-
-  assert.equal(bot.entryOrders.length, 1);
-  assert.equal(bot.entryOrders[0].signalSide, 'UP');
-  assert.equal(bot.entryOrders[0].side, 'UP');
-  assert.equal(bot.entryOrders[0].status, 'PARTIALLY_FILLED_REMAINDER_CANCELLED');
-  assert.equal(bot.entryOrders[0].filledShares, 20);
-  assert.equal(bot.entryOrders[0].cancelledRemainderShares, 80);
-  assert.equal(bot.trades.length, 1);
-  assert.equal(bot.trades[0].shares, 20);
-  assert.equal(bot.trades[0].signalSide, 'UP');
-  assert.equal(bot.trades[0].side, 'UP');
+  bot.processRenkoStrategy(START + 70_000);
+  assert.equal(bot.renkoState.newBrickPrinted, false);
+  assert.equal(bot.entryOrders.filter(order => order.action === 'SELL').length, 0);
+  assert.equal(bot.trades[0].status, 'OPEN');
 });
 
-test('entry is not fabricated when the next-tick book is empty', () => {
-  const { bot, setNow } = createBot();
-  setNow(START - 2_500);
+test('a failed reversal sell is not retried again until another opposite brick prints', () => {
+  const { bot, setNow, addCandle } = createBot();
+  addCandle({ t: START, o: 100, h: 102, l: 100, c: 102 });
+  setNow(START + 60_000);
   bot.tickCount = 1;
-  bot.processCandleSignalStrategy(START - 2_500);
-  setNow(START);
+  setAsks(bot, START + 60_000, 'UP', [{ price: 0.45, size: 100 }]);
+  bot.processRenkoStrategy(START + 60_000);
   bot.tickCount = 2;
-  bot.processCandleSignalStrategy(START);
-  bot.processPendingTakerOrders(START);
+  setNow(START + 60_500);
+  bot.processRenkoStrategy(START + 60_500);
+  bot.processPendingTakerOrders(START + 60_500);
+  assert.equal(bot.trades[0].status, 'OPEN');
 
-  setNow(START + 500);
+  addCandle({ t: START + 60_000, o: 102, h: 102, l: 98, c: 98 });
+  setNow(START + 120_000);
   bot.tickCount = 3;
-  setAsks(bot, START + 500, 'UP', []);
-  bot.processPendingTakerOrders(START + 500);
-  bot.processCandleSignalStrategy(START + 500);
+  setAsks(bot, START + 120_000, 'UP', [], null);
+  bot.processRenkoStrategy(START + 120_000);
+  bot.tickCount = 4;
+  setNow(START + 120_500);
+  setAsks(bot, START + 120_500, 'UP', [], null);
+  bot.processRenkoStrategy(START + 120_500);
+  bot.processPendingTakerOrders(START + 120_500);
+  assert.equal(bot.entryOrders.filter(order => order.action === 'SELL').length, 1);
+  assert.equal(bot.entryOrders.find(order => order.action === 'SELL').status, 'CANCELLED_NO_VISIBLE_BIDS');
 
+  setNow(START + 130_000);
+  bot.tickCount = 5;
+  bot.processRenkoStrategy(START + 130_000);
+  assert.equal(bot.renkoState.newBrickPrinted, false);
+  assert.equal(bot.entryOrders.filter(order => order.action === 'SELL').length, 1);
+  assert.equal(bot.trades[0].status, 'OPEN');
+});
+
+test('an opposite red Renko brick sells UP first, then submits a DOWN buy', () => {
+  const { bot, setNow, addCandle } = createBot();
+  addCandle({ t: START, o: 100, h: 102, l: 100, c: 102 });
+  setNow(START + 60_000);
+  bot.tickCount = 1;
+  setAsks(bot, START + 60_000, 'UP', [{ price: 0.45, size: 100 }]);
+  bot.processRenkoStrategy(START + 60_000);
+  bot.tickCount = 2;
+  setNow(START + 60_500);
+  bot.processRenkoStrategy(START + 60_500);
+  bot.processPendingTakerOrders(START + 60_500);
+  assert.equal(bot.trades[0].side, 'UP');
+  assert.equal(bot.trades[0].status, 'OPEN');
+
+  addCandle({ t: START + 60_000, o: 102, h: 102, l: 98, c: 98 });
+  setNow(START + 120_000);
+  bot.tickCount = 3;
+  setAsks(bot, START + 120_000, 'UP', [], 0.4);
+  setAsks(bot, START + 120_000, 'DOWN', [{ price: 0.45, size: 100 }]);
+  bot.processRenkoStrategy(START + 120_000);
+  const sell = bot.entryOrders.find(order => order.action === 'SELL');
+  assert.ok(sell);
+  assert.equal(sell.side, 'UP');
+  assert.equal(sell.targetSide, 'DOWN');
+  assert.equal(sell.status, 'PENDING_CONFIRMATION');
+
+  setNow(START + 120_500);
+  bot.tickCount = 4;
+  bot.processRenkoStrategy(START + 120_500);
+  bot.processPendingTakerOrders(START + 120_500);
+  assert.equal(sell.status, 'FILLED');
+  const closedUp = bot.trades.find(trade => trade.side === 'UP');
+  assert.equal(closedUp.status, 'SETTLED');
+  assert.equal(closedUp.finalOutcome, 'RENKO_SIGNAL_REVERSAL');
+  assert.ok(closedUp.exitFees > 0);
+  const downBuy = bot.entryOrders.find(order => order.action === 'BUY' && order.side === 'DOWN');
+  assert.equal(downBuy.status, 'PENDING_CONFIRMATION');
+
+  setNow(START + 121_000);
+  bot.tickCount = 5;
+  setAsks(bot, START + 121_000, 'DOWN', [{ price: 0.45, size: 100 }]);
+  bot.processRenkoStrategy(START + 121_000);
+  bot.processPendingTakerOrders(START + 121_000);
+  assert.equal(downBuy.status, 'FILLED');
+  assert.equal(bot.trades.find(trade => trade.side === 'DOWN').status, 'OPEN');
+});
+
+test('a Renko entry is not fabricated when the next-tick ask book is empty', () => {
+  const { bot, setNow, addCandle } = createBot();
+  addCandle({ t: START, o: 100, h: 102, l: 100, c: 102 });
+  setNow(START + 60_000);
+  bot.tickCount = 1;
+  setAsks(bot, START + 60_000, 'UP', []);
+  bot.processRenkoStrategy(START + 60_000);
+  setNow(START + 60_500);
+  bot.tickCount = 2;
+  setAsks(bot, START + 60_500, 'UP', []);
+  bot.processRenkoStrategy(START + 60_500);
+  bot.processPendingTakerOrders(START + 60_500);
   assert.equal(bot.entryOrders[0].status, 'CANCELLED_NO_VISIBLE_ASKS');
   assert.equal(bot.entryOrders[0].filledShares, 0);
   assert.equal(bot.trades.length, 0);
   assert.equal(bot.entryOrders.length, 1);
 });
 
-test('a bot that starts after the window opens skips it rather than inventing a pre-open signal', () => {
+test('no order is submitted before a closed one-minute candle prints a Renko brick', () => {
   const { bot } = createBot();
   bot.beginMarketWindow(START, START + 1_000);
-  bot.processCandleSignalStrategy(START + 1_000);
+  bot.processRenkoStrategy(START + 1_000);
   assert.equal(bot.entryOrders.length, 0);
-  assert.equal(bot.entrySideSelection.status, 'MISSED_PREOPEN_SIGNAL');
+  assert.equal(bot.entrySideSelection.status, 'WAITING_FOR_RENKO_BRICK');
 });
 
 test('neither take profit nor stop loss closes positions before official resolution', () => {

@@ -10,19 +10,19 @@ const { ProbabilityBot } = require("./bot/btc/probability-bot.js") as {
   };
 };
 const {
-  STRATEGY_VERSION,
-  SIGNAL_SCAN_LEAD_MS,
-  SIGNAL_COMPARE_LEAD_MS,
   ENTRY_SHARES,
   POLL_INTERVAL_MS,
 } = require(
-  "./bot/btc/signal-taker-strategy.js",
+  "./bot/btc/paper-trading.js",
 ) as {
-  STRATEGY_VERSION: string;
-  SIGNAL_SCAN_LEAD_MS: number;
-  SIGNAL_COMPARE_LEAD_MS: number;
   ENTRY_SHARES: number;
   POLL_INTERVAL_MS: number;
+};
+const { STRATEGY_VERSION, RENKO_ATR_PERIOD } = require(
+  "./bot/btc/renko-strategy.js",
+) as {
+  STRATEGY_VERSION: string;
+  RENKO_ATR_PERIOD: number;
 };
 const { LearningStore } = require("./bot/btc/learning-store.js") as {
   LearningStore: new (pool: unknown) => {
@@ -48,13 +48,14 @@ router.get("/strategy/learning", async (_req, res) => {
     ...summary,
     settings: {
       timeframe: "5m",
+      signalTimeframe: "1m",
+      renkoBrickSizeMethod: `ATR(${RENKO_ATR_PERIOD}) from closed 1-minute BTC candles`,
       orderType: "TAKER",
-      signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
-      signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
       sharesPerTrade: ENTRY_SHARES,
       pollIntervalMs: POLL_INTERVAL_MS,
-      exitPolicy: "POLYMARKET_RESOLUTION_ONLY",
+      exitPolicy: "OPPOSITE_RENKO_SIGNAL_OR_POLYMARKET_RESOLUTION",
       stopLoss: false,
+      takeProfit: false,
     },
   });
 });

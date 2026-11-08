@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#080d16">
-  <title>BTC Candle Signal Paper Bot</title>
+  <title>BTC Renko Reversal Paper Bot</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -77,19 +77,19 @@
 <body>
 <main>
   <header class="top">
-    <div><div class="brand">BTC / 5 MIN · PAPER EXECUTION</div><div class="subbrand">Polymarket binary market · single fixed candle-signal strategy</div></div>
-    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · TAKER ENTRIES</span><span id="run" class="pill">Connecting</span></div>
+    <div><div class="brand">BTC / 5 MIN · PAPER EXECUTION</div><div class="subbrand">Polymarket binary market · one-minute Renko reversal strategy</div></div>
+    <div class="top-right"><span id="strategyBadge" class="badge">PAPER ONLY · TAKER BUYS / SELLS</span><span id="run" class="pill">Connecting</span></div>
   </header>
   <section class="hero">
-    <div><div class="eyebrow">FIXED POLICY · ONE ENTRY · PAPER ONLY</div><h1>Signal once. Confirm taker fill.</h1><p id="heroStrategy">Connecting to live strategy state.</p></div>
+    <div><div class="eyebrow">ONE-MINUTE RENKO · INTRAWINDOW REVERSALS · PAPER ONLY</div><h1>Follow the Renko direction.</h1><p id="heroStrategy">Connecting to live strategy state.</p></div>
     <div class="window"><span id="windowLabel">WINDOW CLOSES IN</span><strong id="remaining">—</strong><span id="market">Waiting for BTC market</span></div>
   </section>
   <div id="error" class="error"></div>
   <section class="grid overview-grid">
-    <article class="card"><div class="label">Signal side</div><div class="value" id="cheaperSide">—</div><div class="foot" id="cheaperMid">Waiting for the pre-open BTC comparison</div></article>
-    <article class="card"><div class="label">Previous 1m close</div><div class="value" id="expensiveSide">—</div><div class="foot" id="expensiveMid">Compared three seconds before open</div></article>
-    <article class="card"><div class="label">Paper entry state</div><div class="value" id="nextOrder">NOT PLACED</div><div class="foot" id="scheduleHint">Waiting for a valid pre-open signal</div></article>
-    <article class="card"><div class="label">Entry orders · this window</div><div class="value" id="restingSummary">0 / 1</div><div class="foot" id="restingHint">No entry order submitted</div></article>
+    <article class="card"><div class="label">Renko direction</div><div class="value" id="cheaperSide">—</div><div class="foot" id="cheaperMid">Waiting for a confirmed one-minute Renko brick</div></article>
+    <article class="card"><div class="label">Renko box size · 1m ATR</div><div class="value" id="expensiveSide">—</div><div class="foot" id="expensiveMid">Calculated from the preceding 14 closed one-minute candles</div></article>
+    <article class="card"><div class="label">Position action</div><div class="value" id="nextOrder">HOLDING</div><div class="foot" id="scheduleHint">Waiting for a confirmed Renko direction</div></article>
+    <article class="card"><div class="label">Taker orders · this window</div><div class="value" id="restingSummary">0</div><div class="foot" id="restingHint">Buys and reversal sells</div></article>
     <article class="card"><div class="label">BTC spot</div><div class="value" id="spot">—</div><div class="foot" id="gap">Difference from reference —</div></article>
   </section>
   <details class="disclosure" id="marketDetails">
@@ -131,7 +131,7 @@
   </section>
   </section>
   <section class="panel">
-     <div class="section-head"><h2>Entry order history</h2><small>Taker buys · next-tick fill confirmations</small></div>
+      <div class="section-head"><h2>Order history</h2><small>Taker buys and reversal sells · next-tick fill confirmations</small></div>
      <div id="orders" class="table-wrap"><div class="empty">No entry orders yet.</div></div>
   </section>
   <details class="disclosure" id="positionsDetails">
@@ -153,7 +153,7 @@
   </section>
   </details>
   <details class="disclosure" id="strategyDetails">
-     <summary><span>Strategy rules</span><small>Closed-candle signal · one taker entry</small></summary>
+      <summary><span>Strategy rules</span><small>One-minute Renko · intrawindow reversals</small></summary>
     <section class="panel">
       <p id="strategyOrderDetails">Loading strategy rules from live state.</p>
         <p id="strategyFillDetails">Loading paper fill model.</p>
@@ -173,12 +173,12 @@ const time=n=>isNumeric(n)?new Date(n).toLocaleTimeString('en-AU',{timeZone:'UTC
 const safe=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const resultLabel=t=>t.status==='OPEN'?(t.settlementStatus==='AWAITING_SETTLEMENT'?'AWAITING POLYMARKET RESOLUTION':'OPEN'):t.finalOutcome==='MARKET_RESOLUTION'?'RESOLVED · '+money(t.exitPrice):t.finalOutcome||'—';
 function renderTrades(trades){
-  if(!trades?.length){$('trades').innerHTML='<div class="empty">No confirmed taker entries yet.</div>';return}
-   $('trades').innerHTML='<table><thead><tr><th>Filled at</th><th>Side</th><th>Entry type</th><th>Shares</th><th>Average fill</th><th>Entry fees</th><th>Settlement</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${safe(t.entryKind||'—')}</td><td>${Number(t.shares).toFixed(2)}</td><td>${money(t.entryPrice,4)}</td><td>${money(t.fees,4)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
+  if(!trades?.length){$('trades').innerHTML='<div class="empty">No confirmed Renko trades yet.</div>';return}
+   $('trades').innerHTML='<table><thead><tr><th>Filled at</th><th>Side</th><th>Entry type</th><th>Shares</th><th>Average fill</th><th>Entry + exit fees</th><th>Settlement</th><th>P&amp;L</th></tr></thead><tbody>'+trades.map(t=>`<tr><td>${time(t.openedAt)}</td><td class="side ${t.side}">${safe(t.side)}</td><td>${safe(t.entryKind||'—')}</td><td>${Number(t.shares).toFixed(2)}</td><td>${money(t.entryPrice,4)}</td><td>${money(Number(t.fees||0)+Number(t.exitFees||0),4)}</td><td>${safe(resultLabel(t))}</td><td class="pnl ${Number(t.realizedPnl)>=0?'pos':'neg'}">${t.realizedPnl==null?'—':signed(t.realizedPnl)}</td></tr>`).join('')+'</tbody></table>';
 }
 function renderOrders(orders){
  const sorted=(orders||[]).slice().sort((a,b)=>Number(b.placedAt)-Number(a.placedAt));
-   if(!sorted.length){$('orders').innerHTML='<div class="empty">No entry orders yet.</div>';return}
+   if(!sorted.length){$('orders').innerHTML='<div class="empty">No taker orders yet.</div>';return}
     $('orders').innerHTML='<table><thead><tr><th>Submitted · UTC</th><th>Action</th><th>Side</th><th>Type</th><th>Price</th><th>Requested</th><th>Filled</th><th>Average fill</th><th>Fees / rebate</th><th>Order status</th></tr></thead><tbody>'+sorted.slice(0,30).map(o=>{
       const filled=Number(o.filledShares||0),remaining=Number(o.remainingShares||0),raw=String(o.status||'').toUpperCase();
       const cancelled=raw.startsWith('CANCELLED')||raw==='EXPIRED_WINDOW_END';
@@ -187,8 +187,8 @@ function renderOrders(orders){
       const partial=filled>0&&filled<Number(o.requestedShares||0);
       const status=raw==='FILLED'?'FILLED':cancelled?'CANCELLED':pending?'PENDING CONFIRMATION':resting?'RESTING':partial?'PARTIAL · REMAINDER CANCELLED':raw.replaceAll('_',' ');
       const stateClass=cancelled?'cancelled':partial?'partial':raw==='FILLED'?'filled':pending?'submitted':'not-placed';
-      const price=o.action==='SELL'?money(o.limitPrice,2):money(o.averageFillPrice,4);
-      const fees=o.action==='SELL'?`${money(o.estimatedMakerRebate||0,4)} estimated rebate`:money(o.fees,4)+' taker fee';
+       const price=money(o.averageFillPrice??o.fillPrice,4);
+       const fees=money(o.fees,4)+' taker fee';
       return `<tr><td>${time(o.placedAt)}</td><td>${safe(o.action||'BUY')}</td><td class="side ${o.side}">${safe(o.side)}</td><td>${safe(o.orderType||'—')}</td><td>${price}</td><td>${Number(o.requestedShares||0).toLocaleString()}</td><td>${filled.toLocaleString(undefined,{maximumFractionDigits:2})}</td><td>${money(o.averageFillPrice??o.fillPrice,4)}</td><td>${fees}</td><td><span class="order-state ${stateClass}">${safe(status)}</span>${Number(o.cancelledRemainderShares||0)>0?`<div class="muted">${Number(o.cancelledRemainderShares).toLocaleString(undefined,{maximumFractionDigits:2})} unfilled shares cancelled</div>`:''}</td></tr>`;
     }).join('')+'</tbody></table>';
 }
@@ -201,7 +201,7 @@ async function pollLearning(){
   if(!response.ok)throw Error('Learning API HTTP '+response.status);
   const state=await response.json();
   $('learningStatus').textContent=`${state.completedWindows} completed windows · ${state.sampleCount} samples`;
-     $('learningSummary').innerHTML='<div class="trade"><span>Fixed candle-signal strategy</span><span class="muted">Compare BTC with the previous closed 1-minute candle three seconds before each 5-minute window. One 500-share taker entry is confirmed from the next tick’s visible asks; no re-entry.</span></div><div class="trade"><span>Stored data</span><span class="muted">Samples and account analytics are saved for review; they do not alter order placement. Previous strategy history remains archived separately.</span></div>';
+      $('learningSummary').innerHTML='<div class="trade"><span>One-minute Renko reversal strategy</span><span class="muted">Green bricks signal UP and red bricks signal DOWN. Brick size uses the preceding 14 closed one-minute BTC candles. The bot holds through flat intervals and reverses only on a new opposite brick.</span></div><div class="trade"><span>Stored data</span><span class="muted">Samples and account analytics are saved for review; they do not alter order placement. Previous strategy history remains archived separately.</span></div>';
  }catch(error){$('learningStatus').textContent='Storage unavailable';$('learningSummary').textContent=error.message}
  setTimeout(pollLearning,10000);
 }
@@ -253,12 +253,12 @@ function renderAnalytics(data){
 }
 function renderStrategy(state){
    const strategy=state.strategy||{};
-   $('heroStrategy').textContent=`At ${Number(strategy.signalCompareLeadMs??3000)/1000} seconds before each BTC 5-minute window opens, compare the current BTC price with the previous closed 1-minute candle: higher selects UP; equal or lower selects DOWN. At open, submit one ${Number(strategy.sharesPerTrade??500)}-share taker buy.`;
+    $('heroStrategy').textContent=strategy.orderModel||'Build Renko from closed one-minute BTC candles and reverse only on a new opposite brick.';
   $('strategyOrderDetails').textContent=strategy.orderModel||'Strategy rules are not available.';
   $('strategyFillDetails').textContent=strategy.fillModel||'Paper fill model is not available.';
   $('strategyExitDetails').textContent=strategy.exitModel||'Exit and settlement model is not available.';
-    $('strategyFeeDetails').textContent=`Taker entry fees use the market’s fee schedule when available (fallback ${pct(strategy.takerFeeRate)}). There are no sell orders, take-profit exits, or stop-loss exits; every filled position waits for its original market’s official Polymarket resolution.`;
-   $('strategyBadge').textContent=`${safe(state.mode||'PAPER ONLY')} · ${safe(strategy.orderType||'TAKER')} ENTRIES`;
+     $('strategyFeeDetails').textContent=`Taker buy and reversal-sell fees use the market’s fee schedule when available (fallback ${pct(strategy.takerFeeRate)}). There are no take-profit or stop-loss orders; a position closes on an opposite Renko signal or its original market’s official resolution.`;
+    $('strategyBadge').textContent=`${safe(state.mode||'PAPER ONLY')} · TAKER BUYS / SELLS`;
 }
 async function pollAnalytics(){
  try{
@@ -269,10 +269,10 @@ async function pollAnalytics(){
  setTimeout(pollAnalytics,15000);
 }
 function renderMarket(state){
-  const selection=state.entrySideSelection||{},schedule=state.orderSchedule||{};
+   const selection=state.entrySideSelection||{},schedule=state.orderSchedule||{},renko=state.renko||{};
  for(const side of ['UP','DOWN']){
   const prefix=side.toLowerCase(),quote=state.quotes?.[side]||{};
-     const role=selection.selectedSide===side?'SIGNAL SIDE':quote.status==='ERROR'?'BOOK ERROR':'MONITORING';
+      const role=selection.selectedSide===side?'RENKO DIRECTION':quote.status==='ERROR'?'BOOK ERROR':'MONITORING';
   $(prefix+'Role').textContent=role;
   $(prefix+'Midpoint').textContent=money(quote.midpoint,4);
   $(prefix+'Bid').textContent=money(quote.bestBid,4);
@@ -280,15 +280,13 @@ function renderMarket(state){
   const age=Number.isFinite(Number(quote.updatedAt))?Math.max(0,Math.round((Number(state.now)-Number(quote.updatedAt))/1000))+'s':'—';
   $(prefix+'Age').textContent=age;
  }
-   const signalSide=selection.selectedSide||schedule.signalSide;
-   $('cheaperSide').textContent=signalSide||'WAITING';
-   $('cheaperMid').textContent=signalSide
-     ?`BTC ${money(selection.signalPrice??schedule.signalPrice,2)} · ${selection.rule?.replaceAll('_',' ').toLowerCase()||'signal latched'}`
-     :'Waiting for the final 3-second BTC comparison';
-   $('expensiveSide').textContent=money(selection.referenceClose??schedule.referenceClose,2);
-   $('expensiveMid').textContent=selection.referenceCandleAt
-     ?`Closed candle · ${time(Number(selection.referenceCandleAt)+60_000)} UTC`
-     :'Previous completed 1-minute candle close';
+    const signalSide=renko.selectedSide||selection.selectedSide||schedule.signalSide;
+    $('cheaperSide').textContent=signalSide||'FLAT';
+    $('cheaperMid').textContent=signalSide
+      ?`${renko.newBrickPrinted?'New '+renko.bricksPrintedThisTick+' brick(s)':'No new brick · hold direction'} · last brick ${time(renko.latestBrickAt)} UTC`
+      :'No confirmed Renko direction yet';
+    $('expensiveSide').textContent=money(renko.brickSize??schedule.brickSize,2);
+    $('expensiveMid').textContent=`ATR(${renko.atrPeriod||14}) from closed 1-minute candles · fixed for this window`;
 }
 function renderSchedule(state){
  const schedule=state.orderSchedule||{};
@@ -297,27 +295,27 @@ function renderSchedule(state){
   const pending=entry?.status==='PENDING_CONFIRMATION';
   if(pending){
    $('nextOrder').textContent='CONFIRMING';
-   $('scheduleHint').textContent=`${safe(entry.side)} · checking the next tick’s visible asks`;
+    $('scheduleHint').textContent=`${safe(entry.action||'BUY')} ${safe(entry.side)} · checking next tick’s visible ${entry.action==='SELL'?'bids':'asks'}`;
   }else if(filled>0){
-   $('nextOrder').textContent=entry.status==='FILLED'?'FILLED':'PARTIAL';
-   $('scheduleHint').textContent=`${safe(entry.side)} · ${filled.toLocaleString()} shares at ${money(entry.averageFillPrice,4)} average`;
+    $('nextOrder').textContent=entry.action==='SELL'?'REVERSED':entry.status==='FILLED'?'BUY FILLED':'BUY PARTIAL';
+    $('scheduleHint').textContent=`${safe(entry.action||'BUY')} ${safe(entry.side)} · ${filled.toLocaleString()} shares at ${money(entry.averageFillPrice,4)} average`;
   }else if(entry){
    $('nextOrder').textContent=entry.status.startsWith('CANCELLED')?'NOT FILLED':'SUBMITTED';
    $('scheduleHint').textContent=entry.cancelReason||entry.status.replaceAll('_',' ').toLowerCase();
   }else if(schedule.signalSide){
-   $('nextOrder').textContent='SIGNAL LATCHED';
-   $('scheduleHint').textContent=`${safe(schedule.signalSide)} · entry will be submitted at window open`;
+    $('nextOrder').textContent=schedule.heldSide===schedule.tradeSide?'HOLDING':'READY';
+    $('scheduleHint').textContent=schedule.heldSide===schedule.tradeSide
+      ?`Holding ${safe(schedule.heldSide)} · no new Renko brick`
+      :`${safe(schedule.tradeSide||schedule.signalSide)} · waiting for Renko action`;
   }else{
-   $('nextOrder').textContent='NOT PLACED';
-   $('scheduleHint').textContent=schedule.status==='MISSED_PREOPEN_SIGNAL'
-     ?'No valid signal was captured before this window opened'
-     :'Waiting for the final 3-second BTC comparison';
+    $('nextOrder').textContent='WAITING';
+    $('scheduleHint').textContent='Waiting for a valid one-minute Renko direction';
   }
-  $('restingSummary').textContent=`${entryOrders.length} / 1`;
-  $('restingHint').textContent=`${filled.toLocaleString(undefined,{maximumFractionDigits:2})} shares confirmed · held for official market resolution`;
+   $('restingSummary').textContent=String(entryOrders.length);
+   $('restingHint').textContent=`${schedule.buyOrders||0} buys · ${schedule.sellOrders||0} reversal sells · ${Number(schedule.soldShares||0).toLocaleString(undefined,{maximumFractionDigits:2})} shares sold`;
   const takerFees=entryOrders.reduce((sum,order)=>sum+Number(order.fees||0),0);
   $('windowTakerFees').textContent=money(takerFees,4);
-  $('windowTakerFeesHint').textContent=filled>0?'Fee charged on the confirmed taker fill':'No taker fill confirmed yet';
+   $('windowTakerFeesHint').textContent=takerFees>0?'Fees on confirmed taker buys and sells':'No taker fill confirmed yet';
 }
 function renderPositions(positions){
  for(const side of ['UP','DOWN']){
@@ -334,7 +332,7 @@ function renderPositions(positions){
  function renderPendingBySide(orders, activeWindowStart){
  for(const side of ['UP','DOWN']){
   const prefix=side.toLowerCase();
-    const items=(orders||[]).filter(order=>order.side===side&&Number(order.filledShares)>0
+     const items=(orders||[]).filter(order=>order.action!=='SELL'&&order.side===side&&Number(order.filledShares)>0
      &&Number(order.windowStart)===Number(activeWindowStart));
   $(prefix+'OpenOrders').textContent=String(items.length);
    $(prefix+'RestingShares').textContent=items.reduce((sum,order)=>sum+Number(order.filledShares||0),0).toLocaleString(undefined,{maximumFractionDigits:2});
@@ -353,7 +351,7 @@ function renderPositions(positions){
     :'—';
   $('market').textContent=s.window?.title||'Waiting for exact 5-minute market';
   $('spot').textContent=money(s.spotPrice,2);
-  $('gap').textContent=isNumeric(s.priceGap)?`Difference from reference ${money(s.priceGap,2)}`:'BTC reference difference —';
+  $('gap').textContent=isNumeric(s.priceGap)?`BTC vs Renko close ${money(s.priceGap,2)}`:'BTC vs Renko close —';
      renderStrategy(s);renderMarket(s);renderSchedule(s);renderPositions(account.positions);renderPendingBySide(s.entryOrders,s.window?.start);
   $('cash').textContent=money(account.cash);$('pnl').textContent=signed(account.realizedPnl);
     $('startingCash').textContent=money(account.startingCash);

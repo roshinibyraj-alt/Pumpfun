@@ -181,7 +181,7 @@ class LearningStore {
     );
   }
 
-  async getPaperAnalytics(limit = 1000, strategyVersion = 'btc-5m-candle-signal-taker-resolution-v2') {
+  async getPaperAnalytics(limit = 1000, strategyVersion = 'btc-5m-renko-1m-reversal-variants-target-300-v1') {
     const boundedLimit = Number.isInteger(limit) ? Math.min(1200, Math.max(50, limit)) : 1000;
     const [performance, equity] = await Promise.all([
       this.pool.query(
@@ -247,7 +247,7 @@ class LearningStore {
     ]);
     return {
       strategyVersion,
-      mode: 'fixed-candle-signal-taker-logging-only',
+      mode: 'renko-reversal-paper-logging-only',
       tuningEnabled: false,
       sampleCount: Number(samples.rows[0]?.sample_count ?? 0),
       completedWindows: Number(windows.rows[0]?.completed_windows ?? 0),

@@ -357,7 +357,7 @@ class ChainlinkPriceFeed {
         error: this.historyError,
       },
       minuteHistory: {
-        source: 'Binance BTCUSDT closed 1-minute candles (volume confirmation)',
+        source: 'Binance BTCUSDT closed 1-minute candles (Renko ATR sizing)',
         status: this.minuteHistoryStatus,
         candles: this.historicalMinuteCandles.length,
         error: this.minuteHistoryError,

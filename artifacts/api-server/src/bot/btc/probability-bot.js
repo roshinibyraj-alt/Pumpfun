@@ -5,10 +5,7 @@ const marketData = require('./wick-market-data');
 const { feed } = require('./chainlink-price-feed');
 const { recoverExpiredPositions } = require('./position-exits');
 const {
-  STRATEGY_VERSION,
   WINDOW_MS,
-  SIGNAL_SCAN_LEAD_MS,
-  SIGNAL_COMPARE_LEAD_MS,
   ENTRY_SHARES,
   VARIANT_PROFIT_TARGET,
   POLL_INTERVAL_MS,
@@ -17,9 +14,19 @@ const {
   feeParameters,
   estimateTakerFee,
   simulateTakerBuyFill,
-  selectClosedCandleSignal,
   getWindowToScan,
-} = require('./signal-taker-strategy');
+} = require('./paper-trading');
+const {
+  STRATEGY_VERSION,
+  CANDLE_INTERVAL_MS,
+  RENKO_ATR_PERIOD,
+  RENKO_HISTORY_CANDLES,
+  combineClosedMinuteCandles,
+  calculateAtrBrickSize,
+  buildRenko,
+  appendRenkoClose,
+  simulateTakerSellFill,
+} = require('./renko-strategy');
 
 const STARTING_CASH = 10_000;
 const TAKER_FEE_RATE = CRYPTO_TAKER_FEE_RATE;
@@ -78,9 +85,13 @@ class ProbabilityBot {
     this.orderWindowStart = null;
     this.orderSequence = 0;
     this.tickCount = 0;
-    this.entryOrderAttempted = false;
     this.entrySignal = null;
-    this.entrySideSelection = { status: 'WAITING_FOR_PREOPEN_SIGNAL', selectedSide: null };
+    this.entrySideSelection = { status: 'WAITING_FOR_RENKO_DATA', selectedSide: null };
+    this.renkoState = { status: 'WAITING_FOR_RENKO_DATA', windowStart: null };
+    this.renkoEngine = null;
+    this.renkoLastProcessedCandleStart = null;
+    this.lastRenkoActionKey = new Map();
+    this.pendingRenkoFlip = new Map();
     this.windowResults = new Map();
     this.finalizedWindowStarts = new Set();
     this.accountSessionStartedAt = this.now();
@@ -88,7 +99,7 @@ class ProbabilityBot {
     this.equitySnapshotRequested = true;
     this.learningStatus = {
       enabled: Boolean(learningStore),
-      mode: learningStore ? 'fixed-candle-signal-taker-logging-only' : 'disabled',
+      mode: learningStore ? 'renko-reversal-paper-logging-only' : 'disabled',
       completedWindows: 0,
     };
     this.error = null;
@@ -238,8 +249,9 @@ class ProbabilityBot {
       activeVariantId: this.activeVariantId,
       activeVariantMode: this.variants[this.activeVariantId]?.mode,
       entrySideSelection: this.entrySideSelection,
+      renko: this.renkoState,
       orderSchedule: this.orderSchedule(now),
-      referencePrice: this.entrySignal?.referenceClose ?? this.referencePrice,
+      referencePrice: this.renkoState?.lastBrickClose ?? this.referencePrice,
       spotPrice: this.latestPrice,
       quotes: Object.fromEntries(['UP', 'DOWN'].map(side => {
         const quote = this.quotes[side];
@@ -250,7 +262,8 @@ class ProbabilityBot {
       })),
       recentEntryOrders: this.entryOrders.filter(order => order.windowStart === this.market.start)
         .slice(0, 20).map(order => ({
-          id: order.id, side: order.side, orderType: order.orderType,
+          id: order.id, action: order.action, side: order.side, targetSide: order.targetSide,
+          orderType: order.orderType, brickAt: order.brickAt,
           averageFillPrice: order.averageFillPrice, remainingShares: order.remainingShares,
           requestedShares: order.requestedShares, filledShares: order.filledShares,
           fees: order.fees, status: order.status,
@@ -305,11 +318,11 @@ class ProbabilityBot {
         .filter(tick => Math.abs(tick.ts - start) <= 10_000)
         .sort((a, b) => Math.abs(a.ts - start) - Math.abs(b.ts - start))[0];
       const latestTick = ticks[ticks.length - 1];
-      this.referencePrice = referenceTick?.price ?? this.entrySignal?.referenceClose ?? null;
+      this.referencePrice = referenceTick?.price ?? this.renkoState?.lastBrickClose ?? null;
       this.latestPrice = latestTick?.price ?? null;
       this.priceAt = latestTick?.ts ?? null;
       const scanAt = this.now();
-      this.processCandleSignalStrategy(scanAt);
+      this.processRenkoStrategy(scanAt);
       this.processPendingTakerOrders(scanAt);
       this.maybeFinalizeCompletedWindows(scanAt);
       this.maybeRecordEquitySnapshot(scanAt);
@@ -348,19 +361,33 @@ class ProbabilityBot {
   beginMarketWindow(start = this.market?.start, now = this.now()) {
     if (!Number.isFinite(start) || this.orderWindowStart === start) return;
     this.orderWindowStart = start;
-    this.entryOrderAttempted = now >= start;
     this.entrySignal = null;
+    this.renkoEngine = null;
+    this.renkoLastProcessedCandleStart = null;
+    this.lastRenkoActionKey.clear();
+    this.pendingRenkoFlip.clear();
+    this.renkoState = {
+      status: 'WAITING_FOR_RENKO_DATA',
+      windowStart: start,
+      brickSize: null,
+      atr: null,
+      atrPeriod: RENKO_ATR_PERIOD,
+      direction: null,
+      selectedSide: null,
+      latestBrick: null,
+      newBrickPrinted: false,
+      bricksPrintedThisTick: 0,
+    };
     this.entrySideSelection = {
-      status: now >= start ? 'MISSED_PREOPEN_SIGNAL' : 'WAITING_FOR_PREOPEN_SIGNAL',
+      status: 'WAITING_FOR_RENKO_DATA',
       selectedSide: null,
     };
-    this.log('PAPER_CANDLE_SIGNAL_WINDOW_STARTED', {
+    this.log('PAPER_RENKO_WINDOW_STARTED', {
       windowStart: start,
-      signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
-      signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
+      atrPeriod: RENKO_ATR_PERIOD,
       shares: this.variants[this.activeVariantId]?.shareSize ?? ENTRY_SHARES,
       entryOrderType: 'TAKER',
-      startedAfterOpen: now >= start,
+      source: 'CLOSED_ONE_MINUTE_BTC_CANDLES',
     });
   }
 
@@ -368,79 +395,89 @@ class ProbabilityBot {
     return 0;
   }
 
-  processCandleSignalStrategy(now) {
-    if (!this.market || now >= this.market.end) return;
-    if (this.orderWindowStart !== this.market.start) this.beginMarketWindow(this.market.start, now);
-    if (this.entryOrderAttempted) return;
+  closedMinuteCandles(now) {
+    const historical = this.priceFeed.getHistoricalMinuteCandles?.() ?? [];
+    const live = this.priceFeed.getMinuteCandles?.() ?? [];
+    return combineClosedMinuteCandles({ historical, live, now });
+  }
 
-    const signalAt = this.market.start - SIGNAL_COMPARE_LEAD_MS;
-    if (!this.entrySignal && now >= signalAt && now < this.market.start) {
-      try {
-        const signal = selectClosedCandleSignal({
-          candles: this.priceFeed.getMinuteCandles?.() ?? [],
-          ticks: this.priceFeed.getTicks?.() ?? [],
-          signalAt,
-          now,
-        });
-        this.entrySideSelection = signal;
-        if (signal.status === 'SIGNAL_LATCHED') {
-          this.entrySignal = signal;
-          this.referencePrice = signal.referenceClose;
-          this.log('PAPER_CANDLE_SIGNAL_LATCHED', {
-            side: signal.selectedSide,
-            signalSide: signal.selectedSide,
-            tradeSide: this.tradeSideFor(signal.selectedSide),
-            activeVariantId: this.activeVariantId,
-            variantMode: this.variants[this.activeVariantId]?.mode,
-            signalPrice: signal.signalPrice,
-            referenceClose: signal.referenceClose,
-            signalAt: signal.signalAt,
-            referenceCandleAt: signal.referenceCandleAt,
-            rule: signal.rule,
-          }, this.market.start);
-        } else {
-          this.statusReason = signal.status === 'STALE_CLOSED_CANDLE'
-            ? 'The previous closed BTC 1-minute candle is stale; no entry will be made without a valid pre-open signal.'
-            : 'Waiting for the previous closed BTC 1-minute candle and a fresh pre-open BTC price.';
-        }
-      } catch (error) {
-        this.entrySideSelection = {
-          status: 'WAITING_FOR_SIGNAL_DATA',
-          selectedSide: null,
-          error: error?.message || 'BTC signal data unavailable.',
-        };
-        this.statusReason = 'Waiting for fresh BTC signal data before the window opens.';
-      }
-      return;
-    }
-
-    if (now < this.market.start) {
-      this.statusReason = 'Waiting for the final 3 seconds before the next window to select the signal.';
-      return;
-    }
-
-    this.entryOrderAttempted = true;
-    if (!this.entrySignal?.selectedSide) {
-      this.entrySideSelection = {
-        ...this.entrySideSelection,
-        status: 'MISSED_PREOPEN_SIGNAL',
-        selectedSide: null,
+  initializeRenko(candles, now) {
+    const beforeWindow = candles
+      .filter(candle => candle.end <= this.market.start)
+      .slice(-RENKO_HISTORY_CANDLES);
+    const atr = calculateAtrBrickSize(beforeWindow, RENKO_ATR_PERIOD);
+    if (atr.status !== 'READY') {
+      this.renkoState = {
+        ...this.renkoState,
+        status: atr.status,
+        atrPeriod: RENKO_ATR_PERIOD,
+        historyCandles: beforeWindow.length,
+        newBrickPrinted: false,
+        bricksPrintedThisTick: 0,
       };
-      this.statusReason = 'No valid BTC candle signal was latched before the window opened; this window is skipped.';
-      this.log('PAPER_ENTRY_SKIPPED_NO_PREOPEN_SIGNAL', {
-        signalAt,
-        signalStatus: this.entrySideSelection.status,
-      }, this.market.start);
-      return;
+      this.entrySideSelection = {
+        status: atr.status,
+        selectedSide: null,
+        historyCandles: beforeWindow.length,
+        atrPeriod: RENKO_ATR_PERIOD,
+      };
+      this.statusReason = 'Waiting for enough closed one-minute BTC candles to calculate the Renko ATR brick size.';
+      return false;
     }
 
-    const signalSide = this.entrySignal.selectedSide;
-    const variant = this.variants[this.activeVariantId];
-    const side = this.tradeSideFor(signalSide, variant.id);
-    if (!side) {
-      this.statusReason = 'The latched BTC signal has no valid opposite outcome side; no entry was submitted.';
-      return;
+    const built = buildRenko(beforeWindow, atr.brickSize);
+    if (!built.state) {
+      this.renkoState = {
+        ...this.renkoState, status: 'WAITING_FOR_RENKO_BRICK',
+        brickSize: atr.brickSize, atr: atr.atr, historyCandles: beforeWindow.length,
+        newBrickPrinted: false, bricksPrintedThisTick: 0,
+      };
+      this.statusReason = 'Renko is initialized and waiting for its first confirmed brick.';
+      return false;
     }
+
+    this.renkoEngine = built.state;
+    this.renkoLastProcessedCandleStart = beforeWindow.at(-1)?.t ?? null;
+    this.renkoState = {
+      status: built.state.lastBrick ? 'READY' : 'WAITING_FOR_RENKO_BRICK',
+      windowStart: this.market.start,
+      brickSize: atr.brickSize,
+      atr: atr.atr,
+      atrPeriod: RENKO_ATR_PERIOD,
+      historyCandles: beforeWindow.length,
+      direction: built.state.direction,
+      selectedSide: built.state.lastBrick?.side ?? null,
+      lastBrickClose: built.state.lastBrickClose,
+      latestBrick: built.state.lastBrick,
+      latestBrickAt: built.state.lastBrick?.at ?? null,
+      newBrickPrinted: false,
+      bricksPrintedThisTick: 0,
+      initializedAt: now,
+    };
+    this.entrySignal = built.state.lastBrick ? {
+      selectedSide: built.state.lastBrick.side,
+      signalPrice: built.state.lastBrick.close,
+      referenceClose: built.state.lastBrickClose,
+      signalAt: built.state.lastBrick.at,
+      rule: `RENKO_${built.state.lastBrick.color}`,
+    } : null;
+    return true;
+  }
+
+  cancelPendingTakerOrder(order, reason) {
+    if (order.status !== 'PENDING_CONFIRMATION') return false;
+    order.status = 'CANCELLED_SIGNAL_REVERSED';
+    order.remainingShares = 0;
+    order.cancelledRemainderShares = order.requestedShares;
+    order.cancelReason = reason;
+    order.cancelledAt = this.now();
+    this.log('PAPER_TAKER_ORDER_CANCELLED_SIGNAL_REVERSED', {
+      orderId: order.id, action: order.action, side: order.side, reason,
+    }, order.windowStart);
+    return true;
+  }
+
+  queueRenkoBuy(signalSide, side, variant, now, signalKey) {
     const id = `paper-taker-${this.market.start}-${variant.id}-${++this.orderSequence}`;
     const order = {
       id,
@@ -470,47 +507,227 @@ class ProbabilityBot {
       confirmationDueTick: this.tickCount + 1,
       status: 'PENDING_CONFIRMATION',
       fillModel: 'NEXT_TICK_VISIBLE_ASK_SWEEP',
-      signalPrice: this.entrySignal.signalPrice,
-      referenceClose: this.entrySignal.referenceClose,
+      signalPrice: this.renkoState.latestBrick?.close ?? null,
+      brickAt: this.renkoState.latestBrickAt ?? null,
+      renkoSignalKey: signalKey,
     };
     this.entryOrders.unshift(order);
     this.entryOrders.length = Math.min(this.entryOrders.length, 200);
-    this.entrySideSelection = {
-      ...this.entrySignal, status: 'ENTRY_SUBMITTED', tradeSide: side,
-      activeVariantId: variant.id, variantMode: variant.mode,
-    };
-    this.statusReason = `${signalSide} signal latched; ${variant.name} submitted one paper taker buy on ${side} for ${variant.shareSize} shares. Fill price and actual quantity will be confirmed from the next tick's visible ask depth.`;
-    this.log('PAPER_TAKER_BUY_SUBMITTED', {
-      orderId: id,
+    this.lastRenkoActionKey.set(variant.id, signalKey);
+    this.statusReason = `${this.renkoState.newBrickPrinted ? 'A confirmed' : 'The current'} Renko ${signalSide} direction submitted a ${variant.name} paper taker buy on ${side} for ${variant.shareSize} shares. The next tick will confirm only visible ask depth.`;
+    this.log('PAPER_RENKO_TAKER_BUY_SUBMITTED', {
+      orderId: id, side, signalSide, variantId: variant.id, variantMode: variant.mode,
+      cycleNumber: variant.cycleNumber, requestedShares: variant.shareSize,
+      confirmationDueTick: order.confirmationDueTick, fillModel: order.fillModel,
+      brickSize: this.renkoState.brickSize, brickAt: order.brickAt,
+    }, this.market.start);
+    return order;
+  }
+
+  queueRenkoSell(signalSide, targetSide, trades, variant, now, signalKey) {
+    const heldSides = [...new Set(trades.map(trade => trade.side))];
+    if (heldSides.length !== 1) {
+      this.statusReason = 'Renko reversal paused: the active paper version has mixed UP and DOWN inventory in this market.';
+      return null;
+    }
+    const side = heldSides[0];
+    const requestedShares = trades.reduce((sum, trade) => sum + Number(trade.shares || 0), 0);
+    if (requestedShares <= 0) return null;
+    const id = `paper-taker-${this.market.start}-${variant.id}-${++this.orderSequence}`;
+    const order = {
+      id,
+      variantId: variant.id,
+      variantName: variant.name,
+      cycleNumber: variant.cycleNumber,
+      variantMode: variant.mode,
+      marketId: this.market.id,
+      tokenId: this.market.tokens?.[side] ?? null,
+      windowStart: this.market.start,
+      windowEnd: this.market.end,
+      marketTitle: this.market.title,
       side,
       signalSide,
-      variantId: variant.id,
-      variantMode: variant.mode,
-      cycleNumber: variant.cycleNumber,
-      requestedShares: variant.shareSize,
-      confirmationDueTick: order.confirmationDueTick,
-      fillModel: order.fillModel,
-      signalPrice: this.entrySignal.signalPrice,
-      referenceClose: this.entrySignal.referenceClose,
+      targetSide,
+      action: 'SELL',
+      orderType: 'TAKER',
+      executionRole: 'TAKER',
+      requestedShares,
+      filledShares: 0,
+      remainingShares: requestedShares,
+      cancelledRemainderShares: 0,
+      averageFillPrice: null,
+      filledCost: 0,
+      fees: 0,
+      estimatedMakerRebate: 0,
+      placedAt: now,
+      confirmationDueTick: this.tickCount + 1,
+      status: 'PENDING_CONFIRMATION',
+      fillModel: 'NEXT_TICK_VISIBLE_BID_SWEEP',
+      brickSize: this.renkoState.brickSize,
+      brickAt: this.renkoState.latestBrickAt ?? null,
+      renkoSignalKey: signalKey,
+    };
+    this.entryOrders.unshift(order);
+    this.entryOrders.length = Math.min(this.entryOrders.length, 200);
+    this.pendingRenkoFlip.set(variant.id, { signalSide, targetSide, signalKey });
+    this.lastRenkoActionKey.set(variant.id, signalKey);
+    this.statusReason = `Renko reversed to ${signalSide}; the bot is submitting a taker sell for ${requestedShares} ${side} shares before buying ${targetSide}.`;
+    this.log('PAPER_RENKO_TAKER_SELL_SUBMITTED', {
+      orderId: id, side, targetSide, signalSide, variantId: variant.id,
+      requestedShares, confirmationDueTick: order.confirmationDueTick,
+      fillModel: order.fillModel, brickSize: order.brickSize, brickAt: order.brickAt,
     }, this.market.start);
+    return order;
+  }
+
+  processRenkoStrategy(now) {
+    if (!this.market || now < this.market.start || now >= this.market.end) return;
+    if (this.orderWindowStart !== this.market.start) this.beginMarketWindow(this.market.start, now);
+
+    const candles = this.closedMinuteCandles(now);
+    if (!this.renkoEngine && !this.initializeRenko(candles, now)) return;
+    if (this.renkoState.windowStart !== this.market.start) return;
+
+    const newBricks = [];
+    const nextCandles = candles.filter(candle => candle.t >= this.market.start
+      && candle.end <= now
+      && (this.renkoLastProcessedCandleStart == null
+        || candle.t > this.renkoLastProcessedCandleStart));
+    for (const candle of nextCandles) {
+      const result = appendRenkoClose(this.renkoEngine, candle);
+      newBricks.push(...result.bricks);
+      this.renkoLastProcessedCandleStart = candle.t;
+    }
+
+    const latestBrick = this.renkoEngine.lastBrick;
+    const signalSide = latestBrick?.side ?? null;
+    this.renkoState = {
+      ...this.renkoState,
+      status: signalSide ? 'READY' : 'WAITING_FOR_RENKO_BRICK',
+      direction: this.renkoEngine.direction,
+      selectedSide: signalSide,
+      lastBrickClose: this.renkoEngine.lastBrickClose,
+      latestBrick,
+      latestBrickAt: latestBrick?.at ?? null,
+      lastProcessedCandleAt: this.renkoLastProcessedCandleStart == null
+        ? null : this.renkoLastProcessedCandleStart + CANDLE_INTERVAL_MS,
+      newBrickPrinted: newBricks.length > 0,
+      bricksPrintedThisTick: newBricks.length,
+      newBricks: newBricks.slice(-10),
+    };
+    this.entrySignal = latestBrick ? {
+      selectedSide: signalSide,
+      signalPrice: latestBrick.close,
+      referenceClose: this.renkoEngine.lastBrickClose,
+      signalAt: latestBrick.at,
+      rule: `RENKO_${latestBrick.color}`,
+    } : null;
+    this.entrySideSelection = {
+      status: !signalSide ? 'WAITING_FOR_RENKO_BRICK'
+        : newBricks.length ? 'RENKO_BRICK_PRINTED' : 'NO_NEW_BRICK_HOLDING',
+      selectedSide: signalSide,
+      signalPrice: latestBrick?.close ?? null,
+      brickSize: this.renkoState.brickSize,
+      latestBrickAt: latestBrick?.at ?? null,
+      newBrickPrinted: newBricks.length > 0,
+      bricksPrintedThisTick: newBricks.length,
+      rule: latestBrick ? `RENKO_${latestBrick.color}` : null,
+    };
+
+    if (!signalSide) {
+      this.statusReason = this.renkoState.status === 'WAITING_FOR_RENKO_BRICK'
+        ? 'Renko has no confirmed direction yet; waiting for a closed one-minute BTC price to print a brick.'
+        : 'Renko printed no new brick. Any existing position remains open.';
+      return;
+    }
+
+    const variant = this.variants[this.activeVariantId];
+    const targetSide = this.tradeSideFor(signalSide, variant.id);
+    const signalKey = `${this.market.start}:${latestBrick.at}:${signalSide}`;
+    const currentOrders = this.entryOrders.filter(order => order.marketId === this.market.id
+      && order.windowStart === this.market.start
+      && order.variantId === variant.id);
+    const pendingBuys = currentOrders.filter(order =>
+      order.action === 'BUY' && order.status === 'PENDING_CONFIRMATION');
+    const pendingSells = currentOrders.filter(order =>
+      order.action === 'SELL' && order.status === 'PENDING_CONFIRMATION');
+    const openTrades = this.trades.filter(trade => trade.status === 'OPEN'
+      && trade.marketId === this.market.id
+      && trade.windowStart === this.market.start
+      && trade.variantId === variant.id);
+
+    for (const order of pendingBuys) {
+      if (order.side !== targetSide) {
+        this.cancelPendingTakerOrder(order, `Renko direction changed to ${signalSide} before the buy was confirmed.`);
+      }
+    }
+
+    if (openTrades.some(trade => trade.side === targetSide)) {
+      for (const order of pendingSells) {
+        this.cancelPendingTakerOrder(order, `Renko returned to the held ${targetSide} side before the sell was confirmed.`);
+      }
+      this.pendingRenkoFlip.delete(variant.id);
+      this.lastRenkoActionKey.set(variant.id, signalKey);
+      this.statusReason = this.renkoState.newBrickPrinted
+        ? `Renko printed ${signalSide}; the ${variant.name} already holds ${targetSide}, so it keeps the position.`
+        : `No new Renko brick printed; the ${variant.name} keeps its ${targetSide} position.`;
+      return;
+    }
+
+    if (openTrades.length) {
+      this.pendingRenkoFlip.set(variant.id, { signalSide, targetSide, signalKey });
+      const alreadyActedOnBrick = this.lastRenkoActionKey.get(variant.id) === signalKey;
+      if (!pendingSells.length && !alreadyActedOnBrick && this.renkoState.newBrickPrinted) {
+        this.queueRenkoSell(signalSide, targetSide, openTrades, variant, now, signalKey);
+      }
+      return;
+    }
+
+    if (pendingSells.length) {
+      this.pendingRenkoFlip.set(variant.id, { signalSide, targetSide, signalKey });
+      return;
+    }
+    if (pendingBuys.some(order => order.side === targetSide)) {
+      this.lastRenkoActionKey.set(variant.id, signalKey);
+      return;
+    }
+    if (this.lastRenkoActionKey.get(variant.id) === signalKey) return;
+
+    this.queueRenkoBuy(signalSide, targetSide, variant, now, signalKey);
   }
 
   processPendingTakerOrders(now) {
     for (const order of this.entryOrders) {
       if (order.status !== 'PENDING_CONFIRMATION' || this.tickCount < order.confirmationDueTick) continue;
       order.confirmedAt = now;
+      if (!this.market || this.market.id !== order.marketId || now >= order.windowEnd) {
+        order.status = 'CANCELLED_WINDOW_ENDED';
+        order.remainingShares = 0;
+        order.cancelledRemainderShares = order.requestedShares;
+        order.cancelReason = 'The original market window ended before next-tick fill confirmation.';
+        this.log('PAPER_TAKER_ORDER_NOT_FILLED', {
+          orderId: order.id, action: order.action, side: order.side, reason: order.cancelReason,
+        }, order.windowStart);
+        continue;
+      }
       const quote = this.market?.id === order.marketId ? this.quotes[order.side] : null;
       if (!quoteIsFresh(quote, now, EXIT_QUOTE_MAX_AGE_MS)) {
         order.status = 'CANCELLED_NO_FRESH_BOOK';
         order.cancelledRemainderShares = order.requestedShares;
         order.remainingShares = 0;
         order.cancelReason = 'No fresh order book was available on the confirmation tick.';
-        this.statusReason = `${order.side} taker entry was not filled: no fresh ask book was available on the next tick.`;
-        this.log('PAPER_TAKER_BUY_NOT_FILLED', {
+        this.statusReason = `${order.side} taker ${order.action.toLowerCase()} was not filled: no fresh book was available on the next tick.`;
+        this.log(order.action === 'SELL' ? 'PAPER_TAKER_SELL_NOT_FILLED' : 'PAPER_TAKER_BUY_NOT_FILLED', {
           orderId: order.id,
+          action: order.action,
           side: order.side,
           reason: order.cancelReason,
         }, order.windowStart);
+        continue;
+      }
+
+      if (order.action === 'SELL') {
+        this.processPendingTakerSellOrder(order, quote, now);
         continue;
       }
 
@@ -614,10 +831,156 @@ class ProbabilityBot {
         confirmationTick: this.tickCount,
         fillLevels: fill.fills,
       }, order.windowStart);
-      this.statusReason = `${fill.shares.toLocaleString()} ${order.side} shares confirmed at a ${fill.averagePrice.toFixed(4)} weighted average on the next tick; ${remainder.toLocaleString()} unfilled shares were cancelled. Filled shares will be held until the original market’s official Polymarket resolution.`;
+      this.statusReason = `${fill.shares.toLocaleString()} ${order.side} shares confirmed at a ${fill.averagePrice.toFixed(4)} weighted average on the next tick; ${remainder.toLocaleString()} unfilled shares were cancelled. The position stays until an opposite confirmed Renko signal or original-market resolution.`;
       let retainedSettled = 0;
       this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     }
+  }
+
+  processPendingTakerSellOrder(order, quote, now) {
+    const fill = simulateTakerSellFill(quote.bids, order.requestedShares, this.market);
+    if (!fill) {
+      order.status = 'CANCELLED_NO_VISIBLE_BIDS';
+      order.cancelledRemainderShares = order.requestedShares;
+      order.remainingShares = 0;
+      order.cancelReason = 'The next-tick order book contained no executable bid depth.';
+      this.statusReason = `${order.side} reversal sell was not filled: no executable bid depth was visible on the next tick.`;
+      this.log('PAPER_TAKER_SELL_NOT_FILLED', {
+        orderId: order.id, side: order.side, targetSide: order.targetSide, reason: order.cancelReason,
+      }, order.windowStart);
+      return;
+    }
+
+    order.filledShares = fill.shares;
+    order.remainingShares = 0;
+    order.cancelledRemainderShares = fill.remainingShares;
+    order.averageFillPrice = fill.averagePrice;
+    order.fillPrice = fill.averagePrice;
+    order.filledCost = fill.grossPayout;
+    order.fees = fill.fees;
+    order.feeRate = fill.feeRate;
+    order.feeExponent = fill.feeExponent;
+    order.fillLevels = fill.fills;
+    order.status = fill.remainingShares > 1e-8
+      ? 'PARTIALLY_FILLED_REMAINDER_CANCELLED' : 'FILLED';
+
+    let remainingFill = fill.shares;
+    const heldTrades = this.trades
+      .filter(trade => trade.status === 'OPEN'
+        && trade.marketId === order.marketId
+        && trade.windowStart === order.windowStart
+        && trade.variantId === order.variantId
+        && trade.side === order.side)
+      .sort((a, b) => Number(a.openedAt || 0) - Number(b.openedAt || 0));
+    let closedShares = 0;
+    for (const trade of heldTrades) {
+      if (remainingFill <= 1e-8) break;
+      const sharesBefore = Number(trade.shares);
+      const sharesToClose = Math.min(sharesBefore, remainingFill);
+      if (!Number.isFinite(sharesBefore) || sharesBefore <= 0 || sharesToClose <= 0) continue;
+
+      const ratio = sharesToClose / sharesBefore;
+      let closedTrade = trade;
+      if (sharesToClose < sharesBefore - 1e-8) {
+        closedTrade = {
+          ...trade,
+          id: `${trade.id}-renko-exit-${order.id}`,
+          shares: sharesToClose,
+          cost: Number(trade.cost || 0) * ratio,
+          fees: Number(trade.fees || 0) * ratio,
+          totalCost: Number(trade.totalCost || 0) * ratio,
+          status: 'OPEN',
+          settlementStatus: 'OPEN',
+          realizedPnl: null,
+          closePrice: null,
+          exitPrice: null,
+          grossPayout: null,
+          netPayout: null,
+          exitFees: null,
+          settledAt: null,
+        };
+        trade.shares = sharesBefore - sharesToClose;
+        trade.cost = Number(trade.cost || 0) - closedTrade.cost;
+        trade.fees = Number(trade.fees || 0) - closedTrade.fees;
+        trade.totalCost = Number(trade.totalCost || 0) - closedTrade.totalCost;
+        this.trades.unshift(closedTrade);
+      }
+      closedTrade.exitOrderId = order.id;
+      closedTrade.exitSignalSide = order.signalSide;
+      const fillRatio = sharesToClose / fill.shares;
+      this.closeTrade(
+        closedTrade,
+        fill.averagePrice,
+        fill.grossPayout * fillRatio,
+        'RENKO_SIGNAL_REVERSAL',
+        'Taker sell executed against visible bids after an opposite closed one-minute Renko brick.',
+        now,
+        fill.averagePrice,
+        fill.fees * fillRatio,
+        'TAKER',
+      );
+      remainingFill -= sharesToClose;
+      closedShares += sharesToClose;
+    }
+
+    if (closedShares <= 1e-8) {
+      order.status = 'CANCELLED_NO_OPEN_POSITION';
+      order.cancelReason = 'No matching open position remained when the sell was confirmed.';
+      order.filledShares = 0;
+      order.remainingShares = 0;
+      order.cancelledRemainderShares = order.requestedShares;
+      this.log('PAPER_TAKER_SELL_NOT_FILLED', {
+        orderId: order.id, side: order.side, reason: order.cancelReason,
+      }, order.windowStart);
+      return;
+    }
+
+    order.filledShares = closedShares;
+    order.cancelledRemainderShares = Math.max(
+      order.cancelledRemainderShares,
+      order.requestedShares - closedShares,
+    );
+    order.status = order.cancelledRemainderShares > 1e-8
+      ? 'PARTIALLY_FILLED_REMAINDER_CANCELLED' : 'FILLED';
+    this.log('PAPER_TAKER_SELL_FILLED', {
+      orderId: order.id,
+      side: order.side,
+      targetSide: order.targetSide,
+      signalSide: order.signalSide,
+      requestedShares: order.requestedShares,
+      filledShares: closedShares,
+      cancelledRemainderShares: order.cancelledRemainderShares,
+      averageFillPrice: fill.averagePrice,
+      grossPayout: fill.grossPayout * (closedShares / fill.shares),
+      takerFees: fill.fees * (closedShares / fill.shares),
+      fillLevels: fill.fills,
+    }, order.windowStart);
+
+    const variant = this.variants[order.variantId];
+    const remainingHeld = this.trades.some(trade => trade.status === 'OPEN'
+      && trade.marketId === order.marketId
+      && trade.windowStart === order.windowStart
+      && trade.variantId === order.variantId
+      && trade.side === order.side);
+    const flip = this.pendingRenkoFlip.get(order.variantId);
+    const currentSignalSide = this.renkoState.selectedSide;
+    const currentTargetSide = this.tradeSideFor(currentSignalSide, order.variantId);
+    if (!remainingHeld && variant?.active && variant.id === this.activeVariantId
+      && this.market?.id === order.marketId && now < order.windowEnd
+      && flip && currentTargetSide === flip.targetSide) {
+      this.pendingRenkoFlip.delete(order.variantId);
+      this.queueRenkoBuy(
+        currentSignalSide, currentTargetSide, variant, now,
+        `${this.market.start}:${this.renkoState.latestBrickAt}:${currentSignalSide}`,
+      );
+    } else if (!remainingHeld) {
+      this.pendingRenkoFlip.delete(order.variantId);
+      this.statusReason = `${closedShares.toLocaleString()} ${order.side} shares sold at ${fill.averagePrice.toFixed(4)} average; no opposite buy was sent because the Renko direction or active paper version changed.`;
+    } else {
+      this.statusReason = `${closedShares.toLocaleString()} ${order.side} shares sold at ${fill.averagePrice.toFixed(4)} average; the unfilled position remains open until another visible bid is available.`;
+    }
+    let retainedSettled = 0;
+    this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
   }
 
   orderSchedule(now = this.now()) {
@@ -625,7 +988,6 @@ class ProbabilityBot {
     if (!Number.isFinite(start)) {
       return {
         status: 'WAITING_FOR_MARKET',
-        signalAt: null,
         selectedSide: null,
         ordersPlaced: 0,
         openOrders: 0,
@@ -633,28 +995,37 @@ class ProbabilityBot {
     }
     const currentOrders = this.entryOrders.filter(order => order.windowStart === start);
     const openOrders = currentOrders.filter(order => order.status === 'PENDING_CONFIRMATION');
-    const signalAt = start - SIGNAL_COMPARE_LEAD_MS;
+    const latestOrder = currentOrders[0] ?? null;
+    const buyOrders = currentOrders.filter(order => order.action === 'BUY');
+    const sellOrders = currentOrders.filter(order => order.action === 'SELL');
     const status = currentOrders[0]?.status
-      ?? (this.entrySignal?.selectedSide ? this.entrySideSelection.status
-        : now >= this.market.end ? 'WINDOW_CLOSED'
-          : now >= start ? 'MISSED_PREOPEN_SIGNAL'
-            : now >= signalAt ? this.entrySideSelection.status : 'WAITING_FOR_PREOPEN_SIGNAL');
+      ?? (this.renkoState.selectedSide ? this.entrySideSelection.status
+        : now >= this.market.end ? 'WINDOW_CLOSED' : this.renkoState.status);
     return {
       status,
-      signalAt,
       signalSide: this.entrySignal?.selectedSide ?? null,
       tradeSide: this.tradeSideFor(this.entrySignal?.selectedSide),
       activeVariantId: this.activeVariantId,
       variantMode: this.variants[this.activeVariantId]?.mode,
       signalPrice: this.entrySignal?.signalPrice ?? null,
       referenceClose: this.entrySignal?.referenceClose ?? null,
+      brickSize: this.renkoState.brickSize ?? null,
+      latestBrickAt: this.renkoState.latestBrickAt ?? null,
+      newBrickPrinted: Boolean(this.renkoState.newBrickPrinted),
+      bricksPrintedThisTick: this.renkoState.bricksPrintedThisTick ?? 0,
+      heldSide: this.trades.find(trade => trade.status === 'OPEN'
+        && trade.marketId === this.market?.id
+        && trade.windowStart === start
+        && trade.variantId === this.activeVariantId)?.side ?? null,
+      lastAction: latestOrder?.action ?? null,
       nextTickConfirmation: Boolean(openOrders.length),
       ordersPlaced: currentOrders.length,
       openOrders: openOrders.length,
-      filledShares: currentOrders.reduce((sum, order) => sum + order.filledShares, 0),
-      requestedShares: currentOrders.reduce((sum, order) => sum + order.requestedShares, 0),
-      signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
-      signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
+      buyOrders: buyOrders.length,
+      sellOrders: sellOrders.length,
+      filledShares: buyOrders.reduce((sum, order) => sum + order.filledShares, 0),
+      soldShares: sellOrders.reduce((sum, order) => sum + order.filledShares, 0),
+      requestedShares: buyOrders.reduce((sum, order) => sum + order.requestedShares, 0),
       entryOrderType: 'TAKER',
       entryShares: this.variants[this.activeVariantId]?.shareSize ?? ENTRY_SHARES,
     };
@@ -936,18 +1307,18 @@ class ProbabilityBot {
       strategy: {
         version: STRATEGY_VERSION,
         timeframe: '5m',
+        signalTimeframe: '1m',
         pollIntervalMs: POLL_INTERVAL_MS,
         orderType: 'TAKER',
         activeVariantId: this.activeVariantId,
         variantMode: this.variants[this.activeVariantId]?.mode,
         sharesPerTrade: this.variants[this.activeVariantId]?.shareSize ?? ENTRY_SHARES,
         targetProfit: VARIANT_PROFIT_TARGET,
-        signalScanLeadMs: SIGNAL_SCAN_LEAD_MS,
-        signalCompareLeadMs: SIGNAL_COMPARE_LEAD_MS,
+        renkoAtrPeriod: RENKO_ATR_PERIOD,
         takerFeeRate: TAKER_FEE_RATE,
-        orderModel: `Use the most recent closed BTC 1-minute candle. Three seconds before the 5-minute window opens, compare the live BTC price with that candle close: higher signals UP; equal or lower signals DOWN. At window open, the active version buys ${this.variants[this.activeVariantId]?.mode === 'SIGNAL' ? 'the signal side' : 'the opposite side'} using its current share size.`,
-        fillModel: 'The taker entry is confirmed on the next 500 ms bot tick from fresh visible asks, sweeping asks from lowest to highest. Only available shares are booked at their actual weighted average price; the unfilled remainder is cancelled. Taker fees use the market fee schedule when available.',
-        exitModel: 'There is no take-profit or stop-loss. Filled shares remain open through the window and settle only when the original Polymarket market is officially confirmed resolved.',
+        orderModel: `Build Renko from confirmed 1-minute BTC candle closes. The brick size is fixed for each 5-minute market window at the average true range of the preceding ${RENKO_ATR_PERIOD} one-minute bars. Green means UP; red means DOWN. The active version enters that side (or the opposite in the against-signal version). A color reversal closes its current position against visible bids, then buys the new side. If no new brick prints, an existing position is held.`,
+        fillModel: 'Paper taker buys and reversal sells are confirmed on the next 500 ms bot tick from fresh visible ask or bid depth. Only actually visible shares are booked at their weighted average price; unfilled remainder is cancelled. Taker fees use the market fee schedule when available.',
+        exitModel: 'No take-profit or stop-loss. An open position is sold only after a new opposite Renko direction is confirmed; any remaining position is held until the exact original market reaches Polymarket’s official resolution.',
       },
       window: this.market ? {
         title: this.market.title,
@@ -959,9 +1330,9 @@ class ProbabilityBot {
       } : null,
       referencePrice: this.referencePrice,
       spotPrice: this.latestPrice,
-      priceGap: Number.isFinite(this.entrySignal?.signalPrice)
-        && Number.isFinite(this.entrySignal?.referenceClose)
-        ? this.entrySignal.signalPrice - this.entrySignal.referenceClose
+      priceGap: Number.isFinite(this.latestPrice)
+        && Number.isFinite(this.renkoState?.lastBrickClose)
+        ? this.latestPrice - this.renkoState.lastBrickClose
         : Number.isFinite(this.referencePrice) && Number.isFinite(this.latestPrice)
           ? this.latestPrice - this.referencePrice : null,
       priceAt: this.priceAt,
@@ -1001,6 +1372,7 @@ class ProbabilityBot {
       openOrders,
       events: this.events,
       entrySideSelection: this.entrySideSelection,
+      renko: this.renkoState,
       orderSchedule: this.orderSchedule(now),
       learning: {
         ...this.learningStatus,
