@@ -7,7 +7,6 @@ const { recoverExpiredPositions } = require('./position-exits');
 const {
   WINDOW_MS,
   ENTRY_SHARES,
-  VARIANT_PROFIT_TARGET,
   POLL_INTERVAL_MS,
   MAX_QUOTE_AGE_MS,
   quoteIsFresh,
@@ -32,10 +31,8 @@ const STARTING_CASH = 10_000;
 const TAKER_FEE_RATE = CRYPTO_TAKER_FEE_RATE;
 const EQUITY_SNAPSHOT_INTERVAL_MS = 30_000;
 const EXIT_QUOTE_MAX_AGE_MS = MAX_QUOTE_AGE_MS;
-
-function oppositeSide(side) {
-  return side === 'UP' ? 'DOWN' : side === 'DOWN' ? 'UP' : null;
-}
+const TAKE_PROFIT_LIMIT_PRICE = 0.99;
+const TAKE_PROFIT_PAYOUT_PER_SHARE = 1;
 
 function parseLevels(levels, direction) {
   return (Array.isArray(levels) ? levels : [])
@@ -69,7 +66,7 @@ class ProbabilityBot {
     this.referencePrice = null;
     this.latestPrice = null;
     this.priceAt = null;
-    this.startingCash = STARTING_CASH * 2;
+    this.startingCash = STARTING_CASH;
     this.cash = this.startingCash;
     this.trades = [];
     this.settledCount = 0;
@@ -99,7 +96,7 @@ class ProbabilityBot {
     this.equitySnapshotRequested = true;
     this.learningStatus = {
       enabled: Boolean(learningStore),
-      mode: learningStore ? 'renko-reversal-paper-logging-only' : 'disabled',
+      mode: learningStore ? 'renko-signal-tp099-paper-logging-only' : 'disabled',
       completedWindows: 0,
     };
     this.error = null;
@@ -109,63 +106,18 @@ class ProbabilityBot {
     this.activeVariantId = 'signal';
     this.variants = {
       signal: {
-        id: 'signal', name: 'With signal', mode: 'SIGNAL',
+        id: 'signal', name: 'BTC Renko signal', mode: 'SIGNAL',
         startingCash: STARTING_CASH, cash: STARTING_CASH,
-        shareSize: ENTRY_SHARES, cycleNumber: 1, cycleProfit: 0,
+        shareSize: ENTRY_SHARES,
         active: true, settledTrades: 0, wins: 0, losses: 0, totalTrades: 0,
-        equityCurve: [{ ts: this.startedAt, equity: STARTING_CASH }],
-      },
-      against: {
-        id: 'against', name: 'Against signal', mode: 'AGAINST_SIGNAL',
-        startingCash: STARTING_CASH, cash: STARTING_CASH,
-        shareSize: ENTRY_SHARES, cycleNumber: 0, cycleProfit: 0,
-        active: false, settledTrades: 0, wins: 0, losses: 0, totalTrades: 0,
         equityCurve: [{ ts: this.startedAt, equity: STARTING_CASH }],
       },
     };
     this.priceFeed.start();
   }
 
-  tradeSideFor(signalSide, variantId = this.activeVariantId) {
-    const variant = this.variants[variantId];
-    return variant?.mode === 'SIGNAL' ? signalSide : oppositeSide(signalSide);
-  }
-
-  activateNextVariant(currentVariant, now) {
-    if (currentVariant.id !== this.activeVariantId
-      || currentVariant.cycleProfit < VARIANT_PROFIT_TARGET) return false;
-    for (const order of this.entryOrders) {
-      if (order.variantId !== currentVariant.id || order.status !== 'PENDING_CONFIRMATION') continue;
-      order.status = 'CANCELLED_VARIANT_PAUSED';
-      order.remainingShares = 0;
-      order.cancelledRemainderShares = order.requestedShares;
-      order.cancelReason = 'The strategy version reached its profit target and was paused before fill confirmation.';
-      this.log('PAPER_ENTRY_CANCELLED_VARIANT_PAUSED', {
-        orderId: order.id, variantId: currentVariant.id,
-        cancelledShares: order.cancelledRemainderShares,
-      }, order.windowStart);
-    }
-    const nextId = currentVariant.id === 'signal' ? 'against' : 'signal';
-    currentVariant.active = false;
-    currentVariant.shareSize = ENTRY_SHARES;
-    const next = this.variants[nextId];
-    next.cycleNumber += 1;
-    next.cycleProfit = 0;
-    next.shareSize = nextId === 'against' ? ENTRY_SHARES * 2 : ENTRY_SHARES;
-    next.active = true;
-    next.activatedAt = now;
-    this.activeVariantId = nextId;
-    this.statusReason = `${currentVariant.name} reached its $${VARIANT_PROFIT_TARGET} realized-profit target. New entries switched to ${next.name} at ${next.shareSize} shares.`;
-    this.log('PAPER_VARIANT_TARGET_REACHED', {
-      completedVariantId: currentVariant.id,
-      completedCycle: currentVariant.cycleNumber,
-      cycleProfit: currentVariant.cycleProfit,
-      targetProfit: VARIANT_PROFIT_TARGET,
-      activatedVariantId: next.id,
-      activatedCycle: next.cycleNumber,
-      activatedShareSize: next.shareSize,
-    }, this.market?.start);
-    return true;
+  tradeSideFor(signalSide) {
+    return signalSide === 'UP' || signalSide === 'DOWN' ? signalSide : null;
   }
 
   snapshotVariants(now = this.now()) {
@@ -202,10 +154,6 @@ class ProbabilityBot {
         markedValue: marksFresh ? markedValue : null,
         shareSize: variant.shareSize,
         baseShareSize: ENTRY_SHARES,
-        targetProfit: VARIANT_PROFIT_TARGET,
-        cycleNumber: variant.cycleNumber,
-        cycleProfit: variant.cycleProfit,
-        remainingToTarget: Math.max(0, VARIANT_PROFIT_TARGET - variant.cycleProfit),
         totalTrades: variant.totalTrades,
         settledTrades,
         wins: variant.wins,
@@ -483,7 +431,6 @@ class ProbabilityBot {
       id,
       variantId: variant.id,
       variantName: variant.name,
-      cycleNumber: variant.cycleNumber,
       variantMode: variant.mode,
       marketId: this.market.id,
       tokenId: this.market.tokens?.[side] ?? null,
@@ -538,7 +485,6 @@ class ProbabilityBot {
       id,
       variantId: variant.id,
       variantName: variant.name,
-      cycleNumber: variant.cycleNumber,
       variantMode: variant.mode,
       marketId: this.market.id,
       tokenId: this.market.tokens?.[side] ?? null,
@@ -642,7 +588,7 @@ class ProbabilityBot {
     }
 
     const variant = this.variants[this.activeVariantId];
-    const targetSide = this.tradeSideFor(signalSide, variant.id);
+    const targetSide = this.tradeSideFor(signalSide);
     const signalKey = `${this.market.start}:${latestBrick.at}:${signalSide}`;
     const currentOrders = this.entryOrders.filter(order => order.marketId === this.market.id
       && order.windowStart === this.market.start
@@ -780,7 +726,6 @@ class ProbabilityBot {
         orderId: order.id,
         variantId: order.variantId,
         variantName: order.variantName,
-        cycleNumber: order.cycleNumber,
         marketId: order.marketId,
         tokenId: order.tokenId,
         slug: this.market.slug,
@@ -802,6 +747,14 @@ class ProbabilityBot {
         openedAt: now,
         status: 'OPEN',
         settlementStatus: 'OPEN',
+        takeProfitPrice: TAKE_PROFIT_LIMIT_PRICE,
+        takeProfitOrder: {
+          type: 'LIMIT_SELL',
+          price: TAKE_PROFIT_LIMIT_PRICE,
+          status: 'RESTING',
+          remainingShares: fill.shares,
+          placedAt: now,
+        },
         peakBid: null,
         peakBidAt: null,
         lastOutcomeBid: null,
@@ -811,7 +764,7 @@ class ProbabilityBot {
       this.trades.unshift(trade);
       const windowResult = this.windowResults.get(order.windowStart)
         ?? { entryCount: 0, settledCount: 0, netPnl: 0,
-          variantId: order.variantId, cycleNumber: order.cycleNumber };
+          variantId: order.variantId };
       windowResult.entryCount += 1;
       this.windowResults.set(order.windowStart, windowResult);
       this.cash -= fill.totalCost;
@@ -831,7 +784,7 @@ class ProbabilityBot {
         confirmationTick: this.tickCount,
         fillLevels: fill.fills,
       }, order.windowStart);
-      this.statusReason = `${fill.shares.toLocaleString()} ${order.side} shares confirmed at a ${fill.averagePrice.toFixed(4)} weighted average on the next tick; ${remainder.toLocaleString()} unfilled shares were cancelled. The position stays until an opposite confirmed Renko signal or original-market resolution.`;
+      this.statusReason = `${fill.shares.toLocaleString()} ${order.side} shares confirmed at a ${fill.averagePrice.toFixed(4)} weighted average. The position has a $0.99 take-profit; otherwise it stays for the original market's resolution.`;
       let retainedSettled = 0;
       this.trades = this.trades.filter(item => item.status === 'OPEN' || retainedSettled++ < 200);
     }
@@ -964,7 +917,7 @@ class ProbabilityBot {
       && trade.side === order.side);
     const flip = this.pendingRenkoFlip.get(order.variantId);
     const currentSignalSide = this.renkoState.selectedSide;
-    const currentTargetSide = this.tradeSideFor(currentSignalSide, order.variantId);
+    const currentTargetSide = this.tradeSideFor(currentSignalSide);
     if (!remainingHeld && variant?.active && variant.id === this.activeVariantId
       && this.market?.id === order.marketId && now < order.windowEnd
       && flip && currentTargetSide === flip.targetSide) {
@@ -1052,13 +1005,46 @@ class ProbabilityBot {
       if (now < trade.windowEnd && fresh) {
         trade.lastOutcomeBid = bid;
         trade.lastOutcomeBidAt = quote.updatedAt;
+        const takeProfitPrice = Number(trade.takeProfitPrice ?? TAKE_PROFIT_LIMIT_PRICE);
+        if (quote.updatedAt >= (trade.openedAt ?? 0) && bid >= takeProfitPrice) {
+          const executableShares = (quote.bids || [])
+            .filter(level => Number(level.price) >= takeProfitPrice)
+            .reduce((sum, level) => sum + Number(level.size || 0), 0);
+          trade.takeProfitOrder = {
+            ...(trade.takeProfitOrder || {}),
+            type: 'LIMIT_SELL',
+            price: takeProfitPrice,
+            status: 'RESTING',
+            remainingShares: trade.shares,
+            displayedBidShares: executableShares,
+            lastCheckedAt: quote.updatedAt,
+          };
+          if (executableShares + 1e-8 < trade.shares) continue;
+          const payout = trade.shares * TAKE_PROFIT_PAYOUT_PER_SHARE;
+          this.closeTrade(
+            trade,
+            TAKE_PROFIT_LIMIT_PRICE,
+            payout,
+            'TAKE_PROFIT_099',
+            'Paper limit take-profit reached: best bid met $0.99; credited at $1 per share as requested.',
+            now,
+            TAKE_PROFIT_LIMIT_PRICE,
+            0,
+            'MAKER',
+          );
+          this.statusReason = `${trade.shares.toLocaleString()} ${trade.side} shares reached the $0.99 take-profit and were credited at $1 per share.`;
+        }
         continue;
       }
 
       if (now < trade.windowEnd) continue;
       const wasPending = trade.settlementStatus === 'AWAITING_SETTLEMENT';
       trade.settlementStatus = 'AWAITING_SETTLEMENT';
-      trade.settlementError = 'Window ended; no take-profit or stop-loss exit is active. Waiting for confirmed original-market resolution.';
+      if (trade.takeProfitOrder?.status === 'RESTING') {
+        trade.takeProfitOrder.status = 'EXPIRED';
+        trade.takeProfitOrder.remainingShares = trade.shares;
+      }
+      trade.settlementError = 'Window ended before the $0.99 take-profit. Waiting for confirmed original-market resolution.';
       if (!wasPending) {
         this.log('EXPIRY_RECOVERY_PENDING', {
           tradeId: trade.id,
@@ -1073,6 +1059,11 @@ class ProbabilityBot {
     trade, exitPrice, payout, outcome, settlementSource, now, feeExecutionPrice,
     executionFees, exitExecutionRole = 'TAKER', estimatedMakerRebate = 0,
   ) {
+    if (trade.takeProfitOrder?.status === 'RESTING') {
+      trade.takeProfitOrder.status = outcome === 'TAKE_PROFIT_099' ? 'FILLED' : 'CANCELLED';
+      trade.takeProfitOrder.remainingShares = 0;
+      trade.takeProfitOrder.completedAt = now;
+    }
     const exitFees = executionFees ?? estimateTakerFee(feeExecutionPrice, trade.shares, {
       raw: { feeSchedule: { rate: trade.feeRate ?? TAKER_FEE_RATE, exponent: trade.feeExponent ?? 1 } },
     });
@@ -1098,9 +1089,6 @@ class ProbabilityBot {
       variant.settledTrades += 1;
       if (trade.realizedPnl > 0) variant.wins += 1;
       else if (trade.realizedPnl < 0) variant.losses += 1;
-      if (trade.cycleNumber === variant.cycleNumber) {
-        variant.cycleProfit = Number((variant.cycleProfit + trade.realizedPnl).toFixed(8));
-      }
       const previousEquity = variant.equityCurve.at(-1)?.equity ?? variant.startingCash;
       variant.equityCurve.push({
         ts: now,
@@ -1137,7 +1125,6 @@ class ProbabilityBot {
       realizedPnl: trade.realizedPnl,
       windowStart: trade.windowStart,
     }, trade.windowStart ?? this.market?.start);
-    if (variant) this.activateNextVariant(variant, now);
   }
 
   maybeFinalizeCompletedWindows(now) {
@@ -1313,12 +1300,12 @@ class ProbabilityBot {
         activeVariantId: this.activeVariantId,
         variantMode: this.variants[this.activeVariantId]?.mode,
         sharesPerTrade: this.variants[this.activeVariantId]?.shareSize ?? ENTRY_SHARES,
-        targetProfit: VARIANT_PROFIT_TARGET,
+        takeProfitPrice: TAKE_PROFIT_LIMIT_PRICE,
         renkoAtrPeriod: RENKO_ATR_PERIOD,
         takerFeeRate: TAKER_FEE_RATE,
-        orderModel: `Build Renko from confirmed 1-minute BTC candle closes. The brick size is fixed for each 5-minute market window at the average true range of the preceding ${RENKO_ATR_PERIOD} one-minute bars. Green means UP; red means DOWN. The active version enters that side (or the opposite in the against-signal version). A color reversal closes its current position against visible bids, then buys the new side. If no new brick prints, an existing position is held.`,
-        fillModel: 'Paper taker buys and reversal sells are confirmed on the next 500 ms bot tick from fresh visible ask or bid depth. Only actually visible shares are booked at their weighted average price; unfilled remainder is cancelled. Taker fees use the market fee schedule when available.',
-        exitModel: 'No take-profit or stop-loss. An open position is sold only after a new opposite Renko direction is confirmed; any remaining position is held until the exact original market reaches Polymarket’s official resolution.',
+        orderModel: `Build Renko from confirmed 1-minute BTC candle closes. The brick size is fixed for each 5-minute market window at the average true range of the preceding ${RENKO_ATR_PERIOD} one-minute bars. Green means UP and red means DOWN; entries always follow the current Renko signal. A new opposite brick closes the current position and enters the newly signalled side. No new brick means hold.`,
+        fillModel: 'Paper taker buys and reversal sells are confirmed on the next 500 ms bot tick from fresh visible ask or bid depth. Only actually visible shares are booked at their weighted average price; unfilled remainder is cancelled. Taker entry and reversal fees use the market fee schedule when available.',
+        exitModel: 'A paper limit take-profit triggers when a fresh original-market best bid reaches $0.99 and is credited at $1 per share with no exit fee. No stop-loss. Any position not sold by take-profit or a Renko reversal stays open for confirmed resolution of its exact original market.',
       },
       window: this.market ? {
         title: this.market.title,

@@ -2,7 +2,6 @@
 
 const WINDOW_MS = 5 * 60 * 1000;
 const ENTRY_SHARES = 100;
-const VARIANT_PROFIT_TARGET = 300;
 const POLL_INTERVAL_MS = 500;
 const MAX_QUOTE_AGE_MS = 5_000;
 const DEFAULT_TAKER_FEE_RATE = 0.07;
@@ -94,7 +93,6 @@ function getWindowToScan(now) {
 module.exports = {
   WINDOW_MS,
   ENTRY_SHARES,
-  VARIANT_PROFIT_TARGET,
   POLL_INTERVAL_MS,
   MAX_QUOTE_AGE_MS,
   DEFAULT_TAKER_FEE_RATE,

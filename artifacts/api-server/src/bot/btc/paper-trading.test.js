@@ -5,14 +5,12 @@ const assert = require('node:assert/strict');
 const {
   ENTRY_SHARES,
   POLL_INTERVAL_MS,
-  VARIANT_PROFIT_TARGET,
   feeParameters,
   simulateTakerBuyFill,
 } = require('./paper-trading');
 
-test('paper trading retains the independent account size and target settings', () => {
+test('paper trading uses the configured entry size and polling interval', () => {
   assert.equal(ENTRY_SHARES, 100);
-  assert.equal(VARIANT_PROFIT_TARGET, 300);
   assert.equal(POLL_INTERVAL_MS, 500);
 });
 

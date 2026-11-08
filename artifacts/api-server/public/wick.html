@@ -1,78 +1,145 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#090d1d"><title>BTC Strategy Lab</title>
-<style>
-:root{color-scheme:dark;--bg:#090d1d;--panel:#11162b;--line:#303a62;--muted:#a5b4d2;--text:#f6f7ff;--green:#43f0ad;--red:#ff6688;--gold:#ffd166;--cyan:#48e6ff}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 8% -5%,#272b69 0,transparent 36%),radial-gradient(ellipse at 100% 12%,#4b214d 0,transparent 32%),linear-gradient(150deg,#090d1d,#0e1428 55%,#101022);color:var(--text);font:14px/1.5 system-ui,sans-serif}
-main{max-width:1320px;margin:auto;padding:24px}.head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;padding:10px 3px 18px}.title{font-size:clamp(26px,4vw,38px);font-weight:950;letter-spacing:-.04em;background:linear-gradient(90deg,#fff,#6cecff 55%,#c49bff);-webkit-background-clip:text;background-clip:text;color:transparent}.sub,.muted,.small{color:var(--muted)}.sub{margin-top:4px}.pill{border:1px solid #2a816e;background:linear-gradient(120deg,#103c38,#122a39);box-shadow:0 0 22px #2de9bd2b;color:#5fffd0;padding:7px 12px;border-radius:99px;font-weight:800}.panel,.card{background:linear-gradient(145deg,#171e39ef,#10162bee);border:1px solid #333d68;box-shadow:0 16px 45px #03061175;border-radius:16px;padding:19px}.panel{margin-top:12px}.panel h2{font-size:18px;letter-spacing:-.02em;margin:0 0 12px}.overview-title{font-size:14px;text-transform:uppercase;letter-spacing:.12em;color:#91a5da;margin:20px 2px 10px}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{min-height:96px}.card.primary{background:linear-gradient(135deg,#153e69,#211c51 75%);border-color:#4aa7ff}.card.success{background:linear-gradient(135deg,#124a46,#163326);border-color:#27c992}.card.danger{background:linear-gradient(135deg,#582139,#34192f);border-color:#fa5a89}.label{font-size:10px;text-transform:uppercase;letter-spacing:.12em;font-weight:850;color:#afbbdc}.value{font:800 25px/1.2 ui-monospace,monospace;margin-top:7px;letter-spacing:-.03em}.metric-note{display:block;margin-top:6px;font-size:10px;color:var(--muted)}.good{color:#51ffc2}.bad{color:#ff718d}.small{font-size:11px;line-height:1.5}.section-note{margin:0 0 8px}.strategy-grid{display:grid;grid-template-columns:1fr;gap:16px}.strategy-card{position:relative;overflow:hidden;border:1px solid #3d4a77;border-radius:20px;padding:19px;background:linear-gradient(145deg,#182445,#12182c 65%,#20183a);box-shadow:0 18px 50px #02040c8a}.strategy-card:before{content:"";position:absolute;inset:0 0 auto;height:4px;background:linear-gradient(90deg,#ffb84d,#ff6f91,#b279ff)}.strategy-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}.strategy-title{font-size:20px;font-weight:950;letter-spacing:-.03em}.strategy-tag{font-size:10px;font-weight:900;letter-spacing:.1em;text-transform:uppercase;color:#b9ceff;border:1px solid #526493;background:#252d4f;padding:6px 9px;border-radius:99px}.strategy-status{font-size:11px;font-weight:850;color:#53f0c1;margin-top:8px}.strategy-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.strategy-metric{min-width:0;border:1px solid #3a466f;border-radius:13px;padding:10px;background:linear-gradient(145deg,#202a49,#151b32)}.strategy-metric .label{font-size:9px}.strategy-metric .value{font-size:19px;margin-top:5px}.strategy-rules{display:grid;grid-template-columns:1fr 1fr;gap:0 16px;margin-top:10px}.metric{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #344066;gap:10px;font-size:12px}.strategy-rules b{text-align:right;max-width:70%}.strategy-chart{margin-top:12px;border:1px solid #333e66;border-radius:14px;background:#0e1426}.strategy-chart h3{font-size:11px;color:#b7c3e2;text-transform:uppercase;letter-spacing:.1em;padding:12px 12px 0;margin:0}.chart-wrap{padding:8px}.chart-wrap svg{display:block;width:100%;height:auto}.chart-grid{stroke:#28354a;stroke-width:1}.chart-label{fill:var(--muted);font:10px system-ui,sans-serif}.equity-line{fill:none;stroke:#5ceaff;stroke-width:3.5;filter:drop-shadow(0 0 5px #5ceaff88)}.strategy-quotes,.strategy-inventory{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}.strategy-quote,.inventory-card{padding:12px;border-radius:14px;background:#11172b;border:1px solid #344168}.strategy-quote.up,.inventory-card.up{border-top:3px solid var(--green)}.strategy-quote.down,.inventory-card.down{border-top:3px solid var(--red)}.strategy-quote-title,.side-title{font-size:10px;letter-spacing:.12em;font-weight:900}.strategy-quote-price{font-size:25px;font-weight:950;margin-top:3px}.strategy-quote.up .strategy-quote-price,.up-color{color:var(--green)}.strategy-quote.down .strategy-quote-price,.down-color{color:var(--red)}.inventory-count{font-size:22px;font-weight:850;margin:8px 0}.inventory-meta{display:flex;justify-content:space-between;gap:10px;padding-top:9px;border-top:1px solid var(--line);color:var(--muted)}.inventory-meta b{color:var(--text)}.strategy-description{font-size:11px;color:#b1bdd9;line-height:1.6;margin:12px 2px 0}.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;min-width:740px}th,td{text-align:left;padding:9px 8px;border-bottom:1px solid #303a62;font-size:11px}th{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}.empty{color:var(--muted);padding:14px 0}.err{color:var(--red);white-space:pre-wrap}.subhead{margin:18px 0 4px;padding-top:14px;border-top:1px solid var(--line)}
-@media(max-width:850px){main{padding:15px}.strategy-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:520px){main{padding:12px}.head{align-items:flex-start;flex-direction:column}.strategy-card{padding:14px}.strategy-rules{grid-template-columns:1fr}.strategy-quotes,.strategy-inventory{gap:7px}.strategy-quote-price{font-size:21px}.strategy-rules b{max-width:62%}.panel{padding:14px}.value{font-size:20px}}
-</style></head><body><main>
- <header class="head"><div><div class="title">BTC Strategy Lab</div><div class="sub">Two independent BTC 5-minute paper versions · $10,000 each</div></div><span class="pill" id="status">CONNECTING</span></header>
- <section class="panel"><h2>Renko strategy comparison</h2><p class="small section-note">Two isolated $10,000 paper accounts. Only the active version opens new positions; paused positions continue to resolve normally.</p><div id="strategy-panels" class="strategy-grid"></div></section>
-<h2 class="overview-title">Demo account overview</h2><section class="grid">
-<div class="card primary"><div class="label">Demo equity</div><div class="value" id="equity">—</div></div><div class="card"><div class="label">Cash</div><div class="value" id="cash">—</div></div><div class="card"><div class="label">Realized P&amp;L</div><div class="value" id="realized">—</div></div><div class="card"><div class="label">Floating P&amp;L</div><div class="value" id="unrealized">—</div></div>
-<div class="card primary"><div class="label">Total trades</div><div class="value" id="totalTrades">—</div><span class="metric-note" id="settledTrades">— settled</span></div><div class="card danger"><div class="label">Taker fees paid</div><div class="value" id="takerFees">—</div><span class="metric-note">entry fills</span></div><div class="card success"><div class="label">Estimated maker rebate</div><div class="value" id="makerRebate">—</div><span class="metric-note">credited paper estimate · entry fills only</span></div><div class="card primary"><div class="label">Win rate</div><div class="value" id="winRate">—</div><span class="metric-note">wins ÷ settled trades</span></div>
-<div class="card success"><div class="label">Wins</div><div class="value" id="wins">—</div></div><div class="card danger"><div class="label">Losses</div><div class="value" id="losses">—</div></div><div class="card success"><div class="label">Profitable exits</div><div class="value" id="profitableExits">—</div></div><div class="card danger"><div class="label">Losing exits</div><div class="value" id="losingExits">—</div></div><div class="card"><div class="label">Break-even exits</div><div class="value" id="breakEvenExits">—</div></div><div class="card success"><div class="label">Highest consecutive strategy wins</div><div class="value" id="maxConsecutiveWins">—</div><span class="metric-note">Official resolution win</span></div><div class="card danger"><div class="label">Highest consecutive strategy losses</div><div class="value" id="maxConsecutiveLosses">—</div><span class="metric-note">Official resolution loss</span></div><div class="card"><div class="label">Open positions</div><div class="value" id="open">—</div></div>
-</section>
-<section class="panel"><h2>Real Polymarket account · read-only</h2><div class="grid"><div class="card"><div class="label">Real equity</div><div class="value" id="realEquity">—</div></div><div class="card"><div class="label">USDC collateral</div><div class="value" id="realCollateral">—</div></div><div class="card"><div class="label">Position value</div><div class="value" id="realPositionValue">—</div></div></div><div class="small" id="realBalanceStatus">Connecting to the live account balance…</div></section>
-<section class="panel"><h2>Floating positions · live own-side marks</h2><p class="small section-note">Open shares are marked using their own-side best bid. Stale or missing marks are not shown as current unrealized P&amp;L.</p><div id="openPositions" class="table-wrap"></div><h2 class="subhead">Recent closed trades · realized P&amp;L</h2><div id="closedPositions" class="table-wrap"></div></section>
- <p class="small">Paper-only BTC 5-minute market-order strategy. The signal version starts at 100 shares. When it earns $300 net realized profit in its active cycle, it pauses and the against-signal version starts at 200 shares. When the latter reaches its own $300 target, it resets to 100 and the signal version resumes at 100. Each version has separate capital, win rate, trade history, and equity curve. Entries remain taker market buys confirmed from next-tick visible asks; positions settle only from the original market’s official resolution, with no TP or SL. Paper history resets on process restart.</p><div class="err" id="error"></div>
-</main><script>
-const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const usd=x=>x==null||x===''||!Number.isFinite(Number(x))?'—':'$'+Number(x).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
-const px=x=>x==null?'—':'$'+Number(x).toFixed(3),sharesFmt=x=>Number(x||0).toLocaleString(undefined,{maximumFractionDigits:3});
-const timestamp=x=>Number(x)>0?new Date(Number(x)).toLocaleString([],{month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',timeZoneName:'short'}):'—';
-const escResult=p=>p.status==='PENDING_RESOLUTION'?'Awaiting resolution':p.status==='OPEN'?'Open · held for resolution':p.finalOutcome==='MARKET_RESOLUTION'?'Resolved · '+(p.resolutionWinner||'official'):p.finalOutcome||'Pending';
-function equitySvg(points){if(!Array.isArray(points)||points.length<2)return '<div class="empty">Settled trades will appear here.</div>';const vals=points.map(p=>Number(p.equity)).filter(Number.isFinite);if(vals.length<2)return '<div class="empty">Settled trades will appear here.</div>';const w=900,h=210,pad=25,min=Math.min(...vals),max=Math.max(...vals),span=max-min||1,coords=vals.map((v,i)=>`${pad+i*(w-pad*2)/(vals.length-1)},${h-pad-(v-min)*(h-pad*2)/span}`).join(' ');return `<svg viewBox="0 0 ${w} ${h}" role="img" aria-label="Demo equity curve"><line class="chart-grid" x1="${pad}" y1="${pad}" x2="${w-pad}" y2="${pad}"/><line class="chart-grid" x1="${pad}" y1="${h/2}" x2="${w-pad}" y2="${h/2}"/><line class="chart-grid" x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}"/><polyline class="equity-line" points="${coords}"/><text class="chart-label" x="${pad}" y="16">${usd(max)}</text><text class="chart-label" x="${pad}" y="${h-5}">${usd(min)}</text><text class="chart-label" x="${w-pad}" y="${h-5}" text-anchor="end">${vals.length-1} samples</text></svg>`}
-function positionTable(items,open){
- if(!items.length)return `<div class="empty">${open?'No open positions are floating right now.':'No closed trades yet.'}</div>`;
- const headers=open?['Strategy / window','Side','Shares','Avg entry','Fees','Strategy result','Own bid · value','Unrealized P&L','Mark status']:['Strategy / window','Side','Shares','Avg entry','Fees','Strategy result','Exit','Proceeds','Realized P&L','Closed'];
- const rows=items.map(p=>{
-  const markAge=Date.now()-Number(p.lastOutcomeBidAt);
-  const fresh=p.markStatus==='LIVE'&&p.markBid!=null&&p.markValue!=null&&Number.isFinite(markAge)&&markAge>=0&&markAge<=5000;
-   const common=`<td>${esc(p.variantName||p.strategyName||'BTC 5m market strategy')} · ${esc(p.slug||'')}</td><td class="${p.side==='UP'?'good':'bad'}">${esc(p.side)}${p.signalSide?` <span class="muted">(signal ${esc(p.signalSide)})</span>`:''}</td><td>${sharesFmt(p.shares)}</td><td>${px(p.avgEntry)}</td><td>${usd(Number(p.fees||0)+Number(p.exitFees||0))}</td>`;
-  const result=escResult(p);
-  if(open)return `<tr>${common}<td>${esc(result)}</td><td>${fresh?`${px(p.markBid)} · ${usd(p.markValue)}`:'—'}</td><td>${fresh?usd(p.unrealizedPnl):'—'}</td><td>${fresh?'LIVE':esc(p.markStatus==='PENDING_RESOLUTION'?'PENDING RESOLUTION':'STALE / UNAVAILABLE')}</td></tr>`;
-  const exit=p.settlementBasis==='POLYMARKET_RESOLUTION'?`Resolution · ${esc(p.resolutionWinner||'result')}`:'—';
-  return `<tr>${common}<td>${esc(result)}</td><td>${exit}</td><td>${p.proceeds==null?'—':usd(p.proceeds)}</td><td class="${Number(p.realizedPnl)>=0?'good':'bad'}">${p.realizedPnl==null?'—':usd(p.realizedPnl)}</td><td>${timestamp(p.settledAt)}</td></tr>`;
- }).join('');
- return `<table><thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>`;
-}
-function dashboardModel(s,analytics){
-  const a=s.paperAccount||{},w=s.window||{},rawStrategy=s.strategy||{},schedule=s.orderSchedule||{},orders=s.entryOrders||[],latest=orders.find(o=>o.windowStart===w.start)||orders[0],signal=s.entrySideSelection||{},signalSide=latest?.signalSide||signal.selectedSide||schedule.signalSide||null,tradeSide=latest?.side||signal.tradeSide||schedule.tradeSide||null,account={capital:a.startingCash??20000,equity:a.equity,cash:a.cash,realizedPnl:a.realizedPnl,unrealizedPnl:a.unrealizedPnl,openPositions:a.openPositions,totalTrades:a.totalTrades??(s.trades||[]).length,settledTrades:a.settled??0,wins:a.wins??0,losses:a.losses??0,winRate:a.settled?(a.wins||0)/a.settled*100:0,takerFees:a.takerFees??0,estimatedMakerRebate:a.estimatedMakerRebate??0,maxConsecutiveWins:a.maxConsecutiveWins??0,maxConsecutiveLosses:a.maxConsecutiveLosses??0,equityCurve:(analytics?.equityHistory||[]).map(p=>({ts:p.ts,equity:p.equity}))};
- const positions=Object.fromEntries(['UP','DOWN'].map(side=>{const item=a.positions?.[side]||{};return [side,{...item,cost:item.costBasis,shares:item.shares||0}]}));
- const strategy={name:'BTC 5m candle-signal opposite-side taker',timing:'One market buy at the 5-minute window open',trigger:signalSide?`Signal ${signalSide} → buy ${tradeSide||'opposite side'}`:(signal.status||'Waiting for the pre-open BTC comparison'),entries:{sharesPerSide:rawStrategy.sharesPerTrade||100,orderStatus:latest?.status||'NOT_PLACED',signal:{reason:signalSide?`Candle signal ${signalSide}; actual market buy is ${tradeSide||'the opposite side'}.`:rawStrategy.orderModel||'Waiting for signal'}},exit:{orderType:'POLYMARKET_RESOLUTION_ONLY'}};
- return {account,window:w,strategy,signalSide,tradeSide,quotes:s.quotes||{},inventory:positions,status:s.running?(s.error?'blocked_or_error':'scanning'):'stopped',raw:s};
-}
-function strategyPanel(model){const {account:a,window:w,strategy:s,quotes:q,inventory:inv,signalSide,tradeSide,status}=model;const secs=w.end?Math.max(0,Math.ceil((Number(w.end)-Date.now())/1000)):0,windowLabel=secs?`${secs}s left`:'Waiting for BTC window',rule=s.trigger||'Waiting for the pre-open signal';const inventoryCard=(side,item)=>`<div class="inventory-card ${side.toLowerCase()}"><div class="side-title ${side==='UP'?'up-color':'down-color'}">${side} inventory</div><div class="inventory-count">${sharesFmt(item?.shares)} shares</div><div class="inventory-meta"><span>Average cost</span><b>${item?.shares?usd(item.averageCost):'—'}</b></div><div class="inventory-meta"><span>Cost basis</span><b>${usd(item?.cost)}</b></div></div>`;const metrics=[['Demo capital',usd(a.capital)],['Equity',usd(a.equity)],['Cash',usd(a.cash)],['Realized P&L',usd(a.realizedPnl)],['Win rate',`${Number(a.winRate||0).toFixed(1)}%`],['Wins / losses',`${a.wins} / ${a.losses}`],['Trades settled',`${a.settledTrades} / ${a.totalTrades}`],['Open positions',a.openPositions]];return `<article class="strategy-card"><div class="strategy-head"><div><div class="strategy-title">${esc(s.name)}</div><div class="strategy-status">${esc(String(status).replaceAll('_',' '))} · ${esc(windowLabel)}</div></div><span class="strategy-tag">Single paper strategy</span></div><div class="strategy-metrics">${metrics.map(([label,value])=>`<div class="strategy-metric"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`).join('')}</div><div class="strategy-chart"><h3>Equity curve</h3><div class="chart-wrap">${equitySvg(a.equityCurve)}</div></div><div class="strategy-rules"><div class="metric"><span>Entry timing</span><b>At window open</b></div><div class="metric"><span>Entry size</span><b>${Number(s.entries?.sharesPerSide||100).toLocaleString()} shares</b></div><div class="metric"><span>Order type</span><b>Market buy · next-tick fill confirmation</b></div><div class="metric"><span>Signal → trade</span><b>${esc(rule)}</b></div><div class="metric"><span>Exit rule</span><b>Original-market Polymarket resolution only · no TP or SL</b></div></div><div class="strategy-quotes"><div class="strategy-quote up"><div class="strategy-quote-title">UP · best ask</div><div class="strategy-quote-price">${px(q.UP?.bestAsk)}</div></div><div class="strategy-quote down"><div class="strategy-quote-title">DOWN · best ask</div><div class="strategy-quote-price">${px(q.DOWN?.bestAsk)}</div></div></div><div class="strategy-inventory">${inventoryCard('UP',inv.UP)}${inventoryCard('DOWN',inv.DOWN)}</div><p class="strategy-description">${esc(signalSide?`Signal ${signalSide} → paper market buy on ${tradeSide||'the opposite side'}.`:s.entries?.signal?.reason||'Waiting for market data')}${w.slug?` · ${esc(w.slug)}`:''}</p></article>`}
-async function refresh(){try{const [r,ar]=await Promise.all([fetch('/api/strategy/state?ts='+Date.now(),{cache:'no-store'}),fetch('/api/strategy/analytics?limit=1000',{cache:'no-store'})]);if(!r.ok)throw Error('State request failed: '+r.status);const s=await r.json(),analytics=ar.ok?await ar.json():null,model=dashboardModel(s,analytics),a=model.account;document.querySelector('#status').textContent=String(model.status).replaceAll('_',' ').toUpperCase();document.querySelector('#strategy-panels').innerHTML=strategyPanel(model);document.querySelector('#equity').textContent=usd(a.equity);document.querySelector('#cash').textContent=usd(a.cash);const rp=document.querySelector('#realized'),up=document.querySelector('#unrealized');rp.textContent=usd(a.realizedPnl);rp.className='value '+(Number(a.realizedPnl)>=0?'good':'bad');up.textContent=usd(a.unrealizedPnl);up.className='value '+(Number(a.unrealizedPnl)>=0?'good':'bad');document.querySelector('#open').textContent=a.openPositions??0;document.querySelector('#totalTrades').textContent=a.totalTrades??0;document.querySelector('#makerRebate').textContent=usd(a.estimatedMakerRebate);document.querySelector('#takerFees').textContent=usd(a.takerFees);document.querySelector('#settledTrades').textContent=`${a.settledTrades} settled · ${a.openPositions} open`;document.querySelector('#winRate').textContent=`${Number(a.winRate||0).toFixed(1)}%`;document.querySelector('#wins').textContent=a.wins;document.querySelector('#losses').textContent=a.losses;document.querySelector('#profitableExits').textContent=a.wins;document.querySelector('#losingExits').textContent=a.losses;document.querySelector('#breakEvenExits').textContent=0;document.querySelector('#maxConsecutiveWins').textContent=a.maxConsecutiveWins;document.querySelector('#maxConsecutiveLosses').textContent=a.maxConsecutiveLosses;const trades=(s.trades||[]).map(t=>({...t,strategyName:'BTC 5m market strategy',status:t.status==='OPEN'?(t.settlementStatus==='AWAITING_SETTLEMENT'?'PENDING_RESOLUTION':'OPEN'):t.status==='SETTLED'?'SETTLED_EXIT':t.status,strategyOutcome:t.finalOutcome==='MARKET_RESOLUTION'?(t.resolutionWinner===t.side?'WIN':'LOSS'):null,avgEntry:t.entryPrice,markBid:t.lastOutcomeBid,markValue:t.lastOutcomeBid==null?null:t.shares*Number(t.lastOutcomeBid),markStatus:t.settlementStatus==='AWAITING_SETTLEMENT'?'PENDING_RESOLUTION':t.lastOutcomeBid==null?'UNAVAILABLE':'LIVE',unrealizedPnl:t.lastOutcomeBid==null?null:t.shares*Number(t.lastOutcomeBid)-Number(t.totalCost||0),settlementBasis:t.settlementSource==='Original market confirmed closed and resolved; redeemed the exact outcome-token payout (no CLOB sale fee).'?'POLYMARKET_RESOLUTION':t.finalOutcome,proceeds:t.netPayout,exitPrice:t.exitPrice}));const open=trades.filter(t=>['OPEN','PENDING_RESOLUTION'].includes(t.status)),closed=trades.filter(t=>t.status==='SETTLED_EXIT').sort((x,y)=>(Number(y.settledAt)||0)-(Number(x.settledAt)||0)).slice(0,30);document.querySelector('#openPositions').innerHTML=positionTable(open,true);document.querySelector('#closedPositions').innerHTML=positionTable(closed,false);document.querySelector('#error').textContent=s.error||''}catch(e){document.querySelector('#error').textContent='Dashboard data unavailable: '+e.message}}
-async function refreshRealBalance(){try{const r=await fetch('/api/real-balance?ts='+Date.now(),{cache:'no-store'});const d=await r.json(),ready=d.status==='ready';document.querySelector('#realEquity').textContent=ready?usd(d.equity):'—';document.querySelector('#realCollateral').textContent=ready?usd(d.collateral):'—';document.querySelector('#realPositionValue').textContent=ready?usd(d.positionValue):'—';document.querySelector('#realBalanceStatus').textContent=ready?`Live balance updated ${new Date(d.asOf).toLocaleTimeString()} · ${Number(d.positionCount||0)} positions · read-only`:`Real balance ${String(d.status||'unavailable').replaceAll('_',' ')}${d.error?`: ${d.error}`:''}`}catch{document.querySelector('#realBalanceStatus').textContent='Real balance unavailable'}}
- function renderVariant(v,model){
-  const active=v.active===true,mode=v.mode==='SIGNAL'?'With signal':'Against signal',w=model.window||{},q=model.raw?.quotes||{};
-  const metrics=[['Capital',usd(v.startingCash)],['Equity',usd(v.equity)],['Cash',usd(v.cash)],['Realized P&L',usd(v.realizedPnl)],['Win rate',`${Number(v.winRate||0).toFixed(1)}%`],['Wins / losses',`${v.wins} / ${v.losses}`],['Settled / total',`${v.settledTrades} / ${v.totalTrades}`],['Open positions',v.openPositions]];
-  const current=(v.trades||[]).filter(t=>t.status==='OPEN'&&t.windowStart===w.start);
-  const inventoryCard=side=>{const items=current.filter(t=>t.side===side),shares=items.reduce((sum,t)=>sum+Number(t.shares||0),0),cost=items.reduce((sum,t)=>sum+Number(t.totalCost||0),0);return `<div class="inventory-card ${side.toLowerCase()}"><div class="side-title ${side==='UP'?'up-color':'down-color'}">${side} inventory</div><div class="inventory-count">${sharesFmt(shares)} shares</div><div class="inventory-meta"><span>Average cost</span><b>${shares?usd(cost/shares):'—'}</b></div><div class="inventory-meta"><span>Cost basis</span><b>${usd(cost)}</b></div></div>`};
-  const recent=(v.trades||[]).filter(t=>t.status==='SETTLED').slice(0,5);
-  const recentRows=recent.length?recent.map(t=>`<div class="metric"><span>${esc(t.side)} · ${esc(t.slug||'window')}</span><b class="${Number(t.realizedPnl)>=0?'good':'bad'}">${esc(t.resolutionWinner===t.side?'WIN':t.resolutionWinner?'LOSS':'SETTLED')} · ${usd(t.realizedPnl)}</b></div>`).join(''):'<div class="empty">No resolved trades for this version yet.</div>';
-  return `<article class="strategy-card" data-testid="variant-${esc(v.id)}"><div class="strategy-head"><div><div class="strategy-title">${esc(v.name||mode)}</div><div class="strategy-status">${active?'ACTIVE · taking new entries':'PAUSED · existing positions still resolve'} · cycle ${Number(v.cycleNumber)||0}</div></div><span class="strategy-tag">${active?'ACTIVE':'PAUSED'}</span></div><div class="strategy-metrics">${metrics.map(([label,value])=>`<div class="strategy-metric"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`).join('')}</div><div class="strategy-rules"><div class="metric"><span>Signal handling</span><b>${mode}</b></div><div class="metric"><span>Current size</span><b>${sharesFmt(v.shareSize)} shares</b></div><div class="metric"><span>Cycle target</span><b>${usd(v.cycleProfit)} / ${usd(v.targetProfit)}</b></div><div class="metric"><span>Remaining</span><b>${usd(v.remainingToTarget)}</b></div></div><div class="strategy-chart"><h3>Independent equity curve</h3><div class="chart-wrap">${equitySvg(v.equityCurve)}</div></div><div class="strategy-quotes"><div class="strategy-quote up"><div class="strategy-quote-title">UP · best ask</div><div class="strategy-quote-price">${px(q.UP?.bestAsk)}</div></div><div class="strategy-quote down"><div class="strategy-quote-title">DOWN · best ask</div><div class="strategy-quote-price">${px(q.DOWN?.bestAsk)}</div></div></div><div class="strategy-inventory">${inventoryCard('UP')}${inventoryCard('DOWN')}</div><div class="strategy-chart"><h3>Recent resolved trades</h3><div style="padding:0 12px 8px">${recentRows}</div></div></article>`;
- }
- const singleStrategyPanel=strategyPanel;
- strategyPanel=model=>{const variants=Object.values(model.raw?.variants||{});return variants.length?variants.map(v=>renderVariant(v,model)).join(''):singleStrategyPanel(model)};
-  refresh();setInterval(refresh,2000);refreshRealBalance();setInterval(refreshRealBalance,15000);
- </script><script>
-  const strategyDescription=document.querySelector('main > p.small');
-  if(strategyDescription)strategyDescription.textContent='Paper-only BTC 5-minute strategy using closed one-minute Renko bricks. Brick size is ATR(14) from preceding one-minute candles. Green bricks set UP; red bricks set DOWN. The With Renko version buys that side and the Against Renko version buys the opposite side. On an opposite brick, the bot sells the current-window position before entering the new side; without a new brick, it holds. Positions settle from the original market resolution only; no take-profit or stop-loss.';
-  const originalRenderVariant=window.renderVariant;
-  window.renderVariant=function(v,model){
-   const rendered=originalRenderVariant(v,model),renko=model.raw?.renko||{},direction=renko.selectedSide||model.raw?.entrySideSelection?.selectedSide||null;
-   const tradeSide=direction?(v.mode==='SIGNAL'?direction:direction==='UP'?'DOWN':'UP'):null;
-   const color=direction==='UP'?'#43f0ad':direction==='DOWN'?'#ff6688':'#a5b4d2';
-   const price=renko.brickSize==null?'—':px(renko.brickSize);
-   const brickAt=renko.latestBrickAt?timestamp(renko.latestBrickAt):'No confirmed brick yet';
-   const action=direction?'No new brick: hold. Opposite confirmed brick: sell current side, then enter the new side.':'Waiting for enough closed one-minute candles to confirm a Renko brick.';
-   const panel=`<div data-testid="renko-signal" style="margin-top:12px;padding:14px;border:1px solid ${color};border-radius:14px;background:linear-gradient(120deg,#11172b,#18213b);display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;align-items:center"><div><div class="label">1-minute Renko direction</div><div style="font-size:25px;font-weight:950;color:${color}">${esc(direction||'WAITING')}</div></div><div><div class="label">Trade side · ${esc(v.mode==='SIGNAL'?'with Renko':'against Renko')}</div><div style="font-size:20px;font-weight:900;color:${color}">${esc(tradeSide||'WAITING')}</div></div><div><div class="label">1m ATR(14) box size</div><div style="font-size:20px;font-weight:850">${esc(price)}</div></div><div><div class="label">Latest confirmed brick</div><div style="font-size:12px;font-weight:750">${esc(brickAt)}</div></div><div style="grid-column:1/-1;color:#c2cde4;font-size:12px">${esc(action)}</div></div>`;
-   return rendered.replace('<div class="strategy-rules">',panel+'<div class="strategy-rules">')
-    .replaceAll('Signal handling','Renko handling').replaceAll('With signal','With Renko').replaceAll('Against signal','Against Renko');
-  };
-  refresh();
- </script></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0a1020">
+  <title>BTC Renko Bot</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0a1020;--panel:#111a2d;--line:#253551;--muted:#a8b6ca;--text:#f5f8ff;--up:#43e3a1;--down:#ff6f83;--blue:#75b9ff}
+    *{box-sizing:border-box}
+    body{margin:0;background:linear-gradient(155deg,#101a34,#090e1b 60%);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+    main{max-width:1040px;margin:auto;padding:22px}
+    header{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}
+    h1{font-size:clamp(24px,4vw,34px);line-height:1.1;margin:0;letter-spacing:-.04em}
+    h2{font-size:15px;margin:0 0 12px}
+    .sub,.muted,.note{color:var(--muted)}
+    .sub{margin:5px 0 0;font-size:12px}
+    .status{border:1px solid #267b60;background:#10342b;color:#71f0bc;border-radius:99px;padding:7px 11px;font-weight:850;font-size:11px;white-space:nowrap}
+    .panel{background:linear-gradient(145deg,#141f35,#101827);border:1px solid var(--line);border-radius:15px;padding:16px;margin:12px 0}
+    .signal{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:center}
+    .signal-box{border:1px solid var(--line);border-radius:12px;padding:14px;background:#0c1424}
+    .label{color:var(--muted);font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.1em}
+    .signal-value{font-size:32px;font-weight:950;line-height:1.1;margin-top:6px}
+    .up{color:var(--up)}.down{color:var(--down)}
+    .price-grid,.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+    .price,.stat{background:#0c1424;border:1px solid var(--line);border-radius:12px;padding:13px}
+    .price.up-border{border-top:3px solid var(--up)}.price.down-border{border-top:3px solid var(--down)}
+    .price-value{font-size:25px;font-weight:950;margin-top:4px}
+    .stat-value{font-size:20px;font-weight:900;margin-top:5px;overflow-wrap:anywhere}
+    .signal-meta{display:flex;gap:18px;flex-wrap:wrap;margin-top:11px;font-size:12px;color:var(--muted)}
+    .chart{padding:5px 2px 0}.chart svg{width:100%;height:auto;display:block}
+    .chart-grid{stroke:#26364e;stroke-width:1}.chart-line{fill:none;stroke:#78c3ff;stroke-width:3}
+    .table-wrap{overflow-x:auto}
+    table{width:100%;border-collapse:collapse;min-width:550px}
+    th,td{text-align:left;padding:9px 7px;border-bottom:1px solid var(--line);font-size:12px}
+    th{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+    .empty,.error{padding:9px 0;color:var(--muted)}
+    .error{color:var(--down);white-space:pre-wrap}
+    .note{font-size:11px;margin:12px 2px}
+    @media(max-width:680px){main{padding:14px}.price-grid,.stats{grid-template-columns:repeat(2,minmax(0,1fr))}.signal{grid-template-columns:1fr 1fr}.panel{padding:13px}}
+    @media(max-width:400px){.signal-value{font-size:26px}.price-value{font-size:21px}header{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>BTC Renko Bot</h1><p class="sub">One paper account · trades the Renko signal side</p></div>
+      <span class="status" id="status">CONNECTING</span>
+    </header>
+
+    <section class="panel" aria-labelledby="live-title">
+      <h2 id="live-title">Live signal</h2>
+      <div class="signal">
+        <div class="signal-box"><div class="label">1-minute Renko</div><div class="signal-value" id="signal">WAITING</div></div>
+        <div class="signal-box"><div class="label">Trade side</div><div class="signal-value" id="tradeSide">WAITING</div></div>
+      </div>
+      <div class="signal-meta"><span>5m window: <b id="window">Waiting</b></span><span>ATR(14) box: <b id="brickSize">—</b></span><span>Last brick: <b id="brickAt">—</b></span></div>
+    </section>
+
+    <section class="price-grid" aria-label="Current market prices">
+      <div class="price up-border"><div class="label">UP price</div><div class="price-value up" id="upPrice">—</div></div>
+      <div class="price down-border"><div class="label">DOWN price</div><div class="price-value down" id="downPrice">—</div></div>
+      <div class="price"><div class="label">Current position</div><div class="price-value" id="heldSide">—</div></div>
+      <div class="price"><div class="label">Bot status</div><div class="price-value" style="font-size:16px" id="reason">Starting…</div></div>
+    </section>
+
+    <section class="panel" aria-labelledby="account-title">
+      <h2 id="account-title">Paper account</h2>
+      <div class="stats">
+        <div class="stat"><div class="label">Equity</div><div class="stat-value" id="equity">—</div></div>
+        <div class="stat"><div class="label">Realized P&amp;L</div><div class="stat-value" id="pnl">—</div></div>
+        <div class="stat"><div class="label">Win rate</div><div class="stat-value" id="winRate">—</div></div>
+        <div class="stat"><div class="label">Open / settled</div><div class="stat-value" id="counts">—</div></div>
+      </div>
+      <div class="chart" id="equityCurve"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="positions-title">
+      <h2 id="positions-title">Positions</h2>
+      <div class="table-wrap" id="positions"></div>
+      <p class="note">Buy the active Renko side, 100 shares. On a confirmed opposite brick, sell and follow the new signal. A $0.99 limit take-profit is credited as $1 per share; any position still open at expiry awaits that exact market’s confirmed Polymarket resolution. No stop-loss.</p>
+    </section>
+    <div class="error" id="error" role="status"></div>
+  </main>
+  <script>
+    const $=selector=>document.querySelector(selector);
+    const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const money=value=>value==null||!Number.isFinite(Number(value))?'—':'$'+Number(value).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+    const price=value=>value==null||!Number.isFinite(Number(value))?'—':'$'+Number(value).toFixed(3);
+    const stamp=value=>Number(value)>0?new Date(Number(value)).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';
+    function drawEquity(points){
+      const values=(Array.isArray(points)?points:[]).map(point=>Number(point.equity)).filter(Number.isFinite);
+      if(values.length<2)return '<div class="empty">Equity history will appear as the bot records results.</div>';
+      const width=900,height=140,pad=15,min=Math.min(...values),max=Math.max(...values),span=max-min||1;
+      const coords=values.map((value,index)=>`${pad+index*(width-pad*2)/(values.length-1)},${height-pad-(value-min)*(height-pad*2)/span}`).join(' ');
+      return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Paper equity history"><line class="chart-grid" x1="${pad}" y1="${height-pad}" x2="${width-pad}" y2="${height-pad}"/><polyline class="chart-line" points="${coords}"/></svg>`;
+    }
+    function renderPositions(trades){
+      const rows=(Array.isArray(trades)?trades:[]).slice().sort((a,b)=>Number(b.openedAt||0)-Number(a.openedAt||0)).slice(0,20);
+      if(!rows.length)return '<div class="empty">No positions yet.</div>';
+      const body=rows.map(trade=>{
+        let result='Open';
+        if(trade.settlementStatus==='AWAITING_SETTLEMENT')result='Awaiting resolution';
+        else if(trade.finalOutcome==='TAKE_PROFIT_099')result='TP · $1/share';
+        else if(trade.finalOutcome==='MARKET_RESOLUTION')result=`Resolved · ${trade.resolutionWinner||'official'}`;
+        else if(trade.finalOutcome==='RENKO_SIGNAL_REVERSAL')result='Renko reversal';
+        return `<tr><td class="${trade.side==='UP'?'up':'down'}">${esc(trade.side)}</td><td>${Number(trade.shares||0).toLocaleString()}</td><td>${price(trade.entryPrice)}</td><td>${esc(result)}</td><td>${money(trade.realizedPnl)}</td></tr>`;
+      }).join('');
+      return `<table><thead><tr><th>Side</th><th>Shares</th><th>Entry</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody>${body}</tbody></table>`;
+    }
+    async function refresh(){
+      try{
+        const [stateResponse,analyticsResponse]=await Promise.all([
+          fetch('/api/strategy/state?ts='+Date.now(),{cache:'no-store'}),
+          fetch('/api/strategy/analytics?limit=1000',{cache:'no-store'})
+        ]);
+        if(!stateResponse.ok)throw Error('State request failed: '+stateResponse.status);
+        const state=await stateResponse.json(),analytics=analyticsResponse.ok?await analyticsResponse.json():null;
+        const renko=state.renko||{},entry=state.entrySideSelection||{},schedule=state.orderSchedule||{},account=state.paperAccount||{},side=renko.selectedSide||entry.selectedSide||null;
+        const tradeSide=schedule.tradeSide||side,window=state.window||{},seconds=Number(window.secondsRemaining);
+        $('#status').textContent=state.error?'ATTENTION':state.running?'RUNNING':'STOPPED';
+        $('#signal').textContent=side||'WAITING';
+        $('#signal').className='signal-value '+(side==='UP'?'up':side==='DOWN'?'down':'');
+        $('#tradeSide').textContent=tradeSide||'WAITING';
+        $('#tradeSide').className='signal-value '+(tradeSide==='UP'?'up':tradeSide==='DOWN'?'down':'');
+        $('#window').textContent=window.slug?`${window.slug}${Number.isFinite(seconds)?` · ${Math.ceil(seconds)}s left`:''}`:'Waiting for BTC market';
+        $('#brickSize').textContent=renko.brickSize==null?'—':price(renko.brickSize);
+        $('#brickAt').textContent=stamp(renko.latestBrickAt);
+        $('#upPrice').textContent=price(state.quotes?.UP?.midpoint??state.quotes?.UP?.bestAsk);
+        $('#downPrice').textContent=price(state.quotes?.DOWN?.midpoint??state.quotes?.DOWN?.bestAsk);
+        $('#heldSide').textContent=schedule.heldSide||'None';
+        $('#reason').textContent=state.statusReason||'Scanning';
+        $('#equity').textContent=money(account.equity);
+        $('#pnl').textContent=money(account.realizedPnl);
+        $('#winRate').textContent=account.settled?`${(100*Number(account.wins||0)/Number(account.settled)).toFixed(1)}%`:'—';
+        $('#counts').textContent=`${account.openPositions??0} / ${account.settled??0}`;
+        $('#equityCurve').innerHTML=drawEquity(analytics?.equityHistory||[]);
+        $('#positions').innerHTML=renderPositions(state.trades);
+        $('#error').textContent=state.error||'';
+      }catch(error){$('#error').textContent='Dashboard data unavailable: '+error.message}
+    }
+    refresh();setInterval(refresh,2000);
+  </script>
+</body>
+</html>

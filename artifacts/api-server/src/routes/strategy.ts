@@ -53,9 +53,11 @@ router.get("/strategy/learning", async (_req, res) => {
       orderType: "TAKER",
       sharesPerTrade: ENTRY_SHARES,
       pollIntervalMs: POLL_INTERVAL_MS,
-      exitPolicy: "OPPOSITE_RENKO_SIGNAL_OR_POLYMARKET_RESOLUTION",
+      exitPolicy: "TAKE_PROFIT_099_OR_POLYMARKET_RESOLUTION",
       stopLoss: false,
-      takeProfit: false,
+      takeProfit: true,
+      takeProfitPrice: 0.99,
+      takeProfitPayoutPerShare: 1,
     },
   });
 });

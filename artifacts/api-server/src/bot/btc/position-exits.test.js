@@ -76,7 +76,7 @@ test('unresolved expired lots stay pending and never close at a later CLOB bid',
   assert.ok(paper.trades.every(trade => trade.status === 'OPEN'
     && trade.settlementStatus === 'AWAITING_SETTLEMENT'
     && trade.finalOutcome == null));
-  assert.equal(paper.cash, 20_000);
+  assert.equal(paper.cash, 10_000);
 
   resolvedNow = true;
   now += 10_000;
@@ -98,7 +98,7 @@ test('missing market data stays explicitly pending and retries without fabricati
   assert.equal(paper.trades[0].status, 'OPEN');
   assert.equal(paper.trades[0].settlementStatus, 'AWAITING_SETTLEMENT');
   assert.equal(paper.snapshot().paperAccount.awaitingSettlement, 1);
-  assert.equal(paper.cash, 20_000);
+  assert.equal(paper.cash, 10_000);
   now += 9_000;
   await recoverExpiredPositions(paper, now);
   assert.equal(attempts, 1);

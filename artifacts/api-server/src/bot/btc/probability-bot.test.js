@@ -56,7 +56,7 @@ function setAsks(bot, now, side, asks, bid = 0.4) {
   }, now);
 }
 
-test('a confirmed green one-minute Renko brick submits an UP taker buy and confirms next tick', () => {
+test('a confirmed green Renko brick buys only UP in one $10,000 signal account', () => {
   const { bot, setNow, addCandle } = createBot();
   const candleAt = START;
   addCandle({ t: candleAt, o: 100, h: 102, l: 100, c: 102 });
@@ -90,61 +90,25 @@ test('a confirmed green one-minute Renko brick submits an UP taker buy and confi
   assert.equal(trade.orderType, 'TAKER');
   assert.equal(trade.shares, 100);
   assert.equal(bot.takeProfitOrders, undefined);
-  assert.ok(Math.abs(bot.cash - (20_000 - 46.7325)) < 1e-9);
+  assert.ok(Math.abs(bot.cash - (10_000 - 46.7325)) < 1e-9);
   assert.equal(bot.snapshot().takeProfitOrders, undefined);
-  assert.match(bot.snapshot().strategy.exitModel, /opposite Renko direction/i);
+  assert.equal(bot.snapshot().paperAccount.startingCash, 10_000);
+  assert.deepEqual(Object.keys(bot.snapshot().variants), ['signal']);
+  assert.match(bot.snapshot().strategy.exitModel, /best bid reaches \$0\.99/i);
+  assert.match(bot.snapshot().strategy.exitModel, /credited at \$1 per share/i);
+  assert.equal(bot.tradeSideFor('UP'), 'UP');
+  assert.equal(bot.tradeSideFor('DOWN'), 'DOWN');
   assert.equal(bot.snapshot().strategy.version, STRATEGY_VERSION);
 });
 
-test('isolated versions rotate at $300 net realized profit and double only the activated opposite size', () => {
+test('there is no against-signal account or strategy rotation', () => {
   const { bot } = createBot();
-  let state = bot.snapshot();
-  assert.equal(state.paperAccount.startingCash, 20_000);
-  assert.equal(state.activeVariantId, 'signal');
-  assert.equal(state.variants.signal.startingCash, 10_000);
-  assert.equal(state.variants.against.startingCash, 10_000);
+  const state = bot.snapshot();
+  assert.equal(state.paperAccount.startingCash, 10_000);
+  assert.deepEqual(Object.keys(state.variants), ['signal']);
   assert.equal(state.variants.signal.shareSize, 100);
-  assert.equal(state.variants.against.active, false);
-  bot.entryOrders.push({
-    id: 'pending-signal-order', variantId: 'signal', status: 'PENDING_CONFIRMATION',
-    requestedShares: 100, remainingShares: 100, windowStart: START,
-  });
-
-  const signalTrade = {
-    id: 'signal-target', variantId: 'signal', cycleNumber: 1,
-    shares: 300, totalCost: 0, feeRate: 0, feeExponent: 1,
-    side: 'UP', windowStart: START, windowEnd: START + 300_000,
-  };
-  bot.trades = [signalTrade];
-  bot.closeTrade(signalTrade, 1, 300, 'UP', 'CONFIRMED_MARKET_RESOLUTION',
-    START + 300_000, 0, 0, 'RESOLUTION');
-  state = bot.snapshot();
-  assert.equal(state.activeVariantId, 'against');
-  assert.equal(state.variants.signal.realizedPnl, 300);
-  assert.equal(state.variants.against.active, true);
-  assert.equal(state.variants.against.shareSize, 200);
-  assert.equal(state.variants.signal.active, false);
-  assert.equal(bot.tradeSideFor('UP'), 'DOWN');
-  assert.equal(bot.orderSchedule(START).entryShares, 200);
-  assert.equal(bot.entryOrders[0].status, 'CANCELLED_VARIANT_PAUSED');
-  assert.equal(bot.entryOrders[0].remainingShares, 0);
-
-  const againstTrade = {
-    id: 'against-target', variantId: 'against', cycleNumber: 1,
-    shares: 300, totalCost: 0, feeRate: 0, feeExponent: 1,
-    side: 'DOWN', windowStart: START + 300_000, windowEnd: START + 600_000,
-  };
-  bot.trades = [againstTrade];
-  bot.closeTrade(againstTrade, 1, 300, 'DOWN', 'CONFIRMED_MARKET_RESOLUTION',
-    START + 600_000, 0, 0, 'RESOLUTION');
-  state = bot.snapshot();
   assert.equal(state.activeVariantId, 'signal');
-  assert.equal(state.variants.against.shareSize, 100);
-  assert.equal(state.variants.against.active, false);
-  assert.equal(state.variants.signal.active, true);
-  assert.equal(state.variants.signal.shareSize, 100);
-  assert.equal(state.variants.signal.cycleNumber, 2);
-  assert.equal(state.variants.signal.cycleProfit, 0);
+  assert.equal(state.variants.against, undefined);
 });
 
 test('a closed red Renko brick buys DOWN on the signal-following version', () => {
@@ -287,7 +251,7 @@ test('no order is submitted before a closed one-minute candle prints a Renko bri
   assert.equal(bot.entrySideSelection.status, 'WAITING_FOR_RENKO_BRICK');
 });
 
-test('neither take profit nor stop loss closes positions before official resolution', () => {
+test('a fresh $0.99 bid triggers take-profit and credits $1 per share without exit fees', () => {
   const { bot, setNow } = createBot();
   const trade = {
     id: 'test-trade',
@@ -299,6 +263,7 @@ test('neither take profit nor stop loss closes positions before official resolut
     shares: 10,
     entryPrice: 0.75,
     totalCost: 7.5,
+    takeProfitPrice: 0.99,
     feeRate: 0.07,
     feeExponent: 1,
     openedAt: START,
@@ -309,20 +274,59 @@ test('neither take profit nor stop loss closes positions before official resolut
   bot.cash -= trade.totalCost;
 
   setNow(START + 10_000);
-  setAsks(bot, START + 10_000, 'UP', [], 0.99);
+  bot.quotes.UP = bot.quote({
+    bids: [{ price: 0.99, size: 5 }],
+    asks: [],
+  }, START + 10_000);
   bot.processPositionExits(START + 10_000);
   assert.equal(trade.status, 'OPEN');
+  assert.equal(trade.takeProfitOrder.status, 'RESTING');
 
-  setNow(START + 20_000);
-  setAsks(bot, START + 20_000, 'UP', [], 0.01);
-  bot.processPositionExits(START + 20_000);
+  setNow(START + 10_500);
+  bot.quotes.UP = bot.quote({
+    bids: [{ price: 0.99, size: 10 }],
+    asks: [],
+  }, START + 10_500);
+  bot.processPositionExits(START + 10_500);
+  assert.equal(trade.status, 'SETTLED');
+  assert.equal(trade.finalOutcome, 'TAKE_PROFIT_099');
+  assert.equal(trade.takeProfitOrder.status, 'FILLED');
+  assert.equal(trade.exitPrice, 0.99);
+  assert.equal(trade.grossPayout, 10);
+  assert.equal(trade.exitFees, 0);
+  assert.equal(trade.realizedPnl, 2.5);
+  assert.equal(trade.exitExecutionRole, 'MAKER');
+});
+
+test('if TP does not hit before expiry, position awaits exact original-market resolution', () => {
+  const { bot, setNow } = createBot();
+  const trade = {
+    id: 'expiry-trade',
+    marketId: market.id,
+    tokenId: market.tokens.UP,
+    windowStart: START,
+    windowEnd: START + 300_000,
+    side: 'UP',
+    shares: 10,
+    entryPrice: 0.75,
+    totalCost: 7.5,
+    takeProfitPrice: 0.99,
+    feeRate: 0.07,
+    feeExponent: 1,
+    openedAt: START,
+    status: 'OPEN',
+    settlementStatus: 'OPEN',
+  };
+  bot.trades = [trade];
+  bot.cash -= trade.totalCost;
+  setNow(START + 299_000);
+  setAsks(bot, START + 299_000, 'UP', [], 0.98);
+  bot.processPositionExits(START + 299_000);
   assert.equal(trade.status, 'OPEN');
-  assert.equal(trade.finalOutcome, undefined);
-  assert.equal(trade.exitPrice, undefined);
 
   setNow(START + 300_000);
   bot.processPositionExits(START + 300_000);
   assert.equal(trade.status, 'OPEN');
   assert.equal(trade.settlementStatus, 'AWAITING_SETTLEMENT');
-  assert.match(trade.settlementError, /original-market resolution/);
+  assert.match(trade.settlementError, /before the \$0\.99 take-profit/i);
 });

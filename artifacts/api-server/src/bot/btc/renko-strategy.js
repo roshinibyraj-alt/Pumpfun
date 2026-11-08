@@ -7,7 +7,7 @@ const {
   takerFeeAt,
 } = require('./paper-trading');
 
-const STRATEGY_VERSION = 'btc-5m-renko-1m-reversal-variants-target-300-v1';
+const STRATEGY_VERSION = 'btc-5m-renko-1m-signal-tp099-resolution-v1';
 const CANDLE_INTERVAL_MS = 60_000;
 const RENKO_ATR_PERIOD = 14;
 const RENKO_HISTORY_CANDLES = 100;

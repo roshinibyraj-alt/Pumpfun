@@ -17,12 +17,12 @@ test('learning summary only counts samples and windows for the active strategy v
     },
   });
 
-  const summary = await store.getLearningSummary('btc-5m-renko-1m-reversal-variants-target-300-v1');
-  assert.equal(summary.strategyVersion, 'btc-5m-renko-1m-reversal-variants-target-300-v1');
+  const summary = await store.getLearningSummary('btc-5m-renko-1m-signal-tp099-resolution-v1');
+  assert.equal(summary.strategyVersion, 'btc-5m-renko-1m-signal-tp099-resolution-v1');
   assert.equal(summary.completedWindows, 3);
   assert.equal(summary.sampleCount, 17);
   assert.equal(summary.tuningEnabled, false);
-  assert.ok(calls.every(call => call.params[0] === 'btc-5m-renko-1m-reversal-variants-target-300-v1'));
+  assert.ok(calls.every(call => call.params[0] === 'btc-5m-renko-1m-signal-tp099-resolution-v1'));
   assert.ok(calls[0].sql.includes("sample->>'orderStrategy'"));
   assert.ok(calls[1].sql.includes('strategy_version = $1'));
 });
