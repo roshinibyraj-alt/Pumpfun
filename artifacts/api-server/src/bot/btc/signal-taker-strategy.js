@@ -1,11 +1,11 @@
 'use strict';
 
-const STRATEGY_VERSION = 'btc-5m-candle-signal-taker-resolution-v2';
+const STRATEGY_VERSION = 'btc-5m-candle-signal-taker-opposite-resolution-v3';
 const WINDOW_MS = 5 * 60 * 1000;
 const SIGNAL_SCAN_LEAD_MS = 10_000;
 const SIGNAL_COMPARE_LEAD_MS = 3_000;
 const MAX_REFERENCE_CANDLE_AGE_MS = 90_000;
-const ENTRY_SHARES = 500;
+const ENTRY_SHARES = 100;
 const POLL_INTERVAL_MS = 500;
 const MAX_QUOTE_AGE_MS = 5_000;
 const DEFAULT_TAKER_FEE_RATE = 0.07;
