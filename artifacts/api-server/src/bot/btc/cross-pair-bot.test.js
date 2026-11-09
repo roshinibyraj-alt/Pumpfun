@@ -88,15 +88,35 @@ test('uses only the five configured combined-ask tiers and trades aligned 15-min
   assert.deepEqual(state.strategy.tiers.map(tier => tier.id), ['0.90', '0.80', '0.70', '0.60', '0.50']);
   assert.equal(state.window.end - state.window.start, 15 * 60 * 1000);
   assert.equal(state.account.startingCapital, 3000);
-  assert.equal(state.trades.length, 20);
+  assert.equal(state.trades.length, 10);
   assert.ok(state.trades.every(trade => trade.shares === 100));
   assert.ok(state.trades.every(trade => trade.entryPrice === 0.25));
-  assert.equal(state.account.takerFees, 26.25);
+  assert.equal(state.account.takerFees, 13.13);
+  // The first route to trigger each rung owns it; the opposite route is paused.
   assert.equal(state.inventory.currentWindow.BTC.UP.shares, 500);
   assert.equal(state.inventory.currentWindow.ETH.DOWN.shares, 500);
-  assert.equal(state.inventory.currentWindow.BTC.DOWN.shares, 500);
-  assert.equal(state.inventory.currentWindow.ETH.UP.shares, 500);
-  assert.ok(state.pairs.every(pair => pair.tiers.every(tier => tier.status === 'FILLED')));
+  assert.equal(state.inventory.currentWindow.BTC.DOWN.shares, 0);
+  assert.equal(state.inventory.currentWindow.ETH.UP.shares, 0);
+  const first = state.pairs.find(pair => pair.id === 'btc-up-eth-down');
+  const second = state.pairs.find(pair => pair.id === 'eth-up-btc-down');
+  assert.ok(first.tiers.every(tier => tier.status === 'FILLED'));
+  assert.ok(second.tiers.every(tier => tier.status === 'PAUSED_BY_OPPOSITE'));
+});
+
+test('a trigger pauses only the opposite pair on the same rung', async () => {
+  const f = fixture({ askPrice: 0.5 });
+  await f.bot.tick();
+  // Combined 1.00: no rung qualifies yet.
+  assert.equal(f.bot.trades.length, 0);
+  f.bot.quotes.ETH.DOWN.bestAsk = 0.3; // BTC UP 0.5 + ETH DOWN 0.3 = 0.8
+  f.bot.processEntries(f.now());
+  const ids = f.bot.trades.map(t => `${t.pairId}:${t.tierId}`);
+  assert.deepEqual([...new Set(ids)].sort(), ['btc-up-eth-down:0.80', 'btc-up-eth-down:0.90']);
+  const opp = f.bot.snapshot().pairs.find(p => p.id === 'eth-up-btc-down');
+  const status = id => opp.tiers.find(t => t.id === id).status;
+  assert.equal(status('0.90'), 'PAUSED_BY_OPPOSITE');
+  assert.equal(status('0.80'), 'PAUSED_BY_OPPOSITE');
+  assert.notEqual(status('0.70'), 'PAUSED_BY_OPPOSITE');
 });
 
 test('does not book a partial leg as a paired fill', async () => {
@@ -142,12 +162,12 @@ test('moves expired positions to pending and settles only from confirmed origina
   setAskPrice(0.75);
   bot.lastResolutionCheckAt = now();
   await bot.tick();
-  assert.equal(bot.trades.filter(trade => trade.status === 'AWAITING_RESOLUTION').length, 20);
+  assert.equal(bot.trades.filter(trade => trade.status === 'AWAITING_RESOLUTION').length, 10);
 
   await bot.resolveDue(now(), { force: true });
   const state = bot.snapshot();
   assert.equal(state.account.pendingResolutionPositions, 0);
-  assert.equal(state.account.settledPositions, 20);
+  assert.equal(state.account.settledPositions, 10);
   assert.ok(state.trades.every(trade => trade.finalOutcome === 'MARKET_RESOLUTION'));
   assert.equal(state.inventory.awaitingResolution.BTC.UP.shares, 0);
 });
