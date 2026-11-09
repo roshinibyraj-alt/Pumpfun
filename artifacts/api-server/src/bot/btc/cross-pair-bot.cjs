@@ -30,6 +30,7 @@ function makeTierStates() {
     id: tier.id,
     label: tier.label,
     status: 'ARMED',
+    pausedByPairId: null,
     qualifiedAt: null,
     filledAt: null,
     lastCombinedAsk: null,
@@ -112,6 +113,7 @@ class CrossPairBot {
     this.books = new Map();
     this.consumedAskDepth = new Map();
     this.pairTiers = {};
+    this.pairTierLocks = {};
     this.lastMarketRefreshAt = 0;
     this.lastResolutionCheckAt = 0;
     this.resolutionLastAttemptAt = new Map();
@@ -174,6 +176,7 @@ class CrossPairBot {
     this.books.clear();
     this.consumedAskDepth.clear();
     this.pairTiers = Object.fromEntries(this.config.PAIRS.map(pair => [pair.id, makeTierStates()]));
+    this.pairTierLocks = {};
     this.lastMarketRefreshAt = 0;
     this.statusReason = 'Looking up the aligned BTC and ETH 15-minute markets.';
   }
@@ -313,90 +316,136 @@ class CrossPairBot {
     return tier.strict ? combinedAsk < tier.threshold : combinedAsk <= tier.threshold;
   }
 
+  pauseOppositeTier(pair, tier, now) {
+    const opposite = this.config.PAIRS.find(candidate => candidate.id !== pair.id);
+    const state = opposite && this.pairTiers[opposite.id]?.[tier.id];
+    if (!state || state.status === 'FILLED') return;
+    state.status = 'PAUSED_BY_OPPOSITE';
+    state.pausedByPairId = pair.id;
+    state.reason = `Paused because ${pair.label} triggered the ${tier.id} rung at ${new Date(now).toISOString()}.`;
+  }
+
+  processPairTier(now, pair, tier, state) {
+    if (state.status === 'FILLED') return;
+    const pairQuote = this.pairQuote(pair, now);
+    if (!pairQuote) {
+      state.status = 'WAITING_FOR_QUOTES';
+      state.reason = 'Waiting for fresh asks on both pair legs.';
+      state.lastCombinedAsk = null;
+      return;
+    }
+
+    const { combinedAsk } = pairQuote;
+    state.lastCombinedAsk = round(combinedAsk);
+    if (!this.tierQualifies(tier, combinedAsk)) {
+      state.status = 'ARMED';
+      state.reason = `Combined ask ${combinedAsk.toFixed(3)} is above this tier.`;
+      return;
+    }
+
+    if (state.qualifiedAt == null) state.qualifiedAt = now;
+    state.attempts += 1;
+    const executions = pair.legs.map(leg =>
+      this.sweepAsks(leg.asset, leg.side, this.config.SHARES_PER_LEG, this.markets[leg.asset]));
+    if (executions.some(execution => !execution || !execution.complete)) {
+      state.status = 'WAITING_FOR_FULL_DEPTH';
+      state.reason = 'Threshold reached, but both legs do not have enough visible ask depth for a complete paired fill.';
+      return;
+    }
+    const totalCost = executions.reduce((sum, execution) => sum + execution.totalCost, 0);
+    if (totalCost > this.cash + EPSILON) {
+      state.status = 'INSUFFICIENT_CAPITAL';
+      state.reason = `Needs ${totalCost.toFixed(2)} including taker fees; only ${this.cash.toFixed(2)} is available.`;
+      return;
+    }
+    for (const execution of executions) this.commitDepth(execution);
+    this.cash = round(this.cash - totalCost, 8);
+    for (const execution of executions) {
+      const market = this.markets[execution.asset];
+      const trade = {
+        id: `trade-${++this.tradeSequence}`,
+        pairId: pair.id,
+        pairLabel: pair.label,
+        tierId: tier.id,
+        tierLabel: tier.label,
+        asset: execution.asset,
+        side: execution.side,
+        marketId: String(market.id),
+        marketSlug: market.slug,
+        marketTitle: market.title,
+        tokenId: String(execution.tokenId),
+        windowStart: this.windowStart,
+        windowEnd: this.windowEnd,
+        shares: this.config.SHARES_PER_LEG,
+        entryPrice: execution.averagePrice,
+        grossCost: execution.grossCost,
+        fees: execution.fees,
+        totalCost: execution.totalCost,
+        openedAt: now,
+        status: 'OPEN',
+        settlementStatus: 'OPEN',
+        markPrice: null,
+        markValue: null,
+        unrealizedPnl: null,
+        realizedPnl: null,
+        outcome: null,
+      };
+      this.trades.push(trade);
+    }
+    state.status = 'FILLED';
+    state.filledAt = now;
+    state.reason = `Complete ${this.config.SHARES_PER_LEG}-share fills confirmed for both legs.`;
+    const combinedFillCost = executions.reduce((sum, execution) => sum + execution.grossCost, 0);
+    this.log('PAIR_ENTRY_FILLED',
+      `${pair.label} filled ${this.config.SHARES_PER_LEG} shares per leg at the ${tier.id} combined-ask tier.`,
+      {
+        pairId: pair.id,
+        tierId: tier.id,
+        combinedAsk,
+        combinedFillCost: round(combinedFillCost),
+        fees: round(executions.reduce((sum, execution) => sum + execution.fees, 0)),
+        sharesPerLeg: this.config.SHARES_PER_LEG,
+      });
+  }
+
   processEntries(now) {
-    for (const pair of this.config.PAIRS) {
-      const pairQuote = this.pairQuote(pair, now);
-      const states = this.pairTiers[pair.id];
-      if (!states) continue;
-      for (const tier of this.config.TIERS) {
-        const state = states[tier.id];
-        if (state.status === 'FILLED') continue;
+    // Each rung is exclusive: its first qualifying cross-pair route owns that
+    // rung for the rest of this window, while other rungs remain independent.
+    for (const tier of this.config.TIERS) {
+      const lockedPairId = this.pairTierLocks[tier.id];
+      if (lockedPairId) {
+        const selectedPair = this.config.PAIRS.find(pair => pair.id === lockedPairId);
+        if (!selectedPair) continue;
+        this.pauseOppositeTier(selectedPair, tier, this.pairTiers[lockedPairId]?.[tier.id]?.qualifiedAt || now);
+        this.processPairTier(now, selectedPair, tier, this.pairTiers[lockedPairId][tier.id]);
+        continue;
+      }
+
+      for (const pair of this.config.PAIRS) {
+        const state = this.pairTiers[pair.id]?.[tier.id];
+        if (!state || state.status === 'FILLED') continue;
+        const pairQuote = this.pairQuote(pair, now);
         if (!pairQuote) {
           state.status = 'WAITING_FOR_QUOTES';
           state.reason = 'Waiting for fresh asks on both pair legs.';
           state.lastCombinedAsk = null;
           continue;
         }
-        const { combinedAsk } = pairQuote;
-        state.lastCombinedAsk = round(combinedAsk);
-        if (!this.tierQualifies(tier, combinedAsk)) {
+        state.lastCombinedAsk = round(pairQuote.combinedAsk);
+        if (!this.tierQualifies(tier, pairQuote.combinedAsk)) {
           state.status = 'ARMED';
-          state.reason = `Combined ask ${combinedAsk.toFixed(3)} is above this tier.`;
+          state.reason = `Combined ask ${pairQuote.combinedAsk.toFixed(3)} is above this tier.`;
           continue;
         }
-        if (state.qualifiedAt == null) state.qualifiedAt = now;
-        state.attempts += 1;
-        const executions = pair.legs.map(leg =>
-          this.sweepAsks(leg.asset, leg.side, this.config.SHARES_PER_LEG, this.markets[leg.asset]));
-        if (executions.some(execution => !execution || !execution.complete)) {
-          state.status = 'WAITING_FOR_FULL_DEPTH';
-          state.reason = 'Threshold reached, but both legs do not have enough visible ask depth for a complete paired fill.';
-          continue;
-        }
-        const totalCost = executions.reduce((sum, execution) => sum + execution.totalCost, 0);
-        if (totalCost > this.cash + EPSILON) {
-          state.status = 'INSUFFICIENT_CAPITAL';
-          state.reason = `Needs ${totalCost.toFixed(2)} including taker fees; only ${this.cash.toFixed(2)} is available.`;
-          continue;
-        }
-        for (const execution of executions) this.commitDepth(execution);
-        this.cash = round(this.cash - totalCost, 8);
-        for (const execution of executions) {
-          const market = this.markets[execution.asset];
-          const trade = {
-            id: `trade-${++this.tradeSequence}`,
-            pairId: pair.id,
-            pairLabel: pair.label,
-            tierId: tier.id,
-            tierLabel: tier.label,
-            asset: execution.asset,
-            side: execution.side,
-            marketId: String(market.id),
-            marketSlug: market.slug,
-            marketTitle: market.title,
-            tokenId: String(execution.tokenId),
-            windowStart: this.windowStart,
-            windowEnd: this.windowEnd,
-            shares: this.config.SHARES_PER_LEG,
-            entryPrice: execution.averagePrice,
-            grossCost: execution.grossCost,
-            fees: execution.fees,
-            totalCost: execution.totalCost,
-            openedAt: now,
-            status: 'OPEN',
-            settlementStatus: 'OPEN',
-            markPrice: null,
-            markValue: null,
-            unrealizedPnl: null,
-            realizedPnl: null,
-            outcome: null,
-          };
-          this.trades.push(trade);
-        }
-        state.status = 'FILLED';
-        state.filledAt = now;
-        state.reason = `Complete ${this.config.SHARES_PER_LEG}-share fills confirmed for both legs.`;
-        const combinedFillCost = executions.reduce((sum, execution) => sum + execution.grossCost, 0);
-        this.log('PAIR_ENTRY_FILLED',
-          `${pair.label} filled ${this.config.SHARES_PER_LEG} shares per leg at the ${tier.id} combined-ask tier.`,
-          {
-            pairId: pair.id,
-            tierId: tier.id,
-            combinedAsk,
-            combinedFillCost: round(combinedFillCost),
-            fees: round(executions.reduce((sum, execution) => sum + execution.fees, 0)),
-            sharesPerLeg: this.config.SHARES_PER_LEG,
-          });
+
+        this.pairTierLocks[tier.id] = pair.id;
+        state.qualifiedAt = now;
+        this.log('OPPOSITE_RUNG_PAUSED',
+          `${pair.label} triggered the ${tier.id} rung; the opposite pair is paused at this rung for this window.`,
+          { pairId: pair.id, tierId: tier.id, combinedAsk: round(pairQuote.combinedAsk) });
+        this.pauseOppositeTier(pair, tier, now);
+        this.processPairTier(now, pair, tier, state);
+        break;
       }
     }
   }
