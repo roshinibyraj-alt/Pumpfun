@@ -26,7 +26,7 @@ const PAIRS = [
 module.exports = {
   STRATEGY_VERSION: 'cross-pair-arbitrage-15m-v1',
   WINDOW_MS,
-  STARTING_CAPITAL: 1_000,
+  STARTING_CAPITAL: 3_000,
   SHARES_PER_LEG: 100,
   MAX_ENTRY_PRICE: 0.99,
   POLL_INTERVAL_MS: 500,

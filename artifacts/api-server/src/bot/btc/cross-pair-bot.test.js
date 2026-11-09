@@ -87,7 +87,7 @@ test('uses only the five configured combined-ask tiers and trades aligned 15-min
   assert.equal(state.strategy.timeframe, '15m');
   assert.deepEqual(state.strategy.tiers.map(tier => tier.id), ['0.90', '0.80', '0.70', '0.60', '0.50']);
   assert.equal(state.window.end - state.window.start, 15 * 60 * 1000);
-  assert.equal(state.account.startingCapital, 1000);
+  assert.equal(state.account.startingCapital, 3000);
   assert.equal(state.trades.length, 20);
   assert.ok(state.trades.every(trade => trade.shares === 100));
   assert.ok(state.trades.every(trade => trade.entryPrice === 0.25));
@@ -107,7 +107,7 @@ test('does not book a partial leg as a paired fill', async () => {
 
   assert.equal(state.inventory.currentWindow.BTC.UP.shares, 0);
   assert.equal(state.inventory.currentWindow.ETH.DOWN.shares, 0);
-  assert.equal(state.account.cash, 1000);
+  assert.equal(state.account.cash, 3000);
   assert.ok(firstPair.tiers.every(tier => tier.status === 'WAITING_FOR_FULL_DEPTH'));
 });
 
