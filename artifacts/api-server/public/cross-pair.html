@@ -153,6 +153,7 @@
       if(status==='FILLED')return 'filled';
       if(status==='WAITING_FOR_FULL_DEPTH')return 'waiting';
       if(status==='INSUFFICIENT_CAPITAL')return 'blocked';
+      if(status==='PAUSED_BY_OPPOSITE')return 'blocked';
       return '';
     }
     function renderPairs(pairs){
