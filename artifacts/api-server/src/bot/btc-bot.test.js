@@ -269,24 +269,21 @@ test("dashboard renders Renko direction, taker orders, inventory and analytics",
   assert.equal(elements.upRole.textContent, "MONITORING");
 });
 
-test("the public root dashboard is a simple signal-only Renko dashboard", () => {
+test("the public root dashboard shows only the 15-minute BTC/ETH cross-pair strategy", () => {
   const vm = require("node:vm");
-  const html = fs.readFileSync(path.join(__dirname, "../../public/wick.html"), "utf8");
+  const html = fs.readFileSync(path.join(__dirname, "../../public/cross-pair.html"), "utf8");
   const app = fs.readFileSync(path.join(__dirname, "../app.ts"), "utf8");
-  assert.ok(app.indexOf("public/wick.html") < app.indexOf("public/probability.html"));
-  assert.match(html, /BTC Renko Bot/);
-  assert.match(html, /1-minute Renko/);
-  assert.match(html, /buys on the Renko signal side/);
-  assert.match(html, /Starting capital/);
-  assert.match(html, /id="cash"/);
-  assert.match(html, /id="equityStatus"/);
-  assert.match(html, /Awaiting marks/);
-  assert.match(html, /300 shares on that same side/);
-  assert.match(html, /\$0\.99 take-profit/);
-  assert.match(html, /sends no second entry, sells, or reverses on later bricks/);
-  assert.match(html, /Entry orders/);
-  assert.match(html, /exact market.s confirmed Polymarket resolution/);
-  assert.doesNotMatch(html, /against.signal|against Renko|strategy comparison|profit target|order activity|Real Polymarket account/i);
+  assert.ok(app.indexOf("public/cross-pair.html") < app.indexOf("public/probability.html"));
+  assert.match(html, /BTC .* ETH Cross-Pair Bot/);
+  assert.match(html, /15-minute paper strategy/);
+  assert.match(html, /renderPairs/);
+  assert.match(html, /combinedAsk/);
+  assert.match(html, /id="currentInventory"/);
+  assert.match(html, /id="pendingInventory"/);
+  assert.match(html, /id="equity"/);
+  assert.match(html, /exact-market resolution only/);
+  assert.match(html, /fetch\('\/api\/strategy\/state/);
+  assert.doesNotMatch(html, /Renko|RSI|MACD|\b5-minute\b/i);
 
   for (const script of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) {
     new vm.Script(script[1]);
