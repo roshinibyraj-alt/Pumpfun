@@ -118,6 +118,8 @@ class BtcPriceBandBot {
       DOWN: this.emptySideState(),
     };
     this.lastAskTrigger = { UP: null, DOWN: null };
+    this.terminalEvidence = this.emptyTerminalEvidence();
+    this.terminalEvidenceMarketId = null;
     this.websocket = {
       status: 'DISCONNECTED',
       connectedAt: null,
@@ -149,6 +151,16 @@ class BtcPriceBandBot {
       buys: 0,
       sharesBought: 0,
     };
+  }
+
+  emptyTerminalEvidence() {
+    const emptySide = () => ({
+      winnerHitAt: null,
+      winnerBid: null,
+      loserHitAt: null,
+      loserBid: null,
+    });
+    return { UP: emptySide(), DOWN: emptySide() };
   }
 
   start() {
@@ -220,6 +232,8 @@ class BtcPriceBandBot {
     this.lastAskTrigger = { UP: null, DOWN: null };
     this.seenMarketEvents.clear();
     this.terminalObservation = null;
+    this.terminalEvidence = this.emptyTerminalEvidence();
+    this.terminalEvidenceMarketId = null;
     this.websocket = {
       status: 'DISCONNECTED',
       connectedAt: null,
@@ -255,6 +269,9 @@ class BtcPriceBandBot {
       this.books.clear();
       this.sideState = { UP: this.emptySideState(), DOWN: this.emptySideState() };
       this.lastAskTrigger = { UP: null, DOWN: null };
+      this.terminalEvidence = this.emptyTerminalEvidence();
+      this.terminalEvidenceMarketId = String(market.id);
+      this.terminalObservation = null;
       this.startMarketStream(market);
     }
     this.statusReason = 'BTC market loaded; waiting for live UP/DOWN ask updates.';
@@ -482,6 +499,7 @@ class BtcPriceBandBot {
       error: null,
       eventType: 'BEST_BID_ASK',
     };
+    this.recordTerminalEvidence(side, now);
     const bestAskChanged = bestAsk != null
       && (previousBestAsk == null || Math.abs(bestAsk - previousBestAsk) >= EPSILON);
     if (bestAskChanged) {
@@ -512,6 +530,28 @@ class BtcPriceBandBot {
       error: null,
       eventType: 'ORDER_BOOK',
     };
+    this.recordTerminalEvidence(side, now);
+  }
+
+  recordTerminalEvidence(side, now) {
+    if (!this.market || this.windowStart == null || now >= this.windowEnd) return;
+    const marketId = String(this.market.id);
+    if (this.terminalEvidenceMarketId !== marketId) {
+      this.terminalEvidence = this.emptyTerminalEvidence();
+      this.terminalEvidenceMarketId = marketId;
+      this.terminalObservation = null;
+    }
+    const quote = this.quotes[side];
+    if (!this.quoteIsFresh(quote, now) || !Number.isFinite(quote.bestBid)) return;
+    const evidence = this.terminalEvidence[side];
+    if (quote.bestBid >= this.config.TERMINAL_WINNER_BID && evidence.winnerHitAt == null) {
+      evidence.winnerHitAt = now;
+      evidence.winnerBid = quote.bestBid;
+    }
+    if (quote.bestBid < this.config.TERMINAL_LOSER_BID && evidence.loserHitAt == null) {
+      evidence.loserHitAt = now;
+      evidence.loserBid = quote.bestBid;
+    }
   }
 
   quoteIsFresh(quote, now) {
@@ -790,32 +830,34 @@ class BtcPriceBandBot {
   }
 
   maybeSettleAtTerminalPrice(now) {
-    if (this.terminalObservation || !this.market || this.windowStart == null
+    if (!this.market || this.windowStart == null || this.terminalObservation?.winner
       || now < this.windowStart + this.config.TERMINAL_CHECK_SECONDS * 1000
       || now >= this.windowEnd) return;
-    const upQuote = this.quotes.UP;
-    const downQuote = this.quotes.DOWN;
-    if (!this.quoteIsFresh(upQuote, now) || !this.quoteIsFresh(downQuote, now)
-      || !Number.isFinite(upQuote.bestBid) || !Number.isFinite(downQuote.bestBid)) return;
-
+    const evidence = this.terminalEvidence;
+    const upIsWinner = evidence.UP.winnerHitAt != null
+      && evidence.DOWN.loserHitAt != null;
+    const downIsWinner = evidence.DOWN.winnerHitAt != null
+      && evidence.UP.loserHitAt != null;
+    const winner = upIsWinner === downIsWinner ? null : upIsWinner ? 'UP' : 'DOWN';
+    const evidenceSignature = JSON.stringify(evidence);
+    if (this.terminalObservation?.evidenceSignature === evidenceSignature) return;
     const observed = {
       at: now,
-      UP: upQuote.bestBid,
-      DOWN: downQuote.bestBid,
-      winner: null,
+      UP: this.quotes.UP?.bestBid ?? null,
+      DOWN: this.quotes.DOWN?.bestBid ?? null,
+      winner,
+      ambiguous: upIsWinner && downIsWinner,
+      evidence: JSON.parse(evidenceSignature),
+      evidenceSignature,
     };
-    const upIsWinner = upQuote.bestBid >= this.config.TERMINAL_WINNER_BID
-      && downQuote.bestBid < this.config.TERMINAL_LOSER_BID;
-    const downIsWinner = downQuote.bestBid >= this.config.TERMINAL_WINNER_BID
-      && upQuote.bestBid < this.config.TERMINAL_LOSER_BID;
-    if (upIsWinner) observed.winner = 'UP';
-    if (downIsWinner) observed.winner = 'DOWN';
     this.terminalObservation = observed;
 
     if (!observed.winner) {
-      this.log('TERMINAL_PRICE_UNCONFIRMED',
-        'The 297-second UP/DOWN bid prices did not meet both terminal thresholds; positions will wait for official resolution.',
-        { at: now, upBestBid: observed.UP, downBestBid: observed.DOWN });
+      this.log(observed.ambiguous ? 'TERMINAL_PRICE_AMBIGUOUS' : 'TERMINAL_PRICE_UNCONFIRMED',
+        observed.ambiguous
+          ? 'Both directions reached terminal thresholds during this window; positions will wait for official resolution.'
+          : 'No paired terminal thresholds have been recorded by the 297-second check; positions will wait for official resolution unless both are observed before window end.',
+        { at: now, ambiguous: observed.ambiguous, evidence: observed.evidence });
       return;
     }
 
@@ -836,10 +878,13 @@ class BtcPriceBandBot {
       this.cash = round(this.cash + proceeds, 8);
       this.realizedPnl += trade.realizedPnl;
       this.log('TERMINAL_PRICE_SETTLEMENT',
-        `BTC ${trade.side} counted as ${payout ? '$1' : '$0'} per share at the 297-second price check.`,
+        `BTC ${trade.side} counted as ${payout ? '$1' : '$0'} per share from terminal prices recorded this window.`,
         {
           tradeId: trade.id, winner: observed.winner, payout,
-          upBestBid: observed.UP, downBestBid: observed.DOWN,
+          upWinnerBid: observed.evidence.UP.winnerBid,
+          upLoserBid: observed.evidence.UP.loserBid,
+          downWinnerBid: observed.evidence.DOWN.winnerBid,
+          downLoserBid: observed.evidence.DOWN.loserBid,
           realizedPnl: round(trade.realizedPnl),
         });
     }
@@ -1017,7 +1062,7 @@ class BtcPriceBandBot {
           winnerBestBidAtLeast: this.config.TERMINAL_WINNER_BID,
           loserBestBidBelow: this.config.TERMINAL_LOSER_BID,
         },
-        settlement: 'At 297 seconds, settle only when one side is at least $0.99 bid and the other below $0.01; otherwise use exact original-market resolution.',
+        settlement: 'At 297 seconds or later, use any recorded in-window $0.99+ winner bid and opposing below-$0.01 loser bid; if both directions qualify or neither qualifies, use exact original-market resolution.',
         resolutionPollMs: this.config.RESOLUTION_POLL_MS,
         priceSource: 'Polymarket CLOB market WebSocket',
       },
