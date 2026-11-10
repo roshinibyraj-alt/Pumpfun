@@ -1,10 +1,13 @@
 'use strict';
 
 module.exports = {
-  STRATEGY_VERSION: 'btc-5m-best-ask-change-50-share-ws-v2',
+  STRATEGY_VERSION: 'btc-5m-best-ask-change-opposite-reversal-297s-v3',
   WINDOW_MS: 5 * 60 * 1000,
   STARTING_CAPITAL: 3_000,
   SHARES_PER_BUY: 50,
+  TERMINAL_CHECK_SECONDS: 297,
+  TERMINAL_WINNER_BID: 0.99,
+  TERMINAL_LOSER_BID: 0.01,
   MIN_ENTRY_ASK: 0.52,
   MAX_ENTRY_ASK: 0.54,
   POLL_INTERVAL_MS: 500,
