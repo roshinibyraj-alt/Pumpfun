@@ -280,7 +280,7 @@ test("the public root dashboard shows the BTC-only 5-minute ask-band strategy", 
   assert.match(html, /0\.52–\$0\.54/);
   assert.match(html, /50 shares/);
   assert.match(html, /Sell all held shares · rebuy equal shares/);
-  assert.match(html, /\$0\.99\+ winner · below \$0\.01 loser/);
+  assert.match(html, /any in-window \$0\.99\+ \/ below \$0\.01 hits/);
   assert.match(html, /Awaiting official resolution/);
   assert.match(html, /WebSocket/);
   assert.match(html, /id="currentInventory"/);
