@@ -70,7 +70,7 @@ test('config limits the active strategy to BTC 5-minute windows and 50-share buy
   assert.equal(config.MAX_ENTRY_ASK, 0.54);
 });
 
-test('independent UP and DOWN asks at the inclusive band edges each buy 50 shares', () => {
+test('an opposite-side ask trigger sells held shares then buys the same count', () => {
   const { bot } = createBot();
   bot.windowStart = 600_000;
   bot.windowEnd = 900_000;
@@ -90,12 +90,81 @@ test('independent UP and DOWN asks at the inclusive band edges each buy 50 share
   const snapshot = bot.snapshot();
   assert.equal(snapshot.strategy.timeframe, '5m');
   assert.deepEqual(snapshot.strategy.assets, ['BTC']);
-  assert.equal(snapshot.account.openPositions, 2);
-  assert.equal(snapshot.inventory.currentWindow.UP.shares, 50);
+  assert.equal(snapshot.strategy.intraWindowSales, true);
+  assert.equal(snapshot.account.openPositions, 1);
+  assert.equal(snapshot.account.closedPositions, 1);
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 0);
   assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 50);
-  assert.equal(snapshot.trades[0].shares, 50);
+  assert.equal(snapshot.trades[0].side, 'UP');
+  assert.equal(snapshot.trades[0].status, 'CLOSED');
+  assert.equal(snapshot.trades[0].exitReason, 'OPPOSITE_SIGNAL');
+  assert.equal(snapshot.trades[0].exitPrice, 0.5);
+  assert.equal(snapshot.trades[1].side, 'DOWN');
   assert.equal(snapshot.trades[1].shares, 50);
+  assert.equal(snapshot.trades[1].entryMode, 'OPPOSITE_SIGNAL_REVERSAL');
+  assert.equal(snapshot.account.realizedPnl, -1);
   assert.equal(snapshot.trades[0].fees, 0);
+});
+
+test('opposite trigger reverses the full accumulated quantity, not only 50 shares', () => {
+  const { bot } = createBot();
+  bot.windowStart = 600_000;
+  bot.windowEnd = 900_000;
+  bot.market = {
+    id: 'btc-5m-market',
+    start: 600_000,
+    end: 900_000,
+    tokens: { UP: 'up-token', DOWN: 'down-token' },
+    raw: { feesEnabled: false },
+  };
+
+  bot.handleMarketMessage(book('up-token', 0.53, 200, 0.50));
+  bot.handleMarketMessage({
+    event_type: 'price_change',
+    timestamp: '600002',
+    price_changes: [{
+      asset_id: 'up-token',
+      price: '0.52',
+      size: '200',
+      side: 'SELL',
+    }],
+  });
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 100);
+
+  bot.handleMarketMessage(book('down-token', 0.53, 200, 0.49));
+  const snapshot = bot.snapshot();
+  const upTrades = snapshot.trades.filter(trade => trade.side === 'UP');
+  const downTrades = snapshot.trades.filter(trade => trade.side === 'DOWN');
+  assert.equal(upTrades.length, 2);
+  assert.ok(upTrades.every(trade => trade.status === 'CLOSED'));
+  assert.equal(downTrades.length, 1);
+  assert.equal(downTrades[0].shares, 100);
+  assert.equal(downTrades[0].status, 'OPEN');
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 100);
+});
+
+test('reversal waits instead of buying when visible bids cannot sell all held shares', () => {
+  const { bot } = createBot();
+  bot.windowStart = 600_000;
+  bot.windowEnd = 900_000;
+  bot.market = {
+    id: 'btc-5m-market',
+    start: 600_000,
+    end: 900_000,
+    tokens: { UP: 'up-token', DOWN: 'down-token' },
+    raw: { feesEnabled: false },
+  };
+  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
+  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
+  const upBook = bot.books.get('up-token');
+  upBook.bids[0].availableSize = 49;
+  bot.handleMarketMessage(book('down-token', 0.53, 100, 0.49));
+
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 50);
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 0);
+  assert.equal(bot.sideState.DOWN.status, 'WAITING_FOR_REVERSAL_DEPTH');
 });
 
 test('ask-size updates do not buy again unless the best-ask price changes', () => {
@@ -302,4 +371,54 @@ test('expired positions settle only from their exact original market resolution'
   assert.equal(bot.trades[0].status, 'SETTLED');
   assert.equal(bot.trades[0].outcome, 'WIN');
   assert.equal(bot.cash, 3_023.5);
+});
+
+test('297-second bid thresholds settle winner at one dollar and loser at zero', () => {
+  const { bot, setNow } = createBot();
+  bot.windowStart = 600_000;
+  bot.windowEnd = 900_000;
+  bot.market = {
+    id: 'btc-5m-market',
+    slug: 'btc-updown-5m-600',
+    start: 600_000,
+    end: 900_000,
+    tokens: { UP: 'up-token', DOWN: 'down-token' },
+    raw: { feesEnabled: false },
+  };
+  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  setNow(897_000);
+  bot.handleMarketMessage(book('up-token', 0.995, 100, 0.99));
+  bot.handleMarketMessage(book('down-token', 0.01, 100, 0.009));
+
+  const trade = bot.trades[0];
+  assert.equal(bot.terminalObservation.winner, 'UP');
+  assert.equal(trade.status, 'SETTLED');
+  assert.equal(trade.settlementSource, 'TERMINAL_PRICE_297S');
+  assert.equal(trade.resolutionPayout, 1);
+  assert.equal(trade.proceeds, 50);
+  assert.equal(trade.realizedPnl, 23.5);
+});
+
+test('297-second prices outside the thresholds keep positions for official resolution', () => {
+  const { bot, setNow } = createBot();
+  bot.windowStart = 600_000;
+  bot.windowEnd = 900_000;
+  bot.market = {
+    id: 'btc-5m-market',
+    slug: 'btc-updown-5m-600',
+    start: 600_000,
+    end: 900_000,
+    tokens: { UP: 'up-token', DOWN: 'down-token' },
+    raw: { feesEnabled: false },
+  };
+  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  setNow(897_000);
+  bot.handleMarketMessage(book('up-token', 0.90, 100, 0.90));
+  bot.handleMarketMessage(book('down-token', 0.10, 100, 0.10));
+  assert.equal(bot.terminalObservation.winner, null);
+  assert.equal(bot.trades[0].status, 'OPEN');
+
+  setNow(900_001);
+  bot.resetWindow(900_000);
+  assert.equal(bot.trades[0].status, 'AWAITING_RESOLUTION');
 });
