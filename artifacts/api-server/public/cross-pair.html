@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#07111f">
-  <title>BTC × ETH Cross-Pair Paper Bot</title>
+  <title>BTC 5-Minute Ask-Band Paper Bot</title>
   <style>
     :root{color-scheme:dark;--bg:#07111f;--panel:#111f33;--panel2:#152842;--line:#263b58;--muted:#9aacc4;--text:#f3f7ff;--green:#35e0a1;--red:#ff647d;--blue:#63a8ff;--gold:#ffd166;--purple:#bd91ff}
     *{box-sizing:border-box}
@@ -36,25 +36,24 @@
     .price-box{background:#0b1829;border:1px solid #203652;border-radius:14px;padding:13px 15px}
     .price-label{font-size:11px;text-transform:uppercase;letter-spacing:.12em;font-weight:800;color:var(--muted)}
     .price-value{font-size:clamp(25px,4vw,36px);line-height:1.05;font-weight:900;margin-top:7px;font-variant-numeric:tabular-nums}
-    .pair-grid{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:16px}
-    .pair-card{position:relative;overflow:hidden}
-    .pair-card:before{content:"";position:absolute;right:-32px;top:-50px;width:135px;height:135px;border-radius:50%;background:#63a8ff12}
-    .pair-value{font-size:31px;font-weight:900;letter-spacing:-.04em;color:var(--gold);font-variant-numeric:tabular-nums}
-    .pair-legs{color:var(--muted);font-size:12px;margin-top:2px}
-    .tiers{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
-    .tier{border:1px solid var(--line);background:#0b1829;border-radius:10px;padding:8px 10px;min-width:114px}
-    .tier strong{display:block;font-size:13px}
-    .tier small{color:var(--muted);font-size:10px}
-    .tier.filled{border-color:#35e0a177;background:#123629;color:var(--green)}
-    .tier.waiting{border-color:#ffd16677;color:var(--gold)}
-    .tier.blocked{border-color:#ff647d77;color:var(--red)}
-    .inventory{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:16px}
+    .inventory{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:16px}
     .inventory-box{background:#0b1829;border:1px solid #203652;border-radius:14px;padding:14px}
     .inventory-title{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:12px;font-weight:850;text-transform:uppercase;letter-spacing:.07em}
     .inventory-shares{font-size:24px;font-weight:900;margin:11px 0 2px;font-variant-numeric:tabular-nums}
     .inventory-meta{font-size:11px;color:var(--muted);line-height:1.7}
     .direction{font-size:10px;font-weight:900;padding:4px 7px;border-radius:7px}
     .direction.up{color:var(--green);background:#35e0a119}.direction.down{color:var(--red);background:#ff647d19}
+    .quote-meta{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-top:9px;color:var(--muted);font-size:10px}
+    .stream-state{display:flex;align-items:center;gap:9px;font-size:18px;font-weight:850}
+    .stream-state .dot{background:var(--gold)}
+    .stream-state.connected .dot{background:var(--green)}
+    .stream-state.error .dot{background:var(--red)}
+    .stream-meta{font-size:12px;color:var(--muted);margin-top:7px}
+    .rule-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:17px}
+    .rule{background:#0b1829;border:1px solid #203652;border-radius:12px;padding:10px 12px}
+    .rule-label{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;font-weight:800}
+    .rule-value{font-size:15px;font-weight:850;margin-top:4px}
+    .quote-meta .pill{font-size:9px;padding:3px 7px}
     .inventory-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin:18px 0 10px}
     .inventory-head h3{margin:0;font-size:13px}
     .lower{grid-template-columns:1.1fr .9fr}
@@ -70,20 +69,20 @@
     .notice{margin:0 0 16px;padding:12px 14px;border:1px solid #63a8ff55;background:#122844;border-radius:12px;color:#cfe4ff;font-size:12px}
     .error{display:none;margin:0 0 16px;padding:11px 14px;border:1px solid #ff647d88;background:#3a1822;border-radius:12px;color:#ffd9df;font-size:12px}
     .empty{padding:14px;border:1px dashed var(--line);border-radius:12px;color:var(--muted);font-size:12px}
-    @media(max-width:980px){.inventory{grid-template-columns:repeat(2,minmax(0,1fr))}.lower{grid-template-columns:1fr}}
-    @media(max-width:650px){main{padding:18px 13px 32px}header{display:block}.status{display:inline-flex;margin-top:13px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.metric{padding:13px;min-height:91px}.panel{padding:14px}.prices,.pair-grid{grid-template-columns:1fr}.inventory{gap:8px}.inventory-box{padding:11px}.inventory-shares{font-size:20px}}
+    @media(max-width:980px){.lower{grid-template-columns:1fr}}
+    @media(max-width:650px){main{padding:18px 13px 32px}header{display:block}.status{display:inline-flex;margin-top:13px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.metric{padding:13px;min-height:91px}.panel{padding:14px}.prices{grid-template-columns:1fr}.inventory{gap:8px}.inventory-box{padding:11px}.inventory-shares{font-size:20px}.rule-grid{gap:7px}.rule{padding:9px}}
   </style>
 </head>
 <body>
   <main>
     <header>
       <div>
-        <h1>BTC <span>×</span> ETH Cross-Pair Bot</h1>
-        <p class="subtitle">15-minute paper strategy · taker buys · exact-market resolution only</p>
+        <h1>BTC <span>5-Minute Ask-Band</span> Bot</h1>
+        <p class="subtitle">Independent UP and DOWN paper buys · live Polymarket order-book updates</p>
       </div>
       <div class="status" id="status"><span class="dot"></span><span id="statusText">CONNECTING</span></div>
     </header>
-    <div class="notice" id="windowNotice">Loading current aligned 15-minute window…</div>
+    <div class="notice" id="windowNotice">Loading the current BTC 5-minute window…</div>
     <div class="error" id="error"></div>
 
     <section class="layout metrics">
@@ -97,36 +96,36 @@
       <div class="panel">
         <div class="asset-title"><span class="asset-badge">BTC</span><h2>Bitcoin market</h2><span class="pill" id="btcMarket">Waiting</span></div>
         <div class="price-row">
-          <div class="price-box"><div class="price-label">UP · best ask</div><div class="price-value positive" id="btcUp">—</div></div>
-          <div class="price-box"><div class="price-label">DOWN · best ask</div><div class="price-value negative" id="btcDown">—</div></div>
+          <div class="price-box"><div class="price-label">UP · best ask</div><div class="price-value positive" id="btcUp">—</div><div class="quote-meta"><span id="btcUpAge">Waiting for WebSocket</span><span class="pill" id="btcUpBand">WAITING</span></div></div>
+          <div class="price-box"><div class="price-label">DOWN · best ask</div><div class="price-value negative" id="btcDown">—</div><div class="quote-meta"><span id="btcDownAge">Waiting for WebSocket</span><span class="pill" id="btcDownBand">WAITING</span></div></div>
         </div>
       </div>
       <div class="panel">
-        <div class="asset-title"><span class="asset-badge">ETH</span><h2>Ethereum market</h2><span class="pill" id="ethMarket">Waiting</span></div>
-        <div class="price-row">
-          <div class="price-box"><div class="price-label">UP · best ask</div><div class="price-value positive" id="ethUp">—</div></div>
-          <div class="price-box"><div class="price-label">DOWN · best ask</div><div class="price-value negative" id="ethDown">—</div></div>
+        <div class="panel-head"><div><h2>Polymarket live feed</h2><div class="section-note">CLOB market WebSocket · prices update from the order book</div></div></div>
+        <div class="stream-state" id="streamState"><span class="dot"></span><span id="streamStatus">CONNECTING</span></div>
+        <div class="stream-meta" id="streamMeta">Waiting for a live market connection.</div>
+        <div class="rule-grid">
+          <div class="rule"><div class="rule-label">Eligible best ask</div><div class="rule-value">$0.52–$0.54</div></div>
+          <div class="rule"><div class="rule-label">Each buy</div><div class="rule-value">50 shares</div></div>
+          <div class="rule"><div class="rule-label">Trigger</div><div class="rule-value">Every qualifying ask update</div></div>
+          <div class="rule"><div class="rule-label">Execution</div><div class="rule-value">Paper only · visible depth</div></div>
         </div>
       </div>
     </section>
 
-    <section class="layout pair-grid" id="pairs"></section>
-
     <section class="panel" style="margin-bottom:16px">
-      <div class="panel-head"><div><h2>Accumulated positions</h2><div class="section-note">Separate BTC and ETH boxes; entry average excludes fees.</div></div><span class="pill" id="openCount">0 open</span></div>
-      <div class="inventory-head"><h3>Current 15-minute window</h3><span class="section-note">Marked at fresh best bids</span></div>
+      <div class="panel-head"><div><h2>Accumulated BTC shares</h2><div class="section-note">UP and DOWN are independent; entry averages exclude fees.</div></div><span class="pill" id="openCount">0 open</span></div>
+      <div class="inventory-head"><h3>Current 5-minute window</h3><span class="section-note" id="pendingSummary">Marked at fresh best bids</span></div>
       <div class="layout inventory" id="currentInventory"></div>
-      <div class="inventory-head"><h3>Awaiting Polymarket resolution</h3><span class="section-note">Last available bids are marks, not settlement payouts</span></div>
-      <div class="layout inventory" id="pendingInventory"></div>
     </section>
 
     <section class="layout lower">
       <div class="panel">
-        <div class="panel-head"><div><h2>Position records</h2><div class="section-note">Entry fees are included in P&amp;L; no in-window exits.</div></div></div>
+        <div class="panel-head"><div><h2>Position records</h2><div class="section-note">One complete 50-share paper buy per qualifying ask update; no in-window exits.</div></div></div>
         <div class="table-wrap" id="trades"></div>
       </div>
       <div class="panel">
-        <div class="panel-head"><div><h2>Activity</h2><div class="section-note">Paired fills and exact-market settlements.</div></div></div>
+        <div class="panel-head"><div><h2>Activity</h2><div class="section-note">Ask updates, paper fills, and exact-market settlements.</div></div></div>
         <div class="feed" id="events"></div>
       </div>
     </section>
@@ -141,44 +140,44 @@
     const time=value=>Number(value)>0?new Date(Number(value)).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';
     const cls=value=>Number(value)>0?'positive':Number(value)<0?'negative':'';
     function setMoney(id,value){$(id).textContent=money(value);$(id).className='metric-value '+cls(value)}
+    function bandStatus(quote){
+      if(!quote||quote.status==='WAITING'||quote.status==='STALE'||!valid(quote.bestAsk))return 'WAITING';
+      if(Number(quote.bestAsk)<0.52)return 'BELOW BAND';
+      if(Number(quote.bestAsk)>0.54)return 'ABOVE BAND';
+      return 'IN BAND';
+    }
+    function quoteAge(quote){
+      if(!quote||!valid(quote.updatedAt))return 'No live quote';
+      const age=Math.max(0,Number(quote.ageMs||0));
+      return age<1000?`${Math.round(age)} ms ago`:`${(age/1000).toFixed(1)} s ago`;
+    }
     function renderQuotes(state){
-      for(const asset of ['BTC','ETH']){
-        const key=asset.toLowerCase(),market=state.markets?.[asset],quotes=state.quotes?.[asset]||{};
-        $(key+'Market').textContent=market?.title||'Waiting for market';
-        $(key+'Up').textContent=price(quotes.UP?.bestAsk);
-        $(key+'Down').textContent=price(quotes.DOWN?.bestAsk);
+      $('btcMarket').textContent=state.market?.title||'Waiting for market';
+      for(const side of ['UP','DOWN']){
+        const quote=state.quotes?.[side]||{};
+        const key=side==='UP'?'btcUp':'btcDown';
+        $(key).textContent=price(quote.bestAsk);
+        $(side==='UP'?'btcUpAge':'btcDownAge').textContent=quoteAge(quote);
+        $(side==='UP'?'btcUpBand':'btcDownBand').textContent=bandStatus(quote);
       }
-    }
-    function tierClass(status){
-      if(status==='FILLED')return 'filled';
-      if(status==='WAITING_FOR_FULL_DEPTH')return 'waiting';
-      if(status==='INSUFFICIENT_CAPITAL')return 'blocked';
-      if(status==='PAUSED_BY_OPPOSITE')return 'blocked';
-      return '';
-    }
-    function renderPairs(pairs){
-      $('pairs').innerHTML=(pairs||[]).map(pair=>{
-        const tiers=(pair.tiers||[]).map(tier=>`<div class="tier ${tierClass(tier.status)}"><strong>${esc(tier.id)} · ${esc(tier.status.replaceAll('_',' '))}</strong><small>${esc(tier.reason)}</small></div>`).join('');
-        const legs=pair.legAsks?`${price(pair.legAsks[0])} + ${price(pair.legAsks[1])}`:'Waiting for fresh asks';
-        return `<article class="panel pair-card"><div class="panel-head"><div><h2>${esc(pair.label)}</h2><div class="pair-legs">${legs}</div></div><span class="pill">COMBINED ASK</span></div><div class="pair-value">${price(pair.combinedAsk)}</div><div class="tiers">${tiers}</div></article>`;
-      }).join('');
     }
     function renderInventory(group){
       const boxes=[];
-      for(const asset of ['BTC','ETH'])for(const side of ['UP','DOWN']){
-        const box=group?.[asset]?.[side]||{};
+      for(const side of ['UP','DOWN']){
+        const box=group?.[side]||{};
         const pnl=box.unrealizedPnl;
-        boxes.push(`<div class="inventory-box"><div class="inventory-title"><span>${asset}</span><span class="direction ${side.toLowerCase()}">${side}</span></div><div class="inventory-shares">${shares(box.shares)} shares</div><div class="inventory-meta">Avg entry ${price(box.averageEntryPrice)}<br>Cost ${money(box.totalCost)} · Fees ${money(box.fees)}<br>Mark ${money(box.markValue)} · P&amp;L <b class="${cls(pnl)}">${money(pnl)}</b><br>${box.positions||0} position(s)${box.unmarkedPositions?` · ${box.unmarkedPositions} unmarked`:''}</div></div>`);
+        const sideState=window.latestSideState?.[side];
+        boxes.push(`<div class="inventory-box"><div class="inventory-title"><span>BTC</span><span class="direction ${side.toLowerCase()}">${side}</span></div><div class="inventory-shares">${shares(box.shares)} shares</div><div class="inventory-meta">Avg entry ${price(box.averageEntryPrice)}<br>Cost ${money(box.totalCost)} · Fees ${money(box.fees)}<br>Mark ${money(box.markValue)} · P&amp;L <b class="${cls(pnl)}">${money(pnl)}</b><br>${box.positions||0} position(s)${box.unmarkedPositions?` · ${box.unmarkedPositions} unmarked`:''}<br>${esc(sideState?.reason||'Waiting for a qualifying ask update.')}</div></div>`);
       }
       return boxes.join('');
     }
     function renderTrades(trades){
       const rows=(trades||[]).slice(0,18);
-      if(!rows.length)return '<div class="empty">No paired entries yet.</div>';
-      return `<table><thead><tr><th>Time</th><th>Asset / side</th><th>Tier</th><th>Shares</th><th>Avg entry</th><th>State</th><th>P&amp;L</th></tr></thead><tbody>${rows.map(t=>{
+      if(!rows.length)return '<div class="empty">No BTC entries yet.</div>';
+      return `<table><thead><tr><th>Time</th><th>Side</th><th>Trigger</th><th>Shares</th><th>Avg entry</th><th>State</th><th>P&amp;L</th></tr></thead><tbody>${rows.map(t=>{
         const state=t.status==='AWAITING_RESOLUTION'?'Awaiting resolution':t.status==='SETTLED'?`Resolved · ${t.outcome}`:'Open';
         const pnl=t.realizedPnl??t.unrealizedPnl;
-        return `<tr><td>${time(t.openedAt)}</td><td class="${t.side==='UP'?'positive':'negative'}">${esc(t.asset)} ${esc(t.side)}</td><td>${esc(t.tierId)}</td><td>${shares(t.shares)}</td><td>${price(t.entryPrice)}</td><td>${esc(state)}</td><td class="${cls(pnl)}">${money(pnl)}</td></tr>`;
+        return `<tr><td>${time(t.openedAt)}</td><td class="${t.side==='UP'?'positive':'negative'}">BTC ${esc(t.side)}</td><td>${esc(String(t.triggerType||'ask update').replaceAll('_',' '))}</td><td>${shares(t.shares)}</td><td>${price(t.entryPrice)}</td><td>${esc(state)}</td><td class="${cls(pnl)}">${money(pnl)}</td></tr>`;
       }).join('')}</tbody></table>`;
     }
     function renderEvents(events){
@@ -190,18 +189,26 @@
       try{
         const response=await fetch('/api/strategy/state?ts='+Date.now(),{cache:'no-store'});
         if(!response.ok)throw new Error('State request failed ('+response.status+')');
-        const state=await response.json(),account=state.account||{},window=state.window||{};
+         const state=await response.json(),account=state.account||{},activeWindow=state.window||{};
         $('status').className='status '+(state.error?'warning':state.running?'running':'');
         $('statusText').textContent=state.error?'WARNING':state.running?'RUNNING':'STOPPED';
-        $('windowNotice').textContent=`${state.statusReason||'Scanning'} · 15-minute window ends in ${window.secondsRemaining==null?'—':Math.ceil(window.secondsRemaining)+'s'} · Starting paper capital ${money(account.startingCapital)}`;
+         $('windowNotice').textContent=`${state.statusReason||'Scanning'} · BTC 5-minute window ends in ${activeWindow.secondsRemaining==null?'—':Math.ceil(activeWindow.secondsRemaining)+'s'} · Starting paper capital ${money(account.startingCapital)}`;
         $('error').style.display=state.error?'block':'none';$('error').textContent=state.error||'';
         $('equity').textContent=money(account.equity);$('cash').textContent=money(account.cash);
         $('realized').textContent=money(account.realizedPnl);$('unrealized').textContent=money(account.unrealizedPnl);
         $('realized').className='metric-value '+cls(account.realizedPnl);$('unrealized').className='metric-value '+cls(account.unrealizedPnl);
         $('openCount').textContent=`${account.openPositions||0} open · ${account.pendingResolutionPositions||0} pending`;
-        renderQuotes(state);renderPairs(state.pairs);
-        $('currentInventory').innerHTML=renderInventory(state.inventory?.currentWindow);
-        $('pendingInventory').innerHTML=renderInventory(state.inventory?.awaitingResolution);
+         const websocket=state.websocket||{};
+         $('streamState').className='stream-state '+(websocket.status==='CONNECTED'?'connected':websocket.status==='ERROR'?'error':'');
+         $('streamStatus').textContent=websocket.status||'WAITING';
+         $('streamMeta').textContent=websocket.lastMessageAgeMs==null
+           ?`Waiting for a live market update${websocket.error?` · ${websocket.error}`:''}.`
+           :`Last CLOB update ${(websocket.lastMessageAgeMs/1000).toFixed(1)}s ago · reconnects ${websocket.reconnectCount||0}${websocket.error?` · ${websocket.error}`:''}`;
+         window.latestSideState=state.sideState||{};
+         renderQuotes(state);
+         $('currentInventory').innerHTML=renderInventory(state.inventory?.currentWindow);
+         const pendingCount=account.pendingResolutionPositions||0;
+         $('pendingSummary').textContent=`${pendingCount} awaiting exact-market resolution · current marks use best bids`;
         $('trades').innerHTML=renderTrades(state.trades);$('events').innerHTML=renderEvents(state.events);
       }catch(error){
         $('status').className='status warning';$('statusText').textContent='OFFLINE';

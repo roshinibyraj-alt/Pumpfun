@@ -269,21 +269,26 @@ test("dashboard renders Renko direction, taker orders, inventory and analytics",
   assert.equal(elements.upRole.textContent, "MONITORING");
 });
 
-test("the public root dashboard shows only the 15-minute BTC/ETH cross-pair strategy", () => {
+test("the public root dashboard shows the BTC-only 5-minute ask-band strategy", () => {
   const vm = require("node:vm");
   const html = fs.readFileSync(path.join(__dirname, "../../public/cross-pair.html"), "utf8");
   const app = fs.readFileSync(path.join(__dirname, "../app.ts"), "utf8");
   assert.ok(app.indexOf("public/cross-pair.html") < app.indexOf("public/probability.html"));
-  assert.match(html, /BTC .* ETH Cross-Pair Bot/);
-  assert.match(html, /15-minute paper strategy/);
-  assert.match(html, /renderPairs/);
-  assert.match(html, /combinedAsk/);
+  assert.match(html, /BTC .*5-Minute Ask-Band.* Bot/);
+  assert.match(html, /BTC 5-minute window/);
+  assert.match(html, /Polymarket live feed/);
+  assert.match(html, /0\.52–\$0\.54/);
+  assert.match(html, /50 shares/);
+  assert.match(html, /WebSocket/);
   assert.match(html, /id="currentInventory"/);
-  assert.match(html, /id="pendingInventory"/);
+  assert.match(html, /id="btcUp"/);
+  assert.match(html, /id="btcDown"/);
+  assert.match(html, /id="streamStatus"/);
   assert.match(html, /id="equity"/);
-  assert.match(html, /exact-market resolution only/);
+  assert.match(html, /exact-market resolution/);
   assert.match(html, /fetch\('\/api\/strategy\/state/);
-  assert.doesNotMatch(html, /Renko|RSI|MACD|\b5-minute\b/i);
+  assert.doesNotMatch(html, /15-minute|ETH|Cross-Pair|renderPairs|pendingInventory|combinedAsk/i);
+  assert.doesNotMatch(html, /Renko|RSI|MACD/);
 
   for (const script of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) {
     new vm.Script(script[1]);
