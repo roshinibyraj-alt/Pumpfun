@@ -399,6 +399,62 @@ test('297-second bid thresholds settle winner at one dollar and loser at zero', 
   assert.equal(trade.realizedPnl, 23.5);
 });
 
+test('in-window threshold evidence settles at 297 seconds even when both books are empty', () => {
+  const { bot, setNow } = createBot();
+  bot.windowStart = 600_000;
+  bot.windowEnd = 900_000;
+  bot.market = {
+    id: 'btc-5m-market',
+    slug: 'btc-updown-5m-600',
+    start: 600_000,
+    end: 900_000,
+    tokens: { UP: 'up-token', DOWN: 'down-token' },
+    raw: { feesEnabled: false },
+  };
+  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  setNow(800_000);
+  bot.handleMarketMessage(book('up-token', 0.995, 100, 0.99));
+  bot.handleMarketMessage(book('down-token', 0.01, 100, 0.009));
+  bot.quotes = { UP: null, DOWN: null };
+  bot.books.clear();
+
+  setNow(897_000);
+  bot.maybeSettleAtTerminalPrice(897_000);
+
+  assert.equal(bot.terminalObservation.winner, 'UP');
+  assert.equal(bot.terminalObservation.evidence.UP.winnerBid, 0.99);
+  assert.equal(bot.terminalObservation.evidence.DOWN.loserBid, 0.009);
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.equal(bot.trades[0].resolutionPayout, 1);
+});
+
+test('conflicting threshold evidence in both directions waits for official resolution', () => {
+  const { bot, setNow } = createBot();
+  bot.windowStart = 600_000;
+  bot.windowEnd = 900_000;
+  bot.market = {
+    id: 'btc-5m-market',
+    slug: 'btc-updown-5m-600',
+    start: 600_000,
+    end: 900_000,
+    tokens: { UP: 'up-token', DOWN: 'down-token' },
+    raw: { feesEnabled: false },
+  };
+  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  setNow(800_000);
+  bot.handleMarketMessage(book('up-token', 0.995, 100, 0.99));
+  bot.handleMarketMessage(book('down-token', 0.01, 100, 0.009));
+  setNow(850_000);
+  bot.handleMarketMessage(book('down-token', 0.995, 100, 0.99));
+  bot.handleMarketMessage(book('up-token', 0.01, 100, 0.009));
+  setNow(897_000);
+  bot.maybeSettleAtTerminalPrice(897_000);
+
+  assert.equal(bot.terminalObservation.winner, null);
+  assert.equal(bot.terminalObservation.ambiguous, true);
+  assert.equal(bot.trades[0].status, 'OPEN');
+});
+
 test('297-second prices outside the thresholds keep positions for official resolution', () => {
   const { bot, setNow } = createBot();
   bot.windowStart = 600_000;
