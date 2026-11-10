@@ -110,14 +110,14 @@
           <div class="rule"><div class="rule-label">Trigger</div><div class="rule-value">Best-ask price changes only</div></div>
           <div class="rule"><div class="rule-label">Execution</div><div class="rule-value">Paper only · visible depth</div></div>
           <div class="rule"><div class="rule-label">Opposite trigger</div><div class="rule-value">Sell all held shares · rebuy equal shares</div></div>
-          <div class="rule"><div class="rule-label">At 297 seconds</div><div class="rule-value">$0.99+ winner · below $0.01 loser</div></div>
+          <div class="rule"><div class="rule-label">At 297 seconds</div><div class="rule-value">Use any in-window $0.99+ / below $0.01 hits</div></div>
         </div>
       </div>
     </section>
 
     <section class="panel" style="margin-bottom:16px">
       <div class="panel-head"><div><h2>Accumulated BTC shares</h2><div class="section-note">Current UP/DOWN holdings after any reversal; entry averages exclude fees.</div></div><span class="pill" id="openCount">0 open</span></div>
-      <div class="inventory-head"><h3>Current 5-minute window</h3><span class="section-note" id="pendingSummary">Marked at fresh best bids</span></div>
+      <div class="inventory-head"><h3>Current 5-minute window</h3><span class="section-note" id="pendingSummary">Remember terminal threshold hits throughout the window</span></div>
       <div class="layout inventory" id="currentInventory"></div>
     </section>
 
@@ -211,9 +211,11 @@
          $('currentInventory').innerHTML=renderInventory(state.inventory?.currentWindow);
          const pendingCount=account.pendingResolutionPositions||0;
          const observation=activeWindow.terminalObservation;
-         $('pendingSummary').textContent=observation
-           ?`297s bid check · UP ${price(observation.UP)} · DOWN ${price(observation.DOWN)}${observation.winner?` · ${observation.winner} counted as winner`:' · awaiting official resolution'}`
-           :`${pendingCount} awaiting exact-market resolution · at 297s, $0.99+ / below $0.01 bids count as $1 / $0`;
+         $('pendingSummary').textContent=observation?.winner
+           ?`297s threshold check · ${observation.winner} counted as winner from recorded in-window bids`
+           :observation?.ambiguous
+             ?`Conflicting in-window threshold hits · ${pendingCount} position(s) await official resolution`
+             :`${pendingCount} awaiting exact-market resolution · any in-window $0.99+ winner / below $0.01 loser hits are remembered`;
         $('trades').innerHTML=renderTrades(state.trades);$('events').innerHTML=renderEvents(state.events);
       }catch(error){
         $('status').className='status warning';$('statusText').textContent='OFFLINE';
