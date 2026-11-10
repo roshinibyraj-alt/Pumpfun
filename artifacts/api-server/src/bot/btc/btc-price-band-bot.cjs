@@ -8,6 +8,7 @@ const { resolvedPayout } = require('./position-exits.js');
 const EPSILON = 1e-8;
 
 function numeric(value) {
+  if (value == null || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -110,6 +111,7 @@ class BtcPriceBandBot {
       UP: this.emptySideState(),
       DOWN: this.emptySideState(),
     };
+    this.lastAskTrigger = { UP: null, DOWN: null };
     this.websocket = {
       status: 'DISCONNECTED',
       connectedAt: null,
@@ -208,6 +210,7 @@ class BtcPriceBandBot {
     this.quotes = { UP: null, DOWN: null };
     this.books.clear();
     this.sideState = { UP: this.emptySideState(), DOWN: this.emptySideState() };
+    this.lastAskTrigger = { UP: null, DOWN: null };
     this.seenMarketEvents.clear();
     this.websocket = {
       status: 'DISCONNECTED',
@@ -243,6 +246,7 @@ class BtcPriceBandBot {
       this.quotes = { UP: null, DOWN: null };
       this.books.clear();
       this.sideState = { UP: this.emptySideState(), DOWN: this.emptySideState() };
+      this.lastAskTrigger = { UP: null, DOWN: null };
       this.startMarketStream(market);
     }
     this.statusReason = 'BTC market loaded; waiting for live UP/DOWN ask updates.';
@@ -349,7 +353,9 @@ class BtcPriceBandBot {
     };
     this.books.set(tokenId, book);
     this.updateQuoteFromBook(side, tokenId, book, now, event.timestamp);
-    this.tryBuy(side, now, 'BOOK_UPDATE');
+    if (this.tryBuy(side, now, 'BOOK_UPDATE')) {
+      this.recordAskTrigger(side, 'BOOK_UPDATE', event.timestamp);
+    }
   }
 
   handlePriceChanges(event, now) {
@@ -376,8 +382,41 @@ class BtcPriceBandBot {
       book.updatedAt = now;
       book.sourceTimestamp = sourceTimestamp(event.timestamp);
       this.updateQuoteFromBook(group.side, tokenId, book, now, event.timestamp);
-      if (group.askChanged) this.tryBuy(group.side, now, 'ASK_PRICE_UPDATE');
+      if (group.askChanged) {
+        if (this.isDuplicateAskTrigger(group.side, 'ASK_PRICE_UPDATE', event.timestamp)) {
+          this.lastAskTrigger[group.side] = null;
+          continue;
+        }
+        if (this.tryBuy(group.side, now, 'ASK_PRICE_UPDATE')) {
+          this.recordAskTrigger(group.side, 'ASK_PRICE_UPDATE', event.timestamp);
+        }
+      }
     }
+  }
+
+  askTriggerSignature(side, timestamp) {
+    return {
+      timestamp: sourceTimestamp(timestamp),
+      bestAsk: this.quotes[side]?.bestAsk ?? null,
+    };
+  }
+
+  recordAskTrigger(side, source, timestamp) {
+    this.lastAskTrigger[side] = {
+      source,
+      ...this.askTriggerSignature(side, timestamp),
+    };
+  }
+
+  isDuplicateAskTrigger(side, source, timestamp) {
+    const previous = this.lastAskTrigger[side];
+    if (!previous || previous.source === source) return false;
+    const current = this.askTriggerSignature(side, timestamp);
+    return current.timestamp != null
+      && previous.timestamp === current.timestamp
+      && current.bestAsk != null
+      && previous.bestAsk != null
+      && Math.abs(previous.bestAsk - current.bestAsk) < EPSILON;
   }
 
   applyLevelChange(book, change) {
@@ -410,6 +449,7 @@ class BtcPriceBandBot {
     const side = this.sideForToken(tokenId);
     if (!side) return;
     const previous = this.quotes[side] || {};
+    const previousBestAsk = previous.bestAsk ?? null;
     const bestAsk = numeric(event.best_ask ?? event.bestAsk);
     const bestBid = numeric(event.best_bid ?? event.bestBid);
     this.quotes[side] = {
@@ -428,6 +468,15 @@ class BtcPriceBandBot {
       error: null,
       eventType: 'BEST_BID_ASK',
     };
+    const bestAskChanged = bestAsk != null
+      && (previousBestAsk == null || Math.abs(bestAsk - previousBestAsk) >= EPSILON);
+    if (bestAskChanged) {
+      if (this.isDuplicateAskTrigger(side, 'BEST_BID_ASK', event.timestamp)) {
+        this.lastAskTrigger[side] = null;
+      } else if (this.tryBuy(side, now, 'BEST_BID_ASK')) {
+        this.recordAskTrigger(side, 'BEST_BID_ASK', event.timestamp);
+      }
+    }
   }
 
   updateQuoteFromBook(side, tokenId, book, now, timestamp) {

@@ -127,6 +127,63 @@ test('a fresh ask-side update can add another full 50-share buy after depth repl
     bot.trades, trade => trade.status === 'OPEN').UP.shares, 100);
 });
 
+test('best-bid-ask updates can trigger buys without double-counting the matching price change', () => {
+  const { bot } = createBot();
+  bot.windowStart = 600_000;
+  bot.windowEnd = 900_000;
+  bot.market = {
+    id: 'btc-5m-market',
+    start: 600_000,
+    end: 900_000,
+    tokens: { UP: 'up-token', DOWN: 'down-token' },
+    raw: { feesEnabled: false },
+  };
+  bot.books.set('up-token', {
+    asks: [{ price: 0.53, size: 100, availableSize: 100 }],
+    bids: [{ price: 0.50, size: 100, availableSize: 100 }],
+    updatedAt: 600_001,
+  });
+  bot.quotes.UP = {
+    side: 'UP',
+    tokenId: 'up-token',
+    bestAsk: 0.55,
+    bestBid: 0.50,
+    updatedAt: 600_000,
+    status: 'LIVE',
+  };
+  bot.handleMarketMessage({
+    event_type: 'best_bid_ask',
+    asset_id: 'up-token',
+    best_ask: '0.53',
+    best_bid: '0.50',
+    timestamp: '600002',
+  });
+  bot.handleMarketMessage({
+    event_type: 'price_change',
+    timestamp: '600002',
+    price_changes: [{
+      asset_id: 'up-token',
+      price: '0.53',
+      size: '150',
+      side: 'SELL',
+    }],
+  });
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].shares, 50);
+
+  bot.handleMarketMessage({
+    event_type: 'price_change',
+    timestamp: '600003',
+    price_changes: [{
+      asset_id: 'up-token',
+      price: '0.53',
+      size: '200',
+      side: 'SELL',
+    }],
+  });
+  assert.equal(bot.trades.length, 2);
+});
+
 test('prices outside the ask band do not buy; bid-only changes do not trigger buys', () => {
   const { bot } = createBot();
   bot.windowStart = 600_000;
