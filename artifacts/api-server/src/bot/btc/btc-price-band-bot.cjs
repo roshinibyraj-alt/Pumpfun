@@ -89,6 +89,12 @@ function sourceTimestamp(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function bestAskPriceChanged(previous, next) {
+  if (next == null) return false;
+  if (previous == null) return true;
+  return Math.abs(previous - next) >= EPSILON;
+}
+
 class BtcPriceBandBot {
   constructor(options = {}) {
     this.marketData = options.marketData || marketDataDefault;
@@ -343,6 +349,7 @@ class BtcPriceBandBot {
     const side = this.sideForToken(tokenId);
     if (!side) return;
     const previous = this.books.get(tokenId);
+    const previousBestAsk = previous?.asks?.[0]?.price ?? null;
     const asks = reconcileLevels(previous?.asks, normalizeLevels(event.asks, 'asks'));
     const bids = reconcileLevels(previous?.bids, normalizeLevels(event.bids, 'bids'));
     const book = {
@@ -353,7 +360,9 @@ class BtcPriceBandBot {
     };
     this.books.set(tokenId, book);
     this.updateQuoteFromBook(side, tokenId, book, now, event.timestamp);
-    if (this.tryBuy(side, now, 'BOOK_UPDATE')) {
+    const nextBestAsk = asks[0]?.price ?? null;
+    if (bestAskPriceChanged(previousBestAsk, nextBestAsk)
+      && this.tryBuy(side, now, 'BEST_ASK_PRICE_CHANGE')) {
       this.recordAskTrigger(side, 'BOOK_UPDATE', event.timestamp);
     }
   }
@@ -378,11 +387,13 @@ class BtcPriceBandBot {
     for (const [tokenId, group] of byToken) {
       const book = this.books.get(tokenId);
       if (!book) continue;
+      const previousBestAsk = book.asks[0]?.price ?? null;
       for (const change of group.changes) this.applyLevelChange(book, change);
+      const nextBestAsk = book.asks[0]?.price ?? null;
       book.updatedAt = now;
       book.sourceTimestamp = sourceTimestamp(event.timestamp);
       this.updateQuoteFromBook(group.side, tokenId, book, now, event.timestamp);
-      if (group.askChanged) {
+      if (group.askChanged && bestAskPriceChanged(previousBestAsk, nextBestAsk)) {
         if (this.isDuplicateAskTrigger(group.side, 'ASK_PRICE_UPDATE', event.timestamp)) {
           this.lastAskTrigger[group.side] = null;
           continue;
@@ -798,7 +809,7 @@ class BtcPriceBandBot {
         sharesPerBuy: this.config.SHARES_PER_BUY,
         minEntryAsk: this.config.MIN_ENTRY_ASK,
         maxEntryAsk: this.config.MAX_ENTRY_ASK,
-        trigger: 'Each fresh UP or DOWN ask-side WebSocket update inside the inclusive price band.',
+        trigger: 'Each UP or DOWN best-ask price change into or within the inclusive price band.',
         orderType: 'PAPER TAKER SWEEP',
         intraWindowSales: false,
         settlement: 'Exact original BTC market resolution only',

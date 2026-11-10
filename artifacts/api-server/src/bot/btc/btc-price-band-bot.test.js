@@ -98,7 +98,7 @@ test('independent UP and DOWN asks at the inclusive band edges each buy 50 share
   assert.equal(snapshot.trades[0].fees, 0);
 });
 
-test('a fresh ask-side update can add another full 50-share buy after depth replenishes', () => {
+test('ask-size updates do not buy again unless the best-ask price changes', () => {
   const { bot } = createBot();
   bot.windowStart = 600_000;
   bot.windowEnd = 900_000;
@@ -121,8 +121,23 @@ test('a fresh ask-side update can add another full 50-share buy after depth repl
     }],
   });
 
+  assert.equal(bot.trades.length, 1);
+  assert.deepEqual(bot.trades.map(trade => trade.shares), [50]);
+
+  bot.handleMarketMessage({
+    event_type: 'price_change',
+    timestamp: '600003',
+    price_changes: [{
+      asset_id: 'up-token',
+      price: '0.52',
+      size: '60',
+      side: 'SELL',
+    }],
+  });
+
   assert.equal(bot.trades.length, 2);
-  assert.deepEqual(bot.trades.map(trade => trade.shares), [50, 50]);
+  assert.equal(bot.trades[1].triggerAsk, 0.52);
+  assert.equal(bot.trades[1].shares, 50);
   assert.equal(bot.inventoryBoxSnapshot(
     bot.trades, trade => trade.status === 'OPEN').UP.shares, 100);
 });
@@ -181,7 +196,20 @@ test('best-bid-ask updates can trigger buys without double-counting the matching
       side: 'SELL',
     }],
   });
+  assert.equal(bot.trades.length, 1);
+
+  bot.handleMarketMessage({
+    event_type: 'price_change',
+    timestamp: '600004',
+    price_changes: [{
+      asset_id: 'up-token',
+      price: '0.52',
+      size: '60',
+      side: 'SELL',
+    }],
+  });
   assert.equal(bot.trades.length, 2);
+  assert.equal(bot.trades[1].triggerAsk, 0.52);
 });
 
 test('prices outside the ask band do not buy; bid-only changes do not trigger buys', () => {
@@ -236,6 +264,17 @@ test('an in-range ask without 50 shares of visible depth never creates a partial
       asset_id: 'up-token',
       price: '0.53',
       size: '100',
+      side: 'SELL',
+    }],
+  });
+  assert.equal(bot.trades.length, 0);
+  bot.handleMarketMessage({
+    event_type: 'price_change',
+    timestamp: '600003',
+    price_changes: [{
+      asset_id: 'up-token',
+      price: '0.52',
+      size: '60',
       side: 'SELL',
     }],
   });

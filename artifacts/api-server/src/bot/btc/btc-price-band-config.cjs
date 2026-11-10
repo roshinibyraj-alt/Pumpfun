@@ -1,7 +1,7 @@
 'use strict';
 
 module.exports = {
-  STRATEGY_VERSION: 'btc-5m-ask-band-50-share-ws-v1',
+  STRATEGY_VERSION: 'btc-5m-best-ask-change-50-share-ws-v2',
   WINDOW_MS: 5 * 60 * 1000,
   STARTING_CAPITAL: 3_000,
   SHARES_PER_BUY: 50,
