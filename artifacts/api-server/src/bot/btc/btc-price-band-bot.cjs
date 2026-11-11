@@ -114,6 +114,7 @@ class BtcPriceBandBot {
     this.lastStateSavedAt = null;
     this.pendingPersistedState = null;
     this.persistenceTimer = null;
+    this.persistenceHeartbeat = null;
     this.persistenceWriteInProgress = false;
     this.startupPromise = null;
     this.restoredMarketId = null;
@@ -203,6 +204,8 @@ class BtcPriceBandBot {
       void this.tick();
       this.interval = setInterval(() => void this.tick(), this.config.POLL_INTERVAL_MS);
       this.interval.unref?.();
+      this.persistenceHeartbeat = setInterval(() => this.schedulePersistedState(true), 60_000);
+      this.persistenceHeartbeat.unref?.();
     })().catch(error => {
       this.storageHealthy = false;
       this.persistenceStatus = 'ERROR';
@@ -220,6 +223,8 @@ class BtcPriceBandBot {
     this.running = false;
     if (this.interval) clearInterval(this.interval);
     this.interval = null;
+    if (this.persistenceHeartbeat) clearInterval(this.persistenceHeartbeat);
+    this.persistenceHeartbeat = null;
     if (this.persistenceTimer) clearTimeout(this.persistenceTimer);
     this.persistenceTimer = null;
     void this.flushPersistedState();
@@ -452,10 +457,12 @@ class BtcPriceBandBot {
       this.terminalEvidenceMarketId = String(market.id);
       this.terminalObservation = null;
       this.startMarketStream(market);
+      this.schedulePersistedState(true);
     } else if (restoredSameMarket) {
       this.restoredMarketId = null;
       this.terminalEvidenceMarketId = String(market.id);
       this.startMarketStream(market);
+      this.schedulePersistedState(true);
     }
     this.statusReason = 'BTC market loaded; waiting for live UP/DOWN ask updates.';
     this.error = null;
@@ -1185,7 +1192,6 @@ class BtcPriceBandBot {
       return this.snapshot();
     } finally {
       this.tickInProgress = false;
-      this.schedulePersistedState();
     }
   }
 
