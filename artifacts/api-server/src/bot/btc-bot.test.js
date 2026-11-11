@@ -285,10 +285,11 @@ test("the public root dashboard shows the BTC-only 5-minute ask-band strategy", 
   assert.match(html, /All-or-nothing sweep · no price cap/);
   assert.match(html, /no sell orders/);
   assert.match(html, /At \$0\.50 bid, hold shares and arm a 1\.5× buy/);
-  assert.match(html, /Either side can return to the band/);
+  assert.match(html, /Only the side opposite the latest buy can trigger/);
+  assert.match(html, /0 of 2 extra buys used this window/);
   assert.match(html, /New 5-minute window clears unused re-entry and resets size to 50/);
   assert.match(html, /No sell orders before resolution/);
-  assert.match(html, /Either side's ask in band can trigger the next size/);
+  assert.match(html, /only the opposite side's ask can trigger the next size/);
   assert.match(html, /Next base entry/);
   assert.match(html, /Martingale pivot/);
   assert.match(html, /Retry 2 seconds · no price ceiling/);
@@ -302,6 +303,7 @@ test("the public root dashboard shows the BTC-only 5-minute ask-band strategy", 
   assert.match(html, /id="currentInventory"/);
   assert.match(html, /id="btcUp"/);
   assert.match(html, /id="btcDown"/);
+  assert.match(html, /id="martingaleCount"/);
   assert.match(html, /id="streamStatus"/);
   assert.match(html, /id="equity"/);
   assert.match(html, /exact-market resolution/);

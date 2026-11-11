@@ -1,7 +1,7 @@
 'use strict';
 
 module.exports = {
-  STRATEGY_VERSION: 'btc-5m-0.69-0.71-pivot-0.50-martingale-1.5x-no-sells-any-side-reentry-full-sweep-297s-window-reset-isolated-settlement-v15',
+  STRATEGY_VERSION: 'btc-5m-0.69-0.71-pivot-0.50-martingale-1.5x-opposite-side-cap-2-window-reset-v16',
   WINDOW_MS: 5 * 60 * 1000,
   STARTING_CAPITAL: 3_000,
   SHARES_PER_BUY: 50,
@@ -9,6 +9,7 @@ module.exports = {
   OPPOSITE_TRIGGER_SIZE_MULTIPLIER: 1.5,
   MARTINGALE_MULTIPLIER: 1.5,
   MARTINGALE_PIVOT_BID: 0.50,
+  MAX_MARTINGALE_REENTRIES_PER_WINDOW: 2,
   SAME_SIDE_COOLDOWN_MS: 1_000,
   PENDING_TRIGGER_TTL_MS: 2_000,
   PENDING_RETRY_MAX_ASK: 1,

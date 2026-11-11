@@ -173,6 +173,7 @@ class BtcPriceBandBot {
     this.pendingTrigger = null;
     this.martingalePivot = null;
     this.martingaleReentryArmed = false;
+    this.martingaleReentriesThisWindow = 0;
     this.martingalePivotedSides = { UP: false, DOWN: false };
     this.martingaleNextShares = this.config.SHARES_PER_BUY;
     this.triggerSequence = 0;
@@ -357,6 +358,15 @@ class BtcPriceBandBot {
     this.lastBaseBuyAt = state.lastBaseBuyAt != null
       && Number.isFinite(Number(state.lastBaseBuyAt))
       ? Number(state.lastBaseBuyAt) : null;
+    const savedReentryCount = Number(state.martingaleReentriesThisWindow);
+    const ledgerReentryCount = this.trades.filter(trade =>
+      trade.windowStart === this.windowStart
+      && trade.entryMode === 'MARTINGALE_REENTRY'
+      && !trade.parentTradeId).length;
+    this.martingaleReentriesThisWindow = Math.max(
+      ledgerReentryCount,
+      Number.isInteger(savedReentryCount) && savedReentryCount >= 0 ? savedReentryCount : 0,
+    );
     const savedPending = state.pendingTrigger;
     const allowedPendingModes = this.config.SELLS_ON_OPPOSITE_TRIGGER
       ? ['BASE_ENTRY', 'OPPOSITE_TRIGGER_BUY', 'OPPOSITE_SIGNAL_REVERSAL']
@@ -420,6 +430,14 @@ class BtcPriceBandBot {
         && state.martingaleReentryArmed == null) {
         this.martingaleReentryArmed = true;
       }
+    }
+    if (this.martingaleReentriesThisWindow >= this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW) {
+      this.martingaleReentryArmed = false;
+      this.martingalePivot = null;
+      if (this.pendingTrigger?.mode === 'MARTINGALE_REENTRY') this.pendingTrigger = null;
+    } else if (this.pendingTrigger?.mode === 'MARTINGALE_REENTRY'
+      && this.pendingTrigger.side !== this.martingaleReentryTargetSide()) {
+      this.pendingTrigger = null;
     }
     const savedMartingaleShares = Number(state.martingaleNextShares);
     this.martingaleNextShares = Number.isFinite(savedMartingaleShares)
@@ -485,6 +503,7 @@ class BtcPriceBandBot {
       pendingTrigger: this.pendingTrigger,
       martingalePivot: this.martingalePivot,
       martingaleReentryArmed: this.martingaleReentryArmed,
+      martingaleReentriesThisWindow: this.martingaleReentriesThisWindow,
       martingalePivotedSides: this.martingalePivotedSides,
       martingaleNextShares: this.martingaleNextShares,
       triggerSequence: this.triggerSequence,
@@ -581,6 +600,7 @@ class BtcPriceBandBot {
     this.pendingTrigger = null;
     this.martingaleNextShares = this.config.SHARES_PER_BUY;
     this.martingaleReentryArmed = false;
+    this.martingaleReentriesThisWindow = 0;
     this.martingalePivot = null;
     this.martingalePivotedSides = { UP: false, DOWN: false };
     this.lastAskTrigger = { UP: null, DOWN: null };
@@ -907,6 +927,9 @@ class BtcPriceBandBot {
   processMartingalePivot(now = this.now()) {
     if (!this.market || this.windowStart == null || this.terminalObservation?.winner
       || (this.stateStore && !this.storageHealthy)) return false;
+    if (this.martingaleReentriesThisWindow >= this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW) {
+      return false;
+    }
     if (this.martingaleReentryArmed) return false;
 
     const pivot = this.martingalePivot;
@@ -917,21 +940,16 @@ class BtcPriceBandBot {
     }
     if (this.martingalePivot) return false;
 
-    const side = ['UP', 'DOWN'].find(candidate => {
-      const shares = this.currentWindowOpenTrades(candidate)
-        .reduce((sum, trade) => sum + trade.shares, 0);
-      const quote = this.quotes[candidate];
-      return shares > EPSILON
-        && !this.martingalePivotedSides[candidate]
-        && this.quoteIsFresh(quote, now)
-        && Number.isFinite(quote.bestBid)
-        && quote.bestBid <= this.config.MARTINGALE_PIVOT_BID;
-    });
-    if (!side) return false;
+    const side = this.activeSideForWindow();
+    if (!['UP', 'DOWN'].includes(side)) return false;
 
     const quote = this.quotes[side];
     const shares = round(this.currentWindowOpenTrades(side)
       .reduce((sum, trade) => sum + trade.shares, 0), 8);
+    if (shares <= EPSILON || this.martingalePivotedSides[side]
+      || !this.quoteIsFresh(quote, now)
+      || !Number.isFinite(quote.bestBid)
+      || quote.bestBid > this.config.MARTINGALE_PIVOT_BID) return false;
     const nextBaseBuyShares = round(
       Math.max(this.martingaleNextShares, shares) * this.config.MARTINGALE_MULTIPLIER,
       8,
@@ -951,7 +969,8 @@ class BtcPriceBandBot {
 
     const state = this.sideState[side];
     state.status = 'MARTINGALE_PIVOT_TRIGGERED';
-    state.reason = `Best bid reached the $${this.config.MARTINGALE_PIVOT_BID.toFixed(2)} martingale pivot; holding ${shares} ${side} shares and arming a ${nextBaseBuyShares}-share buy when either side returns to the entry band.`;
+    const oppositeSide = side === 'UP' ? 'DOWN' : 'UP';
+    state.reason = `Best bid reached the $${this.config.MARTINGALE_PIVOT_BID.toFixed(2)} martingale pivot; holding ${shares} ${side} shares and arming a ${nextBaseBuyShares}-share ${oppositeSide} buy. ${this.martingaleReentriesThisWindow} of ${this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW} additional martingale buys used this window.`;
     state.lastUpdateAt = now;
     this.log('MARTINGALE_PIVOT_TRIGGERED', state.reason, {
       side,
@@ -960,6 +979,8 @@ class BtcPriceBandBot {
       shares,
       multiplier: this.config.MARTINGALE_MULTIPLIER,
       nextBaseBuyShares,
+      martingaleReentriesThisWindow: this.martingaleReentriesThisWindow,
+      maxMartingaleReentriesPerWindow: this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW,
       soldShares: 0,
     });
     return true;
@@ -1103,9 +1124,23 @@ class BtcPriceBandBot {
     return this.activeSide;
   }
 
+  martingaleReentryTargetSide() {
+    if (!this.martingaleReentryArmed
+      || this.martingaleReentriesThisWindow >= this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW
+      || this.currentWindowOpenTrades().length === 0) return null;
+    const latestPositionSide = this.activeSideForWindow();
+    if (!['UP', 'DOWN'].includes(latestPositionSide)) return null;
+    return latestPositionSide === 'UP' ? 'DOWN' : 'UP';
+  }
+
   handleAskTrigger(side, now, triggerType) {
     const state = this.sideState[side];
     const quote = this.quotes[side];
+    const openTrades = this.currentWindowOpenTrades();
+    const activeSide = openTrades.length > 0 ? this.activeSideForWindow() : null;
+    const martingaleTargetSide = this.martingaleReentryTargetSide();
+    const isMartingaleReentry = !this.config.SELLS_ON_OPPOSITE_TRIGGER
+      && side === martingaleTargetSide;
     state.lastUpdateAt = now;
     state.lastBestAsk = quote?.bestAsk ?? null;
     if (this.stateStore && !this.storageHealthy) {
@@ -1121,6 +1156,9 @@ class BtcPriceBandBot {
 
     if (this.pendingTrigger) {
       if (this.pendingTrigger.side === side) {
+        if (this.pendingTrigger.mode === 'MARTINGALE_REENTRY' && !isMartingaleReentry) {
+          return false;
+        }
         state.status = 'PENDING_TRIGGER';
         state.reason = `Retrying the pending ${side} trigger until it fills or expires.`;
         return true;
@@ -1129,7 +1167,7 @@ class BtcPriceBandBot {
         && this.activeSideForWindow() == null
         && this.currentWindowOpenTrades().length === 0;
       const canReplaceMartingaleEntry = this.pendingTrigger.mode === 'MARTINGALE_REENTRY'
-        && this.martingaleReentryArmed;
+        && isMartingaleReentry;
       if (!canReplaceBaseEntry && !canReplaceMartingaleEntry) return false;
       if (!this.quoteIsFresh(quote, now) || !Number.isFinite(quote?.bestAsk)
         || quote.bestAsk < this.config.MIN_ENTRY_ASK
@@ -1160,16 +1198,22 @@ class BtcPriceBandBot {
       return false;
     }
 
-    const openTrades = this.currentWindowOpenTrades();
-    const activeSide = openTrades.length > 0 ? this.activeSideForWindow() : null;
-    const isMartingaleReentry = !this.config.SELLS_ON_OPPOSITE_TRIGGER
-      && this.martingaleReentryArmed;
-    if (!this.config.SELLS_ON_OPPOSITE_TRIGGER
-      && openTrades.length > 0
-      && !isMartingaleReentry) {
-      state.status = 'POSITION_LOCKED';
-      state.reason = 'Holding open BTC shares with no sell orders; waiting for a held side to touch the $0.50 martingale pivot.';
-      return true;
+    if (!this.config.SELLS_ON_OPPOSITE_TRIGGER && openTrades.length > 0) {
+      if (this.martingaleReentriesThisWindow >= this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW) {
+        state.status = 'MARTINGALE_CAP_REACHED';
+        state.reason = `The ${this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW} additional martingale buys allowed this window have been used; holding shares until settlement or the next window.`;
+        return true;
+      }
+      if (this.martingaleReentryArmed && !isMartingaleReentry) {
+        state.status = 'WAITING_FOR_OPPOSITE_MARTINGALE_TRIGGER';
+        state.reason = `The latest position is ${activeSide}; only the opposite ${martingaleTargetSide} ask can trigger this martingale buy.`;
+        return true;
+      }
+      if (!isMartingaleReentry) {
+        state.status = 'POSITION_LOCKED';
+        state.reason = `Holding ${activeSide} shares with no sell orders; waiting for its $0.50 pivot, then an opposite-side trigger.`;
+        return true;
+      }
     }
     if (this.config.SELLS_ON_OPPOSITE_TRIGGER && activeSide === side) {
       state.status = 'POSITION_LOCKED';
@@ -1280,6 +1324,16 @@ class BtcPriceBandBot {
     const side = pending.side;
     const state = this.sideState[side];
     const quote = this.quotes[side];
+    if (pending.mode === 'MARTINGALE_REENTRY'
+      && pending.side !== this.martingaleReentryTargetSide()) {
+      this.pendingTrigger = null;
+      state.status = this.martingaleReentriesThisWindow
+        >= this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW
+        ? 'MARTINGALE_CAP_REACHED' : 'WAITING_FOR_OPPOSITE_MARTINGALE_TRIGGER';
+      state.reason = 'The pending martingale entry no longer matches the opposite side of the latest position.';
+      this.schedulePersistedState(true);
+      return false;
+    }
     if (pending.mode === 'BASE_ENTRY' && this.activeSideForWindow() === side) {
       this.pendingTrigger = null;
       state.status = 'POSITION_LOCKED';
@@ -1924,6 +1978,15 @@ class BtcPriceBandBot {
     const state = this.sideState[side];
     state.lastUpdateAt = now;
     state.lastBestAsk = quote?.bestAsk ?? null;
+    if (entryMode === 'MARTINGALE_REENTRY'
+      && (this.martingaleReentriesThisWindow >= this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW
+        || this.martingaleReentryTargetSide() !== side)) {
+      state.status = this.martingaleReentriesThisWindow
+        >= this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW
+        ? 'MARTINGALE_CAP_REACHED' : 'WAITING_FOR_OPPOSITE_MARTINGALE_TRIGGER';
+      state.reason = 'Martingale buys are limited to two per window and must be opposite the latest position.';
+      return false;
+    }
     if (this.stateStore && !this.storageHealthy) {
       state.status = 'PAPER_HISTORY_STORAGE_ERROR';
       state.reason = 'Trading is paused until durable paper history storage is available.';
@@ -2005,6 +2068,7 @@ class BtcPriceBandBot {
     };
     this.trades.push(trade);
     if (entryMode === 'MARTINGALE_REENTRY') {
+      this.martingaleReentriesThisWindow += 1;
       this.martingaleReentryArmed = false;
       this.martingalePivot = null;
       this.martingalePivotedSides[side] = false;
@@ -2291,6 +2355,9 @@ class BtcPriceBandBot {
         nextBaseBuyShares: this.martingaleNextShares,
         martingalePivotBid: this.config.MARTINGALE_PIVOT_BID,
         martingaleReentryArmed: this.martingaleReentryArmed,
+        martingaleReentriesThisWindow: this.martingaleReentriesThisWindow,
+        maxMartingaleReentriesPerWindow: this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW,
+        martingaleEligibleSide: this.martingaleReentryTargetSide(),
         allOrNothingBuys: true,
         sameSideCooldownMs: this.config.SAME_SIDE_COOLDOWN_MS,
         activeSide: this.activeSideForWindow(),
@@ -2303,14 +2370,14 @@ class BtcPriceBandBot {
         maxEntryAsk: this.config.MAX_ENTRY_ASK,
         trigger: this.config.SELLS_ON_OPPOSITE_TRIGGER
           ? `The first qualifying ask in the inclusive $${this.config.MIN_ENTRY_ASK.toFixed(2)}-$${this.config.MAX_ENTRY_ASK.toFixed(2)} band buys ${this.martingaleNextShares} base shares. An opposite trigger sells the outgoing position and buys ${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER} times the shares sold.`
-          : `Buy the first qualifying ask in the inclusive $${this.config.MIN_ENTRY_ASK.toFixed(2)}-$${this.config.MAX_ENTRY_ASK.toFixed(2)} band. After a $${this.config.MARTINGALE_PIVOT_BID.toFixed(2)} pivot, one ${this.martingaleNextShares}-share re-entry may be triggered by either side. No sell orders are placed.`,
+          : `Buy the first qualifying ask in the inclusive $${this.config.MIN_ENTRY_ASK.toFixed(2)}-$${this.config.MAX_ENTRY_ASK.toFixed(2)} band. After a $${this.config.MARTINGALE_PIVOT_BID.toFixed(2)} pivot, only the side opposite the latest position may trigger the next ${this.martingaleNextShares}-share buy; allow at most ${this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW} additional martingale buys per window. No sell orders are placed.`,
         orderType: 'PAPER ALL-OR-NOTHING TAKER SWEEP',
         marketSweepMaxPrice: 1,
         intraWindowSales: this.config.SELLS_ON_OPPOSITE_TRIGGER,
         reversalRule: this.config.SELLS_ON_OPPOSITE_TRIGGER
           ? `On an opposite trigger, sell all outgoing shares at visible bids, then buy ${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER} times that share count. Require full visible depth for both legs; otherwise do not partially fill and retry up to two seconds.`
-          : 'Opposite-side signals never sell. After a pivot, either side may trigger one martingale re-entry in the ask band.',
-        martingaleRule: `When a held side's best bid reaches or drops below $${this.config.MARTINGALE_PIVOT_BID.toFixed(2)}, keep all shares and arm the next buy at ${this.config.MARTINGALE_MULTIPLIER} times the larger of current held shares or the previous base size. Either side can trigger that buy in the ask band. No sell orders are placed; profitable resolution resets to ${this.config.SHARES_PER_BUY}.`,
+          : 'Opposite-side signals never sell. After a pivot, only the side opposite the latest position may trigger a martingale re-entry; allow at most two additional buys per window.',
+        martingaleRule: `When the latest position side's best bid reaches or drops below $${this.config.MARTINGALE_PIVOT_BID.toFixed(2)}, keep all shares and arm a buy at ${this.config.MARTINGALE_MULTIPLIER} times the larger of current held shares or the previous base size. Only the opposite side may trigger it, with at most ${this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW} additional martingale buys per window, excluding the ${this.config.SHARES_PER_BUY}-share base buy. Reset count and size at each new window.`,
         terminalCheckSeconds: this.config.TERMINAL_CHECK_SECONDS,
         terminalThresholds: {
           winnerBestBidAtLeast: this.config.TERMINAL_WINNER_BID,
