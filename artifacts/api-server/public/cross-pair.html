@@ -78,7 +78,7 @@
     <header>
       <div>
         <h1>BTC <span>5-Minute Ask-Band</span> Bot</h1>
-        <p class="subtitle">BTC UP/DOWN ask triggers · 50-share base entry · 1.2× flip sizing · live Polymarket order-book updates</p>
+        <p class="subtitle">BTC UP/DOWN ask triggers · $0.69–$0.71 entry band · $0.50 bid stop-loss · 1.5× flip sizing</p>
       </div>
       <div class="status" id="status"><span class="dot"></span><span id="statusText">CONNECTING</span></div>
     </header>
@@ -105,12 +105,13 @@
         <div class="stream-state" id="streamState"><span class="dot"></span><span id="streamStatus">CONNECTING</span></div>
         <div class="stream-meta" id="streamMeta">Waiting for a live market connection.</div>
         <div class="rule-grid">
-          <div class="rule"><div class="rule-label">Eligible best ask</div><div class="rule-value" id="eligibleAskBand">$0.59–$0.61</div></div>
+          <div class="rule"><div class="rule-label">Eligible best ask</div><div class="rule-value" id="eligibleAskBand">$0.69–$0.71</div></div>
           <div class="rule"><div class="rule-label">Base order size</div><div class="rule-value">50 shares</div></div>
           <div class="rule"><div class="rule-label">Trigger</div><div class="rule-value">Hold direction until opposite trigger</div></div>
           <div class="rule"><div class="rule-label">Execution</div><div class="rule-value">All-or-nothing sweep · no price cap</div></div>
-          <div class="rule"><div class="rule-label">Opposite trigger</div><div class="rule-value">Sell outgoing · buy 1.2× shares</div></div>
+          <div class="rule"><div class="rule-label">Opposite trigger</div><div class="rule-value">Sell outgoing · buy 1.5× shares</div></div>
           <div class="rule"><div class="rule-label">Sell behavior</div><div class="rule-value">Sell full position on flip</div></div>
+          <div class="rule"><div class="rule-label">Stop-loss</div><div class="rule-value">Sell full side at $0.50 best bid or lower</div></div>
           <div class="rule"><div class="rule-label">Missed trigger</div><div class="rule-value">Retry 2 seconds · no price ceiling</div></div>
           <div class="rule"><div class="rule-label">At 297 seconds</div><div class="rule-value">Use any in-window $0.99+ / below $0.01 hits</div></div>
         </div>
@@ -118,14 +119,14 @@
     </section>
 
     <section class="panel" style="margin-bottom:16px">
-      <div class="panel-head"><div><h2>BTC position</h2><div class="section-note">Start with 50 shares. On an opposite trigger, sell the outgoing position and buy 1.2× its shares.</div></div><span class="pill" id="openCount">0 open</span></div>
+      <div class="panel-head"><div><h2>BTC position</h2><div class="section-note">Start with 50 shares. Sell at a $0.50 best bid stop-loss or flip on an opposite trigger, buying 1.5× the sold shares.</div></div><span class="pill" id="openCount">0 open</span></div>
       <div class="inventory-head"><h3>Current 5-minute window</h3><span class="section-note" id="pendingSummary">Remember terminal threshold hits throughout the window</span></div>
       <div class="layout inventory" id="currentInventory"></div>
     </section>
 
     <section class="layout lower">
       <div class="panel">
-        <div class="panel-head"><div><h2>Position records</h2><div class="section-note">Initial buys are 50 shares; flip buys are 1.2× shares sold. Both legs require full visible depth.</div></div></div>
+        <div class="panel-head"><div><h2>Position records</h2><div class="section-note">Initial buys are 50 shares; flip buys are 1.5× shares sold. Stop-loss and flip exits require full visible bid depth.</div></div></div>
         <div class="table-wrap" id="trades"></div>
       </div>
       <div class="panel">
@@ -186,7 +187,7 @@
       const rows=(trades||[]).slice(0,18);
       if(!rows.length)return '<div class="empty">No BTC entries yet.</div>';
       return `<table><thead><tr><th>Time</th><th>Side</th><th>Trigger</th><th>Shares</th><th>Avg entry</th><th>State</th><th>P&amp;L</th></tr></thead><tbody>${rows.map(t=>{
-        const state=t.status==='AWAITING_RESOLUTION'?'Awaiting official resolution':t.status==='CLOSED'?`Sold on opposite signal · ${price(t.exitPrice)}`:t.status==='SETTLED'?(t.settlementSource==='TERMINAL_PRICE_297S'?`297s price · ${t.outcome}`:`Resolved · ${t.outcome}`):'Open';
+        const state=t.status==='AWAITING_RESOLUTION'?'Awaiting official resolution':t.status==='CLOSED'?(t.exitReason==='STOP_LOSS'?`Stop-loss · ${price(t.exitPrice)}`:`Sold on opposite signal · ${price(t.exitPrice)}`):t.status==='SETTLED'?(t.settlementSource==='TERMINAL_PRICE_297S'?`297s price · ${t.outcome}`:`Resolved · ${t.outcome}`):'Open';
         const pnl=t.realizedPnl??t.unrealizedPnl;
         return `<tr><td>${time(t.openedAt)}</td><td class="${t.side==='UP'?'positive':'negative'}">BTC ${esc(t.side)}</td><td>${esc(String(t.triggerType||'ask update').replaceAll('_',' '))}</td><td>${shares(t.shares)}</td><td>${price(t.entryPrice)}</td><td>${esc(state)}</td><td class="${cls(pnl)}">${money(pnl)}</td></tr>`;
       }).join('')}</tbody></table>`;

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { BtcPriceBandBot } = require('./btc-price-band-bot.cjs');
 const config = require('./btc-price-band-config.cjs');
 
-function createBot() {
+function createBot({ production = false } = {}) {
   let now = 600_001;
   const market = {
     id: 'btc-5m-market',
@@ -42,7 +42,18 @@ function createBot() {
       return { close() {} };
     },
   };
-  const bot = new BtcPriceBandBot({ marketData, now: () => now });
+  const legacyFixtureConfig = {
+    ...config,
+    MIN_ENTRY_ASK: 0.59,
+    MAX_ENTRY_ASK: 0.61,
+    OPPOSITE_TRIGGER_SIZE_MULTIPLIER: 1.2,
+    STOP_LOSS_BID: 0,
+  };
+  const bot = new BtcPriceBandBot({
+    marketData,
+    now: () => now,
+    config: production ? config : legacyFixtureConfig,
+  });
   return {
     bot,
     market,
@@ -77,17 +88,112 @@ function attachCurrentMarket(bot) {
   };
 }
 
-test('config limits the active strategy to BTC 5-minute windows and scales flips by 1.2x', () => {
+test('config uses BTC 5-minute windows, the $0.69-$0.71 band, and 1.5x flips', () => {
   assert.equal(config.WINDOW_MS, 5 * 60 * 1000);
-  assert.match(config.STRATEGY_VERSION, /0\.59-0\.61/);
+  assert.match(config.STRATEGY_VERSION, /0\.69-0\.71/);
   assert.equal(config.SHARES_PER_BUY, 50);
   assert.equal(config.SELLS_ON_OPPOSITE_TRIGGER, true);
-  assert.equal(config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER, 1.2);
+  assert.equal(config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER, 1.5);
+  assert.equal(config.STOP_LOSS_BID, 0.50);
   assert.equal(config.SAME_SIDE_COOLDOWN_MS, 1_000);
   assert.equal(config.PENDING_TRIGGER_TTL_MS, 2_000);
   assert.equal(config.PENDING_RETRY_MAX_ASK, 1);
-  assert.equal(config.MIN_ENTRY_ASK, 0.59);
-  assert.equal(config.MAX_ENTRY_ASK, 0.61);
+  assert.equal(config.MIN_ENTRY_ASK, 0.69);
+  assert.equal(config.MAX_ENTRY_ASK, 0.71);
+});
+
+test('production band triggers a 50-share entry and a 1.5x opposite flip', () => {
+  const { bot } = createBot({ production: true });
+  attachCurrentMarket(bot);
+
+  bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
+  bot.handleMarketMessage(book('down-token', 0.70, 200, 0.54));
+
+  const snapshot = bot.snapshot();
+  assert.equal(snapshot.trades.length, 2);
+  assert.equal(snapshot.trades.find(trade => trade.side === 'UP').status, 'CLOSED');
+  assert.equal(snapshot.trades.find(trade => trade.side === 'DOWN').shares, 75);
+  assert.equal(snapshot.strategy.minEntryAsk, 0.69);
+  assert.equal(snapshot.strategy.maxEntryAsk, 0.71);
+  assert.equal(snapshot.strategy.oppositeTriggerSizeMultiplier, 1.5);
+  assert.equal(snapshot.strategy.stopLossBid, 0.50);
+});
+
+test('production entry rejects asks outside the new band', () => {
+  const { bot } = createBot({ production: true });
+  attachCurrentMarket(bot);
+
+  bot.handleMarketMessage(book('up-token', 0.68, 200, 0.55));
+  bot.handleMarketMessage(book('down-token', 0.72, 200, 0.54));
+
+  assert.equal(bot.trades.length, 0);
+  assert.equal(bot.sideState.UP.status, 'BELOW_PRICE_BAND');
+  assert.equal(bot.sideState.DOWN.status, 'ABOVE_PRICE_BAND');
+});
+
+test('production stop-loss closes all shares once the best bid reaches $0.50', () => {
+  const { bot, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
+  assert.equal(bot.trades[0].status, 'OPEN');
+
+  setNow(600_002);
+  const stopBook = book('up-token', 0.70, 100, 0.50);
+  stopBook.timestamp = '600002';
+  bot.handleMarketMessage(stopBook);
+
+  const stopped = bot.trades.find(trade => trade.side === 'UP');
+  assert.equal(stopped.status, 'CLOSED');
+  assert.equal(stopped.exitReason, 'STOP_LOSS');
+  assert.equal(stopped.exitPrice, 0.50);
+  assert.equal(stopped.settlementSource, 'STOP_LOSS');
+  assert.equal(bot.snapshot().inventory.currentWindow.UP.shares, 0);
+  assert.equal(bot.snapshot().strategy.stopLossBid, 0.50);
+});
+
+test('stop-loss waits for full visible bid depth without partially selling', () => {
+  const { bot, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
+
+  setNow(600_002);
+  const shortBook = book('up-token', 0.70, 100, 0.50);
+  shortBook.bids[0].size = '49';
+  shortBook.timestamp = '600002';
+  bot.handleMarketMessage(shortBook);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.pendingStopLoss.side, 'UP');
+
+  setNow(600_003);
+  const fullBook = book('up-token', 0.70, 100, 0.49);
+  fullBook.timestamp = '600003';
+  bot.handleMarketMessage(fullBook);
+
+  assert.equal(bot.trades[0].status, 'CLOSED');
+  assert.equal(bot.trades[0].exitPrice, 0.49);
+  assert.equal(bot.pendingStopLoss, null);
+});
+
+test('a triggered stop-loss remains pending across a paper-state restore', () => {
+  const { bot, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
+
+  setNow(600_002);
+  const shortBook = book('up-token', 0.70, 100, 0.50);
+  shortBook.bids[0].size = '49';
+  shortBook.timestamp = '600002';
+  bot.handleMarketMessage(shortBook);
+  const saved = bot.persistentStateSnapshot();
+
+  const restored = new BtcPriceBandBot({ now: () => 600_003, config: bot.config });
+  restored.restorePersistentState(saved);
+  attachCurrentMarket(restored);
+  restored.handleMarketMessage(book('up-token', 0.70, 100, 0.49));
+
+  assert.equal(restored.pendingStopLoss, null);
+  assert.equal(restored.trades.find(trade => trade.side === 'UP').status, 'CLOSED');
+  assert.equal(restored.trades.find(trade => trade.side === 'UP').exitReason, 'STOP_LOSS');
 });
 
 test('an explicit history reset creates a fresh durable ledger before restoring state', async () => {
@@ -214,7 +320,7 @@ test('same-side triggers stay locked while opposite triggers close and scale the
   const legacyState = bot.persistentStateSnapshot();
   delete legacyState.activeSide;
   delete legacyState.lastBaseBuyAt;
-  const restoredLegacy = new BtcPriceBandBot({ now: () => 600_002 });
+  const restoredLegacy = new BtcPriceBandBot({ now: () => 600_002, config: bot.config });
   restoredLegacy.restorePersistentState(legacyState);
   assert.equal(restoredLegacy.activeSide, 'DOWN');
 });
@@ -598,7 +704,7 @@ test('active side and pending retry survive paper-state persistence', () => {
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.60, 49));
   const saved = bot.persistentStateSnapshot();
-  const restored = new BtcPriceBandBot({ now: () => 600_002 });
+  const restored = new BtcPriceBandBot({ now: () => 600_002, config: bot.config });
 
   restored.restorePersistentState(saved);
 
@@ -608,7 +714,7 @@ test('active side and pending retry survive paper-state persistence', () => {
 
   bot.handleMarketMessage(book('up-token', 0.60, 100));
   const afterFill = bot.persistentStateSnapshot();
-  const restoredAfterFill = new BtcPriceBandBot({ now: () => 600_003 });
+  const restoredAfterFill = new BtcPriceBandBot({ now: () => 600_003, config: bot.config });
   restoredAfterFill.restorePersistentState(afterFill);
   assert.equal(restoredAfterFill.activeSide, 'UP');
   assert.equal(restoredAfterFill.lastBaseBuyAt, 600_001);
@@ -640,7 +746,7 @@ test('a saved opposite-trigger retry resumes by selling and buying 1.2x shares',
     netProceeds: 0,
   };
 
-  const restored = new BtcPriceBandBot({ now: () => 600_002 });
+  const restored = new BtcPriceBandBot({ now: () => 600_002, config: bot.config });
   restored.restorePersistentState(saved);
   attachCurrentMarket(restored);
   assert.equal(restored.pendingTrigger.mode, 'OPPOSITE_SIGNAL_REVERSAL');

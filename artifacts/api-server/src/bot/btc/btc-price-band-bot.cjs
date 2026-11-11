@@ -171,6 +171,7 @@ class BtcPriceBandBot {
     this.activeSide = null;
     this.lastBaseBuyAt = null;
     this.pendingTrigger = null;
+    this.pendingStopLoss = null;
     this.triggerSequence = 0;
     this.lastAskTrigger = { UP: null, DOWN: null };
     this.terminalEvidence = this.emptyTerminalEvidence();
@@ -312,6 +313,8 @@ class BtcPriceBandBot {
       'PENDING_TRIGGER_SUPERSEDED',
       'OPPOSITE_SIGNAL_SELL',
       'OPPOSITE_SIGNAL_PARTIAL_SELL',
+      'STOP_LOSS_TRIGGERED',
+      'STOP_LOSS_FILLED',
       'TERMINAL_THRESHOLD_RECORDED',
       'TERMINAL_PRICE_SETTLEMENT',
       'POSITION_RESOLVED',
@@ -380,6 +383,20 @@ class BtcPriceBandBot {
         netProceeds: Math.max(0, Number(savedPending.netProceeds) || 0),
         lastBlockKey: null,
       } : null;
+    const savedStopLoss = state.pendingStopLoss;
+    this.pendingStopLoss = savedStopLoss
+      && ['UP', 'DOWN'].includes(savedStopLoss.side)
+      && Number(savedStopLoss.windowStart) === this.windowStart
+      && (state.marketId == null || String(savedStopLoss.marketId) === String(state.marketId))
+      ? {
+        side: savedStopLoss.side,
+        marketId: String(savedStopLoss.marketId),
+        windowStart: Number(savedStopLoss.windowStart),
+        triggeredAt: Number(savedStopLoss.triggeredAt) || 0,
+        triggerBid: Number.isFinite(Number(savedStopLoss.triggerBid))
+          ? Number(savedStopLoss.triggerBid) : null,
+        lastBlockKey: null,
+      } : null;
     const pendingSequence = Number(String(this.pendingTrigger?.id || '').match(/^trigger-(\d+)$/)?.[1]) || 0;
     this.triggerSequence = Math.max(0, Number(state.triggerSequence) || 0, pendingSequence);
     this.lastAskTrigger = {
@@ -438,6 +455,7 @@ class BtcPriceBandBot {
       activeSide: this.activeSide,
       lastBaseBuyAt: this.lastBaseBuyAt,
       pendingTrigger: this.pendingTrigger,
+      pendingStopLoss: this.pendingStopLoss,
       triggerSequence: this.triggerSequence,
       lastAskTrigger: this.lastAskTrigger,
       quotes: this.quotes,
@@ -530,6 +548,7 @@ class BtcPriceBandBot {
     this.activeSide = null;
     this.lastBaseBuyAt = null;
     this.pendingTrigger = null;
+    this.pendingStopLoss = null;
     this.lastAskTrigger = { UP: null, DOWN: null };
     this.seenMarketEvents.clear();
     this.terminalObservation = null;
@@ -575,6 +594,7 @@ class BtcPriceBandBot {
       this.activeSide = null;
       this.lastBaseBuyAt = null;
       this.pendingTrigger = null;
+      this.pendingStopLoss = null;
       this.lastAskTrigger = { UP: null, DOWN: null };
       this.terminalEvidence = this.emptyTerminalEvidence();
       this.terminalEvidenceMarketId = String(market.id);
@@ -693,9 +713,9 @@ class BtcPriceBandBot {
       sourceTimestamp: sourceTimestamp(event.timestamp),
     };
     this.books.set(tokenId, book);
-    this.updateQuoteFromBook(side, tokenId, book, now, event.timestamp);
+    const stopLossClosed = this.updateQuoteFromBook(side, tokenId, book, now, event.timestamp);
     const nextBestAsk = asks[0]?.price ?? null;
-    if (bestAskPriceChanged(previousBestAsk, nextBestAsk)
+    if (!stopLossClosed && bestAskPriceChanged(previousBestAsk, nextBestAsk)
       && this.handleAskTrigger(side, now, 'BEST_ASK_PRICE_CHANGE')) {
       this.recordAskTrigger(side, 'BOOK_UPDATE', event.timestamp);
     }
@@ -726,8 +746,9 @@ class BtcPriceBandBot {
       const nextBestAsk = book.asks[0]?.price ?? null;
       book.updatedAt = now;
       book.sourceTimestamp = sourceTimestamp(event.timestamp);
-      this.updateQuoteFromBook(group.side, tokenId, book, now, event.timestamp);
+      const stopLossClosed = this.updateQuoteFromBook(group.side, tokenId, book, now, event.timestamp);
       if (group.askChanged && bestAskPriceChanged(previousBestAsk, nextBestAsk)) {
+        if (stopLossClosed) continue;
         if (this.isDuplicateAskTrigger(group.side, 'ASK_PRICE_UPDATE', event.timestamp)) {
           this.lastAskTrigger[group.side] = null;
           continue;
@@ -814,9 +835,10 @@ class BtcPriceBandBot {
       eventType: 'BEST_BID_ASK',
     };
     this.recordTerminalEvidence(side, now);
+    const stopLossClosed = this.processStopLoss(now);
     const bestAskChanged = bestAsk != null
       && (previousBestAsk == null || Math.abs(bestAsk - previousBestAsk) >= EPSILON);
-    if (bestAskChanged) {
+    if (!stopLossClosed && bestAskChanged) {
       if (this.isDuplicateAskTrigger(side, 'BEST_BID_ASK', event.timestamp)) {
         this.lastAskTrigger[side] = null;
       } else if (this.handleAskTrigger(side, now, 'BEST_BID_ASK')) {
@@ -845,7 +867,120 @@ class BtcPriceBandBot {
       eventType: 'ORDER_BOOK',
     };
     this.recordTerminalEvidence(side, now);
+    return this.processStopLoss(now);
   }
+
+  processStopLoss(now = this.now()) {
+    if (!this.market || this.windowStart == null || this.terminalObservation?.winner
+      || (this.stateStore && !this.storageHealthy)) return false;
+
+    let pending = this.pendingStopLoss;
+    if (pending && (pending.windowStart !== this.windowStart
+      || pending.marketId !== String(this.market.id))) {
+      this.pendingStopLoss = null;
+      pending = null;
+    }
+    if (!pending) {
+      const side = ['UP', 'DOWN'].find(candidate => {
+        const shares = this.currentWindowOpenTrades(candidate)
+          .reduce((sum, trade) => sum + trade.shares, 0);
+        const quote = this.quotes[candidate];
+        return shares > EPSILON
+          && this.quoteIsFresh(quote, now)
+          && Number.isFinite(quote.bestBid)
+          && quote.bestBid <= this.config.STOP_LOSS_BID;
+      });
+      if (!side) return false;
+      const quote = this.quotes[side];
+      pending = {
+        side,
+        marketId: String(this.market.id),
+        windowStart: this.windowStart,
+        triggeredAt: now,
+        triggerBid: quote.bestBid,
+        lastBlockKey: null,
+      };
+      this.pendingStopLoss = pending;
+      const state = this.sideState[side];
+      state.status = 'STOP_LOSS_TRIGGERED';
+      state.reason = `Best bid reached ${this.config.STOP_LOSS_BID.toFixed(2)}; selling the full ${side} position.`;
+      if (this.pendingTrigger) {
+        const cancelled = this.pendingTrigger;
+        this.pendingTrigger = null;
+        this.sideState[cancelled.side].status = 'PENDING_TRIGGER_CANCELLED';
+        this.sideState[cancelled.side].reason = `Pending ${cancelled.side} buy cancelled because the ${side} stop-loss triggered.`;
+        this.log('PENDING_TRIGGER_CANCELLED', this.sideState[cancelled.side].reason, {
+          triggerId: cancelled.id,
+          side: cancelled.side,
+          stopLossSide: side,
+        });
+      }
+      this.log('STOP_LOSS_TRIGGERED', state.reason, {
+        side,
+        triggerBid: quote.bestBid,
+        threshold: this.config.STOP_LOSS_BID,
+        shares: round(this.currentWindowOpenTrades(side)
+          .reduce((sum, trade) => sum + trade.shares, 0)),
+      });
+    }
+
+    const state = this.sideState[pending.side];
+    const trades = this.currentWindowOpenTrades(pending.side);
+    const shares = round(trades.reduce((sum, trade) => sum + trade.shares, 0), 8);
+    if (shares <= EPSILON) {
+      this.pendingStopLoss = null;
+      return false;
+    }
+    const quote = this.quotes[pending.side];
+    if (!this.quoteIsFresh(quote, now) || !Number.isFinite(quote.bestBid)) {
+      state.status = 'WAITING_FOR_STOP_LOSS_BIDS';
+      state.reason = `Stop-loss triggered; waiting for a fresh ${pending.side} bid book to sell all shares.`;
+      return false;
+    }
+    const preview = this.sweepBids(pending.side, shares, { consume: false });
+    if (!preview?.complete) {
+      state.status = 'WAITING_FOR_STOP_LOSS_DEPTH';
+      state.reason = `Stop-loss triggered; waiting for visible bids to sell all ${shares} ${pending.side} shares without a partial sale.`;
+      const blockKey = `${state.status}|${state.reason}`;
+      if (pending.lastBlockKey !== blockKey) {
+        this.log('STOP_LOSS_WAITING_FOR_DEPTH', state.reason, {
+          side: pending.side,
+          shares,
+          triggerBid: pending.triggerBid,
+        });
+      }
+      pending.lastBlockKey = blockKey;
+      this.schedulePersistedState();
+      return false;
+    }
+    const execution = this.sweepBids(pending.side, shares);
+    if (!execution?.complete) {
+      state.status = 'WAITING_FOR_STOP_LOSS_DEPTH';
+      state.reason = 'Stop-loss bid depth changed before the full sale completed; waiting for the next book update.';
+      pending.lastBlockKey = null;
+      return false;
+    }
+
+    this.closePositionsOnOppositeSignal(trades, execution, now, null, 'STOP_LOSS');
+    this.pendingStopLoss = null;
+    this.activeSide = null;
+    state.status = 'STOP_LOSS_FILLED';
+    state.reason = `Sold all ${shares} ${pending.side} shares after the best bid reached ${this.config.STOP_LOSS_BID.toFixed(2)}; average sale price ${execution.averagePrice.toFixed(3)}.`;
+    state.lastUpdateAt = now;
+    this.log('STOP_LOSS_FILLED', state.reason, {
+      side: pending.side,
+      shares,
+      triggerBid: pending.triggerBid,
+      averageSellPrice: round(execution.averagePrice),
+      grossProceeds: round(execution.grossProceeds),
+      fees: round(execution.fees),
+      netProceeds: round(execution.netProceeds),
+      realizedPnl: round(trades.reduce((sum, trade) => sum + (trade.realizedPnl || 0), 0)),
+    });
+    this.schedulePersistedState(true);
+    return true;
+  }
+
 
   recordTerminalEvidence(side, now) {
     if (!this.market || this.windowStart == null || now >= this.windowEnd) return;
@@ -998,6 +1133,12 @@ class BtcPriceBandBot {
     if (this.terminalObservation?.winner) {
       state.status = 'WINDOW_ALREADY_SETTLED';
       state.reason = `The ${this.terminalObservation.winner} side already settled this window.`;
+      return false;
+    }
+
+    if (this.pendingStopLoss) {
+      state.status = 'STOP_LOSS_PENDING';
+      state.reason = `Waiting for the pending ${this.pendingStopLoss.side} stop-loss sale to complete.`;
       return false;
     }
 
@@ -1684,7 +1825,7 @@ class BtcPriceBandBot {
     return true;
   }
 
-  closePositionsOnOppositeSignal(trades, execution, now, newSide) {
+  closePositionsOnOppositeSignal(trades, execution, now, newSide, exitReason = 'OPPOSITE_SIGNAL') {
     if (!this.config.SELLS_ON_OPPOSITE_TRIGGER) {
       return {
         soldShares: 0,
@@ -1734,14 +1875,14 @@ class BtcPriceBandBot {
       closedTrade.settlementStatus = 'CLOSED';
       closedTrade.closedAt = now;
       closedTrade.exitSide = newSide;
-      closedTrade.exitReason = 'OPPOSITE_SIGNAL';
+      closedTrade.exitReason = exitReason;
       closedTrade.exitPrice = execution.averagePrice;
       closedTrade.exitGrossProceeds = grossProceeds;
       closedTrade.exitFees = exitFees;
       closedTrade.proceeds = netProceeds;
       closedTrade.realizedPnl = round(netProceeds - closedTrade.totalCost, 8);
-      closedTrade.finalOutcome = 'OPPOSITE_SIGNAL_EXIT';
-      closedTrade.settlementSource = 'OPPOSITE_SIGNAL';
+      closedTrade.finalOutcome = `${exitReason}_EXIT`;
+      closedTrade.settlementSource = exitReason;
       closedTrade.outcome = 'EXIT';
       closedTrade.exitFills = scaleExecutionFills(execution.fills, saleRatio);
       if (closedTrade === trade && Array.isArray(trade.fills)) trade.fills = closedFills;
@@ -2097,6 +2238,7 @@ class BtcPriceBandBot {
         startingCapital: this.startingCapital,
         sharesPerBuy: this.config.SHARES_PER_BUY,
         oppositeTriggerSizeMultiplier: this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER,
+        stopLossBid: this.config.STOP_LOSS_BID,
         allOrNothingBuys: true,
         sameSideCooldownMs: this.config.SAME_SIDE_COOLDOWN_MS,
         activeSide: this.activeSideForWindow(),
@@ -2106,11 +2248,12 @@ class BtcPriceBandBot {
         pendingRetryMaxAsk: this.config.PENDING_RETRY_MAX_ASK,
         minEntryAsk: this.config.MIN_ENTRY_ASK,
         maxEntryAsk: this.config.MAX_ENTRY_ASK,
-        trigger: 'The first qualifying ask in the inclusive band buys 50 shares. An opposite trigger sells the outgoing position and buys 1.2 times the shares sold.',
+        trigger: `The first qualifying ask in the inclusive ${this.config.MIN_ENTRY_ASK.toFixed(2)}-${this.config.MAX_ENTRY_ASK.toFixed(2)} band buys 50 shares. An opposite trigger sells the outgoing position and buys ${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER} times the shares sold.`,
         orderType: 'PAPER ALL-OR-NOTHING TAKER SWEEP',
         marketSweepMaxPrice: 1,
         intraWindowSales: this.config.SELLS_ON_OPPOSITE_TRIGGER,
-        reversalRule: 'On an opposite trigger, sell all outgoing shares at visible bids, then buy 1.2 times that share count. Require full visible depth for both legs; otherwise do not partially fill and retry up to two seconds.',
+        reversalRule: `On an opposite trigger, sell all outgoing shares at visible bids, then buy ${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER} times that share count. Require full visible depth for both legs; otherwise do not partially fill and retry up to two seconds.`,
+        stopLossRule: `When a held side's best bid reaches or drops below ${this.config.STOP_LOSS_BID.toFixed(2)}, sell its entire position at visible bids. Require full visible depth; do not partially sell.`,
         terminalCheckSeconds: this.config.TERMINAL_CHECK_SECONDS,
         terminalThresholds: {
           winnerBestBidAtLeast: this.config.TERMINAL_WINNER_BID,
@@ -2153,6 +2296,12 @@ class BtcPriceBandBot {
         remainingMs: Math.max(0, this.pendingTrigger.expiresAt - now),
         attempts: this.pendingTrigger.attempts,
         requestedShares: this.pendingTrigger.requestedShares,
+      } : null,
+      pendingStopLoss: this.pendingStopLoss ? {
+        side: this.pendingStopLoss.side,
+        triggeredAt: this.pendingStopLoss.triggeredAt,
+        triggerBid: this.pendingStopLoss.triggerBid,
+        threshold: this.config.STOP_LOSS_BID,
       } : null,
       account,
       inventory: {
