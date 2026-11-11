@@ -88,13 +88,24 @@ test('initial history seed is idempotent and does not overwrite an existing ledg
   const store = new PaperStateStore(pool);
   await store.initialize();
   const first = await store.seedFromPublicSnapshot(snapshot());
-  const second = await store.seedFromPublicSnapshot(snapshot({
-    account: { ...snapshot().account, cash: 100 },
-  }));
+  const replacementSnapshot = snapshot({
+    account: { ...snapshot().account, cash: 2900 },
+    trades: [{ ...snapshot().trades[0], totalCost: 100 }],
+  });
+  const second = await store.seedFromPublicSnapshot(replacementSnapshot);
 
   assert.deepEqual(first, { seeded: true, tradeCount: 1, cash: 2950 });
-  assert.deepEqual(second, { seeded: false, reason: 'state-already-present' });
-  assert.equal((await store.loadState()).cash, 2950);
+  assert.deepEqual(second, { seeded: true, tradeCount: 1, cash: 2900 });
+  assert.equal((await store.loadState()).cash, 2900);
+
+  const runtimeState = { ...(await store.loadState()), persistenceSource: 'runtime' };
+  await store.saveState(runtimeState);
+  const third = await store.seedFromPublicSnapshot(snapshot({
+    account: { ...snapshot().account, cash: 2800 },
+    trades: [{ ...snapshot().trades[0], totalCost: 200 }],
+  }));
+  assert.deepEqual(third, { seeded: false, reason: 'runtime-state-already-present' });
+  assert.equal((await store.loadState()).cash, 2900);
 });
 
 test('bot restores its ledger and does not rebuy the same ask after reconnecting', () => {

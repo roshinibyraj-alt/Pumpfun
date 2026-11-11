@@ -10,9 +10,12 @@ async function run() {
   const store = new PaperStateStore(pool);
   await store.initialize();
   const existing = await store.loadState();
-  if (existing) {
+  if (existing?.persistenceSource === "runtime") {
     console.log("BTC paper history already exists; keeping the durable ledger.");
     return;
+  }
+  if (existing) {
+    console.log("Refreshing the pre-deploy BTC history snapshot from the live bot.");
   }
 
   const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(15_000) });

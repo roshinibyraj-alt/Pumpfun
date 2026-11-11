@@ -197,6 +197,10 @@ class BtcPriceBandBot {
       }
       this.storageHealthy = true;
       this.persistenceStatus = 'CONNECTED';
+      if (savedState) {
+        await this.stateStore.saveState(this.persistentStateSnapshot());
+        this.lastStateSavedAt = this.now();
+      }
       this.error = null;
       this.log('BOT_STARTED', savedState
         ? 'BTC 5-minute ask-band bot restored its paper history from PostgreSQL.'
@@ -310,6 +314,7 @@ class BtcPriceBandBot {
   persistentStateSnapshot() {
     const state = {
       schemaVersion: 1,
+      persistenceSource: 'runtime',
       strategyVersion: this.config.STRATEGY_VERSION,
       startingCapital: this.startingCapital,
       cash: this.cash,

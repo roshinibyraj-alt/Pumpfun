@@ -29,6 +29,22 @@ function stateFromPublicSnapshot(snapshot) {
     || !Number.isFinite(Number(account.realizedPnl))) {
     throw new Error('The live BTC account totals are invalid.');
   }
+  const ledgerTotals = snapshot.trades.reduce((totals, trade) => {
+    const totalCost = Number(trade.totalCost);
+    const proceeds = trade.proceeds == null ? 0 : Number(trade.proceeds);
+    const realizedPnl = trade.realizedPnl == null ? 0 : Number(trade.realizedPnl);
+    if (!Number.isFinite(totalCost) || !Number.isFinite(proceeds) || !Number.isFinite(realizedPnl)) {
+      throw new Error('A live BTC trade has invalid accounting values.');
+    }
+    totals.cash -= totalCost;
+    totals.cash += proceeds;
+    totals.realizedPnl += realizedPnl;
+    return totals;
+  }, { cash: Number(account.startingCapital), realizedPnl: 0 });
+  if (Math.round(ledgerTotals.cash * 100) !== Math.round(Number(account.cash) * 100)
+    || Math.round(ledgerTotals.realizedPnl * 100) !== Math.round(Number(account.realizedPnl) * 100)) {
+    throw new Error('The live BTC trade ledger does not reconcile to the account totals.');
+  }
 
   const quotes = snapshot.quotes && typeof snapshot.quotes === 'object'
     ? snapshot.quotes : { UP: null, DOWN: null };
@@ -80,10 +96,11 @@ function stateFromPublicSnapshot(snapshot) {
 
   return {
     schemaVersion: 1,
+    persistenceSource: 'predeploy-seed',
     strategyVersion: snapshot.strategy?.version || 'legacy-btc-5m',
     startingCapital: Number(account.startingCapital),
-    cash: Number(account.cash),
-    realizedPnl: Number(account.realizedPnl),
+    cash: Number(ledgerTotals.cash.toFixed(8)),
+    realizedPnl: Number(ledgerTotals.realizedPnl.toFixed(8)),
     trades: snapshot.trades,
     events: snapshot.events,
     tradeSequence: sequenceFromIds(snapshot.trades, 'trade'),
@@ -138,7 +155,9 @@ class PaperStateStore {
 
   async seedFromPublicSnapshot(snapshot) {
     const existing = await this.loadState();
-    if (existing) return { seeded: false, reason: 'state-already-present' };
+    if (existing?.persistenceSource === 'runtime') {
+      return { seeded: false, reason: 'runtime-state-already-present' };
+    }
     const state = stateFromPublicSnapshot(snapshot);
     await this.saveState(state);
     const saved = await this.loadState();
