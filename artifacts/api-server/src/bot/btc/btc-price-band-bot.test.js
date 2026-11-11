@@ -44,6 +44,7 @@ function createBot({ production = false } = {}) {
   };
   const legacyFixtureConfig = {
     ...config,
+    SELLS_ON_OPPOSITE_TRIGGER: true,
     MIN_ENTRY_ASK: 0.59,
     MAX_ENTRY_ASK: 0.61,
     OPPOSITE_TRIGGER_SIZE_MULTIPLIER: 1.2,
@@ -88,11 +89,11 @@ function attachCurrentMarket(bot) {
   };
 }
 
-test('config uses BTC 5-minute windows, the $0.69-$0.71 band, and 1.5x flips', () => {
+test('config uses BTC 5-minute windows, the $0.69-$0.71 band, the $0.50 pivot, and no sells', () => {
   assert.equal(config.WINDOW_MS, 5 * 60 * 1000);
   assert.match(config.STRATEGY_VERSION, /0\.69-0\.71/);
   assert.equal(config.SHARES_PER_BUY, 50);
-  assert.equal(config.SELLS_ON_OPPOSITE_TRIGGER, true);
+  assert.equal(config.SELLS_ON_OPPOSITE_TRIGGER, false);
   assert.equal(config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER, 1.5);
   assert.equal(config.MARTINGALE_PIVOT_BID, 0.50);
   assert.equal(config.MARTINGALE_MULTIPLIER, 1.5);
@@ -103,22 +104,47 @@ test('config uses BTC 5-minute windows, the $0.69-$0.71 band, and 1.5x flips', (
   assert.equal(config.MAX_ENTRY_ASK, 0.71);
 });
 
-test('production band triggers a 50-share entry and a 1.5x opposite flip', () => {
-  const { bot } = createBot({ production: true });
+test('production never sells on an opposite ask and re-enters either side after the pivot', () => {
+  const { bot, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
 
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
   bot.handleMarketMessage(book('down-token', 0.70, 200, 0.54));
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.sideState.DOWN.status, 'POSITION_LOCKED');
 
+  setNow(600_002);
+  const downOutside = book('down-token', 0.72, 200, 0.54);
+  downOutside.timestamp = '600002';
+  bot.handleMarketMessage(downOutside);
+
+  setNow(600_003);
+  const pivot = book('up-token', 0.70, 200, 0.50);
+  pivot.timestamp = '600003';
+  bot.handleMarketMessage(pivot);
+  assert.equal(bot.martingaleNextShares, 75);
+  assert.equal(bot.martingaleReentryArmed, true);
+
+  setNow(600_004);
+  const downReentry = book('down-token', 0.70, 200, 0.54);
+  downReentry.timestamp = '600004';
+  bot.handleMarketMessage(downReentry);
   const snapshot = bot.snapshot();
   assert.equal(snapshot.trades.length, 2);
-  assert.equal(snapshot.trades.find(trade => trade.side === 'UP').status, 'CLOSED');
+  assert.ok(snapshot.trades.every(trade => trade.status === 'OPEN'));
+  assert.equal(snapshot.trades.find(trade => trade.side === 'UP').shares, 50);
   assert.equal(snapshot.trades.find(trade => trade.side === 'DOWN').shares, 75);
   assert.equal(snapshot.strategy.minEntryAsk, 0.69);
   assert.equal(snapshot.strategy.maxEntryAsk, 0.71);
-  assert.equal(snapshot.strategy.oppositeTriggerSizeMultiplier, 1.5);
+  assert.equal(snapshot.strategy.oppositeTriggerSizeMultiplier, null);
   assert.equal(snapshot.strategy.martingaleMultiplier, 1.5);
   assert.equal(snapshot.strategy.martingalePivotBid, 0.50);
+  assert.equal(snapshot.strategy.sellsOnOppositeTrigger, false);
+  assert.equal(snapshot.strategy.intraWindowSales, false);
+  assert.equal(snapshot.strategy.martingaleReentryArmed, false);
+  assert.equal(snapshot.account.closedPositions, 0);
+  assert.equal(snapshot.events.some(event => event.type === 'OPPOSITE_SIGNAL_SELL'), false);
 });
 
 test('production entry rejects asks outside the new band', () => {
@@ -178,7 +204,7 @@ test('$0.50 martingale pivot holds the position and advances sizing once', () =>
   assert.equal(nextWindowTrade.shares, 75);
 });
 
-test('martingale pivot sizes the next flip and compounds at a later pivot', () => {
+test('martingale re-entry can use either side and compounds after a later pivot without selling', () => {
   const { bot, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
@@ -193,7 +219,11 @@ test('martingale pivot sizes the next flip and compounds at a later pivot', () =
   downEntry.timestamp = '600003';
   bot.handleMarketMessage(downEntry);
   assert.equal(bot.activeSide, 'DOWN');
-  assert.equal(bot.trades.find(trade => trade.status === 'OPEN').shares, 75);
+  assert.equal(bot.martingaleReentryArmed, false);
+  assert.ok(bot.trades.every(trade => trade.status === 'OPEN'));
+  assert.equal(bot.trades.find(trade => trade.side === 'UP').shares, 50);
+  assert.equal(bot.trades.find(trade => trade.side === 'DOWN').shares, 75);
+  assert.equal(bot.trades.filter(trade => trade.status === 'CLOSED').length, 0);
 
   setNow(600_004);
   const secondPivot = book('down-token', 0.70, 200, 0.50);
@@ -207,28 +237,30 @@ test('martingale pivot sizes the next flip and compounds at a later pivot', () =
   upEntry.timestamp = '600005';
   bot.handleMarketMessage(upEntry);
   assert.equal(bot.activeSide, 'UP');
-  assert.equal(bot.trades.find(trade => trade.status === 'OPEN').shares, 112.5);
+  assert.equal(bot.trades.at(-1).shares, 112.5);
+  assert.equal(bot.trades.at(-1).entryMode, 'MARTINGALE_REENTRY');
+  assert.ok(bot.trades.every(trade => trade.status === 'OPEN'));
+  assert.equal(bot.martingaleReentryArmed, false);
   assert.equal(bot.snapshot().strategy.nextBaseBuyShares, 112.5);
 });
 
-test('a profitable opposite-signal close resets pivot martingale sizing', () => {
-  const { bot, setNow } = createBot({ production: true });
+test('a profitable resolution resets pivot martingale sizing and clears the pending re-entry', async () => {
+  const { bot, marketData, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
 
   setNow(600_002);
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.50));
   assert.equal(bot.martingaleNextShares, 75);
-  setNow(600_003);
-  bot.handleMarketMessage(book('up-token', 0.70, 200, 0.95));
-  setNow(600_004);
-  const oppositeEntry = book('down-token', 0.70, 200, 0.54);
-  oppositeEntry.timestamp = '600004';
-  bot.handleMarketMessage(oppositeEntry);
+  assert.equal(bot.martingaleReentryArmed, true);
+  bot.trades[0].status = 'AWAITING_RESOLUTION';
+  await bot.resolveDue(900_001, { force: true });
 
-  assert.ok(bot.trades.find(trade => trade.side === 'UP').realizedPnl > 0);
+  assert.equal(bot.trades[0].status, 'SETTLED');
+  assert.ok(bot.trades[0].realizedPnl > 0);
   assert.equal(bot.martingalePivot, null);
   assert.equal(bot.martingaleNextShares, 50);
+  assert.equal(bot.martingaleReentryArmed, false);
   assert.equal(bot.snapshot().strategy.nextBaseBuyShares, 50);
 });
 

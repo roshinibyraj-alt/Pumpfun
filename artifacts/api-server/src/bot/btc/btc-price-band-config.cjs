@@ -1,11 +1,11 @@
 'use strict';
 
 module.exports = {
-  STRATEGY_VERSION: 'btc-5m-0.69-0.71-pivot-0.50-martingale-1.5x-opposite-1.5x-full-sweep-297s-v12',
+  STRATEGY_VERSION: 'btc-5m-0.69-0.71-pivot-0.50-martingale-1.5x-no-sells-any-side-reentry-full-sweep-297s-v13',
   WINDOW_MS: 5 * 60 * 1000,
   STARTING_CAPITAL: 3_000,
   SHARES_PER_BUY: 50,
-  SELLS_ON_OPPOSITE_TRIGGER: true,
+  SELLS_ON_OPPOSITE_TRIGGER: false,
   OPPOSITE_TRIGGER_SIZE_MULTIPLIER: 1.5,
   MARTINGALE_MULTIPLIER: 1.5,
   MARTINGALE_PIVOT_BID: 0.50,
