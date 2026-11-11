@@ -234,6 +234,67 @@ test('stop-loss latches at $0.40 and waits for full visible bid depth', () => {
   assert.equal(bot.nextEntryShares, 100);
 });
 
+test('stop-loss uses refreshed visible bids and audits the execution book', () => {
+  const { bot, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
+
+  const cachedBook = bot.books.get('up-token');
+  cachedBook.bids = [
+    { price: 0.40, size: 300, availableSize: 0 },
+    { price: 0.39, size: 300, availableSize: 0 },
+    { price: 0.01, size: 300, availableSize: 300 },
+  ];
+
+  setNow(600_002);
+  const stopLossBook = book('up-token', 0.70, 100, 0.40);
+  stopLossBook.bids = [
+    { price: '0.40', size: '300' },
+    { price: '0.39', size: '300' },
+    { price: '0.01', size: '300' },
+  ];
+  stopLossBook.timestamp = '600002';
+  bot.handleMarketMessage(stopLossBook);
+
+  const trade = bot.trades[0];
+  const stopEvent = bot.events.find(event => event.type === 'STOP_LOSS_FILLED');
+  assert.equal(trade.status, 'CLOSED');
+  assert.equal(trade.stopLossTriggerBid, 0.40);
+  assert.equal(trade.exitPrice, 0.40);
+  assert.deepEqual(trade.exitFills.map(fill => ({ price: fill.price, shares: fill.shares })), [
+    { price: 0.40, shares: 50 },
+  ]);
+  assert.equal(trade.stopLossBookAtTrigger.topBidLevels[0].displayedShares, 300);
+  assert.equal(trade.stopLossBookAtTrigger.topBidLevels[0].availableShares, 300);
+  assert.equal(stopEvent.bidBookAtFill.topBidLevels[0].price, 0.40);
+  assert.equal(stopEvent.fills[0].price, 0.40);
+});
+
+test('production price changes refresh bid depth before a stop-loss sweep', () => {
+  const { bot, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
+
+  bot.books.get('up-token').bids = [
+    { price: 0.40, size: 300, availableSize: 0 },
+    { price: 0.01, size: 300, availableSize: 300 },
+  ];
+  setNow(600_002);
+  bot.handleMarketMessage({
+    event_type: 'price_change',
+    timestamp: '600002',
+    price_changes: [
+      { asset_id: 'up-token', side: 'BUY', price: '0.40', size: '300' },
+      { asset_id: 'up-token', side: 'BUY', price: '0.01', size: '300' },
+    ],
+  });
+
+  assert.equal(bot.trades[0].status, 'CLOSED');
+  assert.equal(bot.trades[0].exitPrice, 0.40);
+  assert.equal(bot.trades[0].exitFills[0].price, 0.40);
+  assert.equal(bot.trades[0].stopLossBookAtTrigger.topBidLevels[0].availableShares, 300);
+});
+
 test('wins step back by one addition and reset at the specified win streaks', () => {
   const { bot } = createBot();
   let sequence = 0;

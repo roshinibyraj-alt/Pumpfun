@@ -301,6 +301,8 @@ test("the public root dashboard shows the BTC-only 5-minute ask-band strategy", 
   assert.match(html, /id="btcDown"/);
   assert.match(html, /id="entryCount"/);
   assert.match(html, /id="stopLossStatus"/);
+  assert.match(html, /Market-sell all at bid ≤\$0\.40; fill may be lower/);
+  assert.match(html, /observed bid/);
   assert.match(html, /id="recoveryAdditions"/);
   assert.match(html, /Strategy rules/);
   assert.ok(html.indexOf('id="events"') < html.indexOf('class="panel strategy-panel"'));

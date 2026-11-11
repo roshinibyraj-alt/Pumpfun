@@ -1,7 +1,7 @@
 'use strict';
 
 module.exports = {
-  STRATEGY_VERSION: 'btc-5m-0.69-0.71-stop-0.40-fixed-step-recovery-50-cap-10-one-entry-v17',
+  STRATEGY_VERSION: 'btc-5m-0.69-0.71-stop-0.40-book-audit-fixed-step-recovery-v18',
   WINDOW_MS: 5 * 60 * 1000,
   STARTING_CAPITAL: 3_000,
   SHARES_PER_BUY: 50,

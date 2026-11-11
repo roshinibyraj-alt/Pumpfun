@@ -26,9 +26,12 @@ function normalizeLevels(levels, side) {
     .sort((a, b) => side === 'asks' ? a.price - b.price : b.price - a.price);
 }
 
-function reconcileLevels(previous, next) {
+function reconcileLevels(previous, next, { refreshVisibleDepth = false } = {}) {
   const oldLevels = new Map((previous || []).map(level => [level.price, level]));
   return next.map(level => {
+    if (refreshVisibleDepth) {
+      return { ...level, availableSize: level.size };
+    }
     const old = oldLevels.get(level.price);
     const availableSize = old
       ? Math.max(0, old.availableSize + level.size - old.size)
@@ -599,6 +602,7 @@ class BtcPriceBandBot {
         if (trade.stopLossTriggeredAt == null) {
           trade.stopLossTriggeredAt = now;
           trade.stopLossTriggerBid = quoteIsFresh ? quote.bestBid : null;
+          trade.stopLossBookAtTrigger = this.bidBookAudit(side);
           changed = true;
         }
       }
@@ -618,6 +622,8 @@ class BtcPriceBandBot {
             requestedShares,
             availableShares: round(preview?.shares || 0),
             stopLossBid: this.config.STOP_LOSS_BID,
+            bidBookAtTrigger: trades[0]?.stopLossBookAtTrigger ?? null,
+            bidBookAtRetry: this.bidBookAudit(side),
           });
           for (const trade of trades) trade.stopLossLastBlockKey = blockKey;
           changed = true;
@@ -638,6 +644,9 @@ class BtcPriceBandBot {
         averageExitPrice: round(execution.averagePrice),
         proceeds: round(execution.netProceeds),
         fees: round(execution.fees),
+        fills: execution.fills,
+        bidBookAtTrigger: trades[0]?.stopLossBookAtTrigger ?? null,
+        bidBookAtFill: this.bidBookAudit(side),
       });
       changed = true;
     }
@@ -923,8 +932,12 @@ class BtcPriceBandBot {
     if (!side) return;
     const previous = this.books.get(tokenId);
     const previousBestAsk = previous?.asks?.[0]?.price ?? this.quotes[side]?.bestAsk ?? null;
-    const asks = reconcileLevels(previous?.asks, normalizeLevels(event.asks, 'asks'));
-    const bids = reconcileLevels(previous?.bids, normalizeLevels(event.bids, 'bids'));
+    const asks = reconcileLevels(previous?.asks, normalizeLevels(event.asks, 'asks'), {
+      refreshVisibleDepth: this.config.ONE_TRIGGER_PER_WINDOW,
+    });
+    const bids = reconcileLevels(previous?.bids, normalizeLevels(event.bids, 'bids'), {
+      refreshVisibleDepth: this.config.ONE_TRIGGER_PER_WINDOW,
+    });
     const book = {
       asks,
       bids,
@@ -1019,7 +1032,9 @@ class BtcPriceBandBot {
     }
     if (index >= 0) {
       const level = levels[index];
-      level.availableSize = Math.max(0, level.availableSize + size - level.size);
+      level.availableSize = this.config.ONE_TRIGGER_PER_WINDOW
+        ? size
+        : Math.max(0, level.availableSize + size - level.size);
       level.size = size;
     } else {
       levels.push({ price, size, availableSize: size });
@@ -1267,6 +1282,30 @@ class BtcPriceBandBot {
       averagePrice: grossProceeds / Math.max(EPSILON, sharesFilled),
       fills: fills.map(({ level, ...fill }) => fill),
       complete,
+    };
+  }
+
+  bidBookAudit(side, limit = 10) {
+    const tokenId = String(this.market?.tokens?.[side] || '');
+    const quote = this.quotes[side];
+    const book = this.books.get(tokenId);
+    const levels = book?.bids || [];
+    return {
+      side,
+      tokenId,
+      quoteBestBid: quote?.bestBid ?? null,
+      quoteUpdatedAt: quote?.updatedAt ?? null,
+      quoteSourceTimestamp: quote?.sourceTimestamp ?? null,
+      bookBestBid: levels[0]?.price ?? null,
+      bookUpdatedAt: book?.updatedAt ?? null,
+      bookSourceTimestamp: book?.sourceTimestamp ?? null,
+      displayedBidShares: round(levels.reduce((sum, level) => sum + (Number(level.size) || 0), 0)),
+      availableBidShares: round(levels.reduce((sum, level) => sum + (Number(level.availableSize) || 0), 0)),
+      topBidLevels: levels.slice(0, limit).map(level => ({
+        price: level.price,
+        displayedShares: level.size,
+        availableShares: level.availableSize,
+      })),
     };
   }
 
@@ -2536,7 +2575,7 @@ class BtcPriceBandBot {
         orderType: 'PAPER ALL-OR-NOTHING TAKER SWEEP',
         marketSweepMaxPrice: 1,
         intraWindowSales: true,
-        stopLossRule: `When the held side's best bid reaches or falls below $${this.config.STOP_LOSS_BID.toFixed(2)}, sell all shares using visible bids; no partial sale is recorded.`,
+        stopLossRule: `When the held side's best bid reaches or falls below $${this.config.STOP_LOSS_BID.toFixed(2)}, sell all shares using the latest visible bids; this is a market-style sweep with no price floor.`,
         recoveryRule: `Each stop-loss adds ${this.config.RECOVERY_STEP_SHARES} shares for the next window, up to ${this.config.MAX_RECOVERY_ADDITIONS} additions. At four additions, hold size until two consecutive wins reset to base; at seven or more, hold until three wins. At other levels, each win removes one addition.`,
         reversalRule: 'An opposite-side ask does not sell or replace the window’s one entry. Unsold shares remain until terminal-price or official market resolution.',
         terminalCheckSeconds: this.config.TERMINAL_CHECK_SECONDS,

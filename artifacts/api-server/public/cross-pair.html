@@ -131,7 +131,7 @@
         <div class="rule"><div class="rule-label">Base order size</div><div class="rule-value">50 shares</div></div>
         <div class="rule"><div class="rule-label">Entry limit</div><div class="rule-value" id="entryCount">One trigger per window</div></div>
         <div class="rule"><div class="rule-label">Next entry size</div><div class="rule-value" id="nextBaseEntry">50 shares</div></div>
-        <div class="rule"><div class="rule-label">Stop-loss</div><div class="rule-value" id="stopLossStatus">Sell all if bid reaches $0.40</div></div>
+        <div class="rule"><div class="rule-label">Stop-loss</div><div class="rule-value" id="stopLossStatus">Market-sell all at bid ≤$0.40; fill may be lower</div></div>
         <div class="rule"><div class="rule-label">Recovery additions</div><div class="rule-value" id="recoveryAdditions">0 of 10 additions</div></div>
         <div class="rule"><div class="rule-label">Consecutive wins</div><div class="rule-value" id="consecutiveWins">0</div></div>
         <div class="rule"><div class="rule-label">Size adjustment</div><div class="rule-value">Stop-loss adds 50. Wins step down 50, except the 4- and 7-addition reset streaks</div></div>
@@ -180,9 +180,10 @@
         $('consecutiveWins').textContent=`${Number(strategy.consecutiveWins)} consecutive win${Number(strategy.consecutiveWins)===1?'':'s'}`;
       }
       $('entryCount').textContent=strategy.entryTriggeredThisWindow?'Used · no more entries this window':'Available · one trigger this window';
+      const stopThreshold=`$${Number(strategy.stopLossBid??0.4).toFixed(2)}`;
       $('stopLossStatus').textContent=state.stopLoss
-        ? `Triggered at ${price(state.stopLoss.triggerBid)} · ${state.stopLoss.waitingForDepth?'waiting for full bid depth':'executed'}`
-        : `Sell all if best bid reaches $${Number(strategy.stopLossBid??0.4).toFixed(2)}`;
+        ? `Threshold ${stopThreshold} · observed bid ${price(state.stopLoss.triggerBid)} · ${state.stopLoss.waitingForDepth?'waiting for full bid depth':'executed'}`
+        : `Market-sell all at bid ≤${stopThreshold}; fill may be lower`;
       $('btcMarket').textContent=state.market?.title||'Waiting for market';
       for(const side of ['UP','DOWN']){
         const quote=state.quotes?.[side]||{};
