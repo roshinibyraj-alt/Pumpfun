@@ -78,7 +78,7 @@
     <header>
       <div>
         <h1>BTC <span>5-Minute Ask-Band</span> Bot</h1>
-        <p class="subtitle">BTC UP/DOWN ask triggers · $0.69–$0.71 entry band · no sell orders · 1.5× martingale re-entry</p>
+        <p class="subtitle">BTC 5-minute paper bot · one entry per window · $0.40 stop-loss · fixed-step recovery sizing</p>
       </div>
       <div class="status" id="status"><span class="dot"></span><span id="statusText">CONNECTING</span></div>
     </header>
@@ -104,38 +104,42 @@
         <div class="panel-head"><div><h2>Polymarket live feed</h2><div class="section-note">CLOB market WebSocket · prices update from the order book</div></div></div>
         <div class="stream-state" id="streamState"><span class="dot"></span><span id="streamStatus">CONNECTING</span></div>
         <div class="stream-meta" id="streamMeta">Waiting for a live market connection.</div>
-        <div class="rule-grid">
-          <div class="rule"><div class="rule-label">Eligible best ask</div><div class="rule-value" id="eligibleAskBand">$0.69–$0.71</div></div>
-          <div class="rule"><div class="rule-label">Base order size</div><div class="rule-value">50 shares</div></div>
-          <div class="rule"><div class="rule-label">Next base entry</div><div class="rule-value" id="nextBaseEntry">50 shares</div></div>
-          <div class="rule"><div class="rule-label">Martingale pivot</div><div class="rule-value">At $0.50 bid, hold shares and arm a 1.5× buy</div></div>
-          <div class="rule"><div class="rule-label">Re-entry side</div><div class="rule-value">Only the side opposite the latest buy can trigger</div></div>
-          <div class="rule"><div class="rule-label">Window reset</div><div class="rule-value">New 5-minute window clears unused re-entry and resets size to 50</div></div>
-          <div class="rule"><div class="rule-label">Martingale cap</div><div class="rule-value" id="martingaleCount">0 of 2 extra buys used this window</div></div>
-          <div class="rule"><div class="rule-label">Execution</div><div class="rule-value">All-or-nothing sweep · no price cap</div></div>
-          <div class="rule"><div class="rule-label">Opposite side</div><div class="rule-value">No sale; buy only when re-entry is armed</div></div>
-          <div class="rule"><div class="rule-label">Sell behavior</div><div class="rule-value">No sell orders before resolution</div></div>
-          <div class="rule"><div class="rule-label">Pivot action</div><div class="rule-value">After a pivot, only the opposite side's ask can trigger the next size</div></div>
-          <div class="rule"><div class="rule-label">Missed trigger</div><div class="rule-value">Retry 2 seconds · no price ceiling</div></div>
-          <div class="rule"><div class="rule-label">At 297 seconds</div><div class="rule-value">Use any in-window $0.99+ / below $0.01 hits</div></div>
-        </div>
       </div>
     </section>
 
     <section class="panel" style="margin-bottom:16px">
-      <div class="panel-head"><div><h2>BTC position</h2><div class="section-note">No sell orders: keep shares until resolution. Each $0.50 pivot arms a 1.5× buy only on the side opposite the latest buy. Maximum two extra martingale buys per window; each new window starts at 50.</div></div><span class="pill" id="openCount">0 open</span></div>
+      <div class="panel-head"><div><h2>BTC position</h2><div class="section-note">One entry trigger per window. A bid at or below $0.40 triggers a full-share stop-loss sale; otherwise positions wait for terminal-price or official resolution.</div></div><span class="pill" id="openCount">0 open</span></div>
       <div class="inventory-head"><h3>Current 5-minute window</h3><span class="section-note" id="pendingSummary">Remember terminal threshold hits throughout the window</span></div>
       <div class="layout inventory" id="currentInventory"></div>
     </section>
 
     <section class="layout lower">
       <div class="panel">
-        <div class="panel-head"><div><h2>Position records</h2><div class="section-note">Initial buys are 50 shares. Up to two 1.5× martingale re-entries per window, only on the side opposite the latest buy; all positions remain held until resolution.</div></div></div>
+        <div class="panel-head"><div><h2>Position records</h2><div class="section-note">The ledger keeps each entry, stop-loss sale, fee, and settlement while preserving history across deployments.</div></div></div>
         <div class="table-wrap" id="trades"></div>
       </div>
       <div class="panel">
-        <div class="panel-head"><div><h2>Activity</h2><div class="section-note">Ask triggers, martingale re-entries, 297-second checks, and official settlements.</div></div></div>
+        <div class="panel-head"><div><h2>Activity</h2><div class="section-note">Entry triggers, stop-loss executions, 297-second checks, and official settlements.</div></div></div>
         <div class="feed" id="events"></div>
+      </div>
+    </section>
+
+    <section class="panel strategy-panel" style="margin-top:16px">
+      <div class="panel-head"><div><h2>Strategy rules</h2><div class="section-note">Current BTC 5-minute entry, stop-loss, and recovery settings</div></div></div>
+      <div class="rule-grid">
+        <div class="rule"><div class="rule-label">Eligible best ask</div><div class="rule-value" id="eligibleAskBand">$0.69–$0.71</div></div>
+        <div class="rule"><div class="rule-label">Base order size</div><div class="rule-value">50 shares</div></div>
+        <div class="rule"><div class="rule-label">Entry limit</div><div class="rule-value" id="entryCount">One trigger per window</div></div>
+        <div class="rule"><div class="rule-label">Next entry size</div><div class="rule-value" id="nextBaseEntry">50 shares</div></div>
+        <div class="rule"><div class="rule-label">Stop-loss</div><div class="rule-value" id="stopLossStatus">Sell all if bid reaches $0.40</div></div>
+        <div class="rule"><div class="rule-label">Recovery additions</div><div class="rule-value" id="recoveryAdditions">0 of 10 additions</div></div>
+        <div class="rule"><div class="rule-label">Consecutive wins</div><div class="rule-value" id="consecutiveWins">0</div></div>
+        <div class="rule"><div class="rule-label">Size adjustment</div><div class="rule-value">Stop-loss adds 50. Wins step down 50, except the 4- and 7-addition reset streaks</div></div>
+        <div class="rule"><div class="rule-label">Win reset</div><div class="rule-value">At 4 additions: reset after 2 wins. At 7+: reset after 3 wins</div></div>
+        <div class="rule"><div class="rule-label">Execution</div><div class="rule-value">All-or-nothing sweep · no price cap or partial fills</div></div>
+        <div class="rule"><div class="rule-label">Opposite side</div><div class="rule-value">Does not sell or replace the single entry</div></div>
+        <div class="rule"><div class="rule-label">Missed trigger</div><div class="rule-value">Retry for 2 seconds · buy sweep may reach $1.00</div></div>
+        <div class="rule"><div class="rule-label">At 297 seconds</div><div class="rule-value">Use recorded $0.99+ / below $0.01 hits; otherwise official resolution</div></div>
       </div>
     </section>
   </main>
@@ -166,14 +170,19 @@
       if(valid(strategy.minEntryAsk)&&valid(strategy.maxEntryAsk)){
         $('eligibleAskBand').textContent=`$${Number(strategy.minEntryAsk).toFixed(2)}–$${Number(strategy.maxEntryAsk).toFixed(2)}`;
       }
-      if(valid(strategy.nextBaseBuyShares)){
-        $('nextBaseEntry').textContent=`${shares(strategy.nextBaseBuyShares)} shares${strategy.martingaleReentryArmed?' · armed':''}`;
+      if(valid(strategy.nextEntryShares)){
+        $('nextBaseEntry').textContent=`${shares(strategy.nextEntryShares)} shares for the next entry`;
       }
-      if(valid(strategy.martingaleReentriesThisWindow)&&valid(strategy.maxMartingaleReentriesPerWindow)){
-        const used=Number(strategy.martingaleReentriesThisWindow);
-        const cap=Number(strategy.maxMartingaleReentriesPerWindow);
-        $('martingaleCount').textContent=`${used} of ${cap} extra buys used this window${used>=cap?' · cap reached':''}`;
+      if(valid(strategy.recoveryAdditions)&&valid(strategy.maxRecoveryAdditions)){
+        $('recoveryAdditions').textContent=`${Number(strategy.recoveryAdditions)} of ${Number(strategy.maxRecoveryAdditions)} additions`;
       }
+      if(valid(strategy.consecutiveWins)){
+        $('consecutiveWins').textContent=`${Number(strategy.consecutiveWins)} consecutive win${Number(strategy.consecutiveWins)===1?'':'s'}`;
+      }
+      $('entryCount').textContent=strategy.entryTriggeredThisWindow?'Used · no more entries this window':'Available · one trigger this window';
+      $('stopLossStatus').textContent=state.stopLoss
+        ? `Triggered at ${price(state.stopLoss.triggerBid)} · ${state.stopLoss.waitingForDepth?'waiting for full bid depth':'executed'}`
+        : `Sell all if best bid reaches $${Number(strategy.stopLossBid??0.4).toFixed(2)}`;
       $('btcMarket').textContent=state.market?.title||'Waiting for market';
       for(const side of ['UP','DOWN']){
         const quote=state.quotes?.[side]||{};

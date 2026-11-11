@@ -171,6 +171,10 @@ class BtcPriceBandBot {
     this.activeSide = null;
     this.lastBaseBuyAt = null;
     this.pendingTrigger = null;
+    this.entryTriggeredThisWindow = false;
+    this.recoveryAdditions = 0;
+    this.consecutiveWins = 0;
+    this.nextEntryShares = this.config.SHARES_PER_BUY;
     this.martingalePivot = null;
     this.martingaleReentryArmed = false;
     this.martingaleReentriesThisWindow = 0;
@@ -440,9 +444,20 @@ class BtcPriceBandBot {
       this.pendingTrigger = null;
     }
     const savedMartingaleShares = Number(state.martingaleNextShares);
-    this.martingaleNextShares = Number.isFinite(savedMartingaleShares)
-      && savedMartingaleShares >= this.config.SHARES_PER_BUY
-      ? savedMartingaleShares : this.config.SHARES_PER_BUY;
+    const savedRecoveryAdditions = Number(state.recoveryAdditions);
+    this.recoveryAdditions = Number.isInteger(savedRecoveryAdditions)
+      ? Math.max(0, Math.min(this.config.MAX_RECOVERY_ADDITIONS, savedRecoveryAdditions))
+      : 0;
+    const savedConsecutiveWins = Number(state.consecutiveWins);
+    this.consecutiveWins = Number.isInteger(savedConsecutiveWins)
+      ? Math.max(0, savedConsecutiveWins) : 0;
+    this.syncRecoverySizing();
+    this.entryTriggeredThisWindow = state.entryTriggeredThisWindow === true
+      || Boolean(this.pendingTrigger)
+      || this.trades.some(trade => trade.windowStart === this.windowStart);
+    if (!Number.isFinite(savedMartingaleShares)) {
+      this.martingaleNextShares = this.nextEntryShares;
+    }
     const pendingSequence = Number(String(this.pendingTrigger?.id || '').match(/^trigger-(\d+)$/)?.[1]) || 0;
     this.triggerSequence = Math.max(0, Number(state.triggerSequence) || 0, pendingSequence);
     this.lastAskTrigger = {
@@ -482,6 +497,154 @@ class BtcPriceBandBot {
     this.statusReason = 'Restored the durable BTC paper ledger; reconnecting to the live market.';
   }
 
+  syncRecoverySizing() {
+    const baseShares = Math.max(0, Number(this.config.SHARES_PER_BUY) || 0);
+    const stepShares = Math.max(0, Number(this.config.RECOVERY_STEP_SHARES) || 0);
+    const maxAdditions = Math.max(0, Number(this.config.MAX_RECOVERY_ADDITIONS) || 0);
+    this.recoveryAdditions = Math.max(0, Math.min(maxAdditions, Number(this.recoveryAdditions) || 0));
+    this.nextEntryShares = round(baseShares + this.recoveryAdditions * stepShares, 8);
+    this.martingaleNextShares = this.nextEntryShares;
+    return this.nextEntryShares;
+  }
+
+  applyWindowRecoveryOutcome(windowStart, now = this.now()) {
+    if (windowStart == null) return false;
+    const trades = this.trades.filter(trade => trade.windowStart === windowStart);
+    if (!trades.length || trades.some(trade => trade.recoveryProgressionApplied)
+      || trades.some(trade => ['OPEN', 'AWAITING_RESOLUTION'].includes(trade.status))) {
+      return false;
+    }
+
+    for (const trade of trades) trade.recoveryProgressionApplied = true;
+    const netPnl = trades.reduce((sum, trade) => sum + (Number(trade.realizedPnl) || 0), 0);
+    if (netPnl > EPSILON) {
+      const additionsBeforeWin = this.recoveryAdditions;
+      this.consecutiveWins += 1;
+      const resetAfterWin = () => {
+        this.recoveryAdditions = 0;
+        this.consecutiveWins = 0;
+      };
+      if (additionsBeforeWin >= 7) {
+        if (this.consecutiveWins >= this.config.RESET_AT_SEVEN_ADDITIONS_WINS) resetAfterWin();
+      } else if (additionsBeforeWin === 4) {
+        if (this.consecutiveWins >= this.config.RESET_AT_FOUR_ADDITIONS_WINS) resetAfterWin();
+      } else {
+        this.recoveryAdditions = Math.max(0, additionsBeforeWin - 1);
+        if (this.recoveryAdditions === 4
+          && this.consecutiveWins >= this.config.RESET_AT_FOUR_ADDITIONS_WINS) {
+          resetAfterWin();
+        }
+      }
+    } else {
+      this.consecutiveWins = 0;
+    }
+
+    this.syncRecoverySizing();
+    this.log(netPnl > EPSILON ? 'RECOVERY_WIN_RECORDED' : 'RECOVERY_LOSS_RECORDED',
+      netPnl > EPSILON
+        ? `Window win recorded; next entry size is ${this.nextEntryShares} shares.`
+        : `Window loss recorded; recovery size remains ${this.nextEntryShares} shares.`,
+      {
+        windowStart,
+        netPnl: round(netPnl),
+        recoveryAdditions: this.recoveryAdditions,
+        consecutiveWins: this.consecutiveWins,
+        nextEntryShares: this.nextEntryShares,
+        at: now,
+      });
+    return true;
+  }
+
+  advanceRecoveryAfterStopLoss(windowStart, stoppedTrades, now = this.now()) {
+    const trades = this.trades.filter(trade => trade.windowStart === windowStart
+      && trade.stopLossTriggeredAt != null);
+    if (!trades.length || trades.some(trade => trade.recoveryProgressionApplied)) return false;
+    for (const trade of trades) trade.recoveryProgressionApplied = true;
+    const additionsBeforeStop = this.recoveryAdditions;
+    this.recoveryAdditions = Math.min(
+      this.config.MAX_RECOVERY_ADDITIONS,
+      this.recoveryAdditions + 1,
+    );
+    this.consecutiveWins = 0;
+    this.syncRecoverySizing();
+    this.log('RECOVERY_ADDITION_ADDED',
+      additionsBeforeStop < this.config.MAX_RECOVERY_ADDITIONS
+        ? `Stop-loss completed; next window adds 50 shares, for ${this.nextEntryShares} total shares.`
+        : `Stop-loss completed at the 10-addition cap; next entry remains ${this.nextEntryShares} shares.`,
+      {
+        windowStart,
+        stoppedTradeIds: stoppedTrades.map(trade => trade.id),
+        recoveryAdditions: this.recoveryAdditions,
+        maxRecoveryAdditions: this.config.MAX_RECOVERY_ADDITIONS,
+        nextEntryShares: this.nextEntryShares,
+        at: now,
+      });
+    return true;
+  }
+
+  processStopLoss(now = this.now()) {
+    if (!this.market || this.windowStart == null
+      || (this.stateStore && !this.storageHealthy)) return false;
+    let changed = false;
+    for (const side of ['UP', 'DOWN']) {
+      const trades = this.currentWindowOpenTrades(side);
+      if (!trades.length) continue;
+      const quote = this.quotes[side];
+      const quoteIsFresh = this.quoteIsFresh(quote, now) && Number.isFinite(quote.bestBid);
+      const alreadyTriggered = trades.some(trade => trade.stopLossTriggeredAt != null);
+      if (!alreadyTriggered
+        && (!quoteIsFresh || quote.bestBid > this.config.STOP_LOSS_BID + EPSILON)) continue;
+
+      for (const trade of trades) {
+        if (trade.stopLossTriggeredAt == null) {
+          trade.stopLossTriggeredAt = now;
+          trade.stopLossTriggerBid = quoteIsFresh ? quote.bestBid : null;
+          changed = true;
+        }
+      }
+      const requestedShares = round(
+        trades.reduce((sum, trade) => sum + Number(trade.shares || 0), 0),
+        8,
+      );
+      const preview = this.sweepBids(side, requestedShares, { consume: false });
+      const state = this.sideState[side];
+      if (!preview?.complete) {
+        state.status = 'STOP_LOSS_WAITING_FOR_DEPTH';
+        state.reason = `Bid reached $${this.config.STOP_LOSS_BID.toFixed(2)}; waiting for enough visible bids to sell all ${requestedShares} shares.`;
+        const blockKey = `${state.status}|${requestedShares}`;
+        if (trades.some(trade => trade.stopLossLastBlockKey !== blockKey)) {
+          this.log('STOP_LOSS_WAITING_FOR_DEPTH', state.reason, {
+            side,
+            requestedShares,
+            availableShares: round(preview?.shares || 0),
+            stopLossBid: this.config.STOP_LOSS_BID,
+          });
+          for (const trade of trades) trade.stopLossLastBlockKey = blockKey;
+          changed = true;
+        }
+        continue;
+      }
+
+      const execution = this.sweepBids(side, requestedShares);
+      if (!execution?.complete) continue;
+      this.closePositionsOnOppositeSignal(trades, execution, now, side, 'STOP_LOSS');
+      this.advanceRecoveryAfterStopLoss(this.windowStart, trades, now);
+      state.status = 'STOP_LOSS_FILLED';
+      state.reason = `Sold all ${requestedShares} ${side} shares after the $${this.config.STOP_LOSS_BID.toFixed(2)} stop-loss trigger.`;
+      this.log('STOP_LOSS_FILLED', state.reason, {
+        side,
+        shares: requestedShares,
+        triggerBid: trades[0]?.stopLossTriggerBid ?? quote.bestBid,
+        averageExitPrice: round(execution.averagePrice),
+        proceeds: round(execution.netProceeds),
+        fees: round(execution.fees),
+      });
+      changed = true;
+    }
+    if (changed) this.schedulePersistedState(true);
+    return changed;
+  }
+
   persistentStateSnapshot() {
     const state = {
       schemaVersion: 1,
@@ -501,11 +664,10 @@ class BtcPriceBandBot {
       activeSide: this.activeSide,
       lastBaseBuyAt: this.lastBaseBuyAt,
       pendingTrigger: this.pendingTrigger,
-      martingalePivot: this.martingalePivot,
-      martingaleReentryArmed: this.martingaleReentryArmed,
-      martingaleReentriesThisWindow: this.martingaleReentriesThisWindow,
-      martingalePivotedSides: this.martingalePivotedSides,
-      martingaleNextShares: this.martingaleNextShares,
+      entryTriggeredThisWindow: this.entryTriggeredThisWindow,
+      recoveryAdditions: this.recoveryAdditions,
+      consecutiveWins: this.consecutiveWins,
+      nextEntryShares: this.nextEntryShares,
       triggerSequence: this.triggerSequence,
       lastAskTrigger: this.lastAskTrigger,
       quotes: this.quotes,
@@ -571,6 +733,7 @@ class BtcPriceBandBot {
   resetWindow(start) {
     if (this.windowStart === start) return;
     const previousStart = this.windowStart;
+    if (previousStart != null) this.processStopLoss(this.now());
     this.markOpenPositions(this.now());
     for (const trade of this.trades) {
       if (trade.status === 'OPEN' && trade.windowStart < start) {
@@ -598,7 +761,8 @@ class BtcPriceBandBot {
     this.activeSide = null;
     this.lastBaseBuyAt = null;
     this.pendingTrigger = null;
-    this.martingaleNextShares = this.config.SHARES_PER_BUY;
+    this.entryTriggeredThisWindow = false;
+    this.syncRecoverySizing();
     this.martingaleReentryArmed = false;
     this.martingaleReentriesThisWindow = 0;
     this.martingalePivot = null;
@@ -889,7 +1053,7 @@ class BtcPriceBandBot {
       eventType: 'BEST_BID_ASK',
     };
     this.recordTerminalEvidence(side, now);
-    this.processMartingalePivot(now);
+    this.processStopLoss(now);
     const bestAskChanged = bestAsk != null
       && (previousBestAsk == null || Math.abs(bestAsk - previousBestAsk) >= EPSILON);
     if (bestAskChanged) {
@@ -921,7 +1085,7 @@ class BtcPriceBandBot {
       eventType: 'ORDER_BOOK',
     };
     this.recordTerminalEvidence(side, now);
-    return this.processMartingalePivot(now);
+    return this.processStopLoss(now);
   }
 
   processMartingalePivot(now = this.now()) {
@@ -1066,7 +1230,6 @@ class BtcPriceBandBot {
   }
 
   sweepBids(side, requestedShares, { consume = true } = {}) {
-    if (!this.config.SELLS_ON_OPPOSITE_TRIGGER) return null;
     const market = this.market;
     const quote = this.quotes[side];
     const tokenId = String(market?.tokens?.[side] || '');
@@ -1163,12 +1326,19 @@ class BtcPriceBandBot {
         state.reason = `Retrying the pending ${side} trigger until it fills or expires.`;
         return true;
       }
-      const canReplaceBaseEntry = this.pendingTrigger.mode === 'BASE_ENTRY'
+      const canReplaceBaseEntry = !this.config.ONE_TRIGGER_PER_WINDOW
+        && this.pendingTrigger.mode === 'BASE_ENTRY'
         && this.activeSideForWindow() == null
         && this.currentWindowOpenTrades().length === 0;
       const canReplaceMartingaleEntry = this.pendingTrigger.mode === 'MARTINGALE_REENTRY'
         && isMartingaleReentry;
-      if (!canReplaceBaseEntry && !canReplaceMartingaleEntry) return false;
+      if (!canReplaceBaseEntry && !canReplaceMartingaleEntry) {
+        if (this.config.ONE_TRIGGER_PER_WINDOW && this.entryTriggeredThisWindow) {
+          state.status = 'ONE_TRIGGER_PER_WINDOW';
+          state.reason = 'The window already used its single entry trigger.';
+        }
+        return false;
+      }
       if (!this.quoteIsFresh(quote, now) || !Number.isFinite(quote?.bestAsk)
         || quote.bestAsk < this.config.MIN_ENTRY_ASK
         || quote.bestAsk > this.config.MAX_ENTRY_ASK) return false;
@@ -1196,6 +1366,12 @@ class BtcPriceBandBot {
       state.status = 'ABOVE_PRICE_BAND';
       state.reason = `Best ask ${quote.bestAsk.toFixed(3)} is above $${this.config.MAX_ENTRY_ASK.toFixed(2)}.`;
       return false;
+    }
+
+    if (this.config.ONE_TRIGGER_PER_WINDOW && this.entryTriggeredThisWindow) {
+      state.status = 'ONE_TRIGGER_PER_WINDOW';
+      state.reason = 'The window already used its single entry trigger.';
+      return true;
     }
 
     if (!this.config.SELLS_ON_OPPOSITE_TRIGGER && openTrades.length > 0) {
@@ -1229,8 +1405,9 @@ class BtcPriceBandBot {
       : 0;
     const requestedShares = outgoingShares > EPSILON
       ? round(outgoingShares * this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER, 8)
-      : this.martingaleNextShares;
+      : this.nextEntryShares;
     state.qualifyingUpdates += 1;
+    this.entryTriggeredThisWindow = true;
     this.pendingTrigger = {
       id: `trigger-${++this.triggerSequence}`,
       side,
@@ -1258,7 +1435,7 @@ class BtcPriceBandBot {
       ? `Opposite ${side} trigger queued to sell ${round(outgoingShares)} outgoing shares and buy ${round(requestedShares)} (${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER}x).`
       : isMartingaleReentry
         ? `Martingale re-entry armed: queue ${round(requestedShares)} ${side} shares from the band; either side may trigger this buy.`
-      : `One ${round(requestedShares)}-share ${side} entry queued for this trigger${requestedShares > this.config.SHARES_PER_BUY ? ' using martingale pivot sizing' : ''}.`;
+      : `One ${round(requestedShares)}-share ${side} entry queued for this window.`;
     this.log('PENDING_TRIGGER_CREATED', state.reason, {
       triggerId: this.pendingTrigger.id,
       side,
@@ -1889,7 +2066,7 @@ class BtcPriceBandBot {
   }
 
   closePositionsOnOppositeSignal(trades, execution, now, newSide, exitReason = 'OPPOSITE_SIGNAL') {
-    if (!this.config.SELLS_ON_OPPOSITE_TRIGGER) {
+    if (!this.config.SELLS_ON_OPPOSITE_TRIGGER && exitReason !== 'STOP_LOSS') {
       return {
         soldShares: 0,
         remainingShares: trades.reduce((sum, trade) => sum + trade.shares, 0),
@@ -1937,7 +2114,7 @@ class BtcPriceBandBot {
       closedTrade.status = 'CLOSED';
       closedTrade.settlementStatus = 'CLOSED';
       closedTrade.closedAt = now;
-      closedTrade.exitSide = newSide;
+      closedTrade.exitSide = exitReason === 'STOP_LOSS' ? null : newSide;
       closedTrade.exitReason = exitReason;
       closedTrade.exitPrice = execution.averagePrice;
       closedTrade.exitGrossProceeds = grossProceeds;
@@ -1955,12 +2132,6 @@ class BtcPriceBandBot {
     this.realizedPnl = round(this.realizedPnl + totalRealized, 8);
     if (this.martingalePivot?.side === trades[0]?.side) {
       this.martingalePivot = null;
-    }
-    if (totalRealized > EPSILON) {
-      this.martingaleNextShares = this.config.SHARES_PER_BUY;
-      this.martingaleReentryArmed = false;
-      this.martingalePivot = null;
-      this.martingalePivotedSides = { UP: false, DOWN: false };
     }
     const remainingShares = this.currentWindowOpenTrades(trades[0]?.side)
       .reduce((sum, trade) => sum + trade.shares, 0);
@@ -2067,6 +2238,7 @@ class BtcPriceBandBot {
       outcome: null,
     };
     this.trades.push(trade);
+    this.entryTriggeredThisWindow = true;
     if (entryMode === 'MARTINGALE_REENTRY') {
       this.martingaleReentriesThisWindow += 1;
       this.martingaleReentryArmed = false;
@@ -2132,7 +2304,6 @@ class BtcPriceBandBot {
 
     const currentTrades = this.trades.filter(trade =>
       trade.status === 'OPEN' && trade.marketId === String(this.market.id));
-    let settlementRealizedPnl = 0;
     for (const trade of currentTrades) {
       const payout = trade.side === observed.winner ? 1 : 0;
       const proceeds = trade.shares * payout;
@@ -2147,7 +2318,6 @@ class BtcPriceBandBot {
       trade.outcome = payout === 1 ? 'WIN' : 'LOSS';
       this.cash = round(this.cash + proceeds, 8);
       this.realizedPnl += trade.realizedPnl;
-      settlementRealizedPnl += trade.realizedPnl;
       this.log('TERMINAL_PRICE_SETTLEMENT',
         `BTC ${trade.side} counted as ${payout ? '$1' : '$0'} per share from terminal prices recorded this window.`,
         {
@@ -2159,12 +2329,7 @@ class BtcPriceBandBot {
           realizedPnl: round(trade.realizedPnl),
         });
     }
-    if (settlementRealizedPnl > EPSILON) {
-      this.martingaleNextShares = this.config.SHARES_PER_BUY;
-      this.martingaleReentryArmed = false;
-      this.martingalePivot = null;
-      this.martingalePivotedSides = { UP: false, DOWN: false };
-    }
+    if (currentTrades.length) this.applyWindowRecoveryOutcome(this.windowStart, now);
     this.schedulePersistedState(true);
   }
 
@@ -2197,7 +2362,6 @@ class BtcPriceBandBot {
         const market = await this.marketData.getMarket(marketId);
         const settlementWindowStart = this.trades.find(trade =>
           trade.marketId === marketId)?.windowStart;
-        let marketRealizedPnl = 0;
         let settledCount = 0;
         for (const trade of this.trades) {
           if (trade.status !== 'AWAITING_RESOLUTION' || trade.marketId !== marketId) continue;
@@ -2220,19 +2384,15 @@ class BtcPriceBandBot {
           trade.outcome = payout === 1 ? 'WIN' : 'LOSS';
           this.cash = round(this.cash + proceeds, 8);
           this.realizedPnl += trade.realizedPnl;
-          marketRealizedPnl += trade.realizedPnl;
           settledCount += 1;
           this.log('POSITION_RESOLVED',
             `BTC ${trade.side} settled from its exact original market: ${trade.outcome.toLowerCase()}.`,
             { tradeId: trade.id, marketId, payout, realizedPnl: round(trade.realizedPnl) });
         }
-        if (marketRealizedPnl > EPSILON && settlementWindowStart === this.windowStart) {
-          this.martingaleNextShares = this.config.SHARES_PER_BUY;
-          this.martingaleReentryArmed = false;
-          this.martingalePivot = null;
-          this.martingalePivotedSides = { UP: false, DOWN: false };
+        if (settledCount > 0) {
+          this.applyWindowRecoveryOutcome(settlementWindowStart, now);
+          this.schedulePersistedState(true);
         }
-        if (settledCount > 0) this.schedulePersistedState(true);
       } catch (error) {
         for (const trade of this.trades) {
           if (trade.status === 'AWAITING_RESOLUTION' && trade.marketId === marketId) {
@@ -2261,6 +2421,7 @@ class BtcPriceBandBot {
       const currentStart = Math.floor(now / this.config.WINDOW_MS) * this.config.WINDOW_MS;
       this.resetWindow(currentStart);
       await this.refreshMarket(now);
+      this.processStopLoss(now);
       this.maybeSettleAtTerminalPrice(now);
       this.retryPendingTrigger(now);
       this.markOpenPositions(now);
@@ -2351,33 +2512,33 @@ class BtcPriceBandBot {
         sharesPerBuy: this.config.SHARES_PER_BUY,
         oppositeTriggerSizeMultiplier: this.config.SELLS_ON_OPPOSITE_TRIGGER
           ? this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER : null,
-        martingaleMultiplier: this.config.MARTINGALE_MULTIPLIER,
-        nextBaseBuyShares: this.martingaleNextShares,
-        martingalePivotBid: this.config.MARTINGALE_PIVOT_BID,
-        martingaleReentryArmed: this.martingaleReentryArmed,
-        martingaleReentriesThisWindow: this.martingaleReentriesThisWindow,
-        maxMartingaleReentriesPerWindow: this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW,
-        martingaleEligibleSide: this.martingaleReentryTargetSide(),
+        oneTriggerPerWindow: this.config.ONE_TRIGGER_PER_WINDOW,
+        entryTriggeredThisWindow: this.entryTriggeredThisWindow,
+        stopLossBid: this.config.STOP_LOSS_BID,
+        recoveryStepShares: this.config.RECOVERY_STEP_SHARES,
+        recoveryAdditions: this.recoveryAdditions,
+        maxRecoveryAdditions: this.config.MAX_RECOVERY_ADDITIONS,
+        consecutiveWins: this.consecutiveWins,
+        nextEntryShares: this.nextEntryShares,
+        resetAtFourAdditionsWins: this.config.RESET_AT_FOUR_ADDITIONS_WINS,
+        resetAtSevenAdditionsWins: this.config.RESET_AT_SEVEN_ADDITIONS_WINS,
         allOrNothingBuys: true,
+        allOrNothingSells: true,
         sameSideCooldownMs: this.config.SAME_SIDE_COOLDOWN_MS,
         activeSide: this.activeSideForWindow(),
         oneBaseBuyPerActiveSide: this.config.SELLS_ON_OPPOSITE_TRIGGER,
-        oneMartingaleReentryPerPivot: true,
         sellsOnOppositeTrigger: this.config.SELLS_ON_OPPOSITE_TRIGGER,
         pendingTriggerTtlMs: this.config.PENDING_TRIGGER_TTL_MS,
         pendingRetryMaxAsk: this.config.PENDING_RETRY_MAX_ASK,
         minEntryAsk: this.config.MIN_ENTRY_ASK,
         maxEntryAsk: this.config.MAX_ENTRY_ASK,
-        trigger: this.config.SELLS_ON_OPPOSITE_TRIGGER
-          ? `The first qualifying ask in the inclusive $${this.config.MIN_ENTRY_ASK.toFixed(2)}-$${this.config.MAX_ENTRY_ASK.toFixed(2)} band buys ${this.martingaleNextShares} base shares. An opposite trigger sells the outgoing position and buys ${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER} times the shares sold.`
-          : `Buy the first qualifying ask in the inclusive $${this.config.MIN_ENTRY_ASK.toFixed(2)}-$${this.config.MAX_ENTRY_ASK.toFixed(2)} band. After a $${this.config.MARTINGALE_PIVOT_BID.toFixed(2)} pivot, only the side opposite the latest position may trigger the next ${this.martingaleNextShares}-share buy; allow at most ${this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW} additional martingale buys per window. No sell orders are placed.`,
+        trigger: `Buy at most once per 5-minute window when a fresh best ask is in the inclusive $${this.config.MIN_ENTRY_ASK.toFixed(2)}-$${this.config.MAX_ENTRY_ASK.toFixed(2)} band; next order size is ${this.nextEntryShares} shares.`,
         orderType: 'PAPER ALL-OR-NOTHING TAKER SWEEP',
         marketSweepMaxPrice: 1,
-        intraWindowSales: this.config.SELLS_ON_OPPOSITE_TRIGGER,
-        reversalRule: this.config.SELLS_ON_OPPOSITE_TRIGGER
-          ? `On an opposite trigger, sell all outgoing shares at visible bids, then buy ${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER} times that share count. Require full visible depth for both legs; otherwise do not partially fill and retry up to two seconds.`
-          : 'Opposite-side signals never sell. After a pivot, only the side opposite the latest position may trigger a martingale re-entry; allow at most two additional buys per window.',
-        martingaleRule: `When the latest position side's best bid reaches or drops below $${this.config.MARTINGALE_PIVOT_BID.toFixed(2)}, keep all shares and arm a buy at ${this.config.MARTINGALE_MULTIPLIER} times the larger of current held shares or the previous base size. Only the opposite side may trigger it, with at most ${this.config.MAX_MARTINGALE_REENTRIES_PER_WINDOW} additional martingale buys per window, excluding the ${this.config.SHARES_PER_BUY}-share base buy. Reset count and size at each new window.`,
+        intraWindowSales: true,
+        stopLossRule: `When the held side's best bid reaches or falls below $${this.config.STOP_LOSS_BID.toFixed(2)}, sell all shares using visible bids; no partial sale is recorded.`,
+        recoveryRule: `Each stop-loss adds ${this.config.RECOVERY_STEP_SHARES} shares for the next window, up to ${this.config.MAX_RECOVERY_ADDITIONS} additions. At four additions, hold size until two consecutive wins reset to base; at seven or more, hold until three wins. At other levels, each win removes one addition.`,
+        reversalRule: 'An opposite-side ask does not sell or replace the window’s one entry. Unsold shares remain until terminal-price or official market resolution.',
         terminalCheckSeconds: this.config.TERMINAL_CHECK_SECONDS,
         terminalThresholds: {
           winnerBestBidAtLeast: this.config.TERMINAL_WINNER_BID,
@@ -2421,15 +2582,15 @@ class BtcPriceBandBot {
         attempts: this.pendingTrigger.attempts,
         requestedShares: this.pendingTrigger.requestedShares,
       } : null,
-      martingalePivot: this.martingalePivot ? {
-        side: this.martingalePivot.side,
-        triggeredAt: this.martingalePivot.triggeredAt,
-        triggerBid: this.martingalePivot.triggerBid,
-        sharesAtTrigger: this.martingalePivot.sharesAtTrigger,
-        nextBaseBuyShares: this.martingalePivot.nextBaseBuyShares,
-        threshold: this.config.MARTINGALE_PIVOT_BID,
-        reentryArmed: this.martingaleReentryArmed,
-      } : null,
+      stopLoss: (() => {
+        const triggeredTrade = currentWindowTrades.find(trade => trade.stopLossTriggeredAt != null);
+        return triggeredTrade ? {
+          thresholdBid: this.config.STOP_LOSS_BID,
+          triggeredAt: triggeredTrade.stopLossTriggeredAt,
+          triggerBid: triggeredTrade.stopLossTriggerBid,
+          waitingForDepth: triggeredTrade.status === 'OPEN',
+        } : null;
+      })(),
       account,
       inventory: {
         currentWindow: this.inventoryBoxSnapshot(this.trades,

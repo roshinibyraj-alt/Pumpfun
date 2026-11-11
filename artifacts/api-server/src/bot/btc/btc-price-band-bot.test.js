@@ -45,9 +45,12 @@ function createBot({ production = false } = {}) {
   const legacyFixtureConfig = {
     ...config,
     SELLS_ON_OPPOSITE_TRIGGER: true,
+    ONE_TRIGGER_PER_WINDOW: false,
     MIN_ENTRY_ASK: 0.59,
     MAX_ENTRY_ASK: 0.61,
     OPPOSITE_TRIGGER_SIZE_MULTIPLIER: 1.2,
+    MAX_MARTINGALE_REENTRIES_PER_WINDOW: 2,
+    MARTINGALE_MULTIPLIER: 1.5,
     MARTINGALE_PIVOT_BID: 0,
   };
   const bot = new BtcPriceBandBot({
@@ -89,15 +92,18 @@ function attachCurrentMarket(bot) {
   };
 }
 
-test('config uses BTC 5-minute windows, the $0.69-$0.71 band, the $0.50 pivot, and no sells', () => {
+test('config uses one BTC entry per 5-minute window with fixed-step recovery', () => {
   assert.equal(config.WINDOW_MS, 5 * 60 * 1000);
   assert.match(config.STRATEGY_VERSION, /0\.69-0\.71/);
   assert.equal(config.SHARES_PER_BUY, 50);
+  assert.equal(config.ONE_TRIGGER_PER_WINDOW, true);
+  assert.equal(config.STOP_LOSS_BID, 0.40);
+  assert.equal(config.RECOVERY_STEP_SHARES, 50);
+  assert.equal(config.MAX_RECOVERY_ADDITIONS, 10);
+  assert.equal(config.RESET_AT_FOUR_ADDITIONS_WINS, 2);
+  assert.equal(config.RESET_AT_SEVEN_ADDITIONS_WINS, 3);
   assert.equal(config.SELLS_ON_OPPOSITE_TRIGGER, false);
-  assert.equal(config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER, 1.5);
-  assert.equal(config.MARTINGALE_MULTIPLIER, 1.5);
-  assert.equal(config.MARTINGALE_PIVOT_BID, 0.50);
-  assert.equal(config.MAX_MARTINGALE_REENTRIES_PER_WINDOW, 2);
+  assert.equal(config.MAX_MARTINGALE_REENTRIES_PER_WINDOW, 0);
   assert.equal(config.SAME_SIDE_COOLDOWN_MS, 1_000);
   assert.equal(config.PENDING_TRIGGER_TTL_MS, 2_000);
   assert.equal(config.PENDING_RETRY_MAX_ASK, 1);
@@ -105,42 +111,44 @@ test('config uses BTC 5-minute windows, the $0.69-$0.71 band, the $0.50 pivot, a
   assert.equal(config.MAX_ENTRY_ASK, 0.71);
 });
 
-test('a new 5-minute window clears unused martingale sizing without selling existing shares', () => {
+test('a stop-loss sells the full position and adds 50 shares for the next window', () => {
   const { bot, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
 
   bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
-  setNow(600_002);
-  const pivot = book('up-token', 0.70, 100, 0.50);
-  pivot.timestamp = '600002';
-  bot.handleMarketMessage(pivot);
-
   assert.equal(bot.trades[0].status, 'OPEN');
-  assert.equal(bot.martingaleNextShares, 75);
-  assert.equal(bot.martingaleReentryArmed, true);
+  setNow(600_002);
+  const stopLossBook = book('up-token', 0.70, 100, 0.40);
+  stopLossBook.timestamp = '600002';
+  bot.handleMarketMessage(stopLossBook);
+
+  assert.equal(bot.trades[0].status, 'CLOSED');
+  assert.equal(bot.trades[0].exitReason, 'STOP_LOSS');
+  assert.equal(bot.trades[0].shares, 50);
+  assert.equal(bot.recoveryAdditions, 1);
+  assert.equal(bot.nextEntryShares, 100);
 
   setNow(900_001);
   bot.resetWindow(900_000);
 
   const snapshot = bot.snapshot();
-  assert.equal(bot.martingaleNextShares, 50);
-  assert.equal(bot.martingaleReentryArmed, false);
-  assert.equal(bot.martingaleReentriesThisWindow, 0);
-  assert.equal(bot.martingalePivot, null);
+  assert.equal(bot.nextEntryShares, 100);
+  assert.equal(bot.entryTriggeredThisWindow, false);
   assert.equal(bot.pendingTrigger, null);
-  assert.equal(bot.trades[0].status, 'AWAITING_RESOLUTION');
+  assert.equal(bot.trades[0].status, 'CLOSED');
   assert.equal(bot.trades[0].shares, 50);
-  assert.equal(snapshot.account.closedPositions, 0);
-  assert.equal(snapshot.strategy.nextBaseBuyShares, 50);
-  assert.equal(snapshot.strategy.martingaleReentryArmed, false);
-  assert.equal(snapshot.strategy.martingaleReentriesThisWindow, 0);
+  assert.equal(snapshot.account.closedPositions, 1);
+  assert.equal(snapshot.strategy.nextEntryShares, 100);
+  assert.equal(snapshot.strategy.recoveryAdditions, 1);
 });
 
-test('a profitable prior-window resolution does not reset current-window martingale sizing', async () => {
+test('a resolved win steps recovery size down by 50 shares', async () => {
   const { bot, market, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
 
+  bot.recoveryAdditions = 2;
+  bot.syncRecoverySizing();
   setNow(900_001);
   bot.resetWindow(900_000);
   bot.market = {
@@ -154,22 +162,17 @@ test('a profitable prior-window resolution does not reset current-window marting
   const nextEntry = book('up-token-next', 0.70, 100, 0.55);
   nextEntry.timestamp = '900001';
   bot.handleMarketMessage(nextEntry);
-
-  setNow(900_002);
-  const pivot = book('up-token-next', 0.70, 100, 0.50);
-  pivot.timestamp = '900002';
-  bot.handleMarketMessage(pivot);
-  assert.equal(bot.martingaleNextShares, 75);
-  assert.equal(bot.martingaleReentryArmed, true);
+  assert.equal(bot.trades.filter(trade => trade.windowStart === 900_000).length, 0);
 
   await bot.resolveDue(900_003, { force: true });
 
   assert.equal(bot.trades.find(trade => trade.windowStart === 600_000).status, 'SETTLED');
-  assert.equal(bot.martingaleNextShares, 75);
-  assert.equal(bot.martingaleReentryArmed, true);
+  assert.equal(bot.recoveryAdditions, 1);
+  assert.equal(bot.nextEntryShares, 100);
+  assert.equal(bot.consecutiveWins, 1);
 });
 
-test('production never sells on an opposite ask and re-enters only on the opposite side', () => {
+test('production allows one entry trigger per window and ignores the opposite side', () => {
   const { bot, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
 
@@ -177,37 +180,19 @@ test('production never sells on an opposite ask and re-enters only on the opposi
   bot.handleMarketMessage(book('down-token', 0.70, 200, 0.54));
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].status, 'OPEN');
-  assert.equal(bot.sideState.DOWN.status, 'POSITION_LOCKED');
+  assert.equal(bot.sideState.DOWN.status, 'ONE_TRIGGER_PER_WINDOW');
 
   setNow(600_002);
-  const downOutside = book('down-token', 0.72, 200, 0.54);
-  downOutside.timestamp = '600002';
-  bot.handleMarketMessage(downOutside);
-
-  setNow(600_003);
-  const pivot = book('up-token', 0.70, 200, 0.50);
-  pivot.timestamp = '600003';
-  bot.handleMarketMessage(pivot);
-  assert.equal(bot.martingaleNextShares, 75);
-  assert.equal(bot.martingaleReentryArmed, true);
-
-  setNow(600_004);
-  const downReentry = book('down-token', 0.70, 200, 0.54);
-  downReentry.timestamp = '600004';
-  bot.handleMarketMessage(downReentry);
   const snapshot = bot.snapshot();
-  assert.equal(snapshot.trades.length, 2);
-  assert.ok(snapshot.trades.every(trade => trade.status === 'OPEN'));
-  assert.equal(snapshot.trades.find(trade => trade.side === 'UP').shares, 50);
-  assert.equal(snapshot.trades.find(trade => trade.side === 'DOWN').shares, 75);
+  assert.equal(snapshot.trades.length, 1);
   assert.equal(snapshot.strategy.minEntryAsk, 0.69);
   assert.equal(snapshot.strategy.maxEntryAsk, 0.71);
-  assert.equal(snapshot.strategy.oppositeTriggerSizeMultiplier, null);
-  assert.equal(snapshot.strategy.martingaleMultiplier, 1.5);
-  assert.equal(snapshot.strategy.martingalePivotBid, 0.50);
   assert.equal(snapshot.strategy.sellsOnOppositeTrigger, false);
-  assert.equal(snapshot.strategy.intraWindowSales, false);
-  assert.equal(snapshot.strategy.martingaleReentryArmed, false);
+  assert.equal(snapshot.strategy.oneTriggerPerWindow, true);
+  assert.equal(snapshot.strategy.entryTriggeredThisWindow, true);
+  assert.equal(snapshot.strategy.stopLossBid, 0.40);
+  assert.equal(snapshot.strategy.nextEntryShares, 50);
+  assert.equal(snapshot.strategy.intraWindowSales, true);
   assert.equal(snapshot.account.closedPositions, 0);
   assert.equal(snapshot.events.some(event => event.type === 'OPPOSITE_SIGNAL_SELL'), false);
 });
@@ -224,7 +209,105 @@ test('production entry rejects asks outside the new band', () => {
   assert.equal(bot.sideState.DOWN.status, 'ABOVE_PRICE_BAND');
 });
 
-test('$0.50 martingale pivot holds the position and advances sizing once', () => {
+test('stop-loss latches at $0.40 and waits for full visible bid depth', () => {
+  const { bot, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
+
+  setNow(600_002);
+  const thinStopBook = book('up-token', 0.70, 100, 0.40);
+  thinStopBook.bids[0].size = '25';
+  thinStopBook.timestamp = '600002';
+  bot.handleMarketMessage(thinStopBook);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].stopLossTriggeredAt, 600_002);
+  assert.equal(bot.recoveryAdditions, 0);
+
+  setNow(600_003);
+  const fullDepthBook = book('up-token', 0.70, 100, 0.45);
+  fullDepthBook.timestamp = '600003';
+  bot.handleMarketMessage(fullDepthBook);
+  assert.equal(bot.trades[0].status, 'CLOSED');
+  assert.equal(bot.trades[0].exitReason, 'STOP_LOSS');
+  assert.equal(bot.trades[0].exitPrice, 0.45);
+  assert.equal(bot.recoveryAdditions, 1);
+  assert.equal(bot.nextEntryShares, 100);
+});
+
+test('wins step back by one addition and reset at the specified win streaks', () => {
+  const { bot } = createBot();
+  let sequence = 0;
+  const recordWin = () => {
+    const windowStart = 1_000_000 + sequence * config.WINDOW_MS;
+    bot.trades.push({
+      id: `recovery-win-${++sequence}`,
+      windowStart,
+      status: 'SETTLED',
+      realizedPnl: 10,
+    });
+    bot.applyWindowRecoveryOutcome(windowStart);
+  };
+
+  bot.recoveryAdditions = 3;
+  bot.syncRecoverySizing();
+  recordWin();
+  assert.equal(bot.recoveryAdditions, 2);
+  assert.equal(bot.nextEntryShares, 150);
+
+  bot.recoveryAdditions = 4;
+  bot.consecutiveWins = 0;
+  bot.syncRecoverySizing();
+  recordWin();
+  assert.equal(bot.recoveryAdditions, 4);
+  assert.equal(bot.consecutiveWins, 1);
+  recordWin();
+  assert.equal(bot.recoveryAdditions, 0);
+  assert.equal(bot.consecutiveWins, 0);
+
+  bot.recoveryAdditions = 7;
+  bot.consecutiveWins = 0;
+  bot.syncRecoverySizing();
+  recordWin();
+  recordWin();
+  assert.equal(bot.recoveryAdditions, 7);
+  assert.equal(bot.consecutiveWins, 2);
+  recordWin();
+  assert.equal(bot.recoveryAdditions, 0);
+  assert.equal(bot.nextEntryShares, 50);
+});
+
+test('recovery additions cap at ten and survive state restoration', () => {
+  const { bot, marketData } = createBot({ production: true });
+  for (let index = 0; index < 11; index += 1) {
+    const windowStart = 2_000_000 + index * config.WINDOW_MS;
+    const trade = {
+      id: `stop-loss-${index}`,
+      windowStart,
+      status: 'CLOSED',
+      stopLossTriggeredAt: windowStart + 1,
+    };
+    bot.trades.push(trade);
+    bot.advanceRecoveryAfterStopLoss(windowStart, [trade], windowStart + 1);
+  }
+  assert.equal(bot.recoveryAdditions, 10);
+  assert.equal(bot.nextEntryShares, 550);
+
+  bot.entryTriggeredThisWindow = true;
+  bot.consecutiveWins = 2;
+  const saved = bot.persistentStateSnapshot();
+  const restored = new BtcPriceBandBot({
+    marketData,
+    now: () => 2_000_000,
+    config: bot.config,
+  });
+  restored.restorePersistentState(saved);
+  assert.equal(restored.recoveryAdditions, 10);
+  assert.equal(restored.nextEntryShares, 550);
+  assert.equal(restored.consecutiveWins, 2);
+  assert.equal(restored.entryTriggeredThisWindow, true);
+});
+
+test.skip('legacy $0.50 martingale pivot behavior is no longer active', () => {
   const { bot, market, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
@@ -269,7 +352,7 @@ test('$0.50 martingale pivot holds the position and advances sizing once', () =>
   assert.equal(nextWindowTrade.shares, 50);
 });
 
-test('martingale permits only two opposite-side re-entries per window and restores the used count', () => {
+test.skip('legacy martingale re-entries are no longer active', () => {
   const { bot, marketData, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
@@ -353,7 +436,7 @@ test('martingale permits only two opposite-side re-entries per window and restor
   assert.equal(bot.snapshot().strategy.maxMartingaleReentriesPerWindow, 2);
 });
 
-test('a profitable resolution resets pivot martingale sizing and clears the pending re-entry', async () => {
+test.skip('legacy martingale win reset behavior is no longer active', async () => {
   const { bot, marketData, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
@@ -373,7 +456,7 @@ test('a profitable resolution resets pivot martingale sizing and clears the pend
   assert.equal(bot.snapshot().strategy.nextBaseBuyShares, 50);
 });
 
-test('pivot and martingale size survive restore; a profitable resolution resets sizing', async () => {
+test.skip('legacy pivot persistence is no longer active', async () => {
   const { bot, marketData, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
@@ -1064,7 +1147,7 @@ test('in-window threshold evidence settles at 297 seconds even when both books a
   assert.equal(bot.trades[0].resolutionPayout, 1);
 });
 
-test('conflicting threshold evidence in both directions waits for official resolution', () => {
+test('stop-loss closes the held leg before conflicting terminal evidence is reviewed', () => {
   const { bot, setNow } = createBot();
   bot.windowStart = 600_000;
   bot.windowEnd = 900_000;
@@ -1088,7 +1171,8 @@ test('conflicting threshold evidence in both directions waits for official resol
 
   assert.equal(bot.terminalObservation.winner, null);
   assert.equal(bot.terminalObservation.ambiguous, true);
-  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].status, 'CLOSED');
+  assert.equal(bot.trades[0].exitReason, 'STOP_LOSS');
 });
 
 test('297-second prices outside the thresholds keep positions for official resolution', () => {
