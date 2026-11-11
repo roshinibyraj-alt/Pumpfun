@@ -80,11 +80,10 @@ function attachCurrentMarket(bot) {
 test('config limits the active strategy to BTC 5-minute windows and 50-share buys', () => {
   assert.equal(config.WINDOW_MS, 5 * 60 * 1000);
   assert.equal(config.SHARES_PER_BUY, 50);
-  assert.equal(config.FLIP_ESCALATION_AFTER, 4);
-  assert.equal(config.FLIP_ESCALATION_REBUY_SHARES, 100);
+  assert.equal(config.SELLS_ON_OPPOSITE_TRIGGER, false);
   assert.equal(config.SAME_SIDE_COOLDOWN_MS, 1_000);
   assert.equal(config.PENDING_TRIGGER_TTL_MS, 2_000);
-  assert.equal(config.PENDING_RETRY_MAX_ASK, 0.56);
+  assert.equal(config.PENDING_RETRY_MAX_ASK, 1);
   assert.equal(config.MIN_ENTRY_ASK, 0.52);
   assert.equal(config.MAX_ENTRY_ASK, 0.54);
 });
@@ -132,7 +131,7 @@ test('an explicit history reset creates a fresh durable ledger before restoring 
   }
 });
 
-test('an opposite-side ask trigger sells held shares then buys the same count', () => {
+test('an opposite-side ask trigger buys 50 and leaves existing shares open', () => {
   const { bot } = createBot();
   bot.windowStart = 600_000;
   bot.windowEnd = 900_000;
@@ -152,23 +151,21 @@ test('an opposite-side ask trigger sells held shares then buys the same count', 
   const snapshot = bot.snapshot();
   assert.equal(snapshot.strategy.timeframe, '5m');
   assert.deepEqual(snapshot.strategy.assets, ['BTC']);
-  assert.equal(snapshot.strategy.intraWindowSales, true);
-  assert.equal(snapshot.account.openPositions, 1);
-  assert.equal(snapshot.account.closedPositions, 1);
-  assert.equal(snapshot.inventory.currentWindow.UP.shares, 0);
+  assert.equal(snapshot.strategy.intraWindowSales, false);
+  assert.equal(snapshot.strategy.noShareEscalation, true);
+  assert.equal(snapshot.strategy.allOrNothingBuys, true);
+  assert.equal(snapshot.strategy.sellsOnOppositeTrigger, false);
+  assert.equal(snapshot.strategy.marketSweepMaxPrice, 1);
+  assert.equal(snapshot.account.openPositions, 2);
+  assert.equal(snapshot.account.closedPositions, 0);
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 50);
   assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 50);
-  assert.equal(snapshot.trades[0].side, 'UP');
-  assert.equal(snapshot.trades[0].status, 'CLOSED');
-  assert.equal(snapshot.trades[0].exitReason, 'OPPOSITE_SIGNAL');
-  assert.equal(snapshot.trades[0].exitPrice, 0.5);
-  assert.equal(snapshot.trades[1].side, 'DOWN');
-  assert.equal(snapshot.trades[1].shares, 50);
-  assert.equal(snapshot.trades[1].entryMode, 'OPPOSITE_SIGNAL_REVERSAL');
-  assert.equal(snapshot.account.realizedPnl, -1);
-  assert.equal(snapshot.trades[0].fees, 0);
+  assert.ok(snapshot.trades.every(trade => trade.status === 'OPEN'));
+  assert.equal(snapshot.trades.find(trade => trade.side === 'DOWN').entryMode, 'OPPOSITE_TRIGGER_BUY');
+  assert.equal(snapshot.account.realizedPnl, 0);
 });
 
-test('same-side triggers do not add shares and the opposite trigger flips the active 50-share position', () => {
+test('same-side triggers do not add shares and opposite triggers retain both legs', () => {
   const { bot } = createBot();
   bot.windowStart = 600_000;
   bot.windowEnd = 900_000;
@@ -198,18 +195,16 @@ test('same-side triggers do not add shares and the opposite trigger flips the ac
   const upTrades = snapshot.trades.filter(trade => trade.side === 'UP');
   const downTrades = snapshot.trades.filter(trade => trade.side === 'DOWN');
   assert.equal(upTrades.length, 1);
-  assert.ok(upTrades.every(trade => trade.status === 'CLOSED'));
+  assert.ok(upTrades.every(trade => trade.status === 'OPEN'));
   assert.equal(downTrades.length, 1);
   assert.equal(downTrades[0].shares, 50);
   assert.equal(downTrades[0].status, 'OPEN');
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 50);
   assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 50);
   assert.equal(snapshot.strategy.activeSide, 'DOWN');
-  assert.deepEqual(snapshot.strategy.flipEscalation, {
-    threshold: 4,
-    rebuyShares: 100,
-    consecutiveCompletedFlips: 1,
-    nextRebuyShares: 50,
-  });
+  assert.equal(snapshot.strategy.oneBaseBuyPerActiveSide, true);
+  assert.equal(snapshot.strategy.intraWindowSales, false);
+  assert.equal(snapshot.account.closedPositions, 0);
 
   const legacyState = bot.persistentStateSnapshot();
   delete legacyState.activeSide;
@@ -219,19 +214,21 @@ test('same-side triggers do not add shares and the opposite trigger flips the ac
   assert.equal(restoredLegacy.activeSide, 'DOWN');
 });
 
-test('the next reversal targets 100 shares after four completed flips in the same window', () => {
+test('repeated opposite triggers always buy 50 shares without selling or escalation', () => {
   const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 200, 0.50));
-
-  const flips = [
+  const signals = [
+    { side: 'UP', ask: 0.53 },
     { side: 'DOWN', ask: 0.53 },
     { side: 'UP', ask: 0.52 },
     { side: 'DOWN', ask: 0.52 },
+    { side: 'UP', ask: 0.54 },
+    { side: 'DOWN', ask: 0.54 },
     { side: 'UP', ask: 0.53 },
+    { side: 'DOWN', ask: 0.53 },
   ];
-  flips.forEach(({ side, ask }, index) => {
-    const at = 600_002 + index;
+  signals.forEach(({ side, ask }, index) => {
+    const at = 600_001 + index;
     setNow(at);
     const message = book(
       side === 'UP' ? 'up-token' : 'down-token',
@@ -243,117 +240,66 @@ test('the next reversal targets 100 shares after four completed flips in the sam
     bot.handleMarketMessage(message);
   });
 
-  assert.equal(bot.consecutiveFlipCount, 4);
-  assert.equal(bot.snapshot().strategy.flipEscalation.nextRebuyShares, 100);
-  const saved = bot.persistentStateSnapshot();
-  const restored = new BtcPriceBandBot({ now: () => 600_006 });
-  restored.restorePersistentState(saved);
-  assert.equal(restored.consecutiveFlipCount, 4);
-  restored.resetWindow(900_000);
-  assert.equal(restored.consecutiveFlipCount, 0);
-
-  bot.books.get('up-token').bids[0].availableSize = 100;
-  setNow(600_006);
-  const escalatedFlip = book('down-token', 0.53, 200, 0.49);
-  escalatedFlip.timestamp = '600006';
-  bot.handleMarketMessage(escalatedFlip);
   const snapshot = bot.snapshot();
-  assert.equal(snapshot.inventory.currentWindow.UP.shares, 0);
-  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 100);
-  assert.equal(snapshot.strategy.flipEscalation.consecutiveCompletedFlips, 5);
-  assert.equal(snapshot.strategy.flipEscalation.nextRebuyShares, 100);
+  assert.equal(snapshot.trades.length, 8);
+  assert.ok(snapshot.trades.every(trade => trade.shares === 50 && trade.status === 'OPEN'));
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 200);
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 200);
+  assert.equal(snapshot.account.closedPositions, 0);
+  assert.equal(snapshot.account.realizedPnl, 0);
+  assert.equal(snapshot.strategy.activeSide, 'DOWN');
+});
+
+test('opposite trigger waits for all 50 shares then sweeps above the old price ceiling', () => {
+  const { bot, setNow } = createBot();
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
+
+  setNow(600_002);
+  const shortBook = book('down-token', 0.53, 49, 0.49);
+  shortBook.timestamp = '600002';
+  bot.handleMarketMessage(shortBook);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 50);
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 0);
+  assert.equal(bot.pendingTrigger.mode, 'OPPOSITE_TRIGGER_BUY');
+  assert.equal(bot.pendingTrigger.requestedShares, 50);
+
+  setNow(600_003);
+  bot.handleMarketMessage({
+    event_type: 'book',
+    asset_id: 'down-token',
+    timestamp: '600003',
+    asks: [
+      { price: '0.53', size: '20' },
+      { price: '0.90', size: '30' },
+    ],
+    bids: [{ price: '0.49', size: '100' }],
+  });
+
+  const snapshot = bot.snapshot();
+  const downTrade = snapshot.trades.find(trade => trade.side === 'DOWN');
+  assert.equal(snapshot.trades.length, 2);
+  assert.equal(downTrade.shares, 50);
+  assert.equal(downTrade.entryPrice, 0.752);
+  assert.equal(downTrade.status, 'OPEN');
+  assert.deepEqual(downTrade.fills.map(fill => fill.price), [0.53, 0.90]);
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 50);
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 50);
+  assert.equal(snapshot.account.closedPositions, 0);
   assert.equal(snapshot.pendingTrigger, null);
 });
 
-test('an escalated rebuy waits for the extra visible ask depth and survives as one pending flip', () => {
-  const { bot, setNow } = createBot();
-  attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 200, 0.50));
-
-  const flips = [
-    { side: 'DOWN', ask: 0.53 },
-    { side: 'UP', ask: 0.52 },
-    { side: 'DOWN', ask: 0.52 },
-    { side: 'UP', ask: 0.53 },
-  ];
-  flips.forEach(({ side, ask }, index) => {
-    const at = 600_002 + index;
-    setNow(at);
-    const message = book(
-      side === 'UP' ? 'up-token' : 'down-token',
-      ask,
-      200,
-      side === 'UP' ? 0.50 : 0.49,
-    );
-    message.timestamp = String(at);
-    bot.handleMarketMessage(message);
-  });
-
-  bot.books.get('up-token').bids[0].availableSize = 100;
-  setNow(600_006);
-  const limitedDepth = book('down-token', 0.53, 50, 0.49);
-  limitedDepth.timestamp = '600006';
-  bot.handleMarketMessage(limitedDepth);
-  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 0);
-  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 50);
-  assert.equal(bot.pendingTrigger.rebuyTargetShares, 100);
-  assert.equal(bot.pendingTrigger.sharesBought, 50);
-  assert.equal(bot.consecutiveFlipCount, 4);
-
-  setNow(600_007);
-  const addedDepth = book('down-token', 0.54, 50, 0.49);
-  addedDepth.timestamp = '600007';
-  bot.handleMarketMessage(addedDepth);
-  assert.equal(bot.pendingTrigger, null);
-  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 100);
-  assert.equal(bot.consecutiveFlipCount, 5);
-});
-
-test('partial reversal buys exactly the shares sold and retains the unsold remainder', () => {
+test('an all-or-nothing buy does not consume asks when paper cash is insufficient', () => {
   const { bot } = createBot();
-  bot.windowStart = 600_000;
-  bot.windowEnd = 900_000;
-  bot.market = {
-    id: 'btc-5m-market',
-    start: 600_000,
-    end: 900_000,
-    tokens: { UP: 'up-token', DOWN: 'down-token' },
-    raw: { feesEnabled: false },
-  };
-  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
-  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
-  const upBook = bot.books.get('up-token');
-  upBook.bids[0].availableSize = 20;
-  bot.handleMarketMessage(book('down-token', 0.53, 100, 0.49));
-
-  const openInventory = bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN');
-  assert.equal(openInventory.UP.shares, 30);
-  assert.equal(openInventory.DOWN.shares, 20);
-  assert.equal(bot.activeSide, 'DOWN');
-  assert.equal(bot.pendingTrigger.mode, 'OPPOSITE_SIGNAL_REVERSAL');
-  assert.equal(bot.pendingTrigger.sharesSold, 20);
-  assert.equal(bot.pendingTrigger.sharesBought, 20);
-});
-
-test('a failed matched buy is retried before any further shares are sold', () => {
-  const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
+  bot.cash = 0;
   bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
-  const tryBuy = bot.tryBuy.bind(bot);
-  bot.tryBuy = () => false;
 
-  setNow(600_002);
-  bot.handleMarketMessage(book('down-token', 0.53, 100, 0.49));
-  assert.equal(bot.pendingTrigger.unmatchedShares, 50);
-  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 0);
-
-  bot.tryBuy = tryBuy;
-  setNow(600_003);
-  bot.retryPendingTrigger(600_003);
-
-  assert.equal(bot.pendingTrigger, null);
-  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 50);
-  assert.equal(bot.activeSide, 'DOWN');
+  assert.equal(bot.trades.length, 0);
+  assert.equal(bot.books.get('up-token').asks[0].availableSize, 100);
+  assert.equal(bot.sideState.UP.status, 'INSUFFICIENT_CAPITAL');
+  assert.equal(bot.pendingTrigger.mode, 'BASE_ENTRY');
 });
 
 test('same-side ask-size and price changes do not add while the direction is locked', () => {
@@ -539,7 +485,7 @@ test('an in-range ask waits for full 50-share depth, then fills once', () => {
   assert.equal(bot.trades[0].shares, 50);
 });
 
-test('a missed entry retries after leaving the band, but never above the $0.56 ceiling', () => {
+test('a missed entry retries above the previous price ceiling with a full 50-share sweep', () => {
   const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.53, 49));
@@ -547,16 +493,12 @@ test('a missed entry retries after leaving the band, but never above the $0.56 c
   assert.equal(bot.pendingTrigger.mode, 'BASE_ENTRY');
 
   setNow(600_002);
-  bot.handleMarketMessage(book('up-token', 0.57, 100));
-  assert.equal(bot.trades.length, 0);
-  assert.equal(bot.sideState.UP.status, 'WAITING_FOR_RETRY_PRICE');
-
-  setNow(600_003);
-  bot.handleMarketMessage(book('up-token', 0.55, 100));
+  bot.handleMarketMessage(book('up-token', 0.90, 100));
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].shares, 50);
   assert.equal(bot.trades[0].triggerAsk, 0.53);
-  assert.equal(bot.trades[0].bestAskAtFill, 0.55);
+  assert.equal(bot.trades[0].bestAskAtFill, 0.90);
+  assert.equal(bot.trades[0].entryPrice, 0.90);
   assert.equal(bot.activeSide, 'UP');
 });
 
@@ -637,7 +579,45 @@ test('active side and pending retry survive paper-state persistence', () => {
   assert.equal(restoredAfterFill.lastBaseBuyAt, 600_001);
 });
 
-test('opposite-side flips bypass the one-second same-side duplicate guard', () => {
+test('a saved v6 reversal resumes as a fixed 50-share buy without selling', () => {
+  const { bot } = createBot();
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
+  const saved = bot.persistentStateSnapshot();
+  saved.pendingTrigger = {
+    id: 'trigger-2',
+    side: 'DOWN',
+    mode: 'OPPOSITE_SIGNAL_REVERSAL',
+    triggerType: 'BEST_ASK_PRICE_CHANGE',
+    triggerAsk: 0.53,
+    createdAt: 600_001,
+    expiresAt: 602_001,
+    windowStart: 600_000,
+    attempts: 0,
+    sharesSold: 20,
+    sharesBought: 0,
+    rebuyTargetShares: 100,
+    unmatchedShares: 20,
+    grossProceeds: 8,
+    saleFees: 0,
+    netProceeds: 8,
+  };
+
+  const restored = new BtcPriceBandBot({ now: () => 600_002 });
+  restored.restorePersistentState(saved);
+  attachCurrentMarket(restored);
+  assert.equal(restored.pendingTrigger.mode, 'OPPOSITE_TRIGGER_BUY');
+  assert.equal(restored.pendingTrigger.requestedShares, 50);
+  assert.equal('sharesSold' in restored.pendingTrigger, false);
+
+  restored.handleMarketMessage(book('down-token', 0.53, 100, 0.49));
+  const open = restored.trades.filter(trade => trade.status === 'OPEN');
+  assert.equal(open.length, 2);
+  assert.ok(open.every(trade => trade.shares === 50));
+  assert.equal(restored.snapshot().account.closedPositions, 0);
+});
+
+test('opposite triggers bypass the one-second guard without selling the existing leg', () => {
   const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
@@ -646,8 +626,10 @@ test('opposite-side flips bypass the one-second same-side duplicate guard', () =
 
   setNow(600_002);
   bot.handleMarketMessage(book('down-token', 0.53, 100, 0.49));
-  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 0);
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 50);
   assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 50);
+  assert.equal(bot.snapshot().account.closedPositions, 0);
+  assert.equal(bot.lastBaseBuyAt, 600_001);
   assert.equal(bot.activeSide, 'DOWN');
 });
 

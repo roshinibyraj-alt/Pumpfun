@@ -169,7 +169,6 @@ class BtcPriceBandBot {
       DOWN: this.emptySideState(),
     };
     this.activeSide = null;
-    this.consecutiveFlipCount = 0;
     this.lastBaseBuyAt = null;
     this.pendingTrigger = null;
     this.triggerSequence = 0;
@@ -350,29 +349,27 @@ class BtcPriceBandBot {
         || tradeSequenceFromId(b.id) - tradeSequenceFromId(a.id))[0];
     this.activeSide = ['UP', 'DOWN'].includes(state.activeSide)
       ? state.activeSide : latestWindowTrade?.side || null;
-    this.consecutiveFlipCount = Math.max(
-      0,
-      Math.trunc(Number(state.consecutiveFlipCount) || 0),
-    );
     this.lastBaseBuyAt = state.lastBaseBuyAt != null
       && Number.isFinite(Number(state.lastBaseBuyAt))
       ? Number(state.lastBaseBuyAt) : null;
-    this.pendingTrigger = state.pendingTrigger
-      && ['UP', 'DOWN'].includes(state.pendingTrigger.side)
-      && ['BASE_ENTRY', 'OPPOSITE_SIGNAL_REVERSAL'].includes(state.pendingTrigger.mode)
-      && Number(state.pendingTrigger.windowStart) === this.windowStart
+    const savedPending = state.pendingTrigger;
+    this.pendingTrigger = savedPending
+      && ['UP', 'DOWN'].includes(savedPending.side)
+      && ['BASE_ENTRY', 'OPPOSITE_TRIGGER_BUY', 'OPPOSITE_SIGNAL_REVERSAL'].includes(savedPending.mode)
+      && Number(savedPending.windowStart) === this.windowStart
       ? {
-        ...state.pendingTrigger,
-        attempts: Math.max(0, Number(state.pendingTrigger.attempts) || 0),
-        sharesSold: Math.max(0, Number(state.pendingTrigger.sharesSold) || 0),
-        sharesBought: Math.max(0, Number(state.pendingTrigger.sharesBought) || 0),
-        rebuyTargetShares: Number.isFinite(Number(state.pendingTrigger.rebuyTargetShares))
-          && Number(state.pendingTrigger.rebuyTargetShares) > 0
-          ? Number(state.pendingTrigger.rebuyTargetShares) : null,
-        unmatchedShares: Math.max(0, Number(state.pendingTrigger.unmatchedShares) || 0),
-        grossProceeds: Math.max(0, Number(state.pendingTrigger.grossProceeds) || 0),
-        saleFees: Math.max(0, Number(state.pendingTrigger.saleFees) || 0),
-        netProceeds: Math.max(0, Number(state.pendingTrigger.netProceeds) || 0),
+        id: savedPending.id,
+        side: savedPending.side,
+        mode: savedPending.mode === 'BASE_ENTRY' ? 'BASE_ENTRY' : 'OPPOSITE_TRIGGER_BUY',
+        triggerType: savedPending.triggerType,
+        triggerAsk: Number.isFinite(Number(savedPending.triggerAsk))
+          ? Number(savedPending.triggerAsk) : null,
+        createdAt: Number(savedPending.createdAt) || 0,
+        expiresAt: Number(savedPending.expiresAt) || 0,
+        windowStart: Number(savedPending.windowStart),
+        attempts: Math.max(0, Number(savedPending.attempts) || 0),
+        requestedShares: this.config.SHARES_PER_BUY,
+        lastBlockKey: null,
       } : null;
     const pendingSequence = Number(String(this.pendingTrigger?.id || '').match(/^trigger-(\d+)$/)?.[1]) || 0;
     this.triggerSequence = Math.max(0, Number(state.triggerSequence) || 0, pendingSequence);
@@ -430,7 +427,6 @@ class BtcPriceBandBot {
       marketId: this.market?.id == null ? this.restoredMarketId : String(this.market.id),
       sideState: this.sideState,
       activeSide: this.activeSide,
-      consecutiveFlipCount: this.consecutiveFlipCount,
       lastBaseBuyAt: this.lastBaseBuyAt,
       pendingTrigger: this.pendingTrigger,
       triggerSequence: this.triggerSequence,
@@ -523,7 +519,6 @@ class BtcPriceBandBot {
     this.books.clear();
     this.sideState = { UP: this.emptySideState(), DOWN: this.emptySideState() };
     this.activeSide = null;
-    this.consecutiveFlipCount = 0;
     this.lastBaseBuyAt = null;
     this.pendingTrigger = null;
     this.lastAskTrigger = { UP: null, DOWN: null };
@@ -923,6 +918,7 @@ class BtcPriceBandBot {
   }
 
   sweepBids(side, requestedShares, { consume = true } = {}) {
+    if (!this.config.SELLS_ON_OPPOSITE_TRIGGER) return null;
     const market = this.market;
     const quote = this.quotes[side];
     const tokenId = String(market?.tokens?.[side] || '');
@@ -978,18 +974,6 @@ class BtcPriceBandBot {
         || tradeSequenceFromId(b.id) - tradeSequenceFromId(a.id))[0];
     this.activeSide = latestTrade?.side || null;
     return this.activeSide;
-  }
-
-  nextFlipRebuyShares() {
-    const activeSide = this.activeSideForWindow();
-    const activeShares = activeSide
-      ? this.currentWindowOpenTrades(activeSide).reduce((sum, trade) => sum + trade.shares, 0)
-      : 0;
-    if (activeShares <= EPSILON) return this.config.SHARES_PER_BUY;
-    if (this.consecutiveFlipCount >= this.config.FLIP_ESCALATION_AFTER) {
-      return Math.max(activeShares, this.config.FLIP_ESCALATION_REBUY_SHARES);
-    }
-    return activeShares;
   }
 
   handleAskTrigger(side, now, triggerType) {
@@ -1053,52 +1037,30 @@ class BtcPriceBandBot {
       return true;
     }
 
-    const oppositeSide = side === 'UP' ? 'DOWN' : 'UP';
-    const oppositeTrades = this.currentWindowOpenTrades(oppositeSide);
-    const sharesToReverse = oppositeTrades.reduce((sum, trade) => sum + trade.shares, 0);
-    const isReversal = sharesToReverse > EPSILON || (activeSide != null && activeSide !== side);
-    if (isReversal && sharesToReverse <= EPSILON) {
-      state.status = 'NO_SHARES_TO_FLIP';
-      state.reason = `No open ${oppositeSide} shares remain to sell; no ${side} flip buy was placed.`;
-      return true;
-    }
-
-    const rebuyTargetShares = isReversal
-      ? Math.max(
-        sharesToReverse,
-        this.consecutiveFlipCount >= this.config.FLIP_ESCALATION_AFTER
-          ? this.config.FLIP_ESCALATION_REBUY_SHARES : 0,
-      )
-      : null;
+    const isOppositeTrigger = activeSide != null && activeSide !== side;
     state.qualifyingUpdates += 1;
     this.pendingTrigger = {
       id: `trigger-${++this.triggerSequence}`,
       side,
-      mode: isReversal ? 'OPPOSITE_SIGNAL_REVERSAL' : 'BASE_ENTRY',
+      mode: isOppositeTrigger ? 'OPPOSITE_TRIGGER_BUY' : 'BASE_ENTRY',
       triggerType,
       triggerAsk: quote.bestAsk,
       createdAt: now,
       expiresAt: now + this.config.PENDING_TRIGGER_TTL_MS,
       windowStart: this.windowStart,
       attempts: 0,
-      sharesSold: 0,
-      sharesBought: 0,
-      rebuyTargetShares,
-      unmatchedShares: 0,
-      grossProceeds: 0,
-      saleFees: 0,
-      netProceeds: 0,
+      requestedShares: this.config.SHARES_PER_BUY,
       lastBlockKey: null,
     };
     state.status = 'PENDING_TRIGGER';
-    state.reason = isReversal
-      ? `Opposite ${side} trigger queued; sell ${oppositeSide} shares, then rebuy ${rebuyTargetShares} ${side} shares.`
+    state.reason = isOppositeTrigger
+      ? `Opposite ${side} trigger queued for a fixed ${this.config.SHARES_PER_BUY}-share buy; existing positions stay open.`
       : `One ${this.config.SHARES_PER_BUY}-share ${side} entry queued for this trigger.`;
     this.log('PENDING_TRIGGER_CREATED', state.reason, {
       triggerId: this.pendingTrigger.id,
       side,
       mode: this.pendingTrigger.mode,
-      rebuyTargetShares: this.pendingTrigger.rebuyTargetShares,
+      requestedShares: this.pendingTrigger.requestedShares,
       triggerAsk: quote.bestAsk,
       expiresAt: this.pendingTrigger.expiresAt,
       triggerType,
@@ -1139,9 +1101,6 @@ class BtcPriceBandBot {
       side: pending.side,
       mode: pending.mode,
       attempts: pending.attempts,
-      sharesSold: round(pending.sharesSold),
-      sharesBought: round(pending.sharesBought),
-      unmatchedShares: round(pending.unmatchedShares),
       ageMs: Math.max(0, now - pending.createdAt),
     });
     this.schedulePersistedState(true);
@@ -1187,15 +1146,14 @@ class BtcPriceBandBot {
       return this.setPendingWait(
         pending,
         'WAITING_FOR_RETRY_PRICE',
-        `Best ask ${quote.bestAsk.toFixed(3)} exceeds the $${this.config.PENDING_RETRY_MAX_ASK.toFixed(2)} retry ceiling.`,
+        `Best ask ${quote.bestAsk.toFixed(3)} exceeds the market's $${this.config.PENDING_RETRY_MAX_ASK.toFixed(2)} maximum.`,
       );
     }
 
     const firstAttempt = pending.attempts === 0;
     const minPrice = firstAttempt
       ? this.config.MIN_ENTRY_ASK : this.config.PENDING_RETRY_MIN_ASK;
-    const maxPrice = firstAttempt
-      ? this.config.MAX_ENTRY_ASK : this.config.PENDING_RETRY_MAX_ASK;
+    const maxPrice = this.config.PENDING_RETRY_MAX_ASK;
     pending.attempts += 1;
 
     if (pending.mode === 'BASE_ENTRY') {
@@ -1207,34 +1165,36 @@ class BtcPriceBandBot {
           'Waiting for the one-second same-side duplicate guard to clear.',
         );
       }
-      const filled = this.tryBuy(
-        side,
-        now,
-        pending.triggerType,
-        this.config.SHARES_PER_BUY,
-        null,
-        {
-          minPrice,
-          maxPrice,
-          triggerAsk: pending.triggerAsk,
-          triggerId: pending.id,
-        },
-      );
-      if (filled) {
-        this.pendingTrigger = null;
-        this.schedulePersistedState(true);
-        return true;
-      }
-      return this.setPendingWait(
-        pending,
-        state.status,
-        state.reason,
-        state.status === 'INSUFFICIENT_CAPITAL' ? 'ENTRY_BLOCKED_CAPITAL' : 'ENTRY_WAITING_FOR_DEPTH',
-        { triggerType: pending.triggerType, bestAsk: quote.bestAsk },
-      );
     }
 
-    return this.tryReverse(pending, now, minPrice, maxPrice);
+    const entryMode = pending.mode === 'BASE_ENTRY' ? null : 'OPPOSITE_TRIGGER_BUY';
+    const filled = this.tryBuy(
+      side,
+      now,
+      pending.triggerType,
+      this.config.SHARES_PER_BUY,
+      entryMode,
+      {
+        minPrice,
+        maxPrice,
+        triggerAsk: pending.triggerAsk,
+        triggerId: pending.id,
+      },
+    );
+    if (filled) {
+      this.pendingTrigger = null;
+      this.schedulePersistedState(true);
+      return true;
+    }
+    return this.setPendingWait(
+      pending,
+      state.status,
+      state.reason,
+      state.status === 'INSUFFICIENT_CAPITAL'
+        ? 'ENTRY_BLOCKED_CAPITAL'
+        : entryMode ? 'OPPOSITE_TRIGGER_WAITING_FOR_DEPTH' : 'ENTRY_WAITING_FOR_DEPTH',
+      { triggerType: pending.triggerType, bestAsk: quote.bestAsk },
+    );
   }
 
   tryReverse(pending, now, minPrice, maxPrice) {
@@ -1484,6 +1444,12 @@ class BtcPriceBandBot {
   }
 
   closePositionsOnOppositeSignal(trades, execution, now, newSide) {
+    if (!this.config.SELLS_ON_OPPOSITE_TRIGGER) {
+      return {
+        soldShares: 0,
+        remainingShares: trades.reduce((sum, trade) => sum + trade.shares, 0),
+      };
+    }
     const totalShares = execution.shares;
     this.cash = round(this.cash + execution.netProceeds, 8);
     let totalRealized = 0;
@@ -1550,7 +1516,7 @@ class BtcPriceBandBot {
   tryBuy(side, now, triggerType, requestedShares = this.config.SHARES_PER_BUY, entryMode = null, options = {}) {
     const {
       minPrice = this.config.MIN_ENTRY_ASK,
-      maxPrice = this.config.MAX_ENTRY_ASK,
+      maxPrice = this.config.PENDING_RETRY_MAX_ASK,
       triggerAsk = this.quotes[side]?.bestAsk ?? null,
       triggerId = null,
     } = options;
@@ -1579,24 +1545,34 @@ class BtcPriceBandBot {
       return false;
     }
 
-    const execution = this.sweepAsks(side, requestedShares, { minPrice, maxPrice });
-    if (!execution || !execution.complete) {
+    const preview = this.sweepAsks(side, requestedShares, {
+      consume: false,
+      minPrice,
+      maxPrice,
+    });
+    if (!preview || !preview.complete) {
       state.status = 'WAITING_FOR_FULL_DEPTH';
-      state.reason = `Ask is within the active price limit, but ${requestedShares} shares are not visible yet.`;
+      state.reason = `Waiting for enough visible asks to fill all ${requestedShares} shares; no partial buy was placed.`;
       return false;
     }
-    if (execution.totalCost > this.cash + EPSILON) {
+    if (preview.totalCost > this.cash + EPSILON) {
       state.status = 'INSUFFICIENT_CAPITAL';
-      state.reason = `Needs $${execution.totalCost.toFixed(2)} including fees; $${this.cash.toFixed(2)} is available.`;
+      state.reason = `Needs $${preview.totalCost.toFixed(2)} including fees; $${this.cash.toFixed(2)} is available.`;
       this.log('ENTRY_BLOCKED_CAPITAL', `${side} buy skipped because paper cash is insufficient.`, {
-        side, requiredCash: round(execution.totalCost), availableCash: round(this.cash), triggerType,
+        side, requiredCash: round(preview.totalCost), availableCash: round(this.cash), triggerType,
       });
+      return false;
+    }
+    const execution = this.sweepAsks(side, requestedShares, { minPrice, maxPrice });
+    if (!execution?.complete) {
+      state.status = 'WAITING_FOR_FULL_DEPTH';
+      state.reason = `Visible asks changed before the full ${requestedShares}-share sweep completed.`;
       return false;
     }
 
     this.cash = round(this.cash - execution.totalCost, 8);
     this.activeSide = side;
-    if (entryMode !== 'OPPOSITE_SIGNAL_REVERSAL') this.lastBaseBuyAt = now;
+    if (!entryMode) this.lastBaseBuyAt = now;
     const trade = {
       id: `trade-${++this.tradeSequence}`,
       asset: 'BTC',
@@ -1629,11 +1605,11 @@ class BtcPriceBandBot {
     };
     this.trades.push(trade);
     state.status = 'BUY_FILLED';
-    state.reason = `Bought ${trade.shares} ${side} shares at ${trade.entryPrice.toFixed(3)} average${entryMode ? ' after the opposite-side sale' : ''}.`;
+    state.reason = `Bought ${trade.shares} ${side} shares at ${trade.entryPrice.toFixed(3)} average${entryMode ? '; previous positions remain open' : ''}.`;
     state.buys += 1;
     state.sharesBought += trade.shares;
     this.log('BUY_FILLED',
-      `${side} buy filled: ${trade.shares} shares at ${trade.entryPrice.toFixed(3)} average${entryMode ? ' to match the opposite-side shares sold' : ''}.`,
+      `${side} buy filled: ${trade.shares} shares at ${trade.entryPrice.toFixed(3)} average${entryMode ? ' on an opposite trigger; existing positions remain open' : ''}.`,
       {
         tradeId: trade.id,
         triggerId,
@@ -1879,23 +1855,21 @@ class BtcPriceBandBot {
         assets: ['BTC'],
         startingCapital: this.startingCapital,
         sharesPerBuy: this.config.SHARES_PER_BUY,
+        noShareEscalation: true,
+        allOrNothingBuys: true,
         sameSideCooldownMs: this.config.SAME_SIDE_COOLDOWN_MS,
         activeSide: this.activeSideForWindow(),
-        flipEscalation: {
-          threshold: this.config.FLIP_ESCALATION_AFTER,
-          rebuyShares: this.config.FLIP_ESCALATION_REBUY_SHARES,
-          consecutiveCompletedFlips: this.consecutiveFlipCount,
-          nextRebuyShares: this.nextFlipRebuyShares(),
-        },
         oneBaseBuyPerActiveSide: true,
+        sellsOnOppositeTrigger: this.config.SELLS_ON_OPPOSITE_TRIGGER,
         pendingTriggerTtlMs: this.config.PENDING_TRIGGER_TTL_MS,
         pendingRetryMaxAsk: this.config.PENDING_RETRY_MAX_ASK,
         minEntryAsk: this.config.MIN_ENTRY_ASK,
         maxEntryAsk: this.config.MAX_ENTRY_ASK,
-        trigger: 'One 50-share entry when an ask first qualifies in the inclusive band; hold that side until an opposite-side trigger.',
-        orderType: 'PAPER TAKER SWEEP',
-        intraWindowSales: true,
-        reversalRule: 'Opposite flips sell available live bids and match sold shares. After four completed flips in one window, the next flip targets 100 rebuy shares, subject to visible ask depth and cash; retries remain capped at $0.56 for two seconds.',
+        trigger: 'A qualifying ask in the inclusive band buys exactly 50 shares; same-side triggers stay locked, while an opposite trigger buys 50 more and keeps prior shares open.',
+        orderType: 'PAPER ALL-OR-NOTHING TAKER SWEEP',
+        marketSweepMaxPrice: 1,
+        intraWindowSales: this.config.SELLS_ON_OPPOSITE_TRIGGER,
+        reversalRule: 'Never sell shares. Each opposite trigger buys a fixed 50 shares and retains existing positions. Sweep visible asks up to the market maximum of $1.00; only full 50-share fills are recorded, otherwise wait up to two seconds.',
         terminalCheckSeconds: this.config.TERMINAL_CHECK_SECONDS,
         terminalThresholds: {
           winnerBestBidAtLeast: this.config.TERMINAL_WINNER_BID,
@@ -1937,10 +1911,7 @@ class BtcPriceBandBot {
         expiresAt: this.pendingTrigger.expiresAt,
         remainingMs: Math.max(0, this.pendingTrigger.expiresAt - now),
         attempts: this.pendingTrigger.attempts,
-        sharesSold: round(this.pendingTrigger.sharesSold),
-        sharesBought: round(this.pendingTrigger.sharesBought),
-        rebuyTargetShares: this.pendingTrigger.rebuyTargetShares,
-        unmatchedShares: round(this.pendingTrigger.unmatchedShares),
+        requestedShares: this.pendingTrigger.requestedShares,
       } : null,
       account,
       inventory: {

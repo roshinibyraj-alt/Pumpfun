@@ -279,10 +279,13 @@ test("the public root dashboard shows the BTC-only 5-minute ask-band strategy", 
   assert.match(html, /Polymarket live feed/);
   assert.match(html, /0\.52–\$0\.54/);
   assert.match(html, /50 shares/);
-  assert.match(html, /Flip on trigger · match sold shares/);
-  assert.match(html, /id="flipStreak"/);
-  assert.match(html, /After four completed flips in one window/);
-  assert.match(html, /Retry 2 seconds · max ask \$0\.56/);
+  assert.match(html, /50 shares · no escalation/);
+  assert.match(html, /All-or-nothing sweep · no price cap/);
+  assert.match(html, /Buy 50 more · keep existing shares/);
+  assert.match(html, /Never sell shares/);
+  assert.match(html, /Retry 2 seconds · no price ceiling/);
+  assert.match(html, /full 50-share visible ask sweep/);
+  assert.doesNotMatch(html, /flipStreak|After four completed flips/);
   assert.match(html, /any in-window \$0\.99\+ \/ below \$0\.01 hits/);
   assert.match(html, /History saved to PostgreSQL/);
   assert.match(html, /Awaiting official resolution/);
