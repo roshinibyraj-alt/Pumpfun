@@ -68,3 +68,39 @@ test('one-time reset remains idempotent and only removes paper history when expl
   assert.equal(calls[4].sql, 'COMMIT');
   assert.equal(calls[5].sql, 'RELEASE');
 });
+
+test('history reset atomically reseeds only the requested BTC paper ledger', async () => {
+  const calls = [];
+  const client = {
+    async query(sql, params = []) {
+      calls.push({ sql, params });
+      if (sql.includes('SELECT 1 FROM btc_paper_events')) return { rows: [] };
+      return { rows: [] };
+    },
+    release() { calls.push({ sql: 'RELEASE' }); },
+  };
+  const store = new LearningStore({ connect: async () => client });
+  const freshState = {
+    schemaVersion: 1,
+    startingCapital: 3_000,
+    cash: 3_000,
+    trades: [],
+    events: [],
+  };
+
+  assert.equal(await store.resetHistoryOnce('paper-reset-v5', {
+    botKey: 'btc-5m-price-band',
+    initialState: freshState,
+  }), true);
+
+  const deleteCall = calls.find(call => call.sql.includes('DELETE FROM btc_5m_paper_bot_state'));
+  const insertCall = calls.find(call => call.sql.includes('INSERT INTO btc_5m_paper_bot_state'));
+  assert.deepEqual(deleteCall.params, ['btc-5m-price-band']);
+  assert.equal(insertCall.params[0], 'btc-5m-price-band');
+  assert.deepEqual(JSON.parse(insertCall.params[1]), {
+    ...freshState,
+    historyResetRequestId: 'paper-reset-v5',
+  });
+  assert.match(calls.find(call => call.sql.includes('TRUNCATE TABLE')).sql, /btc_paper_equity_snapshots/);
+  assert.equal(calls.at(-2).sql, 'COMMIT');
+});

@@ -1,10 +1,14 @@
 'use strict';
 
 module.exports = {
-  STRATEGY_VERSION: 'btc-5m-best-ask-change-opposite-reversal-297s-v4',
+  STRATEGY_VERSION: 'btc-5m-trigger-lock-bounded-retry-partial-flip-297s-v5',
   WINDOW_MS: 5 * 60 * 1000,
   STARTING_CAPITAL: 3_000,
   SHARES_PER_BUY: 50,
+  SAME_SIDE_COOLDOWN_MS: 1_000,
+  PENDING_TRIGGER_TTL_MS: 2_000,
+  PENDING_RETRY_MAX_ASK: 0.56,
+  PENDING_RETRY_MIN_ASK: 0.01,
   TERMINAL_CHECK_SECONDS: 297,
   TERMINAL_WINNER_BID: 0.99,
   TERMINAL_LOSER_BID: 0.01,

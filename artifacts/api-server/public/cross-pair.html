@@ -106,10 +106,11 @@
         <div class="stream-meta" id="streamMeta">Waiting for a live market connection.</div>
         <div class="rule-grid">
           <div class="rule"><div class="rule-label">Eligible best ask</div><div class="rule-value">$0.52–$0.54</div></div>
-          <div class="rule"><div class="rule-label">Base buy</div><div class="rule-value">50 shares</div></div>
-          <div class="rule"><div class="rule-label">Trigger</div><div class="rule-value">Best-ask price changes only</div></div>
+          <div class="rule"><div class="rule-label">Base buy</div><div class="rule-value">50 shares · one active side</div></div>
+          <div class="rule"><div class="rule-label">Trigger</div><div class="rule-value">Hold direction until opposite trigger</div></div>
           <div class="rule"><div class="rule-label">Execution</div><div class="rule-value">Paper only · visible depth</div></div>
-          <div class="rule"><div class="rule-label">Opposite trigger</div><div class="rule-value">Sell all held shares · rebuy equal shares</div></div>
+          <div class="rule"><div class="rule-label">Opposite trigger</div><div class="rule-value">Flip immediately · rebuy only shares sold</div></div>
+          <div class="rule"><div class="rule-label">Missed trigger</div><div class="rule-value">Retry 2 seconds · max ask $0.56</div></div>
           <div class="rule"><div class="rule-label">At 297 seconds</div><div class="rule-value">Use any in-window $0.99+ / below $0.01 hits</div></div>
         </div>
       </div>

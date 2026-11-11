@@ -70,10 +70,15 @@ class LearningStore {
     `);
   }
 
-  async resetHistoryOnce(requestId) {
+  async resetHistoryOnce(requestId, { botKey = 'btc-5m-price-band', initialState = null } = {}) {
     const normalizedRequestId = String(requestId ?? '').trim();
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(normalizedRequestId)) {
       throw new Error('A valid BTC history reset request ID is required.');
+    }
+    if (initialState && (initialState.schemaVersion !== 1
+      || !Array.isArray(initialState.trades) || !Array.isArray(initialState.events)
+      || !Number.isFinite(Number(initialState.startingCapital)))) {
+      throw new Error('A valid fresh BTC paper ledger is required for this reset.');
     }
 
     const client = await this.pool.connect();
@@ -99,6 +104,21 @@ class LearningStore {
           btc_paper_equity_snapshots
         RESTART IDENTITY
       `);
+      if (initialState) {
+        await client.query(
+          'DELETE FROM btc_5m_paper_bot_state WHERE bot_key = $1',
+          [botKey],
+        );
+        await client.query(
+          `INSERT INTO btc_5m_paper_bot_state (bot_key, state, updated_at)
+           VALUES ($1, $2::jsonb, $3)`,
+          [
+            botKey,
+            JSON.stringify({ ...initialState, historyResetRequestId: normalizedRequestId }),
+            Date.now(),
+          ],
+        );
+      }
       await client.query(
         `INSERT INTO btc_paper_events (ts, window_start, event, details)
          VALUES ($1, NULL, 'BOT_HISTORY_RESET_COMPLETED', $2::jsonb)`,

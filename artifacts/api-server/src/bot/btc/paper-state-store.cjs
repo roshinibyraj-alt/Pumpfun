@@ -153,6 +153,16 @@ class PaperStateStore {
     );
   }
 
+  async resetHistoryOnce(requestId, initialState) {
+    const { LearningStore } = require('./learning-store');
+    const learningStore = new LearningStore(this.pool);
+    await learningStore.initialize();
+    return learningStore.resetHistoryOnce(requestId, {
+      botKey: this.botKey,
+      initialState,
+    });
+  }
+
   async seedFromPublicSnapshot(snapshot) {
     const existing = await this.loadState();
     if (existing?.persistenceSource === 'runtime') {
