@@ -77,15 +77,17 @@ function attachCurrentMarket(bot) {
   };
 }
 
-test('config limits the active strategy to BTC 5-minute windows and 50-share buys', () => {
+test('config limits the active strategy to BTC 5-minute windows and scales flips by 1.2x', () => {
   assert.equal(config.WINDOW_MS, 5 * 60 * 1000);
+  assert.match(config.STRATEGY_VERSION, /0\.59-0\.61/);
   assert.equal(config.SHARES_PER_BUY, 50);
-  assert.equal(config.SELLS_ON_OPPOSITE_TRIGGER, false);
+  assert.equal(config.SELLS_ON_OPPOSITE_TRIGGER, true);
+  assert.equal(config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER, 1.2);
   assert.equal(config.SAME_SIDE_COOLDOWN_MS, 1_000);
   assert.equal(config.PENDING_TRIGGER_TTL_MS, 2_000);
   assert.equal(config.PENDING_RETRY_MAX_ASK, 1);
-  assert.equal(config.MIN_ENTRY_ASK, 0.52);
-  assert.equal(config.MAX_ENTRY_ASK, 0.54);
+  assert.equal(config.MIN_ENTRY_ASK, 0.59);
+  assert.equal(config.MAX_ENTRY_ASK, 0.61);
 });
 
 test('an explicit history reset creates a fresh durable ledger before restoring state', async () => {
@@ -131,7 +133,7 @@ test('an explicit history reset creates a fresh durable ledger before restoring 
   }
 });
 
-test('an opposite-side ask trigger buys 50 and leaves existing shares open', () => {
+test('an opposite-side ask trigger sells the outgoing position and buys 1.2x shares', () => {
   const { bot } = createBot();
   bot.windowStart = 600_000;
   bot.windowEnd = 900_000;
@@ -145,27 +147,30 @@ test('an opposite-side ask trigger buys 50 and leaves existing shares open', () 
     raw: { feesEnabled: false },
   };
 
-  bot.handleMarketMessage(book('up-token', 0.52));
-  bot.handleMarketMessage(book('down-token', 0.54));
+  bot.handleMarketMessage(book('up-token', 0.59));
+  bot.handleMarketMessage(book('down-token', 0.61));
 
   const snapshot = bot.snapshot();
   assert.equal(snapshot.strategy.timeframe, '5m');
   assert.deepEqual(snapshot.strategy.assets, ['BTC']);
-  assert.equal(snapshot.strategy.intraWindowSales, false);
-  assert.equal(snapshot.strategy.noShareEscalation, true);
+  assert.equal(snapshot.strategy.intraWindowSales, true);
+  assert.equal(snapshot.strategy.oppositeTriggerSizeMultiplier, 1.2);
   assert.equal(snapshot.strategy.allOrNothingBuys, true);
-  assert.equal(snapshot.strategy.sellsOnOppositeTrigger, false);
+  assert.equal(snapshot.strategy.sellsOnOppositeTrigger, true);
   assert.equal(snapshot.strategy.marketSweepMaxPrice, 1);
-  assert.equal(snapshot.account.openPositions, 2);
-  assert.equal(snapshot.account.closedPositions, 0);
-  assert.equal(snapshot.inventory.currentWindow.UP.shares, 50);
-  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 50);
-  assert.ok(snapshot.trades.every(trade => trade.status === 'OPEN'));
-  assert.equal(snapshot.trades.find(trade => trade.side === 'DOWN').entryMode, 'OPPOSITE_TRIGGER_BUY');
-  assert.equal(snapshot.account.realizedPnl, 0);
+  assert.equal(snapshot.account.openPositions, 1);
+  assert.equal(snapshot.account.closedPositions, 1);
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 0);
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 60);
+  assert.equal(snapshot.trades.find(trade => trade.side === 'UP').status, 'CLOSED');
+  const downTrade = snapshot.trades.find(trade => trade.side === 'DOWN');
+  assert.equal(downTrade.status, 'OPEN');
+  assert.equal(downTrade.shares, 60);
+  assert.equal(downTrade.entryMode, 'OPPOSITE_SIGNAL_REVERSAL');
+  assert.ok(snapshot.account.realizedPnl < 0);
 });
 
-test('same-side triggers do not add shares and opposite triggers retain both legs', () => {
+test('same-side triggers stay locked while opposite triggers close and scale the position', () => {
   const { bot } = createBot();
   bot.windowStart = 600_000;
   bot.windowEnd = 900_000;
@@ -177,34 +182,34 @@ test('same-side triggers do not add shares and opposite triggers retain both leg
     raw: { feesEnabled: false },
   };
 
-  bot.handleMarketMessage(book('up-token', 0.53, 200, 0.50));
+  bot.handleMarketMessage(book('up-token', 0.60, 200, 0.50));
   bot.handleMarketMessage({
     event_type: 'price_change',
     timestamp: '600002',
     price_changes: [{
       asset_id: 'up-token',
-      price: '0.52',
+      price: '0.59',
       size: '200',
       side: 'SELL',
     }],
   });
   assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 50);
 
-  bot.handleMarketMessage(book('down-token', 0.53, 200, 0.49));
+  bot.handleMarketMessage(book('down-token', 0.60, 200, 0.49));
   const snapshot = bot.snapshot();
   const upTrades = snapshot.trades.filter(trade => trade.side === 'UP');
   const downTrades = snapshot.trades.filter(trade => trade.side === 'DOWN');
   assert.equal(upTrades.length, 1);
-  assert.ok(upTrades.every(trade => trade.status === 'OPEN'));
+  assert.equal(upTrades[0].status, 'CLOSED');
   assert.equal(downTrades.length, 1);
-  assert.equal(downTrades[0].shares, 50);
+  assert.equal(downTrades[0].shares, 60);
   assert.equal(downTrades[0].status, 'OPEN');
-  assert.equal(snapshot.inventory.currentWindow.UP.shares, 50);
-  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 50);
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 0);
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 60);
   assert.equal(snapshot.strategy.activeSide, 'DOWN');
   assert.equal(snapshot.strategy.oneBaseBuyPerActiveSide, true);
-  assert.equal(snapshot.strategy.intraWindowSales, false);
-  assert.equal(snapshot.account.closedPositions, 0);
+  assert.equal(snapshot.strategy.intraWindowSales, true);
+  assert.equal(snapshot.account.closedPositions, 1);
 
   const legacyState = bot.persistentStateSnapshot();
   delete legacyState.activeSide;
@@ -214,18 +219,18 @@ test('same-side triggers do not add shares and opposite triggers retain both leg
   assert.equal(restoredLegacy.activeSide, 'DOWN');
 });
 
-test('repeated opposite triggers always buy 50 shares without selling or escalation', () => {
+test('repeated opposite triggers sell the full outgoing side and compound the 1.2x size', () => {
   const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
   const signals = [
-    { side: 'UP', ask: 0.53 },
-    { side: 'DOWN', ask: 0.53 },
-    { side: 'UP', ask: 0.52 },
-    { side: 'DOWN', ask: 0.52 },
-    { side: 'UP', ask: 0.54 },
-    { side: 'DOWN', ask: 0.54 },
-    { side: 'UP', ask: 0.53 },
-    { side: 'DOWN', ask: 0.53 },
+    { side: 'UP', ask: 0.60 },
+    { side: 'DOWN', ask: 0.60 },
+    { side: 'UP', ask: 0.59 },
+    { side: 'DOWN', ask: 0.59 },
+    { side: 'UP', ask: 0.61 },
+    { side: 'DOWN', ask: 0.61 },
+    { side: 'UP', ask: 0.60 },
+    { side: 'DOWN', ask: 0.60 },
   ];
   signals.forEach(({ side, ask }, index) => {
     const at = 600_001 + index;
@@ -236,34 +241,38 @@ test('repeated opposite triggers always buy 50 shares without selling or escalat
       200,
       side === 'UP' ? 0.50 : 0.49,
     );
+    message.bids[0].size = '2000';
     message.timestamp = String(at);
     bot.handleMarketMessage(message);
   });
 
   const snapshot = bot.snapshot();
   assert.equal(snapshot.trades.length, 8);
-  assert.ok(snapshot.trades.every(trade => trade.shares === 50 && trade.status === 'OPEN'));
-  assert.equal(snapshot.inventory.currentWindow.UP.shares, 200);
-  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 200);
-  assert.equal(snapshot.account.closedPositions, 0);
-  assert.equal(snapshot.account.realizedPnl, 0);
+  const expectedSizes = [50, 60, 72, 86.4, 103.68, 124.416, 149.2992, 179.15904];
+  assert.deepEqual(snapshot.trades.map(trade => trade.shares), expectedSizes.slice().reverse());
+  assert.equal(snapshot.trades[0].status, 'OPEN');
+  assert.ok(snapshot.trades.slice(1).every(trade => trade.status === 'CLOSED'));
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 0);
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 179.15904);
+  assert.equal(snapshot.account.closedPositions, 7);
+  assert.ok(snapshot.account.realizedPnl < 0);
   assert.equal(snapshot.strategy.activeSide, 'DOWN');
 });
 
-test('opposite trigger waits for all 50 shares then sweeps above the old price ceiling', () => {
+test('opposite trigger waits for full 60-share depth before selling and buying', () => {
   const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
+  bot.handleMarketMessage(book('up-token', 0.60, 100, 0.50));
 
   setNow(600_002);
-  const shortBook = book('down-token', 0.53, 49, 0.49);
+  const shortBook = book('down-token', 0.60, 49, 0.49);
   shortBook.timestamp = '600002';
   bot.handleMarketMessage(shortBook);
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 50);
   assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 0);
-  assert.equal(bot.pendingTrigger.mode, 'OPPOSITE_TRIGGER_BUY');
-  assert.equal(bot.pendingTrigger.requestedShares, 50);
+  assert.equal(bot.pendingTrigger.mode, 'OPPOSITE_SIGNAL_REVERSAL');
+  assert.equal(bot.pendingTrigger.requestedShares, 60);
 
   setNow(600_003);
   bot.handleMarketMessage({
@@ -271,8 +280,8 @@ test('opposite trigger waits for all 50 shares then sweeps above the old price c
     asset_id: 'down-token',
     timestamp: '600003',
     asks: [
-      { price: '0.53', size: '20' },
-      { price: '0.90', size: '30' },
+      { price: '0.60', size: '20' },
+      { price: '0.90', size: '40' },
     ],
     bids: [{ price: '0.49', size: '100' }],
   });
@@ -280,21 +289,47 @@ test('opposite trigger waits for all 50 shares then sweeps above the old price c
   const snapshot = bot.snapshot();
   const downTrade = snapshot.trades.find(trade => trade.side === 'DOWN');
   assert.equal(snapshot.trades.length, 2);
-  assert.equal(downTrade.shares, 50);
-  assert.equal(downTrade.entryPrice, 0.752);
+  assert.equal(downTrade.shares, 60);
+  assert.equal(downTrade.entryPrice, 0.8);
   assert.equal(downTrade.status, 'OPEN');
-  assert.deepEqual(downTrade.fills.map(fill => fill.price), [0.53, 0.90]);
-  assert.equal(snapshot.inventory.currentWindow.UP.shares, 50);
-  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 50);
-  assert.equal(snapshot.account.closedPositions, 0);
+  assert.deepEqual(downTrade.fills.map(fill => fill.price), [0.60, 0.90]);
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 0);
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 60);
+  assert.equal(snapshot.account.closedPositions, 1);
   assert.equal(snapshot.pendingTrigger, null);
+});
+
+test('opposite trigger does not partially sell when visible bid depth is short', () => {
+  const { bot, setNow } = createBot();
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.60, 100, 0.50));
+
+  setNow(600_002);
+  const shortBidBook = book('up-token', 0.60, 100, 0.50);
+  shortBidBook.bids[0].size = '49';
+  shortBidBook.timestamp = '600002';
+  bot.handleMarketMessage(shortBidBook);
+
+  const oppositeBook = book('down-token', 0.60, 100, 0.49);
+  oppositeBook.timestamp = '600002';
+  bot.handleMarketMessage(oppositeBook);
+
+  const snapshot = bot.snapshot();
+  assert.equal(snapshot.trades.length, 1);
+  assert.equal(snapshot.trades[0].side, 'UP');
+  assert.equal(snapshot.trades[0].status, 'OPEN');
+  assert.equal(snapshot.trades[0].shares, 50);
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 50);
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 0);
+  assert.equal(snapshot.account.closedPositions, 0);
+  assert.equal(bot.pendingTrigger.mode, 'OPPOSITE_SIGNAL_REVERSAL');
 });
 
 test('an all-or-nothing buy does not consume asks when paper cash is insufficient', () => {
   const { bot } = createBot();
   attachCurrentMarket(bot);
   bot.cash = 0;
-  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
+  bot.handleMarketMessage(book('up-token', 0.60, 100, 0.50));
 
   assert.equal(bot.trades.length, 0);
   assert.equal(bot.books.get('up-token').asks[0].availableSize, 100);
@@ -313,13 +348,13 @@ test('same-side ask-size and price changes do not add while the direction is loc
     tokens: { UP: 'up-token', DOWN: 'down-token' },
     raw: { feesEnabled: false },
   };
-  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  bot.handleMarketMessage(book('up-token', 0.60, 100));
   bot.handleMarketMessage({
     event_type: 'price_change',
     timestamp: '600002',
     price_changes: [{
       asset_id: 'up-token',
-      price: '0.53',
+      price: '0.60',
       size: '150',
       side: 'SELL',
     }],
@@ -333,7 +368,7 @@ test('same-side ask-size and price changes do not add while the direction is loc
     timestamp: '600003',
     price_changes: [{
       asset_id: 'up-token',
-      price: '0.52',
+      price: '0.59',
       size: '60',
       side: 'SELL',
     }],
@@ -356,14 +391,14 @@ test('best-bid-ask updates can trigger buys without double-counting the matching
     raw: { feesEnabled: false },
   };
   bot.books.set('up-token', {
-    asks: [{ price: 0.53, size: 100, availableSize: 100 }],
+    asks: [{ price: 0.60, size: 100, availableSize: 100 }],
     bids: [{ price: 0.50, size: 100, availableSize: 100 }],
     updatedAt: 600_001,
   });
   bot.quotes.UP = {
     side: 'UP',
     tokenId: 'up-token',
-    bestAsk: 0.55,
+    bestAsk: 0.62,
     bestBid: 0.50,
     updatedAt: 600_000,
     status: 'LIVE',
@@ -371,7 +406,7 @@ test('best-bid-ask updates can trigger buys without double-counting the matching
   bot.handleMarketMessage({
     event_type: 'best_bid_ask',
     asset_id: 'up-token',
-    best_ask: '0.53',
+    best_ask: '0.60',
     best_bid: '0.50',
     timestamp: '600002',
   });
@@ -380,7 +415,7 @@ test('best-bid-ask updates can trigger buys without double-counting the matching
     timestamp: '600002',
     price_changes: [{
       asset_id: 'up-token',
-      price: '0.53',
+      price: '0.60',
       size: '150',
       side: 'SELL',
     }],
@@ -393,7 +428,7 @@ test('best-bid-ask updates can trigger buys without double-counting the matching
     timestamp: '600003',
     price_changes: [{
       asset_id: 'up-token',
-      price: '0.53',
+      price: '0.60',
       size: '200',
       side: 'SELL',
     }],
@@ -405,7 +440,7 @@ test('best-bid-ask updates can trigger buys without double-counting the matching
     timestamp: '600004',
     price_changes: [{
       asset_id: 'up-token',
-      price: '0.52',
+      price: '0.59',
       size: '60',
       side: 'SELL',
     }],
@@ -425,11 +460,11 @@ test('prices outside the ask band do not buy; bid-only changes do not trigger bu
     tokens: { UP: 'up-token', DOWN: 'down-token' },
     raw: { feesEnabled: false },
   };
-  bot.handleMarketMessage(book('up-token', 0.51));
-  bot.handleMarketMessage(book('down-token', 0.55));
+  bot.handleMarketMessage(book('up-token', 0.58));
+  bot.handleMarketMessage(book('down-token', 0.62));
   assert.equal(bot.trades.length, 0);
 
-  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  bot.handleMarketMessage(book('up-token', 0.60, 100));
   bot.handleMarketMessage({
     event_type: 'price_change',
     timestamp: '600003',
@@ -456,7 +491,7 @@ test('an in-range ask waits for full 50-share depth, then fills once', () => {
     tokens: { UP: 'up-token', DOWN: 'down-token' },
     raw: { feesEnabled: false },
   };
-  bot.handleMarketMessage(book('up-token', 0.53, 49));
+  bot.handleMarketMessage(book('up-token', 0.60, 49));
   assert.equal(bot.trades.length, 0);
   assert.equal(bot.sideState.UP.status, 'WAITING_FOR_FULL_DEPTH');
   bot.handleMarketMessage({
@@ -464,7 +499,7 @@ test('an in-range ask waits for full 50-share depth, then fills once', () => {
     timestamp: '600002',
     price_changes: [{
       asset_id: 'up-token',
-      price: '0.53',
+      price: '0.60',
       size: '100',
       side: 'SELL',
     }],
@@ -476,7 +511,7 @@ test('an in-range ask waits for full 50-share depth, then fills once', () => {
     timestamp: '600003',
     price_changes: [{
       asset_id: 'up-token',
-      price: '0.52',
+      price: '0.59',
       size: '60',
       side: 'SELL',
     }],
@@ -488,7 +523,7 @@ test('an in-range ask waits for full 50-share depth, then fills once', () => {
 test('a missed entry retries above the previous price ceiling with a full 50-share sweep', () => {
   const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 49));
+  bot.handleMarketMessage(book('up-token', 0.60, 49));
   assert.equal(bot.trades.length, 0);
   assert.equal(bot.pendingTrigger.mode, 'BASE_ENTRY');
 
@@ -496,7 +531,7 @@ test('a missed entry retries above the previous price ceiling with a full 50-sha
   bot.handleMarketMessage(book('up-token', 0.90, 100));
   assert.equal(bot.trades.length, 1);
   assert.equal(bot.trades[0].shares, 50);
-  assert.equal(bot.trades[0].triggerAsk, 0.53);
+  assert.equal(bot.trades[0].triggerAsk, 0.60);
   assert.equal(bot.trades[0].bestAskAtFill, 0.90);
   assert.equal(bot.trades[0].entryPrice, 0.90);
   assert.equal(bot.activeSide, 'UP');
@@ -505,23 +540,23 @@ test('a missed entry retries above the previous price ceiling with a full 50-sha
 test('a missed entry can catch up below the lower trigger-band edge', () => {
   const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 49));
+  bot.handleMarketMessage(book('up-token', 0.60, 49));
   setNow(600_002);
-  bot.handleMarketMessage(book('up-token', 0.51, 100));
+  bot.handleMarketMessage(book('up-token', 0.58, 100));
 
   assert.equal(bot.trades.length, 1);
-  assert.equal(bot.trades[0].triggerAsk, 0.53);
-  assert.equal(bot.trades[0].bestAskAtFill, 0.51);
+  assert.equal(bot.trades[0].triggerAsk, 0.60);
+  assert.equal(bot.trades[0].bestAskAtFill, 0.58);
   assert.equal(bot.trades[0].shares, 50);
 });
 
 test('a newer opposite trigger replaces an unfilled first-entry trigger', () => {
   const { bot } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 49));
+  bot.handleMarketMessage(book('up-token', 0.60, 49));
   assert.equal(bot.pendingTrigger.side, 'UP');
 
-  bot.handleMarketMessage(book('down-token', 0.53, 100));
+  bot.handleMarketMessage(book('down-token', 0.60, 100));
 
   assert.equal(bot.pendingTrigger, null);
   assert.equal(bot.trades.length, 1);
@@ -533,7 +568,7 @@ test('a newer opposite trigger replaces an unfilled first-entry trigger', () => 
 test('a pending trigger expires after two seconds without creating a late fill', () => {
   const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 49));
+  bot.handleMarketMessage(book('up-token', 0.60, 49));
   assert.equal(bot.pendingTrigger.mode, 'BASE_ENTRY');
 
   setNow(602_001);
@@ -546,7 +581,7 @@ test('a pending trigger expires after two seconds without creating a late fill',
 test('terminal settlement cancels any still-pending entry before it can fill', () => {
   const { bot } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 49));
+  bot.handleMarketMessage(book('up-token', 0.60, 49));
   bot.terminalEvidence.UP.winnerHitAt = 897_000;
   bot.terminalEvidence.DOWN.loserHitAt = 897_000;
 
@@ -561,7 +596,7 @@ test('terminal settlement cancels any still-pending entry before it can fill', (
 test('active side and pending retry survive paper-state persistence', () => {
   const { bot } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 49));
+  bot.handleMarketMessage(book('up-token', 0.60, 49));
   const saved = bot.persistentStateSnapshot();
   const restored = new BtcPriceBandBot({ now: () => 600_002 });
 
@@ -571,7 +606,7 @@ test('active side and pending retry survive paper-state persistence', () => {
   assert.equal(restored.pendingTrigger.id, bot.pendingTrigger.id);
   assert.equal(restored.pendingTrigger.expiresAt, 602_001);
 
-  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  bot.handleMarketMessage(book('up-token', 0.60, 100));
   const afterFill = bot.persistentStateSnapshot();
   const restoredAfterFill = new BtcPriceBandBot({ now: () => 600_003 });
   restoredAfterFill.restorePersistentState(afterFill);
@@ -579,56 +614,61 @@ test('active side and pending retry survive paper-state persistence', () => {
   assert.equal(restoredAfterFill.lastBaseBuyAt, 600_001);
 });
 
-test('a saved v6 reversal resumes as a fixed 50-share buy without selling', () => {
+test('a saved opposite-trigger retry resumes by selling and buying 1.2x shares', () => {
   const { bot } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
+  bot.handleMarketMessage(book('up-token', 0.60, 100, 0.50));
   const saved = bot.persistentStateSnapshot();
   saved.pendingTrigger = {
     id: 'trigger-2',
     side: 'DOWN',
     mode: 'OPPOSITE_SIGNAL_REVERSAL',
     triggerType: 'BEST_ASK_PRICE_CHANGE',
-    triggerAsk: 0.53,
+    triggerAsk: 0.60,
     createdAt: 600_001,
     expiresAt: 602_001,
     windowStart: 600_000,
     attempts: 0,
-    sharesSold: 20,
+    requestedShares: 50,
+    sharesToSell: 50,
+    sharesSold: 0,
     sharesBought: 0,
-    rebuyTargetShares: 100,
-    unmatchedShares: 20,
-    grossProceeds: 8,
+    rebuyTargetShares: 60,
+    unmatchedShares: 0,
+    grossProceeds: 0,
     saleFees: 0,
-    netProceeds: 8,
+    netProceeds: 0,
   };
 
   const restored = new BtcPriceBandBot({ now: () => 600_002 });
   restored.restorePersistentState(saved);
   attachCurrentMarket(restored);
-  assert.equal(restored.pendingTrigger.mode, 'OPPOSITE_TRIGGER_BUY');
+  assert.equal(restored.pendingTrigger.mode, 'OPPOSITE_SIGNAL_REVERSAL');
   assert.equal(restored.pendingTrigger.requestedShares, 50);
-  assert.equal('sharesSold' in restored.pendingTrigger, false);
 
-  restored.handleMarketMessage(book('down-token', 0.53, 100, 0.49));
-  const open = restored.trades.filter(trade => trade.status === 'OPEN');
-  assert.equal(open.length, 2);
-  assert.ok(open.every(trade => trade.shares === 50));
-  assert.equal(restored.snapshot().account.closedPositions, 0);
+  restored.handleMarketMessage(book('up-token', 0.60, 100, 0.50));
+  restored.handleMarketMessage(book('down-token', 0.60, 100, 0.49));
+  const snapshot = restored.snapshot();
+  assert.equal(snapshot.trades.filter(trade => trade.status === 'OPEN').length, 1);
+  assert.equal(snapshot.trades.find(trade => trade.side === 'UP').status, 'CLOSED');
+  assert.equal(snapshot.trades.find(trade => trade.side === 'DOWN').shares, 60);
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 0);
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 60);
+  assert.equal(snapshot.account.closedPositions, 1);
 });
 
-test('opposite triggers bypass the one-second guard without selling the existing leg', () => {
+test('opposite triggers bypass the one-second guard and sell the outgoing leg', () => {
   const { bot, setNow } = createBot();
   attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.53, 100, 0.50));
+  bot.handleMarketMessage(book('up-token', 0.60, 100, 0.50));
   assert.equal(bot.activeSide, 'UP');
   assert.equal(bot.lastBaseBuyAt, 600_001);
 
   setNow(600_002);
-  bot.handleMarketMessage(book('down-token', 0.53, 100, 0.49));
-  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 50);
-  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 50);
-  assert.equal(bot.snapshot().account.closedPositions, 0);
+  bot.handleMarketMessage(book('down-token', 0.60, 100, 0.49));
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 0);
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 60);
+  assert.equal(bot.snapshot().account.closedPositions, 1);
   assert.equal(bot.lastBaseBuyAt, 600_001);
   assert.equal(bot.activeSide, 'DOWN');
 });
@@ -645,14 +685,14 @@ test('expired positions settle only from their exact original market resolution'
     tokens: { UP: 'up-token', DOWN: 'down-token' },
     raw: { feesEnabled: false },
   };
-  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  bot.handleMarketMessage(book('up-token', 0.60, 100));
   setNow(900_001);
   bot.resetWindow(900_000);
   await bot.resolveDue(900_001, { force: true });
 
   assert.equal(bot.trades[0].status, 'SETTLED');
   assert.equal(bot.trades[0].outcome, 'WIN');
-  assert.equal(bot.cash, 3_023.5);
+  assert.equal(bot.cash, 3_020);
 });
 
 test('297-second bid thresholds settle winner at one dollar and loser at zero', () => {
@@ -667,7 +707,7 @@ test('297-second bid thresholds settle winner at one dollar and loser at zero', 
     tokens: { UP: 'up-token', DOWN: 'down-token' },
     raw: { feesEnabled: false },
   };
-  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  bot.handleMarketMessage(book('up-token', 0.60, 100));
   setNow(897_000);
   bot.handleMarketMessage(book('up-token', 0.995, 100, 0.99));
   bot.handleMarketMessage(book('down-token', 0.01, 100, 0.009));
@@ -678,7 +718,7 @@ test('297-second bid thresholds settle winner at one dollar and loser at zero', 
   assert.equal(trade.settlementSource, 'TERMINAL_PRICE_297S');
   assert.equal(trade.resolutionPayout, 1);
   assert.equal(trade.proceeds, 50);
-  assert.equal(trade.realizedPnl, 23.5);
+  assert.equal(trade.realizedPnl, 20);
 });
 
 test('in-window threshold evidence settles at 297 seconds even when both books are empty', () => {
@@ -693,7 +733,7 @@ test('in-window threshold evidence settles at 297 seconds even when both books a
     tokens: { UP: 'up-token', DOWN: 'down-token' },
     raw: { feesEnabled: false },
   };
-  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  bot.handleMarketMessage(book('up-token', 0.60, 100));
   setNow(800_000);
   bot.handleMarketMessage(book('up-token', 0.995, 100, 0.99));
   bot.handleMarketMessage(book('down-token', 0.01, 100, 0.009));
@@ -722,7 +762,7 @@ test('conflicting threshold evidence in both directions waits for official resol
     tokens: { UP: 'up-token', DOWN: 'down-token' },
     raw: { feesEnabled: false },
   };
-  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  bot.handleMarketMessage(book('up-token', 0.60, 100));
   setNow(800_000);
   bot.handleMarketMessage(book('up-token', 0.995, 100, 0.99));
   bot.handleMarketMessage(book('down-token', 0.01, 100, 0.009));
@@ -749,7 +789,7 @@ test('297-second prices outside the thresholds keep positions for official resol
     tokens: { UP: 'up-token', DOWN: 'down-token' },
     raw: { feesEnabled: false },
   };
-  bot.handleMarketMessage(book('up-token', 0.53, 100));
+  bot.handleMarketMessage(book('up-token', 0.60, 100));
   setNow(897_000);
   bot.handleMarketMessage(book('up-token', 0.90, 100, 0.90));
   bot.handleMarketMessage(book('down-token', 0.10, 100, 0.10));

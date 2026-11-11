@@ -48,12 +48,12 @@ test('schema migration preserves existing history while tagging older rows as le
   assert.equal(queries.some(sql => sql.includes('btc_strategy_tuning_runs')), false);
 });
 
-test('one-time reset remains idempotent and only removes paper history when explicitly requested', async () => {
+test('history reset is one-time and removes only the selected bot ledger', async () => {
   const calls = [];
   const client = {
     async query(sql, params = []) {
       calls.push({ sql, params });
-      if (sql.includes('SELECT 1 FROM btc_paper_events')) return { rows: [] };
+      if (sql.includes('SELECT 1 FROM btc_paper_history_reset_requests')) return { rows: [] };
       return { rows: [] };
     },
     release() { calls.push({ sql: 'RELEASE' }); },
@@ -62,11 +62,34 @@ test('one-time reset remains idempotent and only removes paper history when expl
 
   assert.equal(await store.resetHistoryOnce('paper-reset-test'), true);
   assert.equal(calls[0].sql, 'BEGIN');
-  assert.match(calls[2].sql, /TRUNCATE TABLE/);
-  assert.doesNotMatch(calls[2].sql, /btc_strategy_tuning_runs|btc_strategy_learning_state/);
-  assert.match(calls[3].sql, /BOT_HISTORY_RESET_COMPLETED/);
+  assert.match(calls[1].sql, /btc_paper_history_reset_requests/);
+  assert.deepEqual(calls[1].params, ['btc-5m-price-band', 'paper-reset-test']);
+  assert.match(calls[2].sql, /DELETE FROM btc_5m_paper_bot_state/);
+  assert.match(calls[3].sql, /INSERT INTO btc_paper_history_reset_requests/);
+  assert.equal(calls.some(call => call.sql.includes('TRUNCATE TABLE')), false);
+  assert.ok(calls.every(call => !/btc_learning_samples|btc_paper_events|btc_paper_window_results|btc_paper_equity_snapshots/.test(call.sql)));
   assert.equal(calls[4].sql, 'COMMIT');
   assert.equal(calls[5].sql, 'RELEASE');
+});
+
+test('a repeated reset request does not clear the bot ledger twice', async () => {
+  const calls = [];
+  const client = {
+    async query(sql, params = []) {
+      calls.push({ sql, params });
+      if (sql.includes('SELECT 1 FROM btc_paper_history_reset_requests')) {
+        return { rows: [{ one: 1 }] };
+      }
+      return { rows: [] };
+    },
+    release() { calls.push({ sql: 'RELEASE' }); },
+  };
+  const store = new LearningStore({ connect: async () => client });
+
+  assert.equal(await store.resetHistoryOnce('paper-reset-test'), false);
+  assert.equal(calls.length, 4);
+  assert.equal(calls[2].sql, 'COMMIT');
+  assert.equal(calls[3].sql, 'RELEASE');
 });
 
 test('history reset atomically reseeds only the requested BTC paper ledger', async () => {
@@ -74,7 +97,7 @@ test('history reset atomically reseeds only the requested BTC paper ledger', asy
   const client = {
     async query(sql, params = []) {
       calls.push({ sql, params });
-      if (sql.includes('SELECT 1 FROM btc_paper_events')) return { rows: [] };
+      if (sql.includes('SELECT 1 FROM btc_paper_history_reset_requests')) return { rows: [] };
       return { rows: [] };
     },
     release() { calls.push({ sql: 'RELEASE' }); },
@@ -101,6 +124,8 @@ test('history reset atomically reseeds only the requested BTC paper ledger', asy
     ...freshState,
     historyResetRequestId: 'paper-reset-v5',
   });
-  assert.match(calls.find(call => call.sql.includes('TRUNCATE TABLE')).sql, /btc_paper_equity_snapshots/);
+  assert.equal(calls.some(call => call.sql.includes('TRUNCATE TABLE')), false);
+  assert.ok(calls.every(call => !/btc_learning_samples|btc_paper_events|btc_paper_window_results|btc_paper_equity_snapshots/.test(call.sql)));
+  assert.ok(calls.some(call => call.sql.includes('INSERT INTO btc_paper_history_reset_requests')));
   assert.equal(calls.at(-2).sql, 'COMMIT');
 });

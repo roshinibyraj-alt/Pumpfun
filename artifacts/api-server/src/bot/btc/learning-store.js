@@ -68,6 +68,14 @@ class LearningStore {
       CREATE INDEX IF NOT EXISTS btc_paper_equity_snapshots_ts_idx
       ON btc_paper_equity_snapshots (ts DESC)
     `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS btc_paper_history_reset_requests (
+        bot_key text NOT NULL,
+        request_id text NOT NULL,
+        completed_at bigint NOT NULL,
+        PRIMARY KEY (bot_key, request_id)
+      )
+    `);
   }
 
   async resetHistoryOnce(requestId, { botKey = 'btc-5m-price-band', initialState = null } = {}) {
@@ -85,30 +93,21 @@ class LearningStore {
     try {
       await client.query('BEGIN');
       const previousReset = await client.query(
-        `SELECT 1 FROM btc_paper_events
-         WHERE event = 'BOT_HISTORY_RESET_COMPLETED'
-           AND details->>'requestId' = $1
+        `SELECT 1 FROM btc_paper_history_reset_requests
+         WHERE bot_key = $1 AND request_id = $2
          LIMIT 1`,
-        [normalizedRequestId],
+        [botKey, normalizedRequestId],
       );
       if (previousReset.rows.length) {
         await client.query('COMMIT');
         return false;
       }
 
-      await client.query(`
-        TRUNCATE TABLE
-          btc_learning_samples,
-          btc_paper_events,
-          btc_paper_window_results,
-          btc_paper_equity_snapshots
-        RESTART IDENTITY
-      `);
+      await client.query(
+        'DELETE FROM btc_5m_paper_bot_state WHERE bot_key = $1',
+        [botKey],
+      );
       if (initialState) {
-        await client.query(
-          'DELETE FROM btc_5m_paper_bot_state WHERE bot_key = $1',
-          [botKey],
-        );
         await client.query(
           `INSERT INTO btc_5m_paper_bot_state (bot_key, state, updated_at)
            VALUES ($1, $2::jsonb, $3)`,
@@ -120,9 +119,9 @@ class LearningStore {
         );
       }
       await client.query(
-        `INSERT INTO btc_paper_events (ts, window_start, event, details)
-         VALUES ($1, NULL, 'BOT_HISTORY_RESET_COMPLETED', $2::jsonb)`,
-        [Date.now(), JSON.stringify({ requestId: normalizedRequestId })],
+        `INSERT INTO btc_paper_history_reset_requests (bot_key, request_id, completed_at)
+         VALUES ($1, $2, $3)`,
+        [botKey, normalizedRequestId, Date.now()],
       );
       await client.query('COMMIT');
       return true;
@@ -132,12 +131,6 @@ class LearningStore {
     } finally {
       client.release();
     }
-  }
-
-  async clearHistoryResetMarkers() {
-    await this.pool.query(
-      `DELETE FROM btc_paper_events WHERE event = 'BOT_HISTORY_RESET_COMPLETED'`,
-    );
   }
 
   async recordSample(sample) {
