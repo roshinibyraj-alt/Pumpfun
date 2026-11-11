@@ -192,9 +192,11 @@
         const response=await fetch('/api/strategy/state?ts='+Date.now(),{cache:'no-store'});
         if(!response.ok)throw new Error('State request failed ('+response.status+')');
          const state=await response.json(),account=state.account||{},activeWindow=state.window||{};
-        $('status').className='status '+(state.error?'warning':state.running?'running':'');
-        $('statusText').textContent=state.error?'WARNING':state.running?'RUNNING':'STOPPED';
-         $('windowNotice').textContent=`${state.statusReason||'Scanning'} · BTC 5-minute window ends in ${activeWindow.secondsRemaining==null?'—':Math.ceil(activeWindow.secondsRemaining)+'s'} · Starting paper capital ${money(account.startingCapital)}`;
+         $('status').className='status '+(state.error?'warning':state.running?'running':'');
+         $('statusText').textContent=state.status|| (state.error?'WARNING':state.running?'RUNNING':'STOPPED');
+          const persistenceStatus=state.persistence?.status||'UNKNOWN';
+          const historyLabel=persistenceStatus==='CONNECTED'?'History saved to PostgreSQL':`History storage ${persistenceStatus.toLowerCase()}`;
+          $('windowNotice').textContent=`${state.statusReason||'Scanning'} · ${historyLabel} · BTC 5-minute window ends in ${activeWindow.secondsRemaining==null?'—':Math.ceil(activeWindow.secondsRemaining)+'s'} · Starting paper capital ${money(account.startingCapital)}`;
         $('error').style.display=state.error?'block':'none';$('error').textContent=state.error||'';
         $('equity').textContent=money(account.equity);$('cash').textContent=money(account.cash);
         $('realized').textContent=money(account.realizedPnl);$('unrealized').textContent=money(account.unrealizedPnl);

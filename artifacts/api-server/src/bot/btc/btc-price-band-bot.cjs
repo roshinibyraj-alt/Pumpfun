@@ -107,6 +107,16 @@ class BtcPriceBandBot {
     this.events = [];
     this.running = false;
     this.error = null;
+    this.stateStore = options.stateStore || null;
+    this.requirePersistedState = options.requirePersistedState === true;
+    this.storageHealthy = !this.stateStore;
+    this.persistenceStatus = this.stateStore ? 'NOT_STARTED' : 'DISABLED';
+    this.lastStateSavedAt = null;
+    this.pendingPersistedState = null;
+    this.persistenceTimer = null;
+    this.persistenceWriteInProgress = false;
+    this.startupPromise = null;
+    this.restoredMarketId = null;
     this.statusReason = 'Starting the BTC 5-minute price-band paper bot.';
     this.windowStart = null;
     this.windowEnd = null;
@@ -164,18 +174,55 @@ class BtcPriceBandBot {
   }
 
   start() {
-    if (this.running) return;
+    if (this.running) return this.startupPromise;
     this.running = true;
-    this.log('BOT_STARTED', 'BTC 5-minute ask-band paper bot started.');
-    void this.tick();
-    this.interval = setInterval(() => void this.tick(), this.config.POLL_INTERVAL_MS);
-    this.interval.unref?.();
+    if (!this.stateStore) {
+      this.log('BOT_STARTED', 'BTC 5-minute ask-band paper bot started.');
+      void this.tick();
+      this.interval = setInterval(() => void this.tick(), this.config.POLL_INTERVAL_MS);
+      this.interval.unref?.();
+      return Promise.resolve();
+    }
+    this.persistenceStatus = 'LOADING';
+    this.startupPromise = (async () => {
+      await this.stateStore.initialize();
+      const savedState = await this.stateStore.loadState();
+      if (savedState) {
+        this.restorePersistentState(savedState);
+      } else if (this.requirePersistedState) {
+        throw new Error('The durable BTC paper ledger is missing; refusing to start a fresh account.');
+      } else {
+        await this.stateStore.saveState(this.persistentStateSnapshot());
+      }
+      this.storageHealthy = true;
+      this.persistenceStatus = 'CONNECTED';
+      this.error = null;
+      this.log('BOT_STARTED', savedState
+        ? 'BTC 5-minute ask-band bot restored its paper history from PostgreSQL.'
+        : 'BTC 5-minute ask-band paper bot started with a new durable ledger.');
+      void this.tick();
+      this.interval = setInterval(() => void this.tick(), this.config.POLL_INTERVAL_MS);
+      this.interval.unref?.();
+    })().catch(error => {
+      this.storageHealthy = false;
+      this.persistenceStatus = 'ERROR';
+      this.running = false;
+      this.error = 'BTC paper-history storage is unavailable; trading is paused.';
+      this.statusReason = this.error;
+      this.log('STORAGE_ERROR', this.error, {
+        errorType: error?.name || 'Error',
+      });
+    });
+    return this.startupPromise;
   }
 
   stop() {
     this.running = false;
     if (this.interval) clearInterval(this.interval);
     this.interval = null;
+    if (this.persistenceTimer) clearTimeout(this.persistenceTimer);
+    this.persistenceTimer = null;
+    void this.flushPersistedState();
     this.closeMarketStream();
   }
 
@@ -188,6 +235,135 @@ class BtcPriceBandBot {
       ...details,
     });
     this.events = this.events.slice(0, 150);
+    const immediate = new Set([
+      'BUY_FILLED',
+      'OPPOSITE_SIGNAL_SELL',
+      'TERMINAL_THRESHOLD_RECORDED',
+      'TERMINAL_PRICE_SETTLEMENT',
+      'POSITION_RESOLVED',
+      'WINDOW_EXPIRED',
+    ]).has(type);
+    this.schedulePersistedState(immediate);
+  }
+
+  restorePersistentState(state) {
+    if (state?.schemaVersion !== 1 || !Array.isArray(state.trades)
+      || !Array.isArray(state.events) || !Number.isFinite(Number(state.cash))
+      || !Number.isFinite(Number(state.startingCapital))
+      || !Number.isFinite(Number(state.realizedPnl))) {
+      throw new Error('The saved BTC paper ledger has an unsupported or invalid format.');
+    }
+    this.startingCapital = Number(state.startingCapital);
+    this.cash = Number(state.cash);
+    this.realizedPnl = Number(state.realizedPnl);
+    this.trades = state.trades;
+    this.events = state.events.slice(0, 150);
+    this.windowStart = state.windowStart == null ? null : Number(state.windowStart);
+    this.windowEnd = state.windowEnd == null ? null : Number(state.windowEnd);
+    this.restoredMarketId = state.marketId == null ? null : String(state.marketId);
+    this.sideState = {
+      UP: { ...this.emptySideState(), ...(state.sideState?.UP || {}) },
+      DOWN: { ...this.emptySideState(), ...(state.sideState?.DOWN || {}) },
+    };
+    this.lastAskTrigger = {
+      UP: state.lastAskTrigger?.UP ?? null,
+      DOWN: state.lastAskTrigger?.DOWN ?? null,
+    };
+    this.quotes = Object.fromEntries(['UP', 'DOWN'].map(side => {
+      const quote = state.quotes?.[side];
+      if (!quote || typeof quote !== 'object') return [side, null];
+      return [side, {
+        ...quote,
+        status: 'STALE',
+        updatedAt: Number.isFinite(Number(quote.updatedAt)) ? Number(quote.updatedAt) : 0,
+      }];
+    }));
+    this.terminalEvidence = state.terminalEvidence || this.emptyTerminalEvidence();
+    this.terminalEvidenceMarketId = state.terminalEvidenceMarketId == null
+      ? this.restoredMarketId : String(state.terminalEvidenceMarketId);
+    this.terminalObservation = state.terminalObservation || null;
+    this.tradeSequence = Math.max(
+      Number(state.tradeSequence) || 0,
+      ...this.trades.map(trade => {
+        const match = String(trade.id || '').match(/^trade-(\d+)$/);
+        return match ? Number(match[1]) : 0;
+      }),
+    );
+    this.eventSequence = Math.max(
+      Number(state.eventSequence) || 0,
+      ...this.events.map(event => {
+        const match = String(event.id || '').match(/^event-(\d+)$/);
+        return match ? Number(match[1]) : 0;
+      }),
+    );
+    this.books.clear();
+    this.seenMarketEvents.clear();
+    this.lastResolutionCheckAt = 0;
+    this.statusReason = 'Restored the durable BTC paper ledger; reconnecting to the live market.';
+  }
+
+  persistentStateSnapshot() {
+    const state = {
+      schemaVersion: 1,
+      strategyVersion: this.config.STRATEGY_VERSION,
+      startingCapital: this.startingCapital,
+      cash: this.cash,
+      realizedPnl: this.realizedPnl,
+      trades: this.trades,
+      events: this.events,
+      tradeSequence: this.tradeSequence,
+      eventSequence: this.eventSequence,
+      windowStart: this.windowStart,
+      windowEnd: this.windowEnd,
+      marketId: this.market?.id == null ? this.restoredMarketId : String(this.market.id),
+      sideState: this.sideState,
+      lastAskTrigger: this.lastAskTrigger,
+      quotes: this.quotes,
+      terminalEvidence: this.terminalEvidence,
+      terminalEvidenceMarketId: this.terminalEvidenceMarketId,
+      terminalObservation: this.terminalObservation,
+    };
+    return JSON.parse(JSON.stringify(state));
+  }
+
+  schedulePersistedState(immediate = false) {
+    if (!this.stateStore || !this.storageHealthy) return;
+    this.pendingPersistedState = this.persistentStateSnapshot();
+    if (immediate) {
+      if (this.persistenceTimer) clearTimeout(this.persistenceTimer);
+      this.persistenceTimer = null;
+      void this.flushPersistedState();
+      return;
+    }
+    if (this.persistenceTimer) return;
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = null;
+      void this.flushPersistedState();
+    }, 500);
+    this.persistenceTimer.unref?.();
+  }
+
+  async flushPersistedState() {
+    if (!this.stateStore || !this.storageHealthy || this.persistenceWriteInProgress) return;
+    this.persistenceWriteInProgress = true;
+    try {
+      while (this.pendingPersistedState && this.storageHealthy) {
+        const state = this.pendingPersistedState;
+        this.pendingPersistedState = null;
+        await this.stateStore.saveState(state);
+        this.lastStateSavedAt = this.now();
+      }
+    } catch (error) {
+      this.storageHealthy = false;
+      this.persistenceStatus = 'ERROR';
+      this.error = 'BTC paper-history storage is unavailable; new buys are paused.';
+      this.statusReason = this.error;
+    } finally {
+      this.persistenceWriteInProgress = false;
+      if (this.pendingPersistedState && this.storageHealthy) {
+        void this.flushPersistedState();
+      }
+    }
   }
 
   closeMarketStream() {
@@ -234,6 +410,7 @@ class BtcPriceBandBot {
     this.terminalObservation = null;
     this.terminalEvidence = this.emptyTerminalEvidence();
     this.terminalEvidenceMarketId = null;
+    this.restoredMarketId = null;
     this.websocket = {
       status: 'DISCONNECTED',
       connectedAt: null,
@@ -259,10 +436,12 @@ class BtcPriceBandBot {
       throw new Error('BTC UP/DOWN outcomes do not match the current 5-minute window.');
     }
 
-    const changed = !this.market
+    const restoredSameMarket = !this.market && this.restoredMarketId != null
+      && String(this.restoredMarketId) === String(market.id);
+    const changed = !restoredSameMarket && (!this.market
       || String(this.market.id) !== String(market.id)
       || this.market.tokens.UP !== market.tokens.UP
-      || this.market.tokens.DOWN !== market.tokens.DOWN;
+      || this.market.tokens.DOWN !== market.tokens.DOWN);
     this.market = market;
     if (changed) {
       this.quotes = { UP: null, DOWN: null };
@@ -272,6 +451,10 @@ class BtcPriceBandBot {
       this.terminalEvidence = this.emptyTerminalEvidence();
       this.terminalEvidenceMarketId = String(market.id);
       this.terminalObservation = null;
+      this.startMarketStream(market);
+    } else if (restoredSameMarket) {
+      this.restoredMarketId = null;
+      this.terminalEvidenceMarketId = String(market.id);
       this.startMarketStream(market);
     }
     this.statusReason = 'BTC market loaded; waiting for live UP/DOWN ask updates.';
@@ -369,7 +552,7 @@ class BtcPriceBandBot {
     const side = this.sideForToken(tokenId);
     if (!side) return;
     const previous = this.books.get(tokenId);
-    const previousBestAsk = previous?.asks?.[0]?.price ?? null;
+    const previousBestAsk = previous?.asks?.[0]?.price ?? this.quotes[side]?.bestAsk ?? null;
     const asks = reconcileLevels(previous?.asks, normalizeLevels(event.asks, 'asks'));
     const bids = reconcileLevels(previous?.bids, normalizeLevels(event.bids, 'bids'));
     const book = {
@@ -547,10 +730,16 @@ class BtcPriceBandBot {
     if (quote.bestBid >= this.config.TERMINAL_WINNER_BID && evidence.winnerHitAt == null) {
       evidence.winnerHitAt = now;
       evidence.winnerBid = quote.bestBid;
+      this.log('TERMINAL_THRESHOLD_RECORDED',
+        `${side} reached the $0.99 winner threshold during this BTC window.`,
+        { side, threshold: 'WINNER', bid: quote.bestBid, observedAt: now });
     }
     if (quote.bestBid < this.config.TERMINAL_LOSER_BID && evidence.loserHitAt == null) {
       evidence.loserHitAt = now;
       evidence.loserBid = quote.bestBid;
+      this.log('TERMINAL_THRESHOLD_RECORDED',
+        `${side} fell below the $0.01 loser threshold during this BTC window.`,
+        { side, threshold: 'LOSER', bid: quote.bestBid, observedAt: now });
     }
   }
 
@@ -644,6 +833,11 @@ class BtcPriceBandBot {
   }
 
   handleAskTrigger(side, now, triggerType) {
+    if (this.stateStore && !this.storageHealthy) {
+      this.sideState[side].status = 'PAPER_HISTORY_STORAGE_ERROR';
+      this.sideState[side].reason = 'Trading is paused until durable paper history storage is available.';
+      return false;
+    }
     const oppositeSide = side === 'UP' ? 'DOWN' : 'UP';
     const oppositeTrades = this.trades.filter(trade =>
       trade.status === 'OPEN'
@@ -744,6 +938,11 @@ class BtcPriceBandBot {
     const state = this.sideState[side];
     state.lastUpdateAt = now;
     state.lastBestAsk = quote?.bestAsk ?? null;
+    if (this.stateStore && !this.storageHealthy) {
+      state.status = 'PAPER_HISTORY_STORAGE_ERROR';
+      state.reason = 'Trading is paused until durable paper history storage is available.';
+      return false;
+    }
     if (!this.quoteIsFresh(quote, now) || !Number.isFinite(quote.bestAsk)) {
       state.status = 'WAITING_FOR_FRESH_ASK';
       state.reason = 'Waiting for a fresh Polymarket best ask.';
@@ -986,6 +1185,7 @@ class BtcPriceBandBot {
       return this.snapshot();
     } finally {
       this.tickInProgress = false;
+      this.schedulePersistedState();
     }
   }
 
@@ -1042,9 +1242,15 @@ class BtcPriceBandBot {
       running: this.running,
       now,
       lastUpdateAt: now,
-      status: this.error ? 'WARNING' : this.running ? 'RUNNING' : 'STOPPED',
+      status: this.persistenceStatus === 'LOADING'
+        ? 'STARTING'
+        : this.error ? 'WARNING' : this.running ? 'RUNNING' : 'STOPPED',
       statusReason: this.statusReason,
       error: this.error,
+      persistence: {
+        status: this.persistenceStatus,
+        lastSavedAt: this.lastStateSavedAt,
+      },
       strategy: {
         version: this.config.STRATEGY_VERSION,
         timeframe: '5m',

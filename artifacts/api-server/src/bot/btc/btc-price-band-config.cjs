@@ -1,7 +1,7 @@
 'use strict';
 
 module.exports = {
-  STRATEGY_VERSION: 'btc-5m-best-ask-change-opposite-reversal-297s-v3',
+  STRATEGY_VERSION: 'btc-5m-best-ask-change-opposite-reversal-297s-v4',
   WINDOW_MS: 5 * 60 * 1000,
   STARTING_CAPITAL: 3_000,
   SHARES_PER_BUY: 50,
