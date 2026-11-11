@@ -104,6 +104,35 @@ test('config uses BTC 5-minute windows, the $0.69-$0.71 band, the $0.50 pivot, a
   assert.equal(config.MAX_ENTRY_ASK, 0.71);
 });
 
+test('a new 5-minute window clears unused martingale sizing without selling existing shares', () => {
+  const { bot, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
+  setNow(600_002);
+  const pivot = book('up-token', 0.70, 100, 0.50);
+  pivot.timestamp = '600002';
+  bot.handleMarketMessage(pivot);
+
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.martingaleNextShares, 75);
+  assert.equal(bot.martingaleReentryArmed, true);
+
+  setNow(900_001);
+  bot.resetWindow(900_000);
+
+  const snapshot = bot.snapshot();
+  assert.equal(bot.martingaleNextShares, 50);
+  assert.equal(bot.martingaleReentryArmed, false);
+  assert.equal(bot.martingalePivot, null);
+  assert.equal(bot.pendingTrigger, null);
+  assert.equal(bot.trades[0].status, 'AWAITING_RESOLUTION');
+  assert.equal(bot.trades[0].shares, 50);
+  assert.equal(snapshot.account.closedPositions, 0);
+  assert.equal(snapshot.strategy.nextBaseBuyShares, 50);
+  assert.equal(snapshot.strategy.martingaleReentryArmed, false);
+});
+
 test('production never sells on an opposite ask and re-enters either side after the pivot', () => {
   const { bot, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
@@ -201,7 +230,7 @@ test('$0.50 martingale pivot holds the position and advances sizing once', () =>
   bot.handleMarketMessage(nextWindowEntry);
   const nextWindowTrade = bot.trades.find(trade =>
     trade.status === 'OPEN' && trade.windowStart === 900_000);
-  assert.equal(nextWindowTrade.shares, 75);
+  assert.equal(nextWindowTrade.shares, 50);
 });
 
 test('martingale re-entry can use either side and compounds after a later pivot without selling', () => {

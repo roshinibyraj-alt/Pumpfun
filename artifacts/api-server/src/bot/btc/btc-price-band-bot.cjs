@@ -579,6 +579,8 @@ class BtcPriceBandBot {
     this.activeSide = null;
     this.lastBaseBuyAt = null;
     this.pendingTrigger = null;
+    this.martingaleNextShares = this.config.SHARES_PER_BUY;
+    this.martingaleReentryArmed = false;
     this.martingalePivot = null;
     this.martingalePivotedSides = { UP: false, DOWN: false };
     this.lastAskTrigger = { UP: null, DOWN: null };

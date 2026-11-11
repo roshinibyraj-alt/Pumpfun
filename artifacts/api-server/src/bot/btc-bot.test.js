@@ -286,6 +286,7 @@ test("the public root dashboard shows the BTC-only 5-minute ask-band strategy", 
   assert.match(html, /no sell orders/);
   assert.match(html, /At \$0\.50 bid, hold shares and arm a 1\.5× buy/);
   assert.match(html, /Either side can return to the band/);
+  assert.match(html, /New 5-minute window clears unused re-entry and resets size to 50/);
   assert.match(html, /No sell orders before resolution/);
   assert.match(html, /Either side's ask in band can trigger the next size/);
   assert.match(html, /Next base entry/);

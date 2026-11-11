@@ -110,6 +110,7 @@
           <div class="rule"><div class="rule-label">Next base entry</div><div class="rule-value" id="nextBaseEntry">50 shares</div></div>
           <div class="rule"><div class="rule-label">Martingale pivot</div><div class="rule-value">At $0.50 bid, hold shares and arm a 1.5× buy</div></div>
           <div class="rule"><div class="rule-label">Re-entry</div><div class="rule-value">Either side can return to the band</div></div>
+          <div class="rule"><div class="rule-label">Window reset</div><div class="rule-value">New 5-minute window clears unused re-entry and resets size to 50</div></div>
           <div class="rule"><div class="rule-label">Execution</div><div class="rule-value">All-or-nothing sweep · no price cap</div></div>
           <div class="rule"><div class="rule-label">Opposite side</div><div class="rule-value">No sale; buy only when re-entry is armed</div></div>
           <div class="rule"><div class="rule-label">Sell behavior</div><div class="rule-value">No sell orders before resolution</div></div>
@@ -121,7 +122,7 @@
     </section>
 
     <section class="panel" style="margin-bottom:16px">
-      <div class="panel-head"><div><h2>BTC position</h2><div class="section-note">No sell orders: keep shares until resolution. At the $0.50 pivot, the next 1.5× buy can be triggered by either side returning to the band.</div></div><span class="pill" id="openCount">0 open</span></div>
+      <div class="panel-head"><div><h2>BTC position</h2><div class="section-note">No sell orders: keep shares until resolution. At the $0.50 pivot, the next 1.5× buy can be triggered by either side returning to the band. Each new window clears any unused re-entry and resets sizing to 50.</div></div><span class="pill" id="openCount">0 open</span></div>
       <div class="inventory-head"><h3>Current 5-minute window</h3><span class="section-note" id="pendingSummary">Remember terminal threshold hits throughout the window</span></div>
       <div class="layout inventory" id="currentInventory"></div>
     </section>
