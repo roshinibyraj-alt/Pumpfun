@@ -133,6 +133,39 @@ test('a new 5-minute window clears unused martingale sizing without selling exis
   assert.equal(snapshot.strategy.martingaleReentryArmed, false);
 });
 
+test('a profitable prior-window resolution does not reset current-window martingale sizing', async () => {
+  const { bot, market, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
+
+  setNow(900_001);
+  bot.resetWindow(900_000);
+  bot.market = {
+    ...market,
+    id: 'btc-5m-market-next',
+    slug: 'btc-updown-5m-900',
+    start: 900_000,
+    end: 1_200_000,
+    tokens: { UP: 'up-token-next', DOWN: 'down-token-next' },
+  };
+  const nextEntry = book('up-token-next', 0.70, 100, 0.55);
+  nextEntry.timestamp = '900001';
+  bot.handleMarketMessage(nextEntry);
+
+  setNow(900_002);
+  const pivot = book('up-token-next', 0.70, 100, 0.50);
+  pivot.timestamp = '900002';
+  bot.handleMarketMessage(pivot);
+  assert.equal(bot.martingaleNextShares, 75);
+  assert.equal(bot.martingaleReentryArmed, true);
+
+  await bot.resolveDue(900_003, { force: true });
+
+  assert.equal(bot.trades.find(trade => trade.windowStart === 600_000).status, 'SETTLED');
+  assert.equal(bot.martingaleNextShares, 75);
+  assert.equal(bot.martingaleReentryArmed, true);
+});
+
 test('production never sells on an opposite ask and re-enters either side after the pivot', () => {
   const { bot, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);

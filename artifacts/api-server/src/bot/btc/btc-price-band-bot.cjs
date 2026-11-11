@@ -2131,6 +2131,8 @@ class BtcPriceBandBot {
       this.resolutionLastAttemptAt.set(marketId, now);
       try {
         const market = await this.marketData.getMarket(marketId);
+        const settlementWindowStart = this.trades.find(trade =>
+          trade.marketId === marketId)?.windowStart;
         let marketRealizedPnl = 0;
         let settledCount = 0;
         for (const trade of this.trades) {
@@ -2160,7 +2162,7 @@ class BtcPriceBandBot {
             `BTC ${trade.side} settled from its exact original market: ${trade.outcome.toLowerCase()}.`,
             { tradeId: trade.id, marketId, payout, realizedPnl: round(trade.realizedPnl) });
         }
-        if (marketRealizedPnl > EPSILON) {
+        if (marketRealizedPnl > EPSILON && settlementWindowStart === this.windowStart) {
           this.martingaleNextShares = this.config.SHARES_PER_BUY;
           this.martingaleReentryArmed = false;
           this.martingalePivot = null;
