@@ -95,6 +95,7 @@ test('config uses BTC 5-minute windows, the $0.69-$0.71 band, and 1.5x flips', (
   assert.equal(config.SELLS_ON_OPPOSITE_TRIGGER, true);
   assert.equal(config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER, 1.5);
   assert.equal(config.STOP_LOSS_BID, 0.50);
+  assert.equal(config.MARTINGALE_MULTIPLIER, 1.5);
   assert.equal(config.SAME_SIDE_COOLDOWN_MS, 1_000);
   assert.equal(config.PENDING_TRIGGER_TTL_MS, 2_000);
   assert.equal(config.PENDING_RETRY_MAX_ASK, 1);
@@ -116,6 +117,7 @@ test('production band triggers a 50-share entry and a 1.5x opposite flip', () =>
   assert.equal(snapshot.strategy.minEntryAsk, 0.69);
   assert.equal(snapshot.strategy.maxEntryAsk, 0.71);
   assert.equal(snapshot.strategy.oppositeTriggerSizeMultiplier, 1.5);
+  assert.equal(snapshot.strategy.martingaleMultiplier, 1.5);
   assert.equal(snapshot.strategy.stopLossBid, 0.50);
 });
 
@@ -149,6 +151,91 @@ test('production stop-loss closes all shares once the best bid reaches $0.50', (
   assert.equal(stopped.settlementSource, 'STOP_LOSS');
   assert.equal(bot.snapshot().inventory.currentWindow.UP.shares, 0);
   assert.equal(bot.snapshot().strategy.stopLossBid, 0.50);
+});
+
+test('stop-loss rearms either side and compounds the next base size by 1.5x', () => {
+  const { bot, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
+
+  setNow(600_002);
+  bot.handleMarketMessage(book('up-token', 0.70, 200, 0.50));
+  assert.equal(bot.activeSide, null);
+  assert.equal(bot.martingaleNextShares, 75);
+
+  setNow(600_003);
+  const downEntry = book('down-token', 0.70, 200, 0.54);
+  downEntry.timestamp = '600003';
+  bot.handleMarketMessage(downEntry);
+  assert.equal(bot.activeSide, 'DOWN');
+  assert.equal(bot.trades.find(trade => trade.status === 'OPEN').shares, 75);
+
+  setNow(600_004);
+  const secondStop = book('down-token', 0.70, 200, 0.50);
+  secondStop.timestamp = '600004';
+  bot.handleMarketMessage(secondStop);
+  assert.equal(bot.martingaleNextShares, 112.5);
+
+  setNow(600_005);
+  const upEntry = book('up-token', 0.71, 200, 0.54);
+  upEntry.timestamp = '600005';
+  bot.handleMarketMessage(upEntry);
+  assert.equal(bot.activeSide, 'UP');
+  assert.equal(bot.trades.find(trade => trade.status === 'OPEN').shares, 112.5);
+  assert.equal(bot.snapshot().strategy.nextBaseBuyShares, 112.5);
+});
+
+test('a profitable opposite-signal close resets stop-loss martingale sizing', () => {
+  const { bot, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
+
+  setNow(600_002);
+  bot.handleMarketMessage(book('up-token', 0.70, 200, 0.50));
+  setNow(600_003);
+  const downEntry = book('down-token', 0.70, 200, 0.54);
+  downEntry.timestamp = '600003';
+  bot.handleMarketMessage(downEntry);
+  assert.equal(bot.trades.find(trade => trade.status === 'OPEN').shares, 75);
+
+  setNow(600_004);
+  const profitableBid = book('down-token', 0.70, 200, 0.95);
+  profitableBid.timestamp = '600004';
+  bot.handleMarketMessage(profitableBid);
+  setNow(600_005);
+  const oppositeEntry = book('up-token', 0.71, 200, 0.54);
+  oppositeEntry.timestamp = '600005';
+  bot.handleMarketMessage(oppositeEntry);
+
+  assert.ok(bot.trades.find(trade => trade.side === 'DOWN').realizedPnl > 0);
+  assert.equal(bot.martingaleNextShares, 50);
+  assert.equal(bot.snapshot().strategy.nextBaseBuyShares, 50);
+});
+
+test('stop-loss martingale size survives restore and a profitable resolution resets it', async () => {
+  const { bot, marketData } = createBot({ production: true });
+  bot.martingaleNextShares = 75;
+  const restored = new BtcPriceBandBot({
+    marketData,
+    now: () => 900_001,
+    config: bot.config,
+  });
+  restored.restorePersistentState(bot.persistentStateSnapshot());
+  assert.equal(restored.martingaleNextShares, 75);
+
+  restored.trades.push({
+    id: 'trade-profitable-resolution',
+    marketId: 'btc-5m-market',
+    side: 'UP',
+    shares: 50,
+    totalCost: 20,
+    status: 'AWAITING_RESOLUTION',
+  });
+  await restored.resolveDue(900_001, { force: true });
+
+  assert.equal(restored.trades[0].status, 'SETTLED');
+  assert.equal(restored.trades[0].outcome, 'WIN');
+  assert.equal(restored.martingaleNextShares, 50);
 });
 
 test('stop-loss waits for full visible bid depth without partially selling', () => {

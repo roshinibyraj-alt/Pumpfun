@@ -172,6 +172,7 @@ class BtcPriceBandBot {
     this.lastBaseBuyAt = null;
     this.pendingTrigger = null;
     this.pendingStopLoss = null;
+    this.martingaleNextShares = this.config.SHARES_PER_BUY;
     this.triggerSequence = 0;
     this.lastAskTrigger = { UP: null, DOWN: null };
     this.terminalEvidence = this.emptyTerminalEvidence();
@@ -397,6 +398,10 @@ class BtcPriceBandBot {
           ? Number(savedStopLoss.triggerBid) : null,
         lastBlockKey: null,
       } : null;
+    const savedMartingaleShares = Number(state.martingaleNextShares);
+    this.martingaleNextShares = Number.isFinite(savedMartingaleShares)
+      && savedMartingaleShares >= this.config.SHARES_PER_BUY
+      ? savedMartingaleShares : this.config.SHARES_PER_BUY;
     const pendingSequence = Number(String(this.pendingTrigger?.id || '').match(/^trigger-(\d+)$/)?.[1]) || 0;
     this.triggerSequence = Math.max(0, Number(state.triggerSequence) || 0, pendingSequence);
     this.lastAskTrigger = {
@@ -456,6 +461,7 @@ class BtcPriceBandBot {
       lastBaseBuyAt: this.lastBaseBuyAt,
       pendingTrigger: this.pendingTrigger,
       pendingStopLoss: this.pendingStopLoss,
+      martingaleNextShares: this.martingaleNextShares,
       triggerSequence: this.triggerSequence,
       lastAskTrigger: this.lastAskTrigger,
       quotes: this.quotes,
@@ -964,8 +970,9 @@ class BtcPriceBandBot {
     this.closePositionsOnOppositeSignal(trades, execution, now, null, 'STOP_LOSS');
     this.pendingStopLoss = null;
     this.activeSide = null;
+    this.lastBaseBuyAt = null;
     state.status = 'STOP_LOSS_FILLED';
-    state.reason = `Sold all ${shares} ${pending.side} shares after the best bid reached ${this.config.STOP_LOSS_BID.toFixed(2)}; average sale price ${execution.averagePrice.toFixed(3)}.`;
+    state.reason = `Sold all ${shares} ${pending.side} shares after the best bid reached ${this.config.STOP_LOSS_BID.toFixed(2)}; average sale price ${execution.averagePrice.toFixed(3)}. Next base entry: ${this.martingaleNextShares} shares.`;
     state.lastUpdateAt = now;
     this.log('STOP_LOSS_FILLED', state.reason, {
       side: pending.side,
@@ -976,6 +983,7 @@ class BtcPriceBandBot {
       fees: round(execution.fees),
       netProceeds: round(execution.netProceeds),
       realizedPnl: round(trades.reduce((sum, trade) => sum + (trade.realizedPnl || 0), 0)),
+      nextBaseBuyShares: this.martingaleNextShares,
     });
     this.schedulePersistedState(true);
     return true;
@@ -1194,7 +1202,7 @@ class BtcPriceBandBot {
       : 0;
     const requestedShares = outgoingShares > EPSILON
       ? round(outgoingShares * this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER, 8)
-      : this.config.SHARES_PER_BUY;
+      : this.martingaleNextShares;
     state.qualifyingUpdates += 1;
     this.pendingTrigger = {
       id: `trigger-${++this.triggerSequence}`,
@@ -1220,7 +1228,7 @@ class BtcPriceBandBot {
     state.status = 'PENDING_TRIGGER';
     state.reason = isOppositeTrigger
       ? `Opposite ${side} trigger queued to sell ${round(outgoingShares)} outgoing shares and buy ${round(requestedShares)} (${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER}x).`
-      : `One ${this.config.SHARES_PER_BUY}-share ${side} entry queued for this trigger.`;
+      : `One ${round(requestedShares)}-share ${side} entry queued for this trigger${requestedShares > this.config.SHARES_PER_BUY ? ' using stop-loss martingale sizing' : ''}.`;
     this.log('PENDING_TRIGGER_CREATED', state.reason, {
       triggerId: this.pendingTrigger.id,
       side,
@@ -1428,12 +1436,14 @@ class BtcPriceBandBot {
     );
     if (sharesToSell <= EPSILON) {
       pending.mode = 'BASE_ENTRY';
-      pending.requestedShares = this.config.SHARES_PER_BUY;
+      const requestedShares = Number(pending.requestedShares) > 0
+        ? Number(pending.requestedShares) : this.martingaleNextShares;
+      pending.requestedShares = requestedShares;
       const bought = this.tryBuy(
         side,
         now,
         pending.triggerType,
-        this.config.SHARES_PER_BUY,
+        requestedShares,
         null,
         {
           minPrice,
@@ -1890,6 +1900,11 @@ class BtcPriceBandBot {
       remainingSaleShares -= soldShares;
     }
     this.realizedPnl = round(this.realizedPnl + totalRealized, 8);
+    if (totalRealized > EPSILON) {
+      this.martingaleNextShares = this.config.SHARES_PER_BUY;
+    } else if (exitReason === 'STOP_LOSS') {
+      this.martingaleNextShares = round(totalShares * this.config.MARTINGALE_MULTIPLIER, 8);
+    }
     const remainingShares = this.currentWindowOpenTrades(trades[0]?.side)
       .reduce((sum, trade) => sum + trade.shares, 0);
     return { soldShares: totalShares - Math.max(0, remainingSaleShares), remainingShares };
@@ -2042,6 +2057,7 @@ class BtcPriceBandBot {
 
     const currentTrades = this.trades.filter(trade =>
       trade.status === 'OPEN' && trade.marketId === String(this.market.id));
+    let settlementRealizedPnl = 0;
     for (const trade of currentTrades) {
       const payout = trade.side === observed.winner ? 1 : 0;
       const proceeds = trade.shares * payout;
@@ -2056,6 +2072,7 @@ class BtcPriceBandBot {
       trade.outcome = payout === 1 ? 'WIN' : 'LOSS';
       this.cash = round(this.cash + proceeds, 8);
       this.realizedPnl += trade.realizedPnl;
+      settlementRealizedPnl += trade.realizedPnl;
       this.log('TERMINAL_PRICE_SETTLEMENT',
         `BTC ${trade.side} counted as ${payout ? '$1' : '$0'} per share from terminal prices recorded this window.`,
         {
@@ -2067,6 +2084,8 @@ class BtcPriceBandBot {
           realizedPnl: round(trade.realizedPnl),
         });
     }
+    if (settlementRealizedPnl > EPSILON) this.martingaleNextShares = this.config.SHARES_PER_BUY;
+    this.schedulePersistedState(true);
   }
 
   markOpenPositions(now) {
@@ -2096,6 +2115,8 @@ class BtcPriceBandBot {
       this.resolutionLastAttemptAt.set(marketId, now);
       try {
         const market = await this.marketData.getMarket(marketId);
+        let marketRealizedPnl = 0;
+        let settledCount = 0;
         for (const trade of this.trades) {
           if (trade.status !== 'AWAITING_RESOLUTION' || trade.marketId !== marketId) continue;
           const payout = resolvedPayout(market, trade);
@@ -2117,10 +2138,14 @@ class BtcPriceBandBot {
           trade.outcome = payout === 1 ? 'WIN' : 'LOSS';
           this.cash = round(this.cash + proceeds, 8);
           this.realizedPnl += trade.realizedPnl;
+          marketRealizedPnl += trade.realizedPnl;
+          settledCount += 1;
           this.log('POSITION_RESOLVED',
             `BTC ${trade.side} settled from its exact original market: ${trade.outcome.toLowerCase()}.`,
             { tradeId: trade.id, marketId, payout, realizedPnl: round(trade.realizedPnl) });
         }
+        if (marketRealizedPnl > EPSILON) this.martingaleNextShares = this.config.SHARES_PER_BUY;
+        if (settledCount > 0) this.schedulePersistedState(true);
       } catch (error) {
         for (const trade of this.trades) {
           if (trade.status === 'AWAITING_RESOLUTION' && trade.marketId === marketId) {
@@ -2238,6 +2263,8 @@ class BtcPriceBandBot {
         startingCapital: this.startingCapital,
         sharesPerBuy: this.config.SHARES_PER_BUY,
         oppositeTriggerSizeMultiplier: this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER,
+        martingaleMultiplier: this.config.MARTINGALE_MULTIPLIER,
+        nextBaseBuyShares: this.martingaleNextShares,
         stopLossBid: this.config.STOP_LOSS_BID,
         allOrNothingBuys: true,
         sameSideCooldownMs: this.config.SAME_SIDE_COOLDOWN_MS,
@@ -2248,12 +2275,13 @@ class BtcPriceBandBot {
         pendingRetryMaxAsk: this.config.PENDING_RETRY_MAX_ASK,
         minEntryAsk: this.config.MIN_ENTRY_ASK,
         maxEntryAsk: this.config.MAX_ENTRY_ASK,
-        trigger: `The first qualifying ask in the inclusive ${this.config.MIN_ENTRY_ASK.toFixed(2)}-${this.config.MAX_ENTRY_ASK.toFixed(2)} band buys 50 shares. An opposite trigger sells the outgoing position and buys ${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER} times the shares sold.`,
+        trigger: `The first qualifying ask in the inclusive ${this.config.MIN_ENTRY_ASK.toFixed(2)}-${this.config.MAX_ENTRY_ASK.toFixed(2)} band buys ${this.martingaleNextShares} base shares. An opposite trigger sells the outgoing position and buys ${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER} times the shares sold.`,
         orderType: 'PAPER ALL-OR-NOTHING TAKER SWEEP',
         marketSweepMaxPrice: 1,
         intraWindowSales: this.config.SELLS_ON_OPPOSITE_TRIGGER,
         reversalRule: `On an opposite trigger, sell all outgoing shares at visible bids, then buy ${this.config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER} times that share count. Require full visible depth for both legs; otherwise do not partially fill and retry up to two seconds.`,
         stopLossRule: `When a held side's best bid reaches or drops below ${this.config.STOP_LOSS_BID.toFixed(2)}, sell its entire position at visible bids. Require full visible depth; do not partially sell.`,
+        martingaleRule: `After a stop-loss loss, rearm either side and size the next base buy at ${this.config.MARTINGALE_MULTIPLIER} times the stopped shares. Reset to ${this.config.SHARES_PER_BUY} after a profitable close.`,
         terminalCheckSeconds: this.config.TERMINAL_CHECK_SECONDS,
         terminalThresholds: {
           winnerBestBidAtLeast: this.config.TERMINAL_WINNER_BID,

@@ -288,6 +288,8 @@ test("the public root dashboard shows the BTC-only 5-minute ask-band strategy", 
   assert.match(html, /Sell full side at \$0\.50 best bid or lower/);
   assert.match(html, /Retry 2 seconds · no price ceiling/);
   assert.match(html, /Stop-loss and flip exits require full visible bid depth/);
+  assert.match(html, /Next base entry/);
+  assert.match(html, /Stop-loss martingale/);
   assert.doesNotMatch(html, /flipStreak|After four completed flips/);
   assert.match(html, /any in-window \$0\.99\+ \/ below \$0\.01 hits/);
   assert.match(html, /History saved to PostgreSQL/);
