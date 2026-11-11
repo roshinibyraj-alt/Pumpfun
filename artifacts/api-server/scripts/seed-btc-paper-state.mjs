@@ -1,7 +1,12 @@
-import { pool } from "@workspace/db";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
+const dbRequire = createRequire(new URL("../../../lib/db/package.json", import.meta.url));
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL must be set before preparing BTC paper history.");
+}
+const { Pool } = dbRequire("pg");
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 const { PaperStateStore } = require("../src/bot/btc/paper-state-store.cjs");
 const sourceUrl = process.env.BTC_5M_STATE_SOURCE_URL
   || "https://pumpfun-production-7acb.up.railway.app/api/strategy/state";
