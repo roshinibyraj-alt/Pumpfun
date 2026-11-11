@@ -74,10 +74,8 @@ app.use("/api", router);
 
 app.get("/", (_req, res, next) => {
   const dashboardPath = [
-    path.resolve(process.cwd(), "public/cross-pair.html"),
-    path.resolve(process.cwd(), "artifacts/api-server/public/cross-pair.html"),
-    path.resolve(process.cwd(), "public/probability.html"),
-    path.resolve(process.cwd(), "artifacts/api-server/public/probability.html"),
+    path.resolve(process.cwd(), "public/mispricing.html"),
+    path.resolve(process.cwd(), "artifacts/api-server/public/mispricing.html"),
   ].find(existsSync);
   if (!dashboardPath) {
     next();

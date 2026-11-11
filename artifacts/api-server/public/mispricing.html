@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101628">
+    <title>BTCUSDT Mispricing Paper Bot</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b1020;
+        --panel: #141c31;
+        --panel-raised: #1a2540;
+        --line: #293552;
+        --muted: #98a6c4;
+        --text: #f4f7ff;
+        --cyan: #50d5e8;
+        --blue: #7397ff;
+        --green: #42d6a4;
+        --red: #ff718e;
+        --yellow: #ffd36a;
+        --purple: #c59aff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-width: 320px;
+        color: var(--text);
+        background:
+          radial-gradient(ellipse at 10% -10%, rgba(61, 112, 216, .22), transparent 34rem),
+          radial-gradient(ellipse at 95% 5%, rgba(31, 183, 180, .12), transparent 28rem),
+          var(--bg);
+        font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      a { color: var(--cyan); }
+      .shell { width: min(1440px, calc(100% - 36px)); margin: 0 auto; padding: 28px 0 50px; }
+      .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-bottom: 24px; }
+      .brand { display: flex; align-items: center; gap: 14px; }
+      .brand-mark {
+        display: grid; place-items: center; width: 46px; height: 46px; border-radius: 15px;
+        color: #07131e; font-weight: 900; background: linear-gradient(135deg, var(--cyan), #80f1c6);
+        box-shadow: 0 9px 28px rgba(80, 213, 232, .2);
+      }
+      .eyebrow { color: var(--cyan); font-size: 11px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+      h1 { margin: 2px 0 0; font-size: clamp(22px, 3vw, 31px); line-height: 1.15; letter-spacing: -.035em; }
+      .top-meta { display: flex; align-items: center; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+      .pill, .badge {
+        display: inline-flex; align-items: center; gap: 7px; min-height: 30px; padding: 5px 11px;
+        border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+        background: rgba(20, 28, 49, .86); font-size: 12px; font-weight: 750;
+      }
+      .pill::before { content: ""; width: 7px; height: 7px; border-radius: 99px; background: currentColor; }
+      .pill.good { color: var(--green); border-color: rgba(66, 214, 164, .3); }
+      .pill.warn { color: var(--yellow); border-color: rgba(255, 211, 106, .3); }
+      .pill.bad { color: var(--red); border-color: rgba(255, 113, 142, .3); }
+      .hero {
+        position: relative; overflow: hidden; display: grid; grid-template-columns: 1.35fr .65fr;
+        gap: 24px; align-items: center; padding: 25px 28px; margin-bottom: 18px;
+        border: 1px solid rgba(80, 213, 232, .21); border-radius: 22px;
+        background: linear-gradient(112deg, rgba(25, 46, 78, .96), rgba(21, 29, 51, .94) 60%, rgba(33, 36, 71, .9));
+      }
+      .hero::after {
+        content: ""; position: absolute; width: 290px; height: 290px; right: -100px; top: -170px;
+        border: 1px solid rgba(80, 213, 232, .2); border-radius: 50%;
+        box-shadow: 0 0 0 30px rgba(80, 213, 232, .035), 0 0 0 65px rgba(80, 213, 232, .025);
+        pointer-events: none;
+      }
+      .hero h2 { position: relative; z-index: 1; margin: 7px 0 8px; font-size: clamp(19px, 2.4vw, 25px); letter-spacing: -.025em; }
+      .hero p { position: relative; z-index: 1; max-width: 740px; margin: 0; color: #c0cde6; }
+      .hero-state { position: relative; z-index: 1; justify-self: end; text-align: right; }
+      .hero-state strong { display: block; margin-top: 7px; font-size: 17px; }
+      .hero-state small { color: var(--muted); }
+      .grid { display: grid; gap: 14px; }
+      .metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 14px; }
+      .two-col { grid-template-columns: minmax(0, 1.15fr) minmax(320px, .85fr); margin-bottom: 14px; }
+      .three-col { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
+      .panel, .metric {
+        min-width: 0; border: 1px solid var(--line); border-radius: 18px;
+        background: linear-gradient(155deg, rgba(23, 32, 55, .98), rgba(17, 24, 42, .98));
+      }
+      .panel { padding: 18px; }
+      .metric { padding: 15px 17px; }
+      .metric-label, .panel-kicker { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+      .metric-value { margin-top: 8px; font-size: clamp(21px, 2.4vw, 28px); font-weight: 800; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
+      .metric-sub { margin-top: 4px; color: var(--muted); font-size: 12px; }
+      .panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 15px; }
+      h2, h3 { margin: 0; }
+      .panel-title { font-size: 16px; font-weight: 800; letter-spacing: -.015em; }
+      .panel-subtitle { margin-top: 3px; color: var(--muted); font-size: 12px; }
+      .feed-row { display: flex; justify-content: space-between; gap: 16px; padding: 10px 0; border-top: 1px solid rgba(41, 53, 82, .7); }
+      .feed-row:first-of-type { border-top: 0; }
+      .feed-label { color: var(--muted); }
+      .feed-value { text-align: right; font-weight: 750; font-variant-numeric: tabular-nums; }
+      .candles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 15px; }
+      .candle {
+        min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 13px;
+        background: rgba(10, 16, 32, .58);
+      }
+      .candle.green { border-color: rgba(66, 214, 164, .35); }
+      .candle.red { border-color: rgba(255, 113, 142, .35); }
+      .candle-time { color: var(--muted); font-size: 10px; }
+      .candle-return { margin-top: 5px; font-weight: 800; font-variant-numeric: tabular-nums; }
+      .probabilities { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+      .prob-card {
+        padding: 16px; border: 1px solid var(--line); border-radius: 15px;
+        background: linear-gradient(140deg, rgba(34, 50, 82, .85), rgba(15, 22, 40, .8));
+      }
+      .prob-card.up { border-color: rgba(66, 214, 164, .35); }
+      .prob-card.down { border-color: rgba(255, 113, 142, .35); }
+      .prob-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+      .side-label { font-size: 12px; font-weight: 850; letter-spacing: .1em; }
+      .prob-value { margin: 10px 0 3px; font-size: clamp(29px, 4vw, 40px); font-weight: 900; letter-spacing: -.05em; }
+      .prob-detail { color: var(--muted); font-size: 12px; }
+      .decision {
+        padding: 15px 16px; margin-top: 13px; border: 1px solid rgba(197, 154, 255, .3);
+        border-radius: 14px; background: rgba(103, 69, 153, .13);
+      }
+      .decision-title { color: var(--purple); font-size: 11px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+      .decision-text { margin-top: 5px; font-weight: 750; }
+      .decision-reason { margin-top: 4px; color: #c2cbe0; font-size: 12px; }
+      .quote-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px; }
+      .quote-card { padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: rgba(10, 16, 32, .55); }
+      .quote-card h3 { margin-bottom: 12px; font-size: 13px; }
+      .quote-values { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .quote-cell { padding: 9px; border-radius: 10px; background: rgba(26, 37, 64, .78); }
+      .quote-cell span { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; }
+      .quote-cell strong { display: block; margin-top: 3px; font-size: 16px; font-variant-numeric: tabular-nums; }
+      .position-box {
+        display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px;
+        padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: rgba(10, 16, 32, .55);
+      }
+      .position-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 14px; font-weight: 900; }
+      .position-icon.up { color: #071b17; background: var(--green); }
+      .position-icon.down { color: #2b0d16; background: var(--red); }
+      .position-icon.empty { color: var(--muted); background: #283550; }
+      .position-main strong { display: block; font-size: 17px; }
+      .position-main small, .position-pnl small { color: var(--muted); }
+      .position-pnl { text-align: right; font-variant-numeric: tabular-nums; }
+      .position-pnl strong { display: block; font-size: 19px; }
+      .rules { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+      .rule {
+        padding: 12px; border-radius: 12px; background: rgba(10, 16, 32, .5);
+        color: #d4def4; font-size: 12px;
+      }
+      .rule b { display: block; margin-bottom: 4px; color: var(--cyan); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+      .table-wrap { overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; min-width: 620px; font-size: 12px; }
+      th { padding: 9px 8px; color: var(--muted); font-size: 10px; text-align: left; text-transform: uppercase; letter-spacing: .08em; }
+      td { padding: 10px 8px; border-top: 1px solid rgba(41, 53, 82, .7); vertical-align: top; font-variant-numeric: tabular-nums; }
+      .empty-row { color: var(--muted); text-align: center; padding: 22px 8px; }
+      .tag { display: inline-flex; padding: 3px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; background: rgba(115, 151, 255, .15); color: #a9bcff; }
+      .tag.win { color: var(--green); background: rgba(66, 214, 164, .12); }
+      .tag.loss { color: var(--red); background: rgba(255, 113, 142, .12); }
+      .activity-list { display: grid; gap: 8px; max-height: 340px; overflow: auto; }
+      .activity-item { display: grid; grid-template-columns: 10px 1fr; gap: 10px; padding: 10px; border-radius: 12px; background: rgba(10, 16, 32, .5); }
+      .activity-dot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--blue); }
+      .activity-item.trade .activity-dot { background: var(--green); }
+      .activity-item.resolve .activity-dot { background: var(--yellow); }
+      .activity-message { font-size: 12px; }
+      .activity-time { margin-top: 3px; color: var(--muted); font-size: 10px; }
+      .notice {
+        padding: 12px 14px; margin: 14px 0; border: 1px solid rgba(255, 211, 106, .25);
+        border-radius: 13px; color: #d9d2b9; background: rgba(119, 91, 30, .12); font-size: 12px;
+      }
+      .footer { margin-top: 15px; color: var(--muted); font-size: 11px; text-align: center; }
+      .positive { color: var(--green) !important; }
+      .negative { color: var(--red) !important; }
+      .neutral { color: var(--muted) !important; }
+      @media (max-width: 1050px) {
+        .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .two-col { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 680px) {
+        .shell { width: min(100% - 22px, 1440px); padding-top: 16px; }
+        .topbar { align-items: flex-start; flex-direction: column; }
+        .top-meta { justify-content: flex-start; }
+        .hero { grid-template-columns: 1fr; padding: 20px; }
+        .hero-state { justify-self: start; text-align: left; }
+        .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .three-col { grid-template-columns: 1fr; }
+        .candles { grid-template-columns: 1fr; }
+        .rules { grid-template-columns: 1fr; }
+        .position-box { grid-template-columns: auto 1fr; }
+        .position-pnl { grid-column: 2; text-align: left; }
+      }
+      @media (max-width: 400px) {
+        .metrics { grid-template-columns: 1fr 1fr; }
+        .probabilities, .quote-grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">₿</div>
+          <div>
+            <div class="eyebrow">Pumpfun · replacement strategy</div>
+            <h1>BTCUSDT Mispricing Paper Bot</h1>
+          </div>
+        </div>
+        <div class="top-meta">
+          <span class="badge">PAPER ONLY</span>
+          <span id="statusPill" class="pill warn">Connecting</span>
+          <span class="badge">Updated <span id="lastUpdated">—</span></span>
+        </div>
+      </header>
+
+      <section class="hero" aria-labelledby="heroTitle">
+        <div>
+          <div class="eyebrow">Binance model × Polymarket 5-minute BTC</div>
+          <h2 id="heroTitle">Trade only when estimated probability beats the full ask sweep.</h2>
+          <p>The bot estimates UP and DOWN probabilities from the Binance BTCUSDT price, time left, and exactly three completed 5-minute candles. It uses visible Polymarket order-book depth and fees before entering.</p>
+        </div>
+        <div class="hero-state">
+          <span class="badge" id="windowBadge">Window waiting</span>
+          <strong id="statusReason">Starting feeds and the separate paper ledger…</strong>
+          <small id="windowClock">— seconds remaining</small>
+        </div>
+      </section>
+
+      <section class="grid metrics" aria-label="Paper account summary">
+        <article class="metric">
+          <div class="metric-label">Paper equity</div>
+          <div class="metric-value" id="equity">—</div>
+          <div class="metric-sub">cash plus currently marked position</div>
+        </article>
+        <article class="metric">
+          <div class="metric-label">Realized P&amp;L</div>
+          <div class="metric-value" id="realizedPnl">—</div>
+          <div class="metric-sub">after recorded trading fees</div>
+        </article>
+        <article class="metric">
+          <div class="metric-label">Paper cash</div>
+          <div class="metric-value" id="cash">—</div>
+          <div class="metric-sub">available before a new buy</div>
+        </article>
+        <article class="metric">
+          <div class="metric-label">BTC price</div>
+          <div class="metric-value" id="btcPrice">—</div>
+          <div class="metric-sub" id="binanceStatus">Binance stream waiting</div>
+        </article>
+        <article class="metric">
+          <div class="metric-label">Ledger positions</div>
+          <div class="metric-value" id="tradeCount">—</div>
+          <div class="metric-sub" id="ledgerDetail">own ledger · not mixed with prior strategy</div>
+        </article>
+      </section>
+
+      <section class="grid two-col">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">Binance signal inputs</div>
+              <div class="panel-subtitle">Live BTCUSDT aggregate trades · 5-minute window</div>
+            </div>
+            <span class="badge" id="feedFreshness">Waiting for ticks</span>
+          </div>
+          <div class="feed-row"><span class="feed-label">Binance price at window open</span><strong class="feed-value" id="windowOpen">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Last-three-candle volatility</span><strong class="feed-value" id="volatility">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Polymarket market window</span><strong class="feed-value" id="marketName">—</strong></div>
+          <div class="candles" id="candles">
+            <div class="candle"><div class="candle-time">Candle 1</div><div class="candle-return">Waiting</div></div>
+            <div class="candle"><div class="candle-time">Candle 2</div><div class="candle-return">Waiting</div></div>
+            <div class="candle"><div class="candle-time">Candle 3</div><div class="candle-return">Waiting</div></div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <div class="panel-title">Model probabilities</div>
+              <div class="panel-subtitle">Estimated chance of each side paying $1 at resolution</div>
+            </div>
+            <span class="badge" id="modelStatus">Model waiting</span>
+          </div>
+          <div class="probabilities">
+            <div class="prob-card up">
+              <div class="prob-head"><span class="side-label">UP</span><span class="tag">BINANCE MODEL</span></div>
+              <div class="prob-value" id="upProbability">—</div>
+              <div class="prob-detail">Polymarket ask <strong id="upAsk">—</strong></div>
+            </div>
+            <div class="prob-card down">
+              <div class="prob-head"><span class="side-label">DOWN</span><span class="tag">BINANCE MODEL</span></div>
+              <div class="prob-value" id="downProbability">—</div>
+              <div class="prob-detail">Polymarket ask <strong id="downAsk">—</strong></div>
+            </div>
+          </div>
+          <div class="decision">
+            <div class="decision-title">Current decision</div>
+            <div class="decision-text" id="signalSide">Waiting for live inputs</div>
+            <div class="decision-reason" id="signalReason">No signal is evaluated until the three candle returns, Binance tick, and Polymarket book are fresh.</div>
+          </div>
+        </article>
+      </section>
+
+      <section class="grid three-col">
+        <article class="panel">
+          <div class="panel-head">
+            <div><div class="panel-title">Polymarket book</div><div class="panel-subtitle">Best visible bid/ask and top-level size</div></div>
+            <span class="badge" id="clobStatus">WebSocket waiting</span>
+          </div>
+          <div class="quote-grid">
+            <div class="quote-card">
+              <h3>UP contract</h3>
+              <div class="quote-values">
+                <div class="quote-cell"><span>Best ask</span><strong id="upAskBook">—</strong></div>
+                <div class="quote-cell"><span>Ask size</span><strong id="upAskSize">—</strong></div>
+                <div class="quote-cell"><span>Best bid</span><strong id="upBidBook">—</strong></div>
+                <div class="quote-cell"><span>Bid size</span><strong id="upBidSize">—</strong></div>
+              </div>
+            </div>
+            <div class="quote-card">
+              <h3>DOWN contract</h3>
+              <div class="quote-values">
+                <div class="quote-cell"><span>Best ask</span><strong id="downAskBook">—</strong></div>
+                <div class="quote-cell"><span>Ask size</span><strong id="downAskSize">—</strong></div>
+                <div class="quote-cell"><span>Best bid</span><strong id="downBidBook">—</strong></div>
+                <div class="quote-cell"><span>Bid size</span><strong id="downBidSize">—</strong></div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><div class="panel-title">Current position</div><div class="panel-subtitle">No averaging or partial buys</div></div>
+            <span class="badge" id="positionStatus">Flat</span>
+          </div>
+          <div class="position-box">
+            <div class="position-icon empty" id="positionIcon">—</div>
+            <div class="position-main">
+              <strong id="positionTitle">No open position</strong>
+              <small id="positionDetail">Waiting for a qualifying full-size entry</small>
+            </div>
+            <div class="position-pnl">
+              <strong id="positionPnl">—</strong>
+              <small id="positionMark">unrealized at best bid</small>
+            </div>
+          </div>
+          <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div><div class="panel-title">Rules in effect</div><div class="panel-subtitle">This replaces the previous active bot</div></div>
+            <span class="badge">100-share base</span>
+          </div>
+          <div class="rules">
+            <div class="rule"><b>Signal</b>Three closed Binance 5m candles; no partial candle in volatility.</div>
+            <div class="rule"><b>Entry</b>Buy 100 shares only when full visible asks and fees leave at least 5¢ net edge per share.</div>
+            <div class="rule"><b>Flip</b>One profitable flip per window; exit only at a net profit, then buy the opposite side if its edge still qualifies.</div>
+            <div class="rule"><b>Resolution</b>Otherwise hold until official Polymarket resolution for that exact market.</div>
+            <div class="rule"><b>Ledger</b>Independent $3,000 balance; old history stays separate and open trades settle on their original markets.</div>
+            <div class="rule"><b>Execution</b>Paper-only. No wallet or real order is connected.</div>
+          </div>
+        </article>
+      </section>
+
+      <div class="notice">
+        This is an experimental probability model, not risk-free arbitrage. Volatility estimated from only three candles is noisy, Binance prices may differ from Polymarket’s settlement reference, and the official Polymarket result determines paper settlement.
+      </div>
+
+      <section class="grid two-col">
+        <article class="panel">
+          <div class="panel-head">
+            <div><div class="panel-title">Recent trades</div><div class="panel-subtitle">Full account totals use the complete stored ledger</div></div>
+            <span class="badge" id="tradeHistoryCount">0 records</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry</th><th>Fees</th><th>Status</th><th>P&amp;L</th></tr></thead>
+              <tbody id="recentTrades"><tr><td class="empty-row" colspan="7">Waiting for the first trade</td></tr></tbody>
+            </table>
+          </div>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Entries, profitable flips, and official settlements</div></div>
+            <span class="badge" id="activityCount">0 events</span>
+          </div>
+          <div class="activity-list" id="activity"><div class="empty-row">Waiting for bot activity</div></div>
+        </article>
+      </section>
+
+      <footer class="footer">
+        Paper simulation only · Binance BTCUSDT aggregate-trade feed · Polymarket CLOB book and official market resolution · <span id="persistenceStatus">Ledger starting</span>
+      </footer>
+    </main>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const money = (value, digits = 2) => Number.isFinite(Number(value))
+        ? "$" + Number(value).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })
+        : "—";
+      const contractPrice = (value) => Number.isFinite(Number(value)) ? "$" + Number(value).toFixed(3) : "—";
+      const percent = (value) => Number.isFinite(Number(value)) ? (Number(value) * 100).toFixed(1) + "%" : "—";
+      const signedMoney = (value) => Number.isFinite(Number(value))
+        ? (Number(value) >= 0 ? "+" : "−") + money(Math.abs(Number(value)))
+        : "—";
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      })[char]);
+      const time = (value) => Number.isFinite(Number(value))
+        ? new Date(Number(value)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        : "—";
+      const dateTime = (value) => Number.isFinite(Number(value))
+        ? new Date(Number(value)).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        : "—";
+      const setText = (id, value) => { if ($(id)) $(id).textContent = value; };
+      const pnlClass = (value) => Number(value) > 0 ? "positive" : Number(value) < 0 ? "negative" : "neutral";
+
+      function renderCandles(candles) {
+        const rows = Array.isArray(candles) ? candles.slice(-3) : [];
+        $("candles").innerHTML = [0, 1, 2].map((index) => {
+          const candle = rows[index];
+          if (!candle) return `<div class="candle"><div class="candle-time">Candle ${index + 1}</div><div class="candle-return">Waiting</div></div>`;
+          const change = (Number(candle.close) / Number(candle.open)) - 1;
+          const tone = change >= 0 ? "green" : "red";
+          const label = change >= 0 ? "UP candle" : "DOWN candle";
+          return `<div class="candle ${tone}">
+            <div class="candle-time">${escapeHtml(new Date(Number(candle.start)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))} · ${label}</div>
+            <div class="candle-return">${change >= 0 ? "+" : "−"}${Math.abs(change * 100).toFixed(3)}%</div>
+          </div>`;
+        }).join("");
+      }
+
+      function renderTrades(trades, total) {
+        const rows = Array.isArray(trades) ? trades : [];
+        setText("tradeHistoryCount", `${Number(total || rows.length)} records`);
+        if (!rows.length) {
+          $("recentTrades").innerHTML = `<tr><td class="empty-row" colspan="7">Waiting for the first trade</td></tr>`;
+          return;
+        }
+        $("recentTrades").innerHTML = rows.slice(0, 30).map((trade) => {
+          const pnl = Number.isFinite(Number(trade.realizedPnl)) ? Number(trade.realizedPnl) : null;
+          const outcomeClass = trade.outcome === "WIN" ? "win" : trade.outcome === "LOSS" ? "loss" : "";
+          return `<tr>
+            <td>${dateTime(trade.openedAt)}</td>
+            <td><strong>${escapeHtml(trade.side || "—")}</strong></td>
+            <td>${Number(trade.shares || 0)}</td>
+            <td>${contractPrice(trade.entryPrice)}</td>
+            <td>${money(trade.fees || 0)}</td>
+            <td><span class="tag ${outcomeClass}">${escapeHtml(trade.status || "—")}</span></td>
+            <td class="${pnlClass(pnl)}">${pnl == null ? "—" : signedMoney(pnl)}</td>
+          </tr>`;
+        }).join("");
+      }
+
+      function renderActivity(events) {
+        const rows = Array.isArray(events) ? events : [];
+        setText("activityCount", `${rows.length} events`);
+        if (!rows.length) {
+          $("activity").innerHTML = `<div class="empty-row">Waiting for bot activity</div>`;
+          return;
+        }
+        $("activity").innerHTML = rows.slice(0, 35).map((event) => {
+          const type = String(event.type || "").toLowerCase();
+          const kind = type.includes("resolved") || type.includes("settled") ? "resolve"
+            : type.includes("buy") || type.includes("flip") ? "trade" : "";
+          return `<div class="activity-item ${kind}">
+            <div class="activity-dot"></div>
+            <div><div class="activity-message">${escapeHtml(event.message || event.type || "Update")}</div>
+            <div class="activity-time">${dateTime(event.at)}</div></div>
+          </div>`;
+        }).join("");
+      }
+
+      function render(state) {
+        const account = state.account || {};
+        const model = state.model || {};
+        const binance = state.binance || {};
+        const quotes = state.quotes || {};
+        const up = quotes.UP || {};
+        const down = quotes.DOWN || {};
+        const status = String(state.status || "WAITING").toUpperCase();
+        const statusPill = $("statusPill");
+        statusPill.textContent = status;
+        statusPill.className = "pill " + (status === "RUNNING" ? "good" : status === "ERROR" ? "bad" : "warn");
+        setText("statusReason", state.statusReason || state.error || "Waiting for bot status.");
+        setText("lastUpdated", time(state.now));
+        setText("windowBadge", state.window?.slug || "BTC 5m window");
+        setText("windowClock", Number.isFinite(Number(state.window?.secondsRemaining))
+          ? `${Math.max(0, Math.floor(Number(state.window.secondsRemaining)))} seconds remaining`
+          : "Window pending");
+
+        setText("equity", money(account.equity));
+        setText("realizedPnl", money(account.realizedPnl));
+        $("realizedPnl").className = "metric-value " + pnlClass(account.realizedPnl);
+        setText("cash", money(account.cash));
+        setText("btcPrice", money(binance.price, 2));
+        setText("binanceStatus", binance.status === "CONNECTED" ? "Binance tick stream connected" : `Binance ${String(binance.status || "waiting").toLowerCase()}`);
+        setText("tradeCount", Number(account.tradeCount || 0).toLocaleString());
+        setText("ledgerDetail", `${Number(account.openPositions || 0)} open · ${Number(account.pendingResolutionPositions || 0)} awaiting resolution`);
+        setText("windowOpen", money(model.windowOpenPrice, 2));
+        setText("volatility", Number.isFinite(Number(model.volatility5m))
+          ? (Number(model.volatility5m) * 100).toFixed(3) + "% RMS / candle"
+          : "Waiting for 3 candles");
+        setText("marketName", state.market?.title || state.market?.slug || "Market not loaded");
+        setText("feedFreshness", Number.isFinite(Number(binance.tickAgeMs))
+          ? `Tick age ${Math.max(0, Math.round(Number(binance.tickAgeMs)))} ms`
+          : "Waiting for ticks");
+        setText("modelStatus", model.ready ? "READY · 3 CLOSED CANDLES" : "MODEL WAITING");
+        setText("upProbability", percent(model.probabilityUp));
+        setText("downProbability", percent(model.probabilityDown));
+        setText("upAsk", contractPrice(up.bestAsk));
+        setText("downAsk", contractPrice(down.bestAsk));
+        setText("signalSide", state.signal?.side ? `${state.signal.side} signal` : "No trade signal");
+        setText("signalReason", state.signal?.reason || model.reason || "Waiting for inputs.");
+        setText("clobStatus", `Polymarket ${String(state.websocket?.status || "waiting").toLowerCase()}`);
+        setText("upAskBook", contractPrice(up.bestAsk));
+        setText("upAskSize", Number(up.askSize || 0).toLocaleString());
+        setText("upBidBook", contractPrice(up.bestBid));
+        setText("upBidSize", Number(up.bidSize || 0).toLocaleString());
+        setText("downAskBook", contractPrice(down.bestAsk));
+        setText("downAskSize", Number(down.askSize || 0).toLocaleString());
+        setText("downBidBook", contractPrice(down.bestBid));
+        setText("downBidSize", Number(down.bidSize || 0).toLocaleString());
+
+        const position = state.position;
+        const icon = $("positionIcon");
+        icon.className = `position-icon ${position ? String(position.side).toLowerCase() : "empty"}`;
+        setText("positionIcon", position ? position.side : "—");
+        setText("positionStatus", position ? `${position.side} · ${position.shares} shares` : "Flat");
+        setText("positionTitle", position ? `${position.side} position · ${position.shares} shares` : "No open position");
+        setText("positionDetail", position
+          ? `Entry ${contractPrice(position.entryPrice)} · cost ${money(position.totalCost)}`
+          : "Waiting for a qualifying full-size entry");
+        setText("positionPnl", position ? signedMoney(position.unrealizedPnl) : "—");
+        $("positionPnl").className = pnlClass(position?.unrealizedPnl);
+        setText("positionMark", position ? `best bid ${contractPrice(position.markPrice)}` : "unrealized at best bid");
+        setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
+        setText("fees", money(account.takerFees));
+        setText("persistenceStatus", state.persistence?.status === "CONNECTED"
+          ? "paper ledger saved" : `ledger ${String(state.persistence?.status || "starting").toLowerCase()}`);
+        renderCandles(model.volatilityCandles);
+        renderTrades(state.trades, account.tradeCount);
+        renderActivity(state.events);
+      }
+
+      async function refresh() {
+        try {
+          const response = await fetch("/api/strategy/state", { cache: "no-store" });
+          if (!response.ok) throw new Error(`State request failed (${response.status})`);
+          render(await response.json());
+        } catch (error) {
+          $("statusPill").textContent = "API ERROR";
+          $("statusPill").className = "pill bad";
+          setText("statusReason", error?.message || "Could not load bot state.");
+        }
+      }
+      refresh();
+      setInterval(refresh, 1_000);
+    </script>
+  </body>
+</html>
