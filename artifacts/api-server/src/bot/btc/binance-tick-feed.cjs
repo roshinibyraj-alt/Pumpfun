@@ -2,7 +2,7 @@
 
 const CANDLE_MS = 5 * 60 * 1000;
 const HISTORY_URL = 'https://data-api.binance.vision/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=5';
-const STREAM_URL = 'wss://stream.binance.com:9443/ws/btcusdt@aggTrade';
+const STREAM_URL = 'wss://data-stream.binance.vision/ws/btcusdt@aggTrade';
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 15_000;
 

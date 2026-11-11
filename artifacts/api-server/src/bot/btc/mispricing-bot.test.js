@@ -7,7 +7,7 @@ const {
   calculateVolatility,
   estimateUpProbability,
 } = require('./mispricing-bot.cjs');
-const { CANDLE_MS, parseClosedCandles } = require('./binance-tick-feed.cjs');
+const { CANDLE_MS, STREAM_URL, parseClosedCandles } = require('./binance-tick-feed.cjs');
 
 function makeClosedCandle(start, open, close) {
   return {
@@ -124,6 +124,10 @@ function fixture({ price = 100_400, historyCount = 3 } = {}) {
     getNow() { return currentTime; },
   };
 }
+
+test('Binance ticks use the official public market-data WebSocket endpoint', () => {
+  assert.equal(STREAM_URL, 'wss://data-stream.binance.vision/ws/btcusdt@aggTrade');
+});
 
 test('Binance history keeps three completed candles separate from the live candle', () => {
   const now = 4 * CANDLE_MS + 1_000;
