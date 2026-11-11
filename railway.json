@@ -6,6 +6,9 @@
   },
   "deploy": {
     "startCommand": "pnpm start",
+    "preDeployCommand": [
+      "pnpm --filter @workspace/api-server run prepare:btc-history"
+    ],
     "healthcheckPath": "/api/healthz",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
