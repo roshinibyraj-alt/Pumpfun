@@ -80,6 +80,8 @@ function attachCurrentMarket(bot) {
 test('config limits the active strategy to BTC 5-minute windows and 50-share buys', () => {
   assert.equal(config.WINDOW_MS, 5 * 60 * 1000);
   assert.equal(config.SHARES_PER_BUY, 50);
+  assert.equal(config.FLIP_ESCALATION_AFTER, 4);
+  assert.equal(config.FLIP_ESCALATION_REBUY_SHARES, 100);
   assert.equal(config.SAME_SIDE_COOLDOWN_MS, 1_000);
   assert.equal(config.PENDING_TRIGGER_TTL_MS, 2_000);
   assert.equal(config.PENDING_RETRY_MAX_ASK, 0.56);
@@ -202,6 +204,12 @@ test('same-side triggers do not add shares and the opposite trigger flips the ac
   assert.equal(downTrades[0].status, 'OPEN');
   assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 50);
   assert.equal(snapshot.strategy.activeSide, 'DOWN');
+  assert.deepEqual(snapshot.strategy.flipEscalation, {
+    threshold: 4,
+    rebuyShares: 100,
+    consecutiveCompletedFlips: 1,
+    nextRebuyShares: 50,
+  });
 
   const legacyState = bot.persistentStateSnapshot();
   delete legacyState.activeSide;
@@ -209,6 +217,96 @@ test('same-side triggers do not add shares and the opposite trigger flips the ac
   const restoredLegacy = new BtcPriceBandBot({ now: () => 600_002 });
   restoredLegacy.restorePersistentState(legacyState);
   assert.equal(restoredLegacy.activeSide, 'DOWN');
+});
+
+test('the next reversal targets 100 shares after four completed flips in the same window', () => {
+  const { bot, setNow } = createBot();
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.53, 200, 0.50));
+
+  const flips = [
+    { side: 'DOWN', ask: 0.53 },
+    { side: 'UP', ask: 0.52 },
+    { side: 'DOWN', ask: 0.52 },
+    { side: 'UP', ask: 0.53 },
+  ];
+  flips.forEach(({ side, ask }, index) => {
+    const at = 600_002 + index;
+    setNow(at);
+    const message = book(
+      side === 'UP' ? 'up-token' : 'down-token',
+      ask,
+      200,
+      side === 'UP' ? 0.50 : 0.49,
+    );
+    message.timestamp = String(at);
+    bot.handleMarketMessage(message);
+  });
+
+  assert.equal(bot.consecutiveFlipCount, 4);
+  assert.equal(bot.snapshot().strategy.flipEscalation.nextRebuyShares, 100);
+  const saved = bot.persistentStateSnapshot();
+  const restored = new BtcPriceBandBot({ now: () => 600_006 });
+  restored.restorePersistentState(saved);
+  assert.equal(restored.consecutiveFlipCount, 4);
+  restored.resetWindow(900_000);
+  assert.equal(restored.consecutiveFlipCount, 0);
+
+  bot.books.get('up-token').bids[0].availableSize = 100;
+  setNow(600_006);
+  const escalatedFlip = book('down-token', 0.53, 200, 0.49);
+  escalatedFlip.timestamp = '600006';
+  bot.handleMarketMessage(escalatedFlip);
+  const snapshot = bot.snapshot();
+  assert.equal(snapshot.inventory.currentWindow.UP.shares, 0);
+  assert.equal(snapshot.inventory.currentWindow.DOWN.shares, 100);
+  assert.equal(snapshot.strategy.flipEscalation.consecutiveCompletedFlips, 5);
+  assert.equal(snapshot.strategy.flipEscalation.nextRebuyShares, 100);
+  assert.equal(snapshot.pendingTrigger, null);
+});
+
+test('an escalated rebuy waits for the extra visible ask depth and survives as one pending flip', () => {
+  const { bot, setNow } = createBot();
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.53, 200, 0.50));
+
+  const flips = [
+    { side: 'DOWN', ask: 0.53 },
+    { side: 'UP', ask: 0.52 },
+    { side: 'DOWN', ask: 0.52 },
+    { side: 'UP', ask: 0.53 },
+  ];
+  flips.forEach(({ side, ask }, index) => {
+    const at = 600_002 + index;
+    setNow(at);
+    const message = book(
+      side === 'UP' ? 'up-token' : 'down-token',
+      ask,
+      200,
+      side === 'UP' ? 0.50 : 0.49,
+    );
+    message.timestamp = String(at);
+    bot.handleMarketMessage(message);
+  });
+
+  bot.books.get('up-token').bids[0].availableSize = 100;
+  setNow(600_006);
+  const limitedDepth = book('down-token', 0.53, 50, 0.49);
+  limitedDepth.timestamp = '600006';
+  bot.handleMarketMessage(limitedDepth);
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').UP.shares, 0);
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 50);
+  assert.equal(bot.pendingTrigger.rebuyTargetShares, 100);
+  assert.equal(bot.pendingTrigger.sharesBought, 50);
+  assert.equal(bot.consecutiveFlipCount, 4);
+
+  setNow(600_007);
+  const addedDepth = book('down-token', 0.54, 50, 0.49);
+  addedDepth.timestamp = '600007';
+  bot.handleMarketMessage(addedDepth);
+  assert.equal(bot.pendingTrigger, null);
+  assert.equal(bot.inventoryBoxSnapshot(bot.trades, trade => trade.status === 'OPEN').DOWN.shares, 100);
+  assert.equal(bot.consecutiveFlipCount, 5);
 });
 
 test('partial reversal buys exactly the shares sold and retains the unsold remainder', () => {

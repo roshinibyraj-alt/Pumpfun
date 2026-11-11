@@ -1,10 +1,12 @@
 'use strict';
 
 module.exports = {
-  STRATEGY_VERSION: 'btc-5m-trigger-lock-bounded-retry-partial-flip-297s-v5',
+  STRATEGY_VERSION: 'btc-5m-trigger-lock-bounded-retry-flip-escalation-297s-v6',
   WINDOW_MS: 5 * 60 * 1000,
   STARTING_CAPITAL: 3_000,
   SHARES_PER_BUY: 50,
+  FLIP_ESCALATION_AFTER: 4,
+  FLIP_ESCALATION_REBUY_SHARES: 100,
   SAME_SIDE_COOLDOWN_MS: 1_000,
   PENDING_TRIGGER_TTL_MS: 2_000,
   PENDING_RETRY_MAX_ASK: 0.56,

@@ -109,7 +109,8 @@
           <div class="rule"><div class="rule-label">Base buy</div><div class="rule-value">50 shares · one active side</div></div>
           <div class="rule"><div class="rule-label">Trigger</div><div class="rule-value">Hold direction until opposite trigger</div></div>
           <div class="rule"><div class="rule-label">Execution</div><div class="rule-value">Paper only · visible depth</div></div>
-          <div class="rule"><div class="rule-label">Opposite trigger</div><div class="rule-value">Flip immediately · rebuy only shares sold</div></div>
+          <div class="rule"><div class="rule-label">Opposite trigger</div><div class="rule-value">Flip on trigger · match sold shares</div></div>
+          <div class="rule"><div class="rule-label">Flip escalation</div><div class="rule-value" id="flipStreak">0 / 4 flips · next rebuy 50 shares</div></div>
           <div class="rule"><div class="rule-label">Missed trigger</div><div class="rule-value">Retry 2 seconds · max ask $0.56</div></div>
           <div class="rule"><div class="rule-label">At 297 seconds</div><div class="rule-value">Use any in-window $0.99+ / below $0.01 hits</div></div>
         </div>
@@ -124,7 +125,7 @@
 
     <section class="layout lower">
       <div class="panel">
-        <div class="panel-head"><div><h2>Position records</h2><div class="section-note">Each valid ask-price change buys 50 shares unless it reverses held shares; reversals sell first and rebuy the same share count.</div></div></div>
+        <div class="panel-head"><div><h2>Position records</h2><div class="section-note">After four completed flips in one window, the next reversal targets 100 total shares, subject to visible depth and available paper cash.</div></div></div>
         <div class="table-wrap" id="trades"></div>
       </div>
       <div class="panel">
@@ -198,6 +199,8 @@
           const persistenceStatus=state.persistence?.status||'UNKNOWN';
           const historyLabel=persistenceStatus==='CONNECTED'?'History saved to PostgreSQL':`History storage ${persistenceStatus.toLowerCase()}`;
           $('windowNotice').textContent=`${state.statusReason||'Scanning'} · ${historyLabel} · BTC 5-minute window ends in ${activeWindow.secondsRemaining==null?'—':Math.ceil(activeWindow.secondsRemaining)+'s'} · Starting paper capital ${money(account.startingCapital)}`;
+          const flip=state.strategy?.flipEscalation||{};
+          $('flipStreak').textContent=`${Number(flip.consecutiveCompletedFlips||0)} / ${Number(flip.threshold||4)} completed flips · next rebuy ${shares(flip.nextRebuyShares||state.strategy?.sharesPerBuy||50)} shares`;
         $('error').style.display=state.error?'block':'none';$('error').textContent=state.error||'';
         $('equity').textContent=money(account.equity);$('cash').textContent=money(account.cash);
         $('realized').textContent=money(account.realizedPnl);$('unrealized').textContent=money(account.unrealizedPnl);
