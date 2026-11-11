@@ -47,7 +47,7 @@ function createBot({ production = false } = {}) {
     MIN_ENTRY_ASK: 0.59,
     MAX_ENTRY_ASK: 0.61,
     OPPOSITE_TRIGGER_SIZE_MULTIPLIER: 1.2,
-    STOP_LOSS_BID: 0,
+    MARTINGALE_PIVOT_BID: 0,
   };
   const bot = new BtcPriceBandBot({
     marketData,
@@ -94,7 +94,7 @@ test('config uses BTC 5-minute windows, the $0.69-$0.71 band, and 1.5x flips', (
   assert.equal(config.SHARES_PER_BUY, 50);
   assert.equal(config.SELLS_ON_OPPOSITE_TRIGGER, true);
   assert.equal(config.OPPOSITE_TRIGGER_SIZE_MULTIPLIER, 1.5);
-  assert.equal(config.STOP_LOSS_BID, 0.50);
+  assert.equal(config.MARTINGALE_PIVOT_BID, 0.50);
   assert.equal(config.MARTINGALE_MULTIPLIER, 1.5);
   assert.equal(config.SAME_SIDE_COOLDOWN_MS, 1_000);
   assert.equal(config.PENDING_TRIGGER_TTL_MS, 2_000);
@@ -118,7 +118,7 @@ test('production band triggers a 50-share entry and a 1.5x opposite flip', () =>
   assert.equal(snapshot.strategy.maxEntryAsk, 0.71);
   assert.equal(snapshot.strategy.oppositeTriggerSizeMultiplier, 1.5);
   assert.equal(snapshot.strategy.martingaleMultiplier, 1.5);
-  assert.equal(snapshot.strategy.stopLossBid, 0.50);
+  assert.equal(snapshot.strategy.martingalePivotBid, 0.50);
 });
 
 test('production entry rejects asks outside the new band', () => {
@@ -133,35 +133,60 @@ test('production entry rejects asks outside the new band', () => {
   assert.equal(bot.sideState.DOWN.status, 'ABOVE_PRICE_BAND');
 });
 
-test('production stop-loss closes all shares once the best bid reaches $0.50', () => {
-  const { bot, setNow } = createBot({ production: true });
+test('$0.50 martingale pivot holds the position and advances sizing once', () => {
+  const { bot, market, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
   assert.equal(bot.trades[0].status, 'OPEN');
 
   setNow(600_002);
-  const stopBook = book('up-token', 0.70, 100, 0.50);
-  stopBook.timestamp = '600002';
-  bot.handleMarketMessage(stopBook);
+  const pivotBook = book('up-token', 0.70, 100, 0.50);
+  pivotBook.bids[0].size = '1';
+  pivotBook.timestamp = '600002';
+  bot.handleMarketMessage(pivotBook);
 
-  const stopped = bot.trades.find(trade => trade.side === 'UP');
-  assert.equal(stopped.status, 'CLOSED');
-  assert.equal(stopped.exitReason, 'STOP_LOSS');
-  assert.equal(stopped.exitPrice, 0.50);
-  assert.equal(stopped.settlementSource, 'STOP_LOSS');
-  assert.equal(bot.snapshot().inventory.currentWindow.UP.shares, 0);
-  assert.equal(bot.snapshot().strategy.stopLossBid, 0.50);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.activeSide, 'UP');
+  assert.equal(bot.martingaleNextShares, 75);
+  assert.equal(bot.snapshot().strategy.martingalePivotBid, 0.50);
+  assert.equal(bot.snapshot().martingalePivot.nextBaseBuyShares, 75);
+  assert.equal(bot.events.filter(event => event.type === 'MARTINGALE_PIVOT_TRIGGERED').length, 1);
+
+  setNow(600_003);
+  const lowerBook = book('up-token', 0.70, 100, 0.49);
+  lowerBook.bids[0].size = '1';
+  lowerBook.timestamp = '600003';
+  bot.handleMarketMessage(lowerBook);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.martingaleNextShares, 75);
+  assert.equal(bot.events.filter(event => event.type === 'MARTINGALE_PIVOT_TRIGGERED').length, 1);
+
+  setNow(900_001);
+  bot.resetWindow(900_000);
+  bot.market = {
+    ...market,
+    id: 'btc-5m-market-next',
+    slug: 'btc-updown-5m-900',
+    start: 900_000,
+    end: 1_200_000,
+  };
+  const nextWindowEntry = book('up-token', 0.70, 200, 0.55);
+  nextWindowEntry.timestamp = '900001';
+  bot.handleMarketMessage(nextWindowEntry);
+  const nextWindowTrade = bot.trades.find(trade =>
+    trade.status === 'OPEN' && trade.windowStart === 900_000);
+  assert.equal(nextWindowTrade.shares, 75);
 });
 
-test('stop-loss rearms either side and compounds the next base size by 1.5x', () => {
+test('martingale pivot sizes the next flip and compounds at a later pivot', () => {
   const { bot, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
 
   setNow(600_002);
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.50));
-  assert.equal(bot.activeSide, null);
   assert.equal(bot.martingaleNextShares, 75);
+  assert.equal(bot.trades[0].status, 'OPEN');
 
   setNow(600_003);
   const downEntry = book('down-token', 0.70, 200, 0.54);
@@ -171,9 +196,10 @@ test('stop-loss rearms either side and compounds the next base size by 1.5x', ()
   assert.equal(bot.trades.find(trade => trade.status === 'OPEN').shares, 75);
 
   setNow(600_004);
-  const secondStop = book('down-token', 0.70, 200, 0.50);
-  secondStop.timestamp = '600004';
-  bot.handleMarketMessage(secondStop);
+  const secondPivot = book('down-token', 0.70, 200, 0.50);
+  secondPivot.timestamp = '600004';
+  bot.handleMarketMessage(secondPivot);
+  assert.equal(bot.trades.find(trade => trade.status === 'OPEN').status, 'OPEN');
   assert.equal(bot.martingaleNextShares, 112.5);
 
   setNow(600_005);
@@ -185,43 +211,43 @@ test('stop-loss rearms either side and compounds the next base size by 1.5x', ()
   assert.equal(bot.snapshot().strategy.nextBaseBuyShares, 112.5);
 });
 
-test('a profitable opposite-signal close resets stop-loss martingale sizing', () => {
+test('a profitable opposite-signal close resets pivot martingale sizing', () => {
   const { bot, setNow } = createBot({ production: true });
   attachCurrentMarket(bot);
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.55));
 
   setNow(600_002);
   bot.handleMarketMessage(book('up-token', 0.70, 200, 0.50));
+  assert.equal(bot.martingaleNextShares, 75);
   setNow(600_003);
-  const downEntry = book('down-token', 0.70, 200, 0.54);
-  downEntry.timestamp = '600003';
-  bot.handleMarketMessage(downEntry);
-  assert.equal(bot.trades.find(trade => trade.status === 'OPEN').shares, 75);
-
+  bot.handleMarketMessage(book('up-token', 0.70, 200, 0.95));
   setNow(600_004);
-  const profitableBid = book('down-token', 0.70, 200, 0.95);
-  profitableBid.timestamp = '600004';
-  bot.handleMarketMessage(profitableBid);
-  setNow(600_005);
-  const oppositeEntry = book('up-token', 0.71, 200, 0.54);
-  oppositeEntry.timestamp = '600005';
+  const oppositeEntry = book('down-token', 0.70, 200, 0.54);
+  oppositeEntry.timestamp = '600004';
   bot.handleMarketMessage(oppositeEntry);
 
-  assert.ok(bot.trades.find(trade => trade.side === 'DOWN').realizedPnl > 0);
+  assert.ok(bot.trades.find(trade => trade.side === 'UP').realizedPnl > 0);
+  assert.equal(bot.martingalePivot, null);
   assert.equal(bot.martingaleNextShares, 50);
   assert.equal(bot.snapshot().strategy.nextBaseBuyShares, 50);
 });
 
-test('stop-loss martingale size survives restore and a profitable resolution resets it', async () => {
-  const { bot, marketData } = createBot({ production: true });
-  bot.martingaleNextShares = 75;
+test('pivot and martingale size survive restore; a profitable resolution resets sizing', async () => {
+  const { bot, marketData, setNow } = createBot({ production: true });
+  attachCurrentMarket(bot);
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
+  setNow(600_002);
+  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.50));
+  const saved = bot.persistentStateSnapshot();
+
   const restored = new BtcPriceBandBot({
     marketData,
     now: () => 900_001,
     config: bot.config,
   });
-  restored.restorePersistentState(bot.persistentStateSnapshot());
+  restored.restorePersistentState(saved);
   assert.equal(restored.martingaleNextShares, 75);
+  assert.equal(restored.martingalePivot.side, 'UP');
 
   restored.trades.push({
     id: 'trade-profitable-resolution',
@@ -233,54 +259,8 @@ test('stop-loss martingale size survives restore and a profitable resolution res
   });
   await restored.resolveDue(900_001, { force: true });
 
-  assert.equal(restored.trades[0].status, 'SETTLED');
-  assert.equal(restored.trades[0].outcome, 'WIN');
+  assert.equal(restored.trades.find(trade => trade.id === 'trade-profitable-resolution').status, 'SETTLED');
   assert.equal(restored.martingaleNextShares, 50);
-});
-
-test('stop-loss waits for full visible bid depth without partially selling', () => {
-  const { bot, setNow } = createBot({ production: true });
-  attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
-
-  setNow(600_002);
-  const shortBook = book('up-token', 0.70, 100, 0.50);
-  shortBook.bids[0].size = '49';
-  shortBook.timestamp = '600002';
-  bot.handleMarketMessage(shortBook);
-  assert.equal(bot.trades[0].status, 'OPEN');
-  assert.equal(bot.pendingStopLoss.side, 'UP');
-
-  setNow(600_003);
-  const fullBook = book('up-token', 0.70, 100, 0.49);
-  fullBook.timestamp = '600003';
-  bot.handleMarketMessage(fullBook);
-
-  assert.equal(bot.trades[0].status, 'CLOSED');
-  assert.equal(bot.trades[0].exitPrice, 0.49);
-  assert.equal(bot.pendingStopLoss, null);
-});
-
-test('a triggered stop-loss remains pending across a paper-state restore', () => {
-  const { bot, setNow } = createBot({ production: true });
-  attachCurrentMarket(bot);
-  bot.handleMarketMessage(book('up-token', 0.70, 100, 0.55));
-
-  setNow(600_002);
-  const shortBook = book('up-token', 0.70, 100, 0.50);
-  shortBook.bids[0].size = '49';
-  shortBook.timestamp = '600002';
-  bot.handleMarketMessage(shortBook);
-  const saved = bot.persistentStateSnapshot();
-
-  const restored = new BtcPriceBandBot({ now: () => 600_003, config: bot.config });
-  restored.restorePersistentState(saved);
-  attachCurrentMarket(restored);
-  restored.handleMarketMessage(book('up-token', 0.70, 100, 0.49));
-
-  assert.equal(restored.pendingStopLoss, null);
-  assert.equal(restored.trades.find(trade => trade.side === 'UP').status, 'CLOSED');
-  assert.equal(restored.trades.find(trade => trade.side === 'UP').exitReason, 'STOP_LOSS');
 });
 
 test('an explicit history reset creates a fresh durable ledger before restoring state', async () => {
