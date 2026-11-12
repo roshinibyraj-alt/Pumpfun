@@ -218,11 +218,36 @@ test('an opposite signal cannot flip a position that is not net profitable to se
   assert.equal(bot.trades.filter(trade => trade.status === 'OPEN').length, 1);
 });
 
-test('a profitable flip closes the old leg and buys 100 shares once per window', () => {
+test('a profitable flip requires two fresh opposite updates at least 500 ms apart', () => {
   const context = fixture();
-  const { bot, setBook, setPrice } = context;
+  const { bot, setBook, setPrice, setNow } = context;
+  const strategy = bot.snapshot().strategy;
+  assert.equal(strategy.baseShares, 100);
+  assert.equal(strategy.minimumNetEdgePerShare, 0.05);
+  assert.equal(strategy.minimumFlipNetEdgePerShare, 0.10);
+  assert.equal(strategy.flipConfirmationUpdates, 2);
+  assert.equal(strategy.flipConfirmationIntervalMs, 500);
   assert.equal(bot.evaluate(), true);
   setPrice(99_600);
+  setNow(960_500);
+  setBook('UP', {
+    asks: [[0.7, 100]],
+    bids: [[0.8, 100]],
+  });
+  setBook('DOWN', {
+    asks: [[0.1, 100]],
+    bids: [[0.05, 100]],
+  });
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.flipsThisWindow, 0);
+  assert.equal(bot.flipConfirmation.count, 1);
+  assert.match(bot.currentSignal.reason, /1\/2 fresh Binance updates/);
+  assert.equal(bot.trades.filter(trade => trade.status === 'OPEN').length, 1);
+
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.flipConfirmation.count, 1);
+
+  setNow(961_000);
   setBook('UP', {
     asks: [[0.7, 100]],
     bids: [[0.8, 100]],
@@ -237,8 +262,10 @@ test('a profitable flip closes the old leg and buys 100 shares once per window',
   assert.ok(bot.trades[0].realizedPnl > 0);
   assert.equal(bot.trades[1].side, 'DOWN');
   assert.equal(bot.trades[1].shares, 100);
+  assert.equal(bot.flipConfirmation.count, 0);
 
   setPrice(100_400);
+  setNow(961_500);
   setBook('UP', {
     asks: [[0.6, 100]],
     bids: [[0.5, 100]],
@@ -251,6 +278,77 @@ test('a profitable flip closes the old leg and buys 100 shares once per window',
   assert.equal(bot.flipsThisWindow, 1);
   assert.equal(bot.trades.filter(trade => trade.status === 'OPEN').length, 1);
   assert.equal(bot.trades.find(trade => trade.status === 'OPEN').side, 'DOWN');
+});
+
+test('a profitable position does not flip when opposite edge is below ten cents', () => {
+  const context = fixture();
+  const { bot, setBook, setPrice, setNow, getNow } = context;
+  assert.equal(bot.evaluate(), true);
+  setPrice(99_600);
+  setNow(960_500);
+  const downProbability = bot.modelSnapshot(getNow()).probabilityDown;
+  const downAsk = downProbability - 0.08;
+  assert.ok(downAsk > 0 && downAsk < 1);
+  setBook('UP', {
+    asks: [[0.7, 100]],
+    bids: [[0.8, 100]],
+  });
+  setBook('DOWN', {
+    asks: [[downAsk, 100]],
+    bids: [[0.05, 100]],
+  });
+
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.flipsThisWindow, 0);
+  assert.equal(bot.flipConfirmation.count, 0);
+  assert.ok(bot.currentSignal.edgePerShare < 0.10);
+  assert.match(bot.currentSignal.reason, /below the \$0\.10 flip threshold/);
+  assert.equal(bot.trades.filter(trade => trade.status === 'OPEN').length, 1);
+});
+
+test('flip confirmation resets when the opposite edge breaks before confirmation', () => {
+  const context = fixture();
+  const { bot, setBook, setPrice, setNow } = context;
+  assert.equal(bot.evaluate(), true);
+  setPrice(99_600);
+  setNow(960_500);
+  setBook('UP', {
+    asks: [[0.7, 100]],
+    bids: [[0.8, 100]],
+  });
+  setBook('DOWN', {
+    asks: [[0.1, 100]],
+    bids: [[0.05, 100]],
+  });
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.flipConfirmation.count, 1);
+
+  setPrice(100_400);
+  setNow(960_750);
+  setBook('UP', {
+    asks: [[0.7, 100]],
+    bids: [[0.8, 100]],
+  });
+  setBook('DOWN', {
+    asks: [[0.1, 100]],
+    bids: [[0.05, 100]],
+  });
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.flipConfirmation.count, 0);
+
+  setPrice(99_600);
+  setNow(961_000);
+  setBook('UP', {
+    asks: [[0.7, 100]],
+    bids: [[0.8, 100]],
+  });
+  setBook('DOWN', {
+    asks: [[0.1, 100]],
+    bids: [[0.05, 100]],
+  });
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.flipsThisWindow, 0);
+  assert.equal(bot.flipConfirmation.count, 1);
 });
 
 test('positions settle only from the exact original market result', async () => {

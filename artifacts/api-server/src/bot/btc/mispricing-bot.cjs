@@ -8,12 +8,16 @@ const { normalizeLevels } = require('./btc-price-band-bot.cjs');
 
 const EPSILON = 1e-8;
 const DEFAULT_CONFIG = Object.freeze({
-  STRATEGY_VERSION: 'btc-5m-binance-mispricing-3candle-v1',
+  STRATEGY_VERSION: 'btc-5m-binance-mispricing-3candle-v2',
   WINDOW_MS: CANDLE_MS,
   STARTING_CAPITAL: 3_000,
   BASE_SHARES: 100,
   VOLATILITY_CANDLES: 3,
   MIN_NET_EDGE_PER_SHARE: 0.05,
+  MIN_FLIP_NET_EDGE_PER_SHARE: 0.10,
+  FLIP_CONFIRMATION_UPDATES: 2,
+  FLIP_CONFIRMATION_MIN_INTERVAL_MS: 500,
+  FLIP_CONFIRMATION_MAX_INTERVAL_MS: 2_000,
   MAX_FLIPS_PER_WINDOW: 1,
   MAX_DATA_AGE_MS: 2_000,
   POLL_INTERVAL_MS: 500,
@@ -137,6 +141,7 @@ class BtcMispricingBot {
     this.quotes = { UP: emptyQuote('UP'), DOWN: emptyQuote('DOWN') };
     this.entryTriggeredThisWindow = false;
     this.flipsThisWindow = 0;
+    this.flipConfirmation = { side: null, count: 0, lastTickAt: null };
     this.websocket = {
       status: 'WAITING',
       connectedAt: null,
@@ -338,6 +343,7 @@ class BtcMispricingBot {
     this.quotes = { UP: emptyQuote('UP'), DOWN: emptyQuote('DOWN') };
     this.entryTriggeredThisWindow = false;
     this.flipsThisWindow = 0;
+    this.resetFlipConfirmation();
     this.lastEvaluationSignature = null;
     this.schedulePersist(true);
     await this.loadMarket(start);
@@ -638,6 +644,7 @@ class BtcMispricingBot {
     const model = this.modelSnapshot(now);
     this.model = model;
     if (!model.ready) {
+      this.resetFlipConfirmation();
       this.currentSignal = {
         side: null,
         reason: model.reason,
@@ -700,12 +707,52 @@ class BtcMispricingBot {
     return true;
   }
 
+  resetFlipConfirmation() {
+    this.flipConfirmation = { side: null, count: 0, lastTickAt: null };
+  }
+
+  recordFlipConfirmation(side, model, now) {
+    const tickAt = timestamp(model?.tickAt, null);
+    if (tickAt == null || tickAt > now
+      || now - tickAt > this.config.MAX_DATA_AGE_MS) {
+      this.resetFlipConfirmation();
+      return { confirmed: false, count: 0 };
+    }
+
+    const current = this.flipConfirmation;
+    const elapsedSinceConfirmation = current.lastTickAt == null
+      ? null : tickAt - current.lastTickAt;
+    if (current.side !== side
+      || elapsedSinceConfirmation == null
+      || elapsedSinceConfirmation < 0
+      || elapsedSinceConfirmation > this.config.FLIP_CONFIRMATION_MAX_INTERVAL_MS) {
+      this.flipConfirmation = { side, count: 1, lastTickAt: tickAt };
+    } else if (elapsedSinceConfirmation
+      >= this.config.FLIP_CONFIRMATION_MIN_INTERVAL_MS) {
+      this.flipConfirmation = {
+        side,
+        count: Math.min(
+          this.config.FLIP_CONFIRMATION_UPDATES,
+          current.count + 1,
+        ),
+        lastTickAt: tickAt,
+      };
+    }
+
+    return {
+      confirmed: this.flipConfirmation.count
+        >= this.config.FLIP_CONFIRMATION_UPDATES,
+      count: this.flipConfirmation.count,
+    };
+  }
+
   evaluateFlip(openTrade, model, now) {
     const opposite = openTrade.side === 'UP' ? 'DOWN' : 'UP';
     if (this.flipsThisWindow >= this.config.MAX_FLIPS_PER_WINDOW
       || now >= this.windowEnd
       || !this.sideQuoteIsFresh(openTrade.side, now)
       || !this.sideQuoteIsFresh(opposite, now)) {
+      this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
         reason: 'Holding the current position; no eligible flip is available this window.',
@@ -715,6 +762,7 @@ class BtcMispricingBot {
     }
     const salePreview = this.sweep(openTrade.side, 'bids', openTrade.shares);
     if (!salePreview?.complete) {
+      this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
         reason: 'The opposite model signal appeared, but visible bids cannot close the full position.',
@@ -731,6 +779,7 @@ class BtcMispricingBot {
     const edgePerShare = expectedProfit == null
       ? null : expectedProfit / this.config.BASE_SHARES;
     if (liquidationPnl <= EPSILON) {
+      this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
         reason: 'Holding: the current position is not net-profitable to liquidate at visible bids.',
@@ -738,15 +787,20 @@ class BtcMispricingBot {
       };
       return false;
     }
-    if (!buyPreview?.complete || edgePerShare < this.config.MIN_NET_EDGE_PER_SHARE) {
+    if (!buyPreview?.complete || edgePerShare == null
+      || edgePerShare < this.config.MIN_FLIP_NET_EDGE_PER_SHARE) {
+      this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
-        reason: 'Holding: the opposite side does not have enough depth or net edge after fees.',
+        reason: !buyPreview?.complete
+          ? 'Holding: the opposite side does not have enough visible ask depth for all 100 shares.'
+          : `Holding: the opposite edge is below the $${this.config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} flip threshold after fees.`,
         edgePerShare,
       };
       return false;
     }
     if (this.cash + salePreview.netProceeds + EPSILON < buyPreview.totalCost) {
+      this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
         reason: 'Holding: paper cash cannot fund the full opposite-side buy.',
@@ -754,9 +808,19 @@ class BtcMispricingBot {
       };
       return false;
     }
+    const confirmation = this.recordFlipConfirmation(opposite, model, now);
+    if (!confirmation.confirmed) {
+      this.currentSignal = {
+        side: opposite,
+        reason: `Waiting for ${opposite} confirmation (${confirmation.count}/${this.config.FLIP_CONFIRMATION_UPDATES} fresh Binance updates, at least ${this.config.FLIP_CONFIRMATION_MIN_INTERVAL_MS} ms apart).`,
+        edgePerShare,
+      };
+      return false;
+    }
     const sale = this.sweep(openTrade.side, 'bids', openTrade.shares, { consume: true });
     const buy = this.sweep(opposite, 'asks', this.config.BASE_SHARES, { consume: true });
     if (!sale?.complete || !buy?.complete) return false;
+    this.resetFlipConfirmation();
     this.closePosition(openTrade, sale, now, 'PROFITABLE_MODEL_FLIP', opposite);
     this.buyPosition(
       opposite,
@@ -776,11 +840,13 @@ class BtcMispricingBot {
         sharesBought: buy.shares,
         liquidationPnl: round(liquidationPnl, 2),
         oppositeEdgePerShare: round(edgePerShare, 4),
+        confirmationUpdates: confirmation.count,
+        minimumFlipEdgePerShare: this.config.MIN_FLIP_NET_EDGE_PER_SHARE,
         flipsThisWindow: this.flipsThisWindow,
       });
     this.currentSignal = {
       side: opposite,
-      reason: `Flipped after a profitable exit; the opposite edge remained above threshold.`,
+      reason: `Flipped after a profitable exit and ${confirmation.count} fresh opposite-signal confirmations.`,
       edgePerShare,
     };
     this.schedulePersist(true);
@@ -997,10 +1063,17 @@ class BtcMispricingBot {
         baseShares: this.config.BASE_SHARES,
         volatilityLookbackCandles: this.config.VOLATILITY_CANDLES,
         minimumNetEdgePerShare: this.config.MIN_NET_EDGE_PER_SHARE,
+        minimumFlipNetEdgePerShare: this.config.MIN_FLIP_NET_EDGE_PER_SHARE,
+        flipConfirmationUpdates: this.config.FLIP_CONFIRMATION_UPDATES,
+        flipConfirmationIntervalMs: this.config.FLIP_CONFIRMATION_MIN_INTERVAL_MS,
+        flipConfirmation: {
+          side: this.flipConfirmation.side,
+          updates: this.flipConfirmation.count,
+        },
         maximumFlipsPerWindow: this.config.MAX_FLIPS_PER_WINDOW,
         flipsThisWindow: this.flipsThisWindow,
         entryTriggeredThisWindow: this.entryTriggeredThisWindow,
-        exitPolicy: 'Hold to exact original-market resolution unless a net-profitable opposite-model flip qualifies.',
+        exitPolicy: 'Hold to exact original-market resolution unless a profitable opposite edge of at least $0.10/share persists across two fresh Binance updates, at least 500 ms apart.',
         priceSource: 'Binance BTCUSDT aggregate trades',
       },
       window: {
