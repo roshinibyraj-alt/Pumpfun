@@ -320,11 +320,12 @@ test('reconciles a processed LIVE record and clears halt after confirmed cancel 
   bot.liveHalted = true;
   bot.liveHaltReason = 'A saved submission has no exchange order ID; it must be reconciled manually.';
   bot.liveAccount.authenticated = true;
-  setFreshOrderSnapshot(bot);
+  setFreshOrderSnapshot(bot, [{ id: 'stale-live-order' }]);
   const order = {
     id: 'stale-live-order',
     status: 'LIVE',
     processed: true,
+    processedMatchedShares: 0,
     shares: 10,
     matchedShares: 0,
     windowStart: 1_000,
@@ -347,6 +348,50 @@ test('reconciles a processed LIVE record and clears halt after confirmed cancel 
   assert.equal(order.status, 'CANCELLED');
   assert.equal(order.exchangeStatus, 'LIVE');
   assert.ok(order.cancelConfirmedAt);
+  setFreshOrderSnapshot(bot);
+  assert.equal(await bot.clearResolvedSubmissionHalt(), true);
+  assert.equal(bot.liveHalted, false);
+});
+
+test('books partial fills and clears the halt when a fresh authenticated order list confirms the FAK is closed', async () => {
+  const { bot } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
+  bot.liveAccount.authenticated = true;
+  bot.liveAccount.accountReady = true;
+  bot.liveAccount.status = 'READY';
+  setFreshOrderSnapshot(bot);
+  const order = {
+    id: 'partial-fak-order',
+    localId: 'local-partial-fak-order',
+    action: 'BUY_ENTRY',
+    side: 'UP',
+    status: 'RECONCILIATION_REQUIRED',
+    processed: false,
+    shares: 23,
+    matchedShares: 0,
+    limitPrice: 0.61,
+    accountingPriceEstimate: 0.61,
+    submittedAt: bot.now() - 1_000,
+    windowStart: bot.windowStart,
+  };
+  bot.liveOrders = [order];
+  bot.trader = {
+    async fetchOrder() {
+      return { id: 'partial-fak-order', status: 'LIVE', sizeMatched: '3.64' };
+    },
+    async cancelOrder() {
+      assert.fail('A fresh empty open-order snapshot should avoid a redundant cancel.');
+    },
+  };
+
+  await bot.reconcileLiveOrders();
+
+  assert.equal(order.status, 'CANCELLED');
+  assert.equal(order.processed, true);
+  assert.equal(order.processedMatchedShares, 3.64);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].shares, 3.64);
   assert.equal(await bot.clearResolvedSubmissionHalt(), true);
   assert.equal(bot.liveHalted, false);
 });

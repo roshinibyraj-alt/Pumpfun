@@ -780,7 +780,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     });
     if (stillOpen) {
       try {
-        await this.trader.cancelOrder(order.id);
+        await this.cancelAndReconcileOrder(order);
       } catch (error) {
         order.status = 'CANCEL_UNCERTAIN';
         order.error = errorText(error);
@@ -789,15 +789,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         await this.persist();
         throw error;
       }
-      latest = await this.trader.fetchOrder(order.id);
-      this.applyConfirmedCancellation(order, latest);
     } else if (order.matchedShares > 0
       && order.matchedShares < order.shares - EPSILON
       && !TERMINAL_ORDER_STATUSES.has(order.status)) {
       try {
-        await this.trader.cancelOrder(order.id);
-        latest = await this.trader.fetchOrder(order.id);
-        this.applyConfirmedCancellation(order, latest);
+        await this.cancelAndReconcileOrder(order);
       } catch (error) {
         order.status = 'CANCEL_UNCERTAIN';
         order.error = errorText(error);
@@ -819,6 +815,15 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
 
   applyConfirmedCancellation(order, exchangeOrder) {
     this.applyExchangeOrder(order, exchangeOrder);
+    if (order.processed) {
+      const alreadyAccounted = Number(order.processedMatchedShares);
+      if (!Number.isFinite(alreadyAccounted)
+        || Math.abs(alreadyAccounted - Number(order.matchedShares || 0)) > EPSILON) {
+        order.status = 'RECONCILIATION_REQUIRED';
+        order.error = 'Matched quantity changed after fill processing.';
+        return false;
+      }
+    }
     if (!isTerminalOrder({
       ...exchangeOrder,
       shares: order.shares,
@@ -826,6 +831,65 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     })) {
       order.status = 'CANCELLED';
       order.cancelConfirmedAt = this.now();
+    }
+    return true;
+  }
+
+  hasFreshExchangeOrderSnapshot(afterTimestamp = 0) {
+    const snapshotAt = Date.parse(this.liveAccount.ordersSnapshotAt || '');
+    const age = this.now() - snapshotAt;
+    return this.liveAccount.accountReady
+      && String(this.liveAccount.status || '').toUpperCase() === 'READY'
+      && this.liveAccount.orderSnapshotStatus === 'READY'
+      && Number.isFinite(snapshotAt)
+      && age >= 0
+      && age <= Math.max(60_000, this.accountRefreshMs * 3)
+      && snapshotAt >= Number(afterTimestamp || 0)
+      && Array.isArray(this.liveAccount.orders);
+  }
+
+  markOrderClosedFromFreshSnapshot(order) {
+    if (!order.id || !this.hasFreshExchangeOrderSnapshot(order.submittedAt)) return false;
+    const orderId = String(order.id);
+    if (this.liveAccount.orders.some(exchangeOrder =>
+      String(exchangeOrder?.id || exchangeOrder?.orderId || '') === orderId)) {
+      return false;
+    }
+
+    const matched = Math.max(0, Number(order.matchedShares) || 0);
+    if (order.processed) {
+      const alreadyAccounted = Number(order.processedMatchedShares);
+      if (!Number.isFinite(alreadyAccounted) || Math.abs(alreadyAccounted - matched) > EPSILON) {
+        return false;
+      }
+    }
+    const requested = Number(order.shares);
+    if (!Number.isFinite(requested) || requested <= 0) return false;
+    order.status = matched >= requested - EPSILON
+      ? 'MATCHED'
+      : matched > EPSILON
+        ? 'CANCELLED'
+        : 'UNFILLED';
+    order.closedByOpenOrdersSnapshotAt = this.now();
+    order.closeEvidence = 'absent-from-fresh-authenticated-open-orders';
+    return true;
+  }
+
+  async cancelAndReconcileOrder(order) {
+    try {
+      await this.trader.cancelOrder(order.id);
+      const finalOrder = await this.trader.fetchOrder(order.id);
+      if (!this.applyConfirmedCancellation(order, finalOrder)) {
+        throw new Error('Matched quantity changed after fill processing.');
+      }
+      return true;
+    } catch (cancelError) {
+      const refreshed = await this.refreshAccountSnapshot();
+      if (!refreshed) throw cancelError;
+      const finalOrder = await this.trader.fetchOrder(order.id);
+      this.applyExchangeOrder(order, finalOrder);
+      if (this.markOrderClosedFromFreshSnapshot(order)) return true;
+      throw cancelError;
     }
   }
 
@@ -842,6 +906,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         return;
       }
       order.processed = true;
+      order.processedMatchedShares = 0;
       if (order.action === 'SELL_FLIP') this.pendingFlip = null;
       order.status = order.status === 'REJECTED' ? 'REJECTED' : 'UNFILLED';
       order.updatedAt = this.now();
@@ -869,6 +934,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       trade.fillPriceBasis = 'conservative-order-book-estimate';
       order.tradeId = trade.id;
       order.processed = true;
+      order.processedMatchedShares = filled;
       if (order.action === 'BUY_FLIP') {
         this.flipsThisWindow += 1;
         this.pendingFlip = null;
@@ -907,6 +973,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         this.pendingFlip = null;
       }
       order.processed = true;
+      order.processedMatchedShares = filled;
     }
     order.status = order.status || 'RECONCILED';
     order.updatedAt = this.now();
@@ -1030,9 +1097,9 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         if (!isTerminalOrder({
           ...latest, shares: order.shares, matchedShares: order.matchedShares,
         })) {
-          await this.trader.cancelOrder(order.id);
-          const finalOrder = await this.trader.fetchOrder(order.id);
-          this.applyConfirmedCancellation(order, finalOrder);
+          if (!this.markOrderClosedFromFreshSnapshot(order)) {
+            await this.cancelAndReconcileOrder(order);
+          }
         }
         await this.processFinalOrder(order);
         await this.persist();
@@ -1052,9 +1119,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       if (order.windowStart >= nextWindowStart || !order.id
         || !isActiveOrder(order)) continue;
       try {
-        await this.trader.cancelOrder(order.id);
-        const latest = await this.trader.fetchOrder(order.id);
-        this.applyConfirmedCancellation(order, latest);
+        await this.cancelAndReconcileOrder(order);
         await this.processFinalOrder(order);
       } catch (error) {
         order.error = errorText(error);
