@@ -264,11 +264,18 @@ test('a profitable flip requires two fresh opposite updates at least 500 ms apar
   assert.equal(strategy.nextEntryShares, 100);
   assert.equal(strategy.lossSizeStepShares, 20);
   assert.equal(strategy.winSizeReductionShares, 30);
+  assert.equal(strategy.profitableIntrawindowCloseReducesSize, true);
   assert.equal(strategy.minimumNetEdgePerShare, 0.05);
   assert.equal(strategy.minimumFlipNetEdgePerShare, 0.10);
   assert.equal(strategy.flipConfirmationUpdates, 2);
   assert.equal(strategy.flipConfirmationIntervalMs, 500);
   openTakerPosition(context);
+  bot.trades.push(
+    { id: 'prior-loss-1', outcome: 'LOSS', sizingOutcome: 'LOSS', sizingAdjustmentApplied: true, sizingAdjustedAt: 1, windowStart: 1 },
+    { id: 'prior-loss-2', outcome: 'LOSS', sizingOutcome: 'LOSS', sizingAdjustmentApplied: true, sizingAdjustedAt: 2, windowStart: 2 },
+  );
+  bot.recalculateNextEntryShares();
+  assert.equal(bot.nextEntryShares, 140);
   setPrice(99_600);
   setNow(960_500);
   setBook('UP', {
@@ -276,7 +283,7 @@ test('a profitable flip requires two fresh opposite updates at least 500 ms apar
     bids: [[0.8, 100]],
   });
   setBook('DOWN', {
-    asks: [[0.1, 100]],
+    asks: [[0.1, 110]],
     bids: [[0.05, 100]],
   });
   assert.equal(bot.evaluate(), false);
@@ -294,24 +301,33 @@ test('a profitable flip requires two fresh opposite updates at least 500 ms apar
     bids: [[0.8, 100]],
   });
   setBook('DOWN', {
-    asks: [[0.1, 100]],
+    asks: [[0.1, 110]],
     bids: [[0.05, 100]],
   });
   assert.equal(bot.evaluate(), true);
   assert.equal(bot.flipsThisWindow, 1);
   assert.equal(bot.trades[0].status, 'CLOSED');
   assert.ok(bot.trades[0].realizedPnl > 0);
+  assert.equal(bot.trades[0].sizingOutcome, 'WIN');
+  assert.equal(bot.trades[0].sizingAdjustmentApplied, true);
+  assert.equal(bot.nextEntryShares, 110);
   assert.ok(bot.trades[0].fees > 0);
   assert.ok(bot.trades[0].exitFees > 0);
-  assert.equal(bot.trades.length, 2);
-  assert.equal(bot.trades[1].side, 'DOWN');
-  assert.equal(bot.trades[1].shares, 100);
-  assert.ok(bot.trades[1].fees > 0);
+  const flippedTrade = bot.trades.find(trade => trade.entryReason === 'PROFITABLE_MODEL_FLIP');
+  assert.ok(flippedTrade);
+  assert.equal(flippedTrade.side, 'DOWN');
+  assert.equal(flippedTrade.shares, 110);
+  assert.ok(flippedTrade.fees > 0);
+  assert.equal(
+    bot.applySizingAdjustment(bot.trades[0], 'WIN', 961_000, 'duplicate close', 'TEST'),
+    false,
+  );
+  assert.equal(bot.nextEntryShares, 110);
   const expectedFees = bot.trades.reduce(
     (sum, trade) => sum + (Number(trade.fees) || 0) + (Number(trade.exitFees) || 0),
     0,
   );
-  assert.ok(Math.abs(bot.accountSnapshot().takerFees - expectedFees) < 1e-9);
+  assert.equal(bot.accountSnapshot().takerFees, Math.round(expectedFees * 100) / 100);
   assert.equal(bot.flipConfirmation.count, 0);
 
   setPrice(100_400);
@@ -431,7 +447,7 @@ test('positions settle only from the exact original market result', async () => 
   assert.equal(bot.cash, 3_050);
 });
 
-test('only resolved wins and losses change size; the 100-share floor is preserved', () => {
+test('resolved outcomes and profitable closes adjust size once; the 100-share floor is preserved', () => {
   const { bot } = fixture();
   const record = (outcome, settledAt) => {
     const trade = {
@@ -449,7 +465,22 @@ test('only resolved wins and losses change size; the 100-share floor is preserve
   assert.equal(bot.nextEntryShares, 120);
   record('LOSS', 2);
   assert.equal(bot.nextEntryShares, 140);
-  record('WIN', 3);
+  const profitableExit = {
+    id: 'sizing-profit-close',
+    status: 'OPEN',
+    outcome: null,
+    totalCost: 10,
+  };
+  bot.trades.push(profitableExit);
+  bot.closePosition(profitableExit, {
+    netProceeds: 20,
+    gross: 20,
+    fees: 0,
+    averagePrice: 0.2,
+    fills: [],
+  }, 3, 'PROFITABLE_MODEL_FLIP', 'DOWN');
+  assert.equal(profitableExit.outcome, 'EXIT');
+  assert.equal(profitableExit.sizingOutcome, 'WIN');
   assert.equal(bot.nextEntryShares, 110);
   record('WIN', 4);
   assert.equal(bot.nextEntryShares, 100);

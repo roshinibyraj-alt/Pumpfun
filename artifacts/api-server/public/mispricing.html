@@ -351,7 +351,7 @@
           <div class="rules">
             <div class="rule"><b>Signal</b>Three closed Binance 5m candles; only fresh model data and fresh books can trigger an order.</div>
             <div class="rule"><b>Entry</b>Sweep visible asks for the next order size only when the full quantity is available and estimated net edge is at least 5¢ per share after taker fees.</div>
-            <div class="rule"><b>Size</b>Start at 100 shares; each resolved loss adds 20, each resolved win subtracts 30, with a 100-share floor. Paper cash limits orders.</div>
+            <div class="rule"><b>Size</b>Start at 100 shares; each resolved loss adds 20, while a resolved win or profitable intra-window close subtracts 30, with a 100-share floor. Paper cash limits orders.</div>
             <div class="rule"><b>Flip</b>One profitable flip per window. Sell at visible bids and buy the opposite side by sweeping asks; require full depth, 10¢ net edge, and two fresh Binance updates at least 500 ms apart.</div>
             <div class="rule"><b>Resolution</b>Otherwise hold until official Polymarket resolution for that exact market.</div>
             <div class="rule"><b>Fees</b>Entries and early-flip exits are taker sweeps; fees are included in modeled cash and P&amp;L.</div>

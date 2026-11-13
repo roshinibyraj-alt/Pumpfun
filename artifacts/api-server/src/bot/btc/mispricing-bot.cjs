@@ -8,7 +8,7 @@ const { normalizeLevels } = require('./btc-price-band-bot.cjs');
 
 const EPSILON = 1e-8;
 const DEFAULT_CONFIG = Object.freeze({
-  STRATEGY_VERSION: 'btc-5m-binance-taker-sizing-3candle-v1',
+  STRATEGY_VERSION: 'btc-5m-binance-taker-sizing-profit-close-v2',
   WINDOW_MS: CANDLE_MS,
   STARTING_CAPITAL: 3_000,
   BASE_SHARES: 100,
@@ -1114,7 +1114,16 @@ class BtcMispricingBot {
       return false;
     }
     const liquidationPnl = salePreview.netProceeds - openTrade.totalCost;
-    const targetShares = this.nextEntryShares;
+    if (liquidationPnl <= EPSILON) {
+      this.resetFlipConfirmation();
+      this.currentSignal = {
+        side: opposite,
+        reason: 'Holding: the current position is not net-profitable to liquidate at visible bids.',
+        edgePerShare: null,
+      };
+      return false;
+    }
+    const targetShares = this.sizeAfterOutcome(this.nextEntryShares, 'WIN');
     const buyPreview = this.sweep(opposite, 'asks', targetShares);
     const oppositeProbability = opposite === 'UP' ? model.probabilityUp : model.probabilityDown;
     const expectedProfit = buyPreview?.complete
@@ -1122,15 +1131,6 @@ class BtcMispricingBot {
       : null;
     const edgePerShare = expectedProfit == null
       ? null : expectedProfit / targetShares;
-    if (liquidationPnl <= EPSILON) {
-      this.resetFlipConfirmation();
-      this.currentSignal = {
-        side: opposite,
-        reason: 'Holding: the current position is not net-profitable to liquidate at visible bids.',
-        edgePerShare,
-      };
-      return false;
-    }
     if (!buyPreview?.complete || edgePerShare == null
       || edgePerShare < this.config.MIN_FLIP_NET_EDGE_PER_SHARE) {
       this.resetFlipConfirmation();
@@ -1262,39 +1262,66 @@ class BtcMispricingBot {
     trade.outcome = 'EXIT';
     trade.exitFills = execution.fills;
     this.realizedPnl = round(this.realizedPnl + trade.realizedPnl, 8);
+    if (trade.realizedPnl > EPSILON) {
+      this.applySizingAdjustment(
+        trade,
+        'WIN',
+        now,
+        'Profitable intra-window close',
+        'PROFITABLE_INTRAWINDOW_CLOSE',
+      );
+    }
     return trade;
+  }
+
+  sizeAfterOutcome(shares, outcome) {
+    return outcome === 'LOSS'
+      ? Number(shares) + this.config.LOSS_SIZE_STEP_SHARES
+      : Math.max(
+        this.config.BASE_SHARES,
+        Number(shares) - this.config.WIN_SIZE_REDUCTION_SHARES,
+      );
   }
 
   recalculateNextEntryShares() {
     const sizingTrades = this.trades
       .filter(trade => trade.sizingAdjustmentApplied
-        && (trade.outcome === 'WIN' || trade.outcome === 'LOSS'))
-      .sort((left, right) => (Number(left.settledAt) || 0) - (Number(right.settledAt) || 0)
+        && ['WIN', 'LOSS'].includes(trade.sizingOutcome || trade.outcome))
+      .sort((left, right) => (
+        Number(left.sizingAdjustedAt ?? left.settledAt ?? left.closedAt ?? left.windowStart) || 0
+      ) - (
+        Number(right.sizingAdjustedAt ?? right.settledAt ?? right.closedAt ?? right.windowStart) || 0
+      )
         || (Number(left.windowStart) || 0) - (Number(right.windowStart) || 0)
         || String(left.id).localeCompare(String(right.id)));
     let shares = this.config.BASE_SHARES;
     for (const trade of sizingTrades) {
-      trade.sizeBeforeResolution = shares;
-      shares = trade.outcome === 'LOSS'
-        ? shares + this.config.LOSS_SIZE_STEP_SHARES
-        : Math.max(this.config.BASE_SHARES, shares - this.config.WIN_SIZE_REDUCTION_SHARES);
-      trade.sizeAfterResolution = shares;
+      const outcome = trade.sizingOutcome || trade.outcome;
+      trade.sizeBeforeAdjustment = shares;
+      shares = this.sizeAfterOutcome(shares, outcome);
+      trade.sizeAfterAdjustment = shares;
+      if (trade.outcome === outcome && ['WIN', 'LOSS'].includes(trade.outcome)) {
+        trade.sizeBeforeResolution = trade.sizeBeforeAdjustment;
+        trade.sizeAfterResolution = shares;
+      }
     }
     this.nextEntryShares = shares;
     return shares;
   }
 
-  applyResolutionSizing(trade, now) {
-    if (trade.sizingAdjustmentApplied
-      || (trade.outcome !== 'WIN' && trade.outcome !== 'LOSS')) return false;
+  applySizingAdjustment(trade, outcome, now, reason, adjustmentType) {
+    if (trade.sizingAdjustmentApplied || !['WIN', 'LOSS'].includes(outcome)) return false;
     trade.sizingAdjustmentApplied = true;
+    trade.sizingOutcome = outcome;
+    trade.sizingAdjustedAt = now;
     const previous = this.nextEntryShares;
     const next = this.recalculateNextEntryShares();
     this.log('NEXT_ENTRY_SIZE_UPDATED',
-      `${trade.outcome === 'LOSS' ? 'Loss' : 'Win'} resolved; next order size is ${next} shares.`,
+      `${reason}; next order size is ${next} shares.`,
       {
         tradeId: trade.id,
-        outcome: trade.outcome,
+        outcome,
+        adjustmentType,
         previousShares: previous,
         nextShares: next,
         lossIncrementShares: this.config.LOSS_SIZE_STEP_SHARES,
@@ -1303,6 +1330,17 @@ class BtcMispricingBot {
         at: now,
       });
     return true;
+  }
+
+  applyResolutionSizing(trade, now) {
+    if (trade.outcome !== 'WIN' && trade.outcome !== 'LOSS') return false;
+    return this.applySizingAdjustment(
+      trade,
+      trade.outcome,
+      now,
+      `${trade.outcome === 'LOSS' ? 'Loss' : 'Win'} resolved`,
+      'ORIGINAL_MARKET_RESOLUTION',
+    );
   }
 
   updateOpenMarks(now) {
@@ -1451,6 +1489,7 @@ class BtcMispricingBot {
         nextEntryShares: this.nextEntryShares,
         lossSizeStepShares: this.config.LOSS_SIZE_STEP_SHARES,
         winSizeReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
+        profitableIntrawindowCloseReducesSize: true,
         sizeFloorShares: this.config.BASE_SHARES,
         volatilityLookbackCandles: this.config.VOLATILITY_CANDLES,
         minimumNetEdgePerShare: this.config.MIN_NET_EDGE_PER_SHARE,
