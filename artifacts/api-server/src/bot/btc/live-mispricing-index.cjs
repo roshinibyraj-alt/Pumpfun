@@ -87,9 +87,11 @@ async function main() {
     const uncertainStatuses = new Set([
       'SUBMITTING', 'SUBMISSION_UNCERTAIN', 'CANCEL_UNCERTAIN', 'RECONCILIATION_REQUIRED',
     ]);
-    const unresolvedOrderCount = Array.isArray(state.liveOrders)
-      ? state.liveOrders.filter(order => uncertainStatuses.has(order.status)).length
-      : 0;
+    const unresolvedOrderCount = Number.isFinite(Number(state.haltRecovery?.unresolvedOrderCount))
+      ? Number(state.haltRecovery.unresolvedOrderCount)
+      : Array.isArray(state.liveOrders)
+        ? state.liveOrders.filter(order => uncertainStatuses.has(order.status)).length
+        : 0;
     console.log(`BTC live mispricing bot status: ${state.status}`);
     console.log(
       `Polymarket account auth=${Boolean(state.account?.authenticated)} `
@@ -109,6 +111,8 @@ async function main() {
       + `halted=${Boolean(state.liveHalted)} `
       + `haltReasonClass=${classifyHaltReason(state.liveHaltReason)} `
       + `unresolvedOrders=${unresolvedOrderCount} `
+      + `missingOrderIds=${Number(state.haltRecovery?.missingOrderIdCount) || 0} `
+      + `haltRecoveryBlockers=${state.haltRecovery?.blockers?.map(safeLogTag).join(',') || 'NONE'} `
       + `exchangeOpenOrders=${Array.isArray(state.account?.orders) ? state.account.orders.length : 'UNKNOWN'} `
       + `persistence=${String(state.persistence?.status || 'UNKNOWN')}`,
     );

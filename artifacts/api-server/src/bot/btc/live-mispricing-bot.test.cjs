@@ -308,6 +308,11 @@ test('missing-order-ID halt clears only after later exchange confirmation and st
   }];
   assert.equal(await bot.clearResolvedSubmissionHalt(), false);
   assert.equal(bot.liveHalted, true);
+  const diagnostics = bot.submissionHaltRecoveryDiagnostics();
+  assert.ok(diagnostics.blockers.includes('LOCAL_ORDERS_UNRESOLVED'));
+  assert.ok(diagnostics.blockers.includes('LOCAL_ORDER_ID_MISSING'));
+  assert.equal(diagnostics.unresolvedOrderCount, 1);
+  assert.equal(diagnostics.missingOrderIdCount, 1);
 });
 
 test('reconciliation halt stays active if the account snapshot is stale or any order is unresolved', async () => {

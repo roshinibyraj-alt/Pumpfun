@@ -116,6 +116,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     this.liveOrders = [];
     this.activeLiveOrderId = null;
     this.pendingFlip = null;
+    this.lastHaltRecoverySignature = null;
     this.liveHalted = false;
     this.liveHaltReason = null;
     this.evaluatePromise = null;
@@ -313,29 +314,41 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     return this.persist();
   }
 
-  async clearResolvedSubmissionHalt() {
-    const ordersSnapshotAt = Date.parse(this.liveAccount.ordersSnapshotAt || '');
-    const ordersSnapshotAge = this.now() - ordersSnapshotAt;
-    const ordersSnapshotFreshnessMs = Math.max(60_000, this.accountRefreshMs * 3);
-    if (
-      !this.liveHalted
-      || !RECOVERABLE_ORDER_HALT_REASONS.has(this.liveHaltReason)
-      || !this.liveAccount.accountReady
-      || String(this.liveAccount.status || '').toUpperCase() !== 'READY'
-      || this.liveAccount.orderSnapshotStatus !== 'READY'
-      || !Number.isFinite(ordersSnapshotAt)
-      || ordersSnapshotAge < 0
-      || ordersSnapshotAge > ordersSnapshotFreshnessMs
-      || !Array.isArray(this.liveAccount.orders)
-      || this.liveAccount.orders.length > 0
-      || this.pendingFlip
-      || this.activeLiveOrderId
-      || !this.stateStore
-      || !this.storageHealthy
-    ) {
-      return false;
+  submissionHaltRecoveryDiagnostics() {
+    const blockers = [];
+    const maxSnapshotAgeMs = Math.max(60_000, this.accountRefreshMs * 3);
+    const snapshotAt = Date.parse(this.liveAccount.ordersSnapshotAt || '');
+    const snapshotAgeMs = this.now() - snapshotAt;
+
+    if (!RECOVERABLE_ORDER_HALT_REASONS.has(this.liveHaltReason)) {
+      blockers.push('HALT_REASON_NOT_RECOVERABLE');
     }
-    const unresolved = this.liveOrders.some(order => {
+    if (!this.liveAccount.accountReady) blockers.push('ACCOUNT_NOT_READY');
+    if (String(this.liveAccount.status || '').toUpperCase() !== 'READY') {
+      blockers.push('ACCOUNT_STATUS_NOT_READY');
+    }
+    if (this.liveAccount.orderSnapshotStatus !== 'READY') {
+      blockers.push('ORDER_SNAPSHOT_NOT_READY');
+    } else if (!Number.isFinite(snapshotAt)) {
+      blockers.push('ORDER_SNAPSHOT_TIMESTAMP_MISSING');
+    } else if (snapshotAgeMs < 0) {
+      blockers.push('ORDER_SNAPSHOT_FROM_FUTURE');
+    } else if (snapshotAgeMs > maxSnapshotAgeMs) {
+      blockers.push('ORDER_SNAPSHOT_STALE');
+    }
+    if (!Array.isArray(this.liveAccount.orders)) {
+      blockers.push('EXCHANGE_ORDERS_UNAVAILABLE');
+    } else if (this.liveAccount.orders.length > 0) {
+      blockers.push('EXCHANGE_OPEN_ORDERS_PRESENT');
+    }
+    if (this.pendingFlip) blockers.push('PENDING_FLIP_PRESENT');
+    if (this.activeLiveOrderId) blockers.push('ACTIVE_ORDER_PRESENT');
+    if (!this.stateStore || !this.storageHealthy) {
+      blockers.push('PERSISTENCE_UNAVAILABLE');
+    }
+
+    const localOrders = Array.isArray(this.liveOrders) ? this.liveOrders : [];
+    const unresolvedOrders = localOrders.filter(order => {
       const status = orderStatus(order);
       const terminal = isTerminalOrder({
         ...order,
@@ -350,7 +363,55 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         || !terminal
         || confirmedFillMissingDetails;
     });
-    if (unresolved) return false;
+    const unresolvedStatusCounts = {};
+    for (const order of unresolvedOrders) {
+      const status = String(orderStatus(order) || 'UNKNOWN')
+        .replace(/[^A-Z0-9_]/g, '_')
+        .slice(0, 40);
+      unresolvedStatusCounts[status] = (unresolvedStatusCounts[status] || 0) + 1;
+    }
+    const missingOrderIdCount = unresolvedOrders.filter(order => !order.id).length;
+    if (unresolvedOrders.length > 0) blockers.push('LOCAL_ORDERS_UNRESOLVED');
+    if (missingOrderIdCount > 0) blockers.push('LOCAL_ORDER_ID_MISSING');
+
+    return {
+      canClear: this.liveHalted && blockers.length === 0,
+      blockers,
+      unresolvedOrderCount: unresolvedOrders.length,
+      missingOrderIdCount,
+      unresolvedStatusCounts,
+      localOrderCount: localOrders.length,
+      exchangeOpenOrderCount: Array.isArray(this.liveAccount.orders)
+        ? this.liveAccount.orders.length
+        : null,
+      orderSnapshotAgeMs: Number.isFinite(snapshotAgeMs) ? snapshotAgeMs : null,
+    };
+  }
+
+  async clearResolvedSubmissionHalt() {
+    if (!this.liveHalted) return false;
+    const diagnostics = this.submissionHaltRecoveryDiagnostics();
+    if (!diagnostics.canClear) {
+      const statusSummary = Object.entries(diagnostics.unresolvedStatusCounts)
+        .map(([status, count]) => `${status}:${count}`)
+        .join(',') || 'NONE';
+      const signature = [
+        diagnostics.blockers.join(',') || 'UNKNOWN',
+        statusSummary,
+      ].join('|');
+      if (signature !== this.lastHaltRecoverySignature) {
+        this.lastHaltRecoverySignature = signature;
+        const message = `blockers=${diagnostics.blockers.join(',') || 'UNKNOWN'} `
+          + `localOrders=${diagnostics.localOrderCount} `
+          + `unresolvedOrders=${diagnostics.unresolvedOrderCount} `
+          + `missingOrderIds=${diagnostics.missingOrderIdCount} `
+          + `statuses=${statusSummary}`;
+        this.log('LIVE_HALT_RECOVERY_BLOCKED', message);
+        console.warn(`Live halt recovery blocked ${message}`);
+      }
+      return false;
+    }
+    this.lastHaltRecoverySignature = null;
     this.liveHalted = false;
     this.liveHaltReason = null;
     return this.persist();
@@ -1031,6 +1092,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       tradingEnabled: this.tradingEnabled,
       liveHalted: this.liveHalted,
       liveHaltReason: this.liveHaltReason,
+      haltRecovery: this.liveHalted ? this.submissionHaltRecoveryDiagnostics() : null,
       strategy: {
         ...(base.strategy || {}),
         name: 'BTC 5-minute Binance mispricing',
