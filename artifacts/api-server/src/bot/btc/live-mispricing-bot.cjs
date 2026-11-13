@@ -101,6 +101,14 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       orders: [],
       transactions: [],
       asOf: null,
+      orderSnapshotStatus: 'UNKNOWN',
+      ordersSnapshotAt: null,
+      orderSnapshotError: null,
+      balanceStatus: 'LOADING',
+      positionsStatus: 'LOADING',
+      positionsHttpStatus: null,
+      positionsRetryAfterMs: null,
+      activityStatus: 'LOADING',
       error: null,
       errorName: null,
       errorCode: null,
@@ -144,10 +152,12 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     this.processStartedAt = this.now();
     await super.start();
     if (this.trader) {
+      let authenticated = false;
       try {
         await this.trader.authenticate();
+        authenticated = true;
         this.liveAccount.authenticated = true;
-        this.liveAccount.accountReady = false;
+        this.liveAccount.accountReady = true;
         this.liveAccount.status = 'READY';
         this.liveAccount.error = null;
         this.liveAccount.errorName = null;
@@ -158,14 +168,23 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         await this.clearResolvedAuthHalt();
         await this.clearResolvedSubmissionHalt();
       } catch (error) {
-        this.liveAccount.authenticated = false;
-        this.liveAccount.accountReady = false;
-        this.liveAccount.status = 'AUTH_ERROR';
         this.liveAccount.error = errorText(error);
         this.liveAccount.errorName = safeErrorName(error);
         this.liveAccount.errorCode = safeErrorCode(error);
-        if (this.tradingEnabled) {
-          this.haltLiveTrading(AUTHENTICATION_HALT_REASON);
+        if (!authenticated) {
+          this.liveAccount.authenticated = false;
+          this.liveAccount.accountReady = false;
+          this.liveAccount.status = 'AUTH_ERROR';
+          if (this.tradingEnabled) this.haltLiveTrading(AUTHENTICATION_HALT_REASON);
+        } else {
+          this.liveAccount.authenticated = true;
+          this.liveAccount.accountReady = true;
+          this.liveAccount.status = 'READY';
+          this.liveAccount.orderSnapshotStatus = 'STALE';
+          this.liveAccount.orderSnapshotError = this.liveAccount.error;
+          if (this.tradingEnabled) {
+            this.haltLiveTrading('An existing order could not be reconciled; new orders are blocked.');
+          }
         }
       }
     } else {
@@ -190,8 +209,17 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     if (!this.running || !this.trader) return;
     if (this.accountRefreshTimer) clearTimeout(this.accountRefreshTimer);
     this.accountRefreshTimer = setTimeout(async () => {
-      await this.refreshAccountSnapshot();
-      this.scheduleAccountRefresh();
+      try {
+        const refreshed = await this.refreshAccountSnapshot();
+        if (refreshed && this.liveHalted) {
+          await this.reconcileLiveOrders();
+          await this.clearResolvedSubmissionHalt();
+        }
+      } catch (error) {
+        this.error = errorText(error);
+      } finally {
+        this.scheduleAccountRefresh();
+      }
     }, this.accountRefreshMs);
     this.accountRefreshTimer.unref?.();
   }
@@ -199,22 +227,64 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   async refreshAccountSnapshot() {
     if (!this.trader || !this.liveAccount.authenticated) return false;
     try {
-      const account = await this.trader.getEquitySnapshot();
+      const account = typeof this.trader.getTradingSnapshot === 'function'
+        ? await this.trader.getTradingSnapshot()
+        : await this.trader.getEquitySnapshot();
       this.liveAccount = {
         ...this.liveAccount,
         ...account,
         authenticated: true,
         accountReady: true,
+        status: 'READY',
+        orderSnapshotStatus: account.orderSnapshotStatus || 'READY',
+        orderSnapshotError: null,
         error: null,
+        errorName: null,
+        errorCode: null,
       };
+      if (typeof this.trader.refreshDisplaySnapshot === 'function') {
+        void this.trader.refreshDisplaySnapshot().then(display => {
+          const previousPositionsStatus = this.liveAccount.positionsStatus;
+          const previousPositionsHttpStatus = this.liveAccount.positionsHttpStatus;
+          this.liveAccount = {
+            ...this.liveAccount,
+            ...display,
+            authenticated: true,
+            accountReady: true,
+            status: 'READY',
+          };
+          if (
+            previousPositionsStatus !== this.liveAccount.positionsStatus
+            || previousPositionsHttpStatus !== this.liveAccount.positionsHttpStatus
+          ) {
+            const diagnostic = `status=${this.liveAccount.positionsStatus || 'UNKNOWN'} `
+              + `httpStatus=${this.liveAccount.positionsHttpStatus ?? 'NONE'} `
+              + `retryAfterMs=${this.liveAccount.positionsRetryAfterMs ?? 'NONE'}`;
+            this.log(
+              'ACCOUNT_POSITIONS_SNAPSHOT',
+              diagnostic,
+            );
+            console.log(`Polymarket positions snapshot ${diagnostic}`);
+          }
+        }).catch(error => {
+          this.liveAccount.positionsStatus = error?.rateLimited
+            ? 'RATE_LIMITED'
+            : error?.cooldown
+              ? 'COOLDOWN'
+              : 'STALE';
+          this.liveAccount.positionsError = errorText(error);
+        });
+      }
       return true;
     } catch (error) {
+      this.liveAccount.authenticated = true;
+      this.liveAccount.accountReady = true;
+      this.liveAccount.status = 'READY';
+      this.liveAccount.orderSnapshotStatus = 'STALE';
+      this.liveAccount.orderSnapshotError = errorText(error);
       this.liveAccount.error = errorText(error);
       this.liveAccount.errorName = safeErrorName(error);
       this.liveAccount.errorCode = safeErrorCode(error);
-      this.liveAccount.status = error?.rateLimited
-        ? 'RATE_LIMITED'
-        : 'STALE';
       return false;
     }
   }
@@ -244,11 +314,18 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   async clearResolvedSubmissionHalt() {
+    const ordersSnapshotAt = Date.parse(this.liveAccount.ordersSnapshotAt || '');
+    const ordersSnapshotAge = this.now() - ordersSnapshotAt;
+    const ordersSnapshotFreshnessMs = Math.max(60_000, this.accountRefreshMs * 3);
     if (
       !this.liveHalted
       || !RECOVERABLE_ORDER_HALT_REASONS.has(this.liveHaltReason)
       || !this.liveAccount.accountReady
       || String(this.liveAccount.status || '').toUpperCase() !== 'READY'
+      || this.liveAccount.orderSnapshotStatus !== 'READY'
+      || !Number.isFinite(ordersSnapshotAt)
+      || ordersSnapshotAge < 0
+      || ordersSnapshotAge > ordersSnapshotFreshnessMs
       || !Array.isArray(this.liveAccount.orders)
       || this.liveAccount.orders.length > 0
       || this.pendingFlip

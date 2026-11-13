@@ -35,6 +35,13 @@ function createBot({ tradingEnabled = true, trader = null } = {}) {
   return { bot, saves };
 }
 
+function setFreshOrderSnapshot(bot, orders = []) {
+  bot.liveAccount.status = 'READY';
+  bot.liveAccount.orders = orders;
+  bot.liveAccount.orderSnapshotStatus = 'READY';
+  bot.liveAccount.ordersSnapshotAt = new Date(bot.now()).toISOString();
+}
+
 test('live copy starts at 10 shares and sizes outcomes by +2/-3 with a 10-share floor', () => {
   const { bot } = createBot();
   assert.equal(bot.config.BASE_SHARES, 10);
@@ -234,7 +241,7 @@ test('submission halt clears only after every order is resolved and the exchange
   const { bot, saves } = createBot({ tradingEnabled: false });
   bot.liveHalted = true;
   bot.liveHaltReason = 'Order submission outcome is uncertain; automatic retries are blocked.';
-  bot.liveAccount.orders = [];
+  setFreshOrderSnapshot(bot);
   bot.liveOrders = [{
     id: 'exchange-confirmed',
     status: 'MATCHED',
@@ -253,7 +260,7 @@ test('reconciliation halt clears only after all orders are terminal and the exch
   const { bot, saves } = createBot({ tradingEnabled: false });
   bot.liveHalted = true;
   bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
-  bot.liveAccount.orders = [];
+  setFreshOrderSnapshot(bot);
   bot.liveOrders = [{
     id: 'exchange-confirmed',
     status: 'MATCHED',
@@ -278,7 +285,7 @@ test('missing-order-ID halt clears only after later exchange confirmation and st
   const { bot } = createBot({ tradingEnabled: false });
   bot.liveHalted = true;
   bot.liveHaltReason = 'A saved submission has no exchange order ID; it must be reconciled manually.';
-  bot.liveAccount.orders = [];
+  setFreshOrderSnapshot(bot);
   bot.liveOrders = [{
     id: 'exchange-confirmed',
     status: 'MATCHED',
@@ -307,7 +314,7 @@ test('reconciliation halt stays active if the account snapshot is stale or any o
   const { bot } = createBot({ tradingEnabled: false });
   bot.liveHalted = true;
   bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
-  bot.liveAccount.orders = [];
+  setFreshOrderSnapshot(bot);
   bot.liveOrders = [{
     id: 'exchange-uncertain',
     status: 'RECONCILIATION_REQUIRED',
@@ -329,7 +336,7 @@ test('submission halt stays active while any order state remains uncertain', asy
   const { bot } = createBot({ tradingEnabled: false });
   bot.liveHalted = true;
   bot.liveHaltReason = 'Order submission outcome is uncertain; automatic retries are blocked.';
-  bot.liveAccount.orders = [];
+  setFreshOrderSnapshot(bot);
   bot.liveOrders = [{
     id: null,
     status: 'SUBMISSION_UNCERTAIN',
@@ -342,7 +349,56 @@ test('submission halt stays active while any order state remains uncertain', asy
   assert.equal(bot.liveHalted, true);
 
   bot.liveOrders = [];
-  bot.liveAccount.orders = [{ id: 'open-exchange-order' }];
+  setFreshOrderSnapshot(bot, [{ id: 'open-exchange-order' }]);
   assert.equal(await bot.clearResolvedSubmissionHalt(), false);
   assert.equal(bot.liveHalted, true);
+});
+
+test('positions API failure does not gate live readiness or safe order-halt recovery', async () => {
+  const trader = {
+    async getTradingSnapshot() {
+      return {
+        status: 'READY',
+        accountReady: true,
+        collateral: 123.45,
+        balanceStatus: 'READY',
+        orders: [],
+        orderSnapshotStatus: 'READY',
+        ordersSnapshotAt: new Date().toISOString(),
+      };
+    },
+    async refreshDisplaySnapshot() {
+      return {
+        positions: [],
+        positionValue: 0,
+        positionCount: 0,
+        positionsStatus: 'RATE_LIMITED',
+        positionsHttpStatus: 429,
+        positionsRetryAfterMs: 30_000,
+        transactions: [],
+        activityStatus: 'READY',
+      };
+    },
+  };
+  const { bot } = createBot({ trader });
+  bot.liveAccount.authenticated = true;
+  bot.liveAccount.accountReady = false;
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'A saved order has no exchange order ID; automatic resubmission is blocked.';
+  bot.liveOrders = [{
+    id: 'resolved-order',
+    status: 'MATCHED',
+    processed: true,
+    shares: 10,
+    matchedShares: 10,
+  }];
+
+  assert.equal(await bot.refreshAccountSnapshot(), true);
+  await Promise.resolve();
+  assert.equal(bot.liveAccount.accountReady, true);
+  assert.equal(bot.liveAccount.status, 'READY');
+  assert.equal(bot.liveAccount.positionsStatus, 'RATE_LIMITED');
+  assert.equal(bot.liveAccount.orders.length, 0);
+  assert.equal(await bot.clearResolvedSubmissionHalt(), true);
+  assert.equal(bot.liveHalted, false);
 });

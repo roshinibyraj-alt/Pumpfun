@@ -52,6 +52,88 @@ test('account snapshot exposes collateral, marked positions, and recent real tra
   assert.equal(Object.hasOwn(snapshot.transactions[0], 'proxyWallet'), false);
 });
 
+test('fresh CLOB order snapshots remain available while dashboard positions are rate-limited', async () => {
+  const trader = new LivePolymarketTrader('test-private-key', {
+    sdk: { AssetType: { COLLATERAL: 'COLLATERAL' } },
+    actions: {
+      async fetchBalanceAllowance() {
+        return { balance: '123450000' };
+      },
+    },
+    clock: () => 1_800_000_000_000,
+  });
+  trader.client = {};
+  trader.depositWallet = '0xpublic-wallet';
+  let positionReads = 0;
+  trader.listOpenOrders = async () => [];
+  trader.getAllPositions = async () => {
+    positionReads += 1;
+    const error = new Error('Positions API rate-limited; retry in 30s.');
+    error.rateLimited = true;
+    error.httpStatus = 429;
+    error.retryAfterMs = 30_000;
+    throw error;
+  };
+  trader.getRecentActivity = async () => [];
+
+  const trading = await trader.getTradingSnapshot();
+  assert.equal(positionReads, 0);
+  assert.equal(trading.accountReady, true);
+  assert.equal(trading.orderSnapshotStatus, 'READY');
+  assert.deepEqual(trading.orders, []);
+
+  const display = await trader.refreshDisplaySnapshot();
+  assert.equal(display.positionsStatus, 'RATE_LIMITED');
+  assert.equal(display.positionsHttpStatus, 429);
+  assert.equal(display.positionsRetryAfterMs, 30_000);
+  assert.equal(trading.orderSnapshotStatus, 'READY');
+});
+
+test('a local positions cooldown is not reported as an upstream rate limit', async () => {
+  let fetches = 0;
+  const trader = new LivePolymarketTrader('test-private-key', {
+    fetcher: async () => {
+      fetches += 1;
+      throw new Error('Fetch should not run during local cooldown.');
+    },
+    clock: () => 20_000,
+  });
+  trader.positionsNextAllowedAt = 50_000;
+
+  await assert.rejects(
+    trader.getAllPositions('0xpublic-wallet'),
+    error => {
+      assert.equal(error.cooldown, true);
+      assert.equal(error.rateLimited, undefined);
+      assert.equal(error.retryAfterMs, 30_000);
+      return true;
+    },
+  );
+  assert.equal(fetches, 0);
+});
+
+test('upstream positions 429 exposes its HTTP status and retry delay', async () => {
+  const trader = new LivePolymarketTrader('test-private-key', {
+    fetcher: async () => ({
+      ok: false,
+      status: 429,
+      headers: { get: name => name.toLowerCase() === 'retry-after' ? '2' : null },
+    }),
+    clock: () => 20_000,
+  });
+
+  await assert.rejects(
+    trader.getAllPositions('0xpublic-wallet'),
+    error => {
+      assert.equal(error.rateLimited, true);
+      assert.equal(error.cooldown, undefined);
+      assert.equal(error.httpStatus, 429);
+      assert.equal(error.retryAfterMs, 15_000);
+      return true;
+    },
+  );
+});
+
 test('taker orders preserve share sizing and post as immediate FAK orders', async () => {
   let created;
   let posted;

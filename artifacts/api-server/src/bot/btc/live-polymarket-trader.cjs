@@ -43,6 +43,19 @@ class LivePolymarketTrader {
     this.positionsNextAllowedAt = 0;
     this.positionsRequest = null;
     this.positions429Count = 0;
+    this.balanceCache = null;
+    this.balanceStatus = 'LOADING';
+    this.balanceError = null;
+    this.positionsCache = [];
+    this.positionValueCache = 0;
+    this.positionsStatus = 'LOADING';
+    this.positionsError = null;
+    this.positionsHttpStatus = null;
+    this.positionsRetryAfterMs = null;
+    this.transactionsCache = [];
+    this.activityStatus = 'LOADING';
+    this.activityError = null;
+    this.dashboardRefreshRequest = null;
   }
 
   async authenticate() {
@@ -158,6 +171,8 @@ class LivePolymarketTrader {
     }
     this.activityCache = payload.data;
     this.activityCacheAt = Number(this.clock());
+    this.activityStatus = 'READY';
+    this.activityError = null;
     return this.activityCache;
   }
 
@@ -167,7 +182,7 @@ class LivePolymarketTrader {
     const waitMs = Math.max(0, this.positionsNextAllowedAt - now);
     if (waitMs > 0) {
       const error = new Error(`Positions API cooldown is active for ${Math.ceil(waitMs / 1000)}s.`);
-      error.rateLimited = true;
+      error.cooldown = true;
       error.retryAfterMs = waitMs;
       throw error;
     }
@@ -216,10 +231,13 @@ class LivePolymarketTrader {
           this.positionsNextAllowedAt = Number(this.clock()) + retryMs;
           const error = new Error(`Positions API rate-limited; retry in ${Math.ceil(retryMs / 1000)}s.`);
           error.rateLimited = true;
+          error.httpStatus = 429;
           error.retryAfterMs = retryMs;
           throw error;
         }
-        throw new Error(`Positions API returned ${response.status}.`);
+        const error = new Error(`Positions API returned ${response.status}.`);
+        error.httpStatus = response.status;
+        throw error;
       }
       const payload = await response.json();
       if (!Array.isArray(payload?.data) || !payload.pagination) {
@@ -239,64 +257,181 @@ class LivePolymarketTrader {
     throw new Error(`Positions API exceeded the ${maxPages * pageSize}-row safety limit.`);
   }
 
-  async getEquitySnapshot() {
+  async getTradingSnapshot() {
     if (!this.client) throw new Error('Polymarket authentication is not ready.');
-    const wallet = this.depositWallet;
-    const [balance, positions, orders, activity] = await Promise.all([
-      this.actions.fetchBalanceAllowance(this.client, {
+    const [balanceResult, ordersResult] = await Promise.allSettled([
+      Promise.resolve().then(() => this.actions.fetchBalanceAllowance(this.client, {
         assetType: this.sdk.AssetType.COLLATERAL,
-      }),
-      this.getAllPositions(wallet),
+      })),
       this.listOpenOrders(),
-      this.getRecentActivity(wallet),
     ]);
-    const collateral = Number(balance?.balance) / 1e6;
-    if (!Number.isFinite(collateral)) throw new Error('USDC collateral balance is unavailable.');
-    const recentTradeByAsset = new Map();
-    for (const trade of activity) {
-      const asset = String(trade.token_id || '');
-      const timestamp = Number(trade.timestamp);
-      if (asset && !recentTradeByAsset.has(asset) && Number.isFinite(timestamp)) {
-        recentTradeByAsset.set(asset, new Date(timestamp * 1000).toISOString());
+
+    if (balanceResult.status === 'fulfilled') {
+      const collateral = Number(balanceResult.value?.balance) / 1e6;
+      if (Number.isFinite(collateral)) {
+        this.balanceCache = collateral;
+        this.balanceStatus = 'READY';
+        this.balanceError = null;
+      } else {
+        this.balanceStatus = 'STALE';
+        this.balanceError = 'USDC collateral balance is unavailable.';
       }
+    } else {
+      this.balanceStatus = 'STALE';
+      this.balanceError = String(balanceResult.reason?.message || balanceResult.reason || 'Balance snapshot failed.').slice(0, 180);
     }
-    const normalizedPositions = positions.map(position => ({
-      market: String(position.title || position.question || position.market || 'Unknown market'),
-      slug: position.slug || null,
-      outcome: String(position.outcome || 'Unknown'),
-      shares: finite(position.current_size),
-      avgEntry: finite(position.avg_price),
-      markPrice: finite(position.current_price),
-      value: finite(position.current_value),
-      pnl: finite(position.unrealized_pnl),
-      lastTradeAt: recentTradeByAsset.get(String(position.token_id || '')) || null,
-    }));
-    const positionValue = normalizedPositions.reduce(
-      (sum, position) => sum + (position.value || position.shares * position.markPrice),
-      0,
-    );
-    const transactions = activity.slice(0, 100).map(item => ({
-      timestamp: finite(item.timestamp),
-      type: String(item.type || 'TRADE'),
-      side: String(item.side || ''),
-      outcome: String(item.outcome || ''),
-      price: finite(item.price),
-      shares: finite(item.size),
-      amount: finite(item.usdcSize ?? item.usdc_size),
-      market: String(item.title || item.question || item.market || ''),
-      slug: item.slug || null,
-      transactionHash: item.transactionHash || item.transaction_hash || null,
-    }));
+
+    if (ordersResult.status !== 'fulfilled') {
+      throw ordersResult.reason instanceof Error
+        ? ordersResult.reason
+        : new Error('Polymarket open-order snapshot failed.');
+    }
+
+    const asOf = new Date(Number(this.clock())).toISOString();
     return {
-      status: 'ready',
-      collateral,
+      status: 'READY',
+      accountReady: true,
+      collateral: this.balanceCache,
+      equity: this.balanceCache == null
+        ? null
+        : this.balanceCache + this.positionValueCache,
+      balanceStatus: this.balanceStatus,
+      balanceError: this.balanceError,
+      orders: ordersResult.value,
+      orderSnapshotStatus: 'READY',
+      ordersSnapshotAt: asOf,
+      positions: this.positionsCache,
+      positionValue: this.positionValueCache,
+      positionCount: this.positionsCache.length,
+      positionsStatus: this.positionsStatus,
+      positionsError: this.positionsError,
+      positionsHttpStatus: this.positionsHttpStatus,
+      positionsRetryAfterMs: this.positionsRetryAfterMs,
+      transactions: this.transactionsCache,
+      activityStatus: this.activityStatus,
+      activityError: this.activityError,
+      asOf,
+    };
+  }
+
+  async refreshDisplaySnapshot() {
+    if (!this.client) throw new Error('Polymarket authentication is not ready.');
+    if (this.dashboardRefreshRequest) return this.dashboardRefreshRequest;
+
+    const request = (async () => {
+      const [positionsResult, activityResult] = await Promise.allSettled([
+        this.getAllPositions(this.depositWallet),
+        this.getRecentActivity(this.depositWallet),
+      ]);
+      const activity = activityResult.status === 'fulfilled'
+        ? activityResult.value
+        : (this.activityCache || []);
+      if (activityResult.status === 'fulfilled') {
+        this.activityStatus = 'READY';
+        this.activityError = null;
+        this.transactionsCache = activity.slice(0, 100).map(item => ({
+          timestamp: finite(item.timestamp),
+          type: String(item.type || 'TRADE'),
+          side: String(item.side || ''),
+          outcome: String(item.outcome || ''),
+          price: finite(item.price),
+          shares: finite(item.size),
+          amount: finite(item.usdcSize ?? item.usdc_size),
+          market: String(item.title || item.question || item.market || ''),
+          slug: item.slug || null,
+          transactionHash: item.transactionHash || item.transaction_hash || null,
+        }));
+      } else {
+        const error = activityResult.reason;
+        this.activityStatus = error?.rateLimited
+          ? 'RATE_LIMITED'
+          : error?.cooldown
+            ? 'COOLDOWN'
+            : 'STALE';
+        this.activityError = String(error?.message || error || 'Activity snapshot failed.').slice(0, 180);
+      }
+
+      if (positionsResult.status === 'fulfilled') {
+        const recentTradeByAsset = new Map();
+        for (const trade of activity) {
+          const asset = String(trade.token_id || '');
+          const timestamp = Number(trade.timestamp);
+          if (asset && !recentTradeByAsset.has(asset) && Number.isFinite(timestamp)) {
+            recentTradeByAsset.set(asset, new Date(timestamp * 1000).toISOString());
+          }
+        }
+        this.positionsCache = positionsResult.value.map(position => ({
+          market: String(position.title || position.question || position.market || 'Unknown market'),
+          slug: position.slug || null,
+          outcome: String(position.outcome || 'Unknown'),
+          shares: finite(position.current_size),
+          avgEntry: finite(position.avg_price),
+          markPrice: finite(position.current_price),
+          value: finite(position.current_value),
+          pnl: finite(position.unrealized_pnl),
+          lastTradeAt: recentTradeByAsset.get(String(position.token_id || '')) || null,
+        }));
+        this.positionValueCache = this.positionsCache.reduce(
+          (sum, position) => sum + (position.value || position.shares * position.markPrice),
+          0,
+        );
+        this.positionsStatus = 'READY';
+        this.positionsError = null;
+        this.positionsHttpStatus = null;
+        this.positionsRetryAfterMs = null;
+      } else {
+        const error = positionsResult.reason;
+        this.positionsStatus = error?.rateLimited
+          ? 'RATE_LIMITED'
+          : error?.cooldown
+            ? 'COOLDOWN'
+            : 'STALE';
+        this.positionsError = String(error?.message || error || 'Positions snapshot failed.').slice(0, 180);
+        this.positionsHttpStatus = Number.isFinite(Number(error?.httpStatus))
+          ? Number(error.httpStatus)
+          : null;
+        this.positionsRetryAfterMs = Number.isFinite(Number(error?.retryAfterMs))
+          ? Number(error.retryAfterMs)
+          : null;
+      }
+
+      return {
+        positionValue: this.positionValueCache,
+        equity: this.balanceCache == null
+          ? null
+          : this.balanceCache + this.positionValueCache,
+        positionCount: this.positionsCache.length,
+        positions: this.positionsCache,
+        positionsStatus: this.positionsStatus,
+        positionsError: this.positionsError,
+        positionsHttpStatus: this.positionsHttpStatus,
+        positionsRetryAfterMs: this.positionsRetryAfterMs,
+        transactions: this.transactionsCache,
+        activityStatus: this.activityStatus,
+        activityError: this.activityError,
+      };
+    })();
+    this.dashboardRefreshRequest = request;
+    try {
+      return await request;
+    } finally {
+      if (this.dashboardRefreshRequest === request) this.dashboardRefreshRequest = null;
+    }
+  }
+
+  async getEquitySnapshot() {
+    const trading = await this.getTradingSnapshot();
+    const display = await this.refreshDisplaySnapshot();
+    const collateral = trading.collateral;
+    const positionValue = display.positionValue;
+    const equity = Number.isFinite(Number(collateral))
+      ? Number(collateral) + Number(positionValue || 0)
+      : null;
+    return {
+      ...trading,
+      ...display,
       positionValue,
-      equity: collateral + positionValue,
-      positionCount: normalizedPositions.length,
-      positions: normalizedPositions,
-      orders,
-      transactions,
-      asOf: new Date(Number(this.clock())).toISOString(),
+      equity,
     };
   }
 }

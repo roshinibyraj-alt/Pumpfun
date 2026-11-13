@@ -83,7 +83,7 @@ async function main() {
     await bot.start();
     const state = bot.snapshot();
     const collateral = state.account?.collateral;
-    const snapshotAvailable = collateral != null && Number.isFinite(Number(collateral));
+    const collateralAvailable = collateral != null && Number.isFinite(Number(collateral));
     const uncertainStatuses = new Set([
       'SUBMITTING', 'SUBMISSION_UNCERTAIN', 'CANCEL_UNCERTAIN', 'RECONCILIATION_REQUIRED',
     ]);
@@ -98,7 +98,13 @@ async function main() {
       + `authErrorClass=${classifyAuthError(state.account?.error)} `
       + `authErrorName=${safeLogTag(state.account?.errorName || 'NONE')} `
       + `authErrorCode=${safeLogTag(state.account?.errorCode || 'NONE')} `
-      + `snapshot=${snapshotAvailable} `
+      + `accountReady=${Boolean(state.account?.accountReady)} `
+      + `ordersSnapshot=${safeLogTag(state.account?.orderSnapshotStatus || 'UNKNOWN')} `
+      + `positionsStatus=${safeLogTag(state.account?.positionsStatus || 'UNKNOWN')} `
+      + `positionsHttpStatus=${Number.isFinite(Number(state.account?.positionsHttpStatus)) ? Number(state.account.positionsHttpStatus) : 'NONE'} `
+      + `positionsRetryAfterMs=${Number.isFinite(Number(state.account?.positionsRetryAfterMs)) ? Number(state.account.positionsRetryAfterMs) : 'NONE'} `
+      + `balanceStatus=${safeLogTag(state.account?.balanceStatus || 'UNKNOWN')} `
+      + `collateralSnapshot=${collateralAvailable} `
       + `ordersEnabled=${Boolean(state.tradingEnabled && !state.liveHalted)} `
       + `halted=${Boolean(state.liveHalted)} `
       + `haltReasonClass=${classifyHaltReason(state.liveHaltReason)} `

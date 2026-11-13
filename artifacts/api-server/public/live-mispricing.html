@@ -340,8 +340,16 @@
       $('status-reason').textContent = state.liveHaltReason || state.statusReason || 'Bot status unavailable.';
       $('mode-pill').textContent = state.liveHalted ? 'ORDERS HALTED' : state.tradingEnabled ? 'REAL ORDERS ENABLED' : 'READ ONLY';
       $('mode-pill').className = `pill ${state.liveHalted ? 'danger' : state.tradingEnabled ? '' : 'warning'}`;
-      $('account-pill').textContent = account.accountReady ? (account.status === 'RATE_LIMITED' ? 'ACCOUNT DATA RATE-LIMITED' : 'ACCOUNT CONNECTED') : (account.status || 'ACCOUNT UNAVAILABLE');
-      $('account-pill').className = `pill ${account.accountReady ? '' : 'warning'}`;
+      const accountWarnings = [];
+      if (account.orderSnapshotStatus && account.orderSnapshotStatus !== 'READY') accountWarnings.push('ORDER LIST STALE');
+      if (account.positionsStatus === 'RATE_LIMITED') accountWarnings.push('POSITIONS 429');
+      else if (account.positionsStatus === 'COOLDOWN') accountWarnings.push('POSITIONS COOLDOWN');
+      else if (account.positionsStatus === 'STALE') accountWarnings.push('POSITIONS STALE');
+      if (account.balanceStatus === 'STALE') accountWarnings.push('BALANCE STALE');
+      $('account-pill').textContent = account.accountReady
+        ? `ACCOUNT CONNECTED${accountWarnings.length ? ` · ${accountWarnings.join(' · ')}` : ''}`
+        : (account.status || 'ACCOUNT UNAVAILABLE');
+      $('account-pill').className = `pill ${account.accountReady && accountWarnings.length === 0 ? '' : 'warning'}`;
       $('window-pill').textContent = state.window?.slug ? `Window ${state.window.slug.slice(-5)}` : 'Waiting for market';
       $('signal-reason').textContent = state.signal?.reason || 'No qualifying signal';
       $('prob-up').textContent = percent(model.probabilityUp);
