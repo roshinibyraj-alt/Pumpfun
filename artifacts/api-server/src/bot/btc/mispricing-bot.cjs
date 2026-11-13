@@ -8,13 +8,18 @@ const { normalizeLevels } = require('./btc-price-band-bot.cjs');
 
 const EPSILON = 1e-8;
 const DEFAULT_CONFIG = Object.freeze({
-  STRATEGY_VERSION: 'btc-5m-binance-mispricing-3candle-v2',
+  STRATEGY_VERSION: 'btc-5m-binance-maker-filter-3candle-v1',
   WINDOW_MS: CANDLE_MS,
   STARTING_CAPITAL: 3_000,
   BASE_SHARES: 100,
+  LOSS_SIZE_STEP_SHARES: 20,
+  WIN_SIZE_REDUCTION_SHARES: 30,
   VOLATILITY_CANDLES: 3,
   MIN_NET_EDGE_PER_SHARE: 0.05,
   MIN_FLIP_NET_EDGE_PER_SHARE: 0.10,
+  ENTRY_CONFIRMATION_UPDATES: 2,
+  ENTRY_CONFIRMATION_MIN_INTERVAL_MS: 500,
+  ENTRY_CONFIRMATION_MAX_INTERVAL_MS: 2_000,
   FLIP_CONFIRMATION_UPDATES: 2,
   FLIP_CONFIRMATION_MIN_INTERVAL_MS: 500,
   FLIP_CONFIRMATION_MAX_INTERVAL_MS: 2_000,
@@ -22,6 +27,7 @@ const DEFAULT_CONFIG = Object.freeze({
   MAX_DATA_AGE_MS: 2_000,
   POLL_INTERVAL_MS: 500,
   RESOLUTION_POLL_MS: 5_000,
+  CRYPTO_MAKER_REBATE_SHARE: 0.20,
 });
 
 function round(value, digits = 6) {
@@ -133,13 +139,18 @@ class BtcMispricingBot {
     this.trades = [];
     this.events = [];
     this.tradeSequence = 0;
+    this.orderSequence = 0;
     this.eventSequence = 0;
+    this.nextEntryShares = this.config.BASE_SHARES;
     this.windowStart = null;
     this.windowEnd = null;
     this.market = null;
     this.books = new Map();
     this.quotes = { UP: emptyQuote('UP'), DOWN: emptyQuote('DOWN') };
     this.entryTriggeredThisWindow = false;
+    this.pendingEntryOrder = null;
+    this.entryConfirmation = { side: null, count: 0, lastTickAt: null };
+    this.seenTradeEvents = [];
     this.flipsThisWindow = 0;
     this.flipConfirmation = { side: null, count: 0, lastTickAt: null };
     this.websocket = {
@@ -224,6 +235,7 @@ class BtcMispricingBot {
         return match ? Number(match[1]) : 0;
       }),
     );
+    this.orderSequence = Math.max(0, Number(state.orderSequence) || 0);
     this.eventSequence = Math.max(
       Number(state.eventSequence) || 0,
       ...this.events.map(event => {
@@ -231,10 +243,20 @@ class BtcMispricingBot {
         return match ? Number(match[1]) : 0;
       }),
     );
+    const savedNextShares = Number(state.nextEntryShares);
+    this.nextEntryShares = Number.isFinite(savedNextShares)
+      ? Math.max(this.config.BASE_SHARES, Math.floor(savedNextShares))
+      : this.config.BASE_SHARES;
     this.windowStart = Number.isFinite(Number(state.windowStart))
       ? Number(state.windowStart) : null;
     this.windowEnd = this.windowStart == null ? null : this.windowStart + this.config.WINDOW_MS;
     this.entryTriggeredThisWindow = state.entryTriggeredThisWindow === true;
+    this.pendingEntryOrder = state.pendingEntryOrder
+      && Number(state.pendingEntryOrder.windowStart) === this.windowStart
+      ? { ...state.pendingEntryOrder } : null;
+    this.entryConfirmation = { side: null, count: 0, lastTickAt: null };
+    this.seenTradeEvents = Array.isArray(state.seenTradeEvents)
+      ? state.seenTradeEvents.slice(-2_000) : [];
     this.flipsThisWindow = Math.max(0, Number(state.flipsThisWindow) || 0);
     this.market = null;
     this.books.clear();
@@ -244,7 +266,7 @@ class BtcMispricingBot {
 
   persistentStateSnapshot() {
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       strategyVersion: this.config.STRATEGY_VERSION,
       startingCapital: this.startingCapital,
       cash: this.cash,
@@ -252,9 +274,13 @@ class BtcMispricingBot {
       trades: this.trades,
       events: this.events,
       tradeSequence: this.tradeSequence,
+      orderSequence: this.orderSequence,
       eventSequence: this.eventSequence,
+      nextEntryShares: this.nextEntryShares,
       windowStart: this.windowStart,
       entryTriggeredThisWindow: this.entryTriggeredThisWindow,
+      pendingEntryOrder: this.pendingEntryOrder,
+      seenTradeEvents: this.seenTradeEvents.slice(-2_000),
       flipsThisWindow: this.flipsThisWindow,
     };
   }
@@ -319,6 +345,12 @@ class BtcMispricingBot {
   async resetWindow(start) {
     if (this.windowStart === start) return;
     const previousStart = this.windowStart;
+    if (this.pendingEntryOrder && this.pendingEntryOrder.windowStart < start) {
+      this.cancelPendingEntryOrder(
+        'The 5-minute window ended before the passive order filled.',
+        this.now(),
+      );
+    }
     if (previousStart != null) {
       let moved = 0;
       for (const trade of this.trades) {
@@ -342,6 +374,7 @@ class BtcMispricingBot {
     this.books.clear();
     this.quotes = { UP: emptyQuote('UP'), DOWN: emptyQuote('DOWN') };
     this.entryTriggeredThisWindow = false;
+    this.resetEntryConfirmation();
     this.flipsThisWindow = 0;
     this.resetFlipConfirmation();
     this.lastEvaluationSignature = null;
@@ -420,13 +453,17 @@ class BtcMispricingBot {
       return;
     }
     if (!event || typeof event !== 'object') return;
-    const type = event.event_type || event.eventType;
+    const payload = event.payload && typeof event.payload === 'object'
+      ? { ...event, ...event.payload }
+      : event;
+    const type = event.event_type || event.eventType || event.type;
     if (!type || type === 'PONG') return;
     this.websocket.lastMessageAt = this.now();
     this.websocket.error = null;
-    if (type === 'book') this.applyBookSnapshot(event, this.now());
-    else if (type === 'price_change') this.applyPriceChanges(event, this.now());
-    else if (type === 'best_bid_ask') this.applyBestBidAsk(event, this.now());
+    if (type === 'book') this.applyBookSnapshot(payload, this.now());
+    else if (type === 'price_change') this.applyPriceChanges(payload, this.now());
+    else if (type === 'best_bid_ask') this.applyBestBidAsk(payload, this.now());
+    else if (type === 'last_trade_price') this.applyLastTradePrice(payload, this.now());
     void this.evaluate();
   }
 
@@ -530,6 +567,265 @@ class BtcMispricingBot {
       && Number.isFinite(book?.updatedAt)
       && now >= book.updatedAt
       && now - book.updatedAt <= this.config.MAX_DATA_AGE_MS;
+  }
+
+  resetEntryConfirmation() {
+    this.entryConfirmation = { side: null, count: 0, lastTickAt: null };
+  }
+
+  recordEntryConfirmation(side, model, now) {
+    const tickAt = timestamp(model?.tickAt, null);
+    if (tickAt == null || tickAt > now || now - tickAt > this.config.MAX_DATA_AGE_MS) {
+      this.resetEntryConfirmation();
+      return { confirmed: false, count: 0 };
+    }
+    const current = this.entryConfirmation;
+    const elapsed = current.lastTickAt == null ? null : tickAt - current.lastTickAt;
+    if (current.side !== side || elapsed == null || elapsed < 0
+      || elapsed > this.config.ENTRY_CONFIRMATION_MAX_INTERVAL_MS) {
+      this.entryConfirmation = { side, count: 1, lastTickAt: tickAt };
+    } else if (elapsed >= this.config.ENTRY_CONFIRMATION_MIN_INTERVAL_MS) {
+      this.entryConfirmation = {
+        side,
+        count: Math.min(this.config.ENTRY_CONFIRMATION_UPDATES, current.count + 1),
+        lastTickAt: tickAt,
+      };
+    }
+    return {
+      confirmed: this.entryConfirmation.count >= this.config.ENTRY_CONFIRMATION_UPDATES,
+      count: this.entryConfirmation.count,
+    };
+  }
+
+  passiveBidQuote(side, now = this.now()) {
+    if (!this.sideQuoteIsFresh(side, now)) return null;
+    const quote = this.quotes[side];
+    const book = this.books.get(String(this.market?.tokens?.[side] || ''));
+    const bid = book?.bids?.[0];
+    const ask = book?.asks?.[0];
+    if (!bid || !ask
+      || !Number.isFinite(bid.price) || bid.price <= 0 || bid.price >= 1
+      || !Number.isFinite(ask.price) || ask.price <= bid.price + EPSILON
+      || Math.abs(bid.price - quote.bestBid) >= EPSILON
+      || Math.abs(ask.price - quote.bestAsk) >= EPSILON) return null;
+    return {
+      limitPrice: bid.price,
+      queueAheadShares: Math.max(0, Number(bid.availableSize) || 0),
+      bestAsk: ask.price,
+    };
+  }
+
+  cancelPendingEntryOrder(reason, now = this.now()) {
+    const order = this.pendingEntryOrder;
+    if (!order) return false;
+    order.status = order.filledShares > 0 ? 'PARTIALLY_FILLED_CANCELLED' : 'CANCELLED';
+    order.cancelledAt = now;
+    order.cancelReason = reason;
+    this.log('MAKER_ORDER_CANCELLED', reason, {
+      orderId: order.id,
+      side: order.side,
+      limitPrice: order.limitPrice,
+      filledShares: order.filledShares,
+      remainingShares: order.remainingShares,
+    });
+    this.pendingEntryOrder = null;
+    this.schedulePersist(true);
+    return true;
+  }
+
+  placeMakerEntryOrder(side, model, now, entryReason, edgePerShare) {
+    const passive = this.passiveBidQuote(side, now);
+    if (!passive) {
+      this.currentSignal = {
+        side,
+        reason: 'No safe post-only bid is available; the bot will not cross the spread.',
+        edgePerShare,
+      };
+      return false;
+    }
+    const shares = this.nextEntryShares;
+    const estimatedCost = shares * passive.limitPrice;
+    if (estimatedCost > this.cash + EPSILON) {
+      this.currentSignal = {
+        side,
+        reason: `The ${side} signal qualifies, but available paper cash cannot fund ${shares} shares at the passive bid.`,
+        edgePerShare,
+      };
+      return false;
+    }
+    const order = {
+      id: `misprice-order-${++this.orderSequence}`,
+      side,
+      marketId: String(this.market.id),
+      tokenId: String(this.market.tokens[side]),
+      marketSlug: this.market.slug,
+      windowStart: this.windowStart,
+      windowEnd: this.windowEnd,
+      limitPrice: passive.limitPrice,
+      targetShares: shares,
+      filledShares: 0,
+      remainingShares: shares,
+      queueAheadShares: passive.queueAheadShares,
+      estimatedCost,
+      estimatedEdgePerShare: edgePerShare,
+      modelProbability: side === 'UP' ? model.probabilityUp : model.probabilityDown,
+      modelPriceAtEntry: model.currentPrice,
+      entryReason,
+      postOnly: true,
+      status: 'RESTING',
+      postedAt: now,
+    };
+    this.pendingEntryOrder = order;
+    this.entryTriggeredThisWindow = true;
+    this.resetEntryConfirmation();
+    this.currentSignal = {
+      side,
+      reason: `Post-only ${side} bid resting at $${passive.limitPrice.toFixed(2)}; waiting for a sell trade to fill it.`,
+      edgePerShare,
+    };
+    this.log('MAKER_ORDER_PLACED',
+      `Posted a post-only ${shares}-share ${side} buy at $${passive.limitPrice.toFixed(2)}; no taker entry fee applies if it fills as maker.`,
+      {
+        orderId: order.id,
+        side,
+        limitPrice: order.limitPrice,
+        targetShares: order.targetShares,
+        queueAheadShares: round(order.queueAheadShares, 4),
+        estimatedCost: round(order.estimatedCost, 4),
+        estimatedEdgePerShare: round(edgePerShare, 4),
+        postOnly: true,
+      });
+    this.schedulePersist(true);
+    return true;
+  }
+
+  recordMakerFill(order, shares, now, transactionHash = null) {
+    const filledShares = Math.min(
+      Math.max(0, Number(shares) || 0),
+      Math.max(0, Number(order.remainingShares) || 0),
+    );
+    if (filledShares <= EPSILON) return false;
+    const grossCost = filledShares * order.limitPrice;
+    const makerFee = 0;
+    const estimatedRebate = takerFeeAt(
+      order.limitPrice,
+      filledShares,
+      feeParameters(this.market),
+    ) * this.config.CRYPTO_MAKER_REBATE_SHARE;
+    let trade = order.tradeId
+      ? this.trades.find(item => item.id === order.tradeId)
+      : null;
+    if (!trade) {
+      trade = {
+        id: `misprice-trade-${++this.tradeSequence}`,
+        asset: 'BTC',
+        side: order.side,
+        marketId: order.marketId,
+        marketSlug: order.marketSlug,
+        marketTitle: this.market?.title || order.marketSlug,
+        tokenId: order.tokenId,
+        windowStart: order.windowStart,
+        windowEnd: order.windowEnd,
+        shares: 0,
+        entryPrice: order.limitPrice,
+        totalCost: 0,
+        grossCost: 0,
+        fees: 0,
+        fills: [],
+        openedAt: now,
+        modelProbability: order.modelProbability,
+        modelPriceAtEntry: order.modelPriceAtEntry,
+        expectedEdgePerShare: order.estimatedEdgePerShare,
+        entryReason: order.entryReason,
+        entryOrderId: order.id,
+        executionRole: 'MAKER',
+        estimatedMakerRebate: 0,
+        status: 'OPEN',
+        settlementStatus: 'OPEN',
+        markPrice: null,
+        markValue: null,
+        unrealizedPnl: null,
+        realizedPnl: null,
+        outcome: null,
+      };
+      this.trades.push(trade);
+      order.tradeId = trade.id;
+    }
+    trade.shares += filledShares;
+    trade.grossCost += grossCost;
+    trade.totalCost += grossCost + makerFee;
+    trade.entryPrice = trade.grossCost / trade.shares;
+    trade.fees += makerFee;
+    trade.estimatedMakerRebate += estimatedRebate;
+    trade.fills.push({
+      price: order.limitPrice,
+      shares: filledShares,
+      gross: grossCost,
+      fee: makerFee,
+      role: 'MAKER',
+      transactionHash,
+      at: now,
+    });
+    this.cash = round(this.cash - grossCost - makerFee, 8);
+    order.filledShares += filledShares;
+    order.remainingShares = Math.max(0, order.targetShares - order.filledShares);
+    order.lastFillAt = now;
+    order.status = order.remainingShares <= EPSILON ? 'FILLED' : 'PARTIALLY_FILLED';
+    this.log('MAKER_BUY_FILLED',
+      `Filled ${round(filledShares, 4)} ${order.side} shares at the resting $${order.limitPrice.toFixed(2)} bid; entry fee $0, estimated rebate $${round(estimatedRebate, 4)}.`,
+      {
+        orderId: order.id,
+        tradeId: trade.id,
+        side: order.side,
+        shares: round(filledShares, 4),
+        averagePrice: round(trade.entryPrice),
+        totalCost: round(grossCost, 4),
+        entryFee: 0,
+        estimatedMakerRebate: round(estimatedRebate, 4),
+        remainingShares: round(order.remainingShares, 4),
+      });
+    if (order.remainingShares <= EPSILON) {
+      order.status = 'FILLED';
+      order.filledAt = now;
+      this.pendingEntryOrder = null;
+    }
+    this.schedulePersist(true);
+    return true;
+  }
+
+  applyLastTradePrice(event, now) {
+    const order = this.pendingEntryOrder;
+    if (!order || order.windowStart !== this.windowStart
+      || String(event.asset_id || event.assetId || '') !== order.tokenId
+      || String(event.side || '').toUpperCase() !== 'SELL') return false;
+    const price = Number(event.price);
+    const size = Number(event.size);
+    const tradeAt = timestamp(event.timestamp, now);
+    if (!Number.isFinite(price) || price <= 0 || price >= 1
+      || !Number.isFinite(size) || size <= 0
+      || tradeAt < order.postedAt || tradeAt > now + 1_000) return false;
+    const txHash = event.transaction_hash || event.transactionHash || event.hash || null;
+    const eventKey = txHash
+      ? `${order.tokenId}:${txHash}:${tradeAt}:${price}:${size}`
+      : `${order.tokenId}:${tradeAt}:${price}:${size}:${String(event.side).toUpperCase()}`;
+    if (this.seenTradeEvents.includes(eventKey)) return false;
+    this.seenTradeEvents.push(eventKey);
+    if (this.seenTradeEvents.length > 2_000) {
+      this.seenTradeEvents.splice(0, this.seenTradeEvents.length - 2_000);
+    }
+    if (price > order.limitPrice + EPSILON) return false;
+
+    let executableShares = size;
+    if (price + EPSILON >= order.limitPrice) {
+      const queueConsumed = Math.min(order.queueAheadShares, executableShares);
+      order.queueAheadShares = Math.max(0, order.queueAheadShares - queueConsumed);
+      executableShares -= queueConsumed;
+    } else {
+      // A print below the resting limit means the order was traded through.
+      order.queueAheadShares = 0;
+    }
+    if (executableShares <= EPSILON) return false;
+    return this.recordMakerFill(order, executableShares, now, txHash);
   }
 
   modelSnapshot(now = this.now()) {
@@ -639,12 +935,64 @@ class BtcMispricingBot {
       && trade.marketId === String(this.market?.id)) || null;
   }
 
+  pendingOrderEdge(model, order = this.pendingEntryOrder) {
+    if (!order || !model?.ready) return null;
+    const probability = order.side === 'UP' ? model.probabilityUp : model.probabilityDown;
+    return Number.isFinite(Number(probability))
+      ? Number(probability) - Number(order.limitPrice)
+      : null;
+  }
+
+  pendingOrderInvalidReason(model, now) {
+    const order = this.pendingEntryOrder;
+    if (!order) return null;
+    if (now >= this.windowEnd || order.windowStart !== this.windowStart) {
+      return 'The market window ended before the passive order filled.';
+    }
+    const passive = this.passiveBidQuote(order.side, now);
+    const edgePerShare = this.pendingOrderEdge(model, order);
+    if (!model.ready || !passive || edgePerShare == null
+      || edgePerShare < this.config.MIN_NET_EDGE_PER_SHARE) {
+      return 'The Binance signal, Polymarket book, or minimum edge filter no longer qualifies.';
+    }
+    if (passive.bestAsk <= order.limitPrice + EPSILON) {
+      return 'The ask reached the limit without a matching sell trade print; canceled rather than inventing a fill.';
+    }
+    return null;
+  }
+
+  evaluatePendingEntryOrder(model, now) {
+    const order = this.pendingEntryOrder;
+    if (!order) return false;
+    const edgePerShare = this.pendingOrderEdge(model, order);
+    const invalidReason = this.pendingOrderInvalidReason(model, now);
+    if (invalidReason) {
+      this.cancelPendingEntryOrder(invalidReason, now);
+      this.currentSignal = {
+        side: order.side,
+        reason: 'The resting maker order was canceled because its entry filters no longer pass.',
+        edgePerShare,
+      };
+      return false;
+    }
+    this.currentSignal = {
+      side: order.side,
+      reason: `Post-only order resting at $${order.limitPrice.toFixed(2)}; ${round(order.queueAheadShares, 2)} shares estimated ahead in queue.`,
+      edgePerShare,
+    };
+    return false;
+  }
+
   evaluate(now = this.now()) {
     if (!this.market || this.windowStart == null || !this.storageHealthy) return false;
     const model = this.modelSnapshot(now);
     this.model = model;
     if (!model.ready) {
+      this.resetEntryConfirmation();
       this.resetFlipConfirmation();
+      if (this.pendingEntryOrder) {
+        this.cancelPendingEntryOrder('Fresh Binance probability data is unavailable.', now);
+      }
       this.currentSignal = {
         side: null,
         reason: model.reason,
@@ -652,59 +1000,59 @@ class BtcMispricingBot {
       };
       return false;
     }
+    if (this.pendingEntryOrder) {
+      const invalidReason = this.pendingOrderInvalidReason(model, now);
+      if (invalidReason) this.cancelPendingEntryOrder(invalidReason, now);
+    }
     const openTrade = this.currentOpenTrade();
     if (openTrade) return this.evaluateFlip(openTrade, model, now);
+    if (this.pendingEntryOrder) return this.evaluatePendingEntryOrder(model, now);
     if (this.entryTriggeredThisWindow || now >= this.windowEnd) return false;
+    const shares = this.nextEntryShares;
     const candidates = ['UP', 'DOWN'].map(side => {
-      if (!this.sideQuoteIsFresh(side, now)) return null;
-      const preview = this.sweep(side, 'asks', this.config.BASE_SHARES);
-      if (!preview?.complete) return null;
+      const passive = this.passiveBidQuote(side, now);
+      if (!passive) return null;
       const probability = side === 'UP' ? model.probabilityUp : model.probabilityDown;
-      const expectedProfit = probability * this.config.BASE_SHARES - preview.totalCost;
-      return {
-        side,
-        preview,
-        expectedProfit,
-        edgePerShare: expectedProfit / this.config.BASE_SHARES,
-      };
+      const edgePerShare = probability - passive.limitPrice;
+      return { side, passive, edgePerShare, estimatedCost: shares * passive.limitPrice };
     }).filter(candidate => candidate
       && candidate.edgePerShare >= this.config.MIN_NET_EDGE_PER_SHARE);
     if (!candidates.length) {
+      this.resetEntryConfirmation();
       this.currentSignal = {
         side: null,
-        reason: 'No side clears the minimum net edge after visible sweep costs and fees.',
+        reason: 'No passive bid clears the minimum edge with fresh, non-crossed order-book data.',
         edgePerShare: null,
       };
       return false;
     }
     candidates.sort((left, right) => right.edgePerShare - left.edgePerShare);
     const selected = candidates[0];
-    if (selected.preview.totalCost > this.cash + EPSILON) {
+    if (selected.estimatedCost > this.cash + EPSILON) {
+      this.resetEntryConfirmation();
       this.currentSignal = {
         side: selected.side,
-        reason: `The ${selected.side} edge qualifies, but paper cash is insufficient.`,
+        reason: `The ${selected.side} signal qualifies, but paper cash cannot fund ${shares} shares at the passive bid.`,
         edgePerShare: selected.edgePerShare,
       };
       return false;
     }
-    const execution = this.sweep(selected.side, 'asks', this.config.BASE_SHARES, { consume: true });
-    if (!execution?.complete) return false;
-    this.buyPosition(
+    const confirmation = this.recordEntryConfirmation(selected.side, model, now);
+    if (!confirmation.confirmed) {
+      this.currentSignal = {
+        side: selected.side,
+        reason: `Waiting for ${selected.side} signal confirmation (${confirmation.count}/${this.config.ENTRY_CONFIRMATION_UPDATES} fresh Binance updates, at least ${this.config.ENTRY_CONFIRMATION_MIN_INTERVAL_MS} ms apart).`,
+        edgePerShare: selected.edgePerShare,
+      };
+      return false;
+    }
+    return this.placeMakerEntryOrder(
       selected.side,
-      execution,
       model,
       now,
       'MODEL_EDGE',
       selected.edgePerShare,
     );
-    this.entryTriggeredThisWindow = true;
-    this.currentSignal = {
-      side: selected.side,
-      reason: `${selected.side} bought because its estimated net edge cleared the configured threshold.`,
-      edgePerShare: selected.edgePerShare,
-    };
-    this.schedulePersist(true);
-    return true;
   }
 
   resetFlipConfirmation() {
@@ -771,13 +1119,12 @@ class BtcMispricingBot {
       return false;
     }
     const liquidationPnl = salePreview.netProceeds - openTrade.totalCost;
-    const buyPreview = this.sweep(opposite, 'asks', this.config.BASE_SHARES);
+    const passive = this.passiveBidQuote(opposite, now);
+    const targetShares = this.nextEntryShares;
     const oppositeProbability = opposite === 'UP' ? model.probabilityUp : model.probabilityDown;
-    const expectedProfit = buyPreview?.complete
-      ? oppositeProbability * this.config.BASE_SHARES - buyPreview.totalCost
+    const edgePerShare = passive
+      ? oppositeProbability - passive.limitPrice
       : null;
-    const edgePerShare = expectedProfit == null
-      ? null : expectedProfit / this.config.BASE_SHARES;
     if (liquidationPnl <= EPSILON) {
       this.resetFlipConfirmation();
       this.currentSignal = {
@@ -787,23 +1134,24 @@ class BtcMispricingBot {
       };
       return false;
     }
-    if (!buyPreview?.complete || edgePerShare == null
+    if (!passive || edgePerShare == null
       || edgePerShare < this.config.MIN_FLIP_NET_EDGE_PER_SHARE) {
       this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
-        reason: !buyPreview?.complete
-          ? 'Holding: the opposite side does not have enough visible ask depth for all 100 shares.'
-          : `Holding: the opposite edge is below the $${this.config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} flip threshold after fees.`,
+        reason: !passive
+          ? 'Holding: no safe post-only bid is available for the opposite-side maker order.'
+          : `Holding: the opposite maker edge is below the $${this.config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} flip threshold.`,
         edgePerShare,
       };
       return false;
     }
-    if (this.cash + salePreview.netProceeds + EPSILON < buyPreview.totalCost) {
+    const estimatedBuyCost = targetShares * passive.limitPrice;
+    if (this.cash + salePreview.netProceeds + EPSILON < estimatedBuyCost) {
       this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
-        reason: 'Holding: paper cash cannot fund the full opposite-side buy.',
+        reason: `Holding: the flip proceeds and paper cash cannot fund ${targetShares} shares at the opposite passive bid.`,
         edgePerShare,
       };
       return false;
@@ -818,87 +1166,39 @@ class BtcMispricingBot {
       return false;
     }
     const sale = this.sweep(openTrade.side, 'bids', openTrade.shares, { consume: true });
-    const buy = this.sweep(opposite, 'asks', this.config.BASE_SHARES, { consume: true });
-    if (!sale?.complete || !buy?.complete) return false;
+    if (!sale?.complete || !this.passiveBidQuote(opposite, now)) return false;
     this.resetFlipConfirmation();
     this.closePosition(openTrade, sale, now, 'PROFITABLE_MODEL_FLIP', opposite);
-    this.buyPosition(
+    if (this.pendingEntryOrder) {
+      this.cancelPendingEntryOrder(
+        'The existing passive order was canceled before executing the opposite-side flip.',
+        now,
+      );
+    }
+    this.flipsThisWindow += 1;
+    const orderPosted = this.placeMakerEntryOrder(
       opposite,
-      buy,
       model,
       now,
       'PROFITABLE_MODEL_FLIP',
       edgePerShare,
     );
-    this.flipsThisWindow += 1;
     this.log('PROFITABLE_MODEL_FLIP',
-      `Closed profitable ${openTrade.side} shares and bought ${this.config.BASE_SHARES} ${opposite} shares on the opposite model edge.`,
+      `Sold ${openTrade.side} shares at market after fees and posted a ${this.nextEntryShares}-share post-only ${opposite} buy.`,
       {
         fromSide: openTrade.side,
         toSide: opposite,
         sharesSold: sale.shares,
-        sharesBought: buy.shares,
+        sharesRequested: this.nextEntryShares,
         liquidationPnl: round(liquidationPnl, 2),
         oppositeEdgePerShare: round(edgePerShare, 4),
         confirmationUpdates: confirmation.count,
         minimumFlipEdgePerShare: this.config.MIN_FLIP_NET_EDGE_PER_SHARE,
         flipsThisWindow: this.flipsThisWindow,
+        makerOrderPosted: orderPosted,
       });
-    this.currentSignal = {
-      side: opposite,
-      reason: `Flipped after a profitable exit and ${confirmation.count} fresh opposite-signal confirmations.`,
-      edgePerShare,
-    };
     this.schedulePersist(true);
-    return true;
-  }
-
-  buyPosition(side, execution, model, now, entryReason, edgePerShare) {
-    const trade = {
-      id: `misprice-trade-${++this.tradeSequence}`,
-      asset: 'BTC',
-      side,
-      marketId: String(this.market.id),
-      marketSlug: this.market.slug,
-      marketTitle: this.market.title,
-      tokenId: String(this.market.tokens[side]),
-      windowStart: this.windowStart,
-      windowEnd: this.windowEnd,
-      shares: this.config.BASE_SHARES,
-      entryPrice: execution.averagePrice,
-      totalCost: execution.totalCost,
-      grossCost: execution.gross,
-      fees: execution.fees,
-      fills: execution.fills,
-      openedAt: now,
-      modelProbability: side === 'UP' ? model.probabilityUp : model.probabilityDown,
-      modelPriceAtEntry: model.currentPrice,
-      expectedEdgePerShare: edgePerShare,
-      entryReason,
-      status: 'OPEN',
-      settlementStatus: 'OPEN',
-      markPrice: null,
-      markValue: null,
-      unrealizedPnl: null,
-      realizedPnl: null,
-      outcome: null,
-    };
-    this.cash = round(this.cash - trade.totalCost, 8);
-    this.trades.push(trade);
-    this.log('BUY_FILLED',
-      `Bought ${trade.shares} ${side} shares at a $${trade.entryPrice.toFixed(3)} average; model edge was $${Number(edgePerShare).toFixed(3)} per share after fees.`,
-      {
-        tradeId: trade.id,
-        side,
-        shares: trade.shares,
-        averagePrice: round(trade.entryPrice),
-        totalCost: round(trade.totalCost, 2),
-        fees: round(trade.fees, 2),
-        modelProbability: round(trade.modelProbability, 4),
-        expectedEdgePerShare: round(edgePerShare, 4),
-        modelPrice: round(trade.modelPriceAtEntry, 2),
-      });
-    return trade;
+    return orderPosted;
   }
 
   closePosition(trade, execution, now, reason, nextSide = null) {
@@ -917,6 +1217,46 @@ class BtcMispricingBot {
     trade.exitFills = execution.fills;
     this.realizedPnl = round(this.realizedPnl + trade.realizedPnl, 8);
     return trade;
+  }
+
+  recalculateNextEntryShares() {
+    const sizingTrades = this.trades
+      .filter(trade => trade.sizingAdjustmentApplied
+        && (trade.outcome === 'WIN' || trade.outcome === 'LOSS'))
+      .sort((left, right) => (Number(left.settledAt) || 0) - (Number(right.settledAt) || 0)
+        || (Number(left.windowStart) || 0) - (Number(right.windowStart) || 0)
+        || String(left.id).localeCompare(String(right.id)));
+    let shares = this.config.BASE_SHARES;
+    for (const trade of sizingTrades) {
+      trade.sizeBeforeResolution = shares;
+      shares = trade.outcome === 'LOSS'
+        ? shares + this.config.LOSS_SIZE_STEP_SHARES
+        : Math.max(this.config.BASE_SHARES, shares - this.config.WIN_SIZE_REDUCTION_SHARES);
+      trade.sizeAfterResolution = shares;
+    }
+    this.nextEntryShares = shares;
+    return shares;
+  }
+
+  applyResolutionSizing(trade, now) {
+    if (trade.sizingAdjustmentApplied
+      || (trade.outcome !== 'WIN' && trade.outcome !== 'LOSS')) return false;
+    trade.sizingAdjustmentApplied = true;
+    const previous = this.nextEntryShares;
+    const next = this.recalculateNextEntryShares();
+    this.log('NEXT_ENTRY_SIZE_UPDATED',
+      `${trade.outcome === 'LOSS' ? 'Loss' : 'Win'} resolved; next order size is ${next} shares.`,
+      {
+        tradeId: trade.id,
+        outcome: trade.outcome,
+        previousShares: previous,
+        nextShares: next,
+        lossIncrementShares: this.config.LOSS_SIZE_STEP_SHARES,
+        winReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
+        minimumShares: this.config.BASE_SHARES,
+        at: now,
+      });
+    return true;
   }
 
   updateOpenMarks(now) {
@@ -968,6 +1308,7 @@ class BtcMispricingBot {
           trade.outcome = payout === 1 ? 'WIN' : 'LOSS';
           this.cash = round(this.cash + proceeds, 8);
           this.realizedPnl = round(this.realizedPnl + trade.realizedPnl, 8);
+          this.applyResolutionSizing(trade, now);
           this.log('POSITION_RESOLVED',
             `${trade.side} settled from its exact original Polymarket market as a ${trade.outcome.toLowerCase()}.`,
             {
@@ -1037,6 +1378,10 @@ class BtcMispricingBot {
       losses: settled.filter(trade => trade.outcome === 'LOSS').length,
       takerFees: round(this.trades.reduce((sum, trade) =>
         sum + (Number(trade.fees) || 0) + (Number(trade.exitFees) || 0), 0), 2),
+      estimatedMakerRebates: round(this.trades.reduce(
+        (sum, trade) => sum + (Number(trade.estimatedMakerRebate) || 0),
+        0,
+      ), 4),
       tradeCount: this.trades.length,
     };
   }
@@ -1061,9 +1406,22 @@ class BtcMispricingBot {
         timeframe: '5m',
         symbol: 'BTCUSDT',
         baseShares: this.config.BASE_SHARES,
+        nextEntryShares: this.nextEntryShares,
+        lossSizeStepShares: this.config.LOSS_SIZE_STEP_SHARES,
+        winSizeReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
+        sizeFloorShares: this.config.BASE_SHARES,
         volatilityLookbackCandles: this.config.VOLATILITY_CANDLES,
         minimumNetEdgePerShare: this.config.MIN_NET_EDGE_PER_SHARE,
         minimumFlipNetEdgePerShare: this.config.MIN_FLIP_NET_EDGE_PER_SHARE,
+        entryConfirmationUpdates: this.config.ENTRY_CONFIRMATION_UPDATES,
+        entryConfirmationIntervalMs: this.config.ENTRY_CONFIRMATION_MIN_INTERVAL_MS,
+        entryConfirmation: {
+          side: this.entryConfirmation.side,
+          updates: this.entryConfirmation.count,
+        },
+        entryOrderType: 'POST_ONLY LIMIT AT BEST BID',
+        makerEntryFee: 0,
+        makerRebateShare: this.config.CRYPTO_MAKER_REBATE_SHARE,
         flipConfirmationUpdates: this.config.FLIP_CONFIRMATION_UPDATES,
         flipConfirmationIntervalMs: this.config.FLIP_CONFIRMATION_MIN_INTERVAL_MS,
         flipConfirmation: {
@@ -1093,6 +1451,19 @@ class BtcMispricingBot {
       binance: this.priceFeed.snapshot?.() || null,
       model,
       signal: this.currentSignal,
+      pendingEntryOrder: this.pendingEntryOrder ? {
+        id: this.pendingEntryOrder.id,
+        side: this.pendingEntryOrder.side,
+        limitPrice: this.pendingEntryOrder.limitPrice,
+        targetShares: this.pendingEntryOrder.targetShares,
+        filledShares: this.pendingEntryOrder.filledShares,
+        remainingShares: this.pendingEntryOrder.remainingShares,
+        queueAheadShares: this.pendingEntryOrder.queueAheadShares,
+        estimatedEdgePerShare: this.pendingEntryOrder.estimatedEdgePerShare,
+        status: this.pendingEntryOrder.status,
+        postOnly: this.pendingEntryOrder.postOnly,
+        postedAt: this.pendingEntryOrder.postedAt,
+      } : null,
       quotes: {
         UP: { ...this.quotes.UP },
         DOWN: { ...this.quotes.DOWN },
