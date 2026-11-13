@@ -38,10 +38,14 @@ async function main() {
   try {
     await bot.start();
     const state = bot.snapshot();
+    const collateral = state.account?.collateral;
+    const snapshotAvailable = collateral != null && Number.isFinite(Number(collateral));
     console.log(`BTC live mispricing bot status: ${state.status}`);
     console.log(
       `Polymarket account auth=${Boolean(state.account?.authenticated)} `
-      + `snapshot=${Number.isFinite(Number(state.account?.collateral))} `
+      + `keyConfigured=${Boolean(privateKey)} `
+      + `accountStatus=${String(state.account?.status || 'UNKNOWN')} `
+      + `snapshot=${snapshotAvailable} `
       + `ordersEnabled=${Boolean(state.tradingEnabled && !state.liveHalted)}`,
     );
   } catch (error) {
