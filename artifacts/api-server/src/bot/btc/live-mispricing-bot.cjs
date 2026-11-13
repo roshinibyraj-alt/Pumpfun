@@ -790,14 +790,14 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         throw error;
       }
       latest = await this.trader.fetchOrder(order.id);
-      this.applyExchangeOrder(order, latest);
+      this.applyConfirmedCancellation(order, latest);
     } else if (order.matchedShares > 0
       && order.matchedShares < order.shares - EPSILON
       && !TERMINAL_ORDER_STATUSES.has(order.status)) {
       try {
         await this.trader.cancelOrder(order.id);
         latest = await this.trader.fetchOrder(order.id);
-        this.applyExchangeOrder(order, latest);
+        this.applyConfirmedCancellation(order, latest);
       } catch (error) {
         order.status = 'CANCEL_UNCERTAIN';
         order.error = errorText(error);
@@ -815,6 +815,18 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     order.status = orderStatus(exchangeOrder);
     order.updatedAt = this.now();
     order.exchangeStatus = order.status;
+  }
+
+  applyConfirmedCancellation(order, exchangeOrder) {
+    this.applyExchangeOrder(order, exchangeOrder);
+    if (!isTerminalOrder({
+      ...exchangeOrder,
+      shares: order.shares,
+      matchedShares: order.matchedShares,
+    })) {
+      order.status = 'CANCELLED';
+      order.cancelConfirmedAt = this.now();
+    }
   }
 
   async processFinalOrder(order, model = this.model) {
@@ -1011,7 +1023,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         }
         continue;
       }
-      if (order.processed) continue;
+      if (order.processed && isTerminalOrder(order)) continue;
       try {
         const latest = await this.trader.fetchOrder(order.id);
         this.applyExchangeOrder(order, latest);
@@ -1020,7 +1032,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         })) {
           await this.trader.cancelOrder(order.id);
           const finalOrder = await this.trader.fetchOrder(order.id);
-          this.applyExchangeOrder(order, finalOrder);
+          this.applyConfirmedCancellation(order, finalOrder);
         }
         await this.processFinalOrder(order);
         await this.persist();
@@ -1037,12 +1049,12 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   async cancelOrdersFromPreviousWindow(nextWindowStart) {
     if (!this.trader || !this.liveAccount.authenticated) return;
     for (const order of this.liveOrders) {
-      if (order.processed || order.windowStart >= nextWindowStart || !order.id
+      if (order.windowStart >= nextWindowStart || !order.id
         || !isActiveOrder(order)) continue;
       try {
         await this.trader.cancelOrder(order.id);
         const latest = await this.trader.fetchOrder(order.id);
-        this.applyExchangeOrder(order, latest);
+        this.applyConfirmedCancellation(order, latest);
         await this.processFinalOrder(order);
       } catch (error) {
         order.error = errorText(error);

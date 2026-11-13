@@ -315,6 +315,42 @@ test('missing-order-ID halt clears only after later exchange confirmation and st
   assert.equal(diagnostics.missingOrderIdCount, 1);
 });
 
+test('reconciles a processed LIVE record and clears halt after confirmed cancel despite stale fetch status', async () => {
+  const { bot } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'A saved submission has no exchange order ID; it must be reconciled manually.';
+  bot.liveAccount.authenticated = true;
+  setFreshOrderSnapshot(bot);
+  const order = {
+    id: 'stale-live-order',
+    status: 'LIVE',
+    processed: true,
+    shares: 10,
+    matchedShares: 0,
+    windowStart: 1_000,
+  };
+  bot.liveOrders = [order];
+  let cancelCalls = 0;
+  bot.trader = {
+    async fetchOrder() {
+      return { id: 'stale-live-order', status: 'LIVE', sizeMatched: '0' };
+    },
+    async cancelOrder() {
+      cancelCalls += 1;
+      return { canceled: ['stale-live-order'] };
+    },
+  };
+
+  await bot.reconcileLiveOrders();
+
+  assert.equal(cancelCalls, 1);
+  assert.equal(order.status, 'CANCELLED');
+  assert.equal(order.exchangeStatus, 'LIVE');
+  assert.ok(order.cancelConfirmedAt);
+  assert.equal(await bot.clearResolvedSubmissionHalt(), true);
+  assert.equal(bot.liveHalted, false);
+});
+
 test('reconciliation halt stays active if the account snapshot is stale or any order is unresolved', async () => {
   const { bot } = createBot({ tradingEnabled: false });
   bot.liveHalted = true;
