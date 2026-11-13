@@ -6,6 +6,11 @@ const { feeParameters, takerFeeAt } = require('./paper-trading.js');
 const EPSILON = 1e-8;
 const AUTHENTICATION_HALT_REASON = 'Polymarket authentication failed; live orders are disabled.';
 const SUBMISSION_UNCERTAIN_HALT_REASON = 'Order submission outcome is uncertain; automatic retries are blocked.';
+const ORDER_RECONCILIATION_HALT_REASON = 'An existing order could not be reconciled; new orders are blocked.';
+const RECOVERABLE_ORDER_HALT_REASONS = new Set([
+  SUBMISSION_UNCERTAIN_HALT_REASON,
+  ORDER_RECONCILIATION_HALT_REASON,
+]);
 const TERMINAL_ORDER_STATUSES = new Set([
   'MATCHED', 'FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED',
 ]);
@@ -236,8 +241,9 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   async clearResolvedSubmissionHalt() {
     if (
       !this.liveHalted
-      || this.liveHaltReason !== SUBMISSION_UNCERTAIN_HALT_REASON
+      || !RECOVERABLE_ORDER_HALT_REASONS.has(this.liveHaltReason)
       || !this.liveAccount.accountReady
+      || String(this.liveAccount.status || '').toUpperCase() !== 'READY'
       || !Array.isArray(this.liveAccount.orders)
       || this.liveAccount.orders.length > 0
       || this.pendingFlip
@@ -247,15 +253,21 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     ) {
       return false;
     }
-    const unresolved = this.liveOrders.some(order =>
-      ['SUBMITTING', 'SUBMISSION_UNCERTAIN', 'CANCEL_UNCERTAIN', 'RECONCILIATION_REQUIRED']
-        .includes(order.status)
-      || (!order.processed && !isTerminalOrder({
+    const unresolved = this.liveOrders.some(order => {
+      const status = orderStatus(order);
+      const terminal = isTerminalOrder({
         ...order,
         shares: order.shares,
         matchedShares: order.matchedShares,
-      })),
-    );
+      });
+      const confirmedFillMissingDetails = ['MATCHED', 'FILLED'].includes(status)
+        && (!order.id || Number(order.matchedShares) <= EPSILON);
+      return ['SUBMITTING', 'SUBMISSION_UNCERTAIN', 'CANCEL_UNCERTAIN', 'RECONCILIATION_REQUIRED']
+        .includes(status)
+        || !order.processed
+        || !terminal
+        || confirmedFillMissingDetails;
+    });
     if (unresolved) return false;
     this.liveHalted = false;
     this.liveHaltReason = null;
@@ -865,7 +877,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       } catch (error) {
         order.error = errorText(error);
         order.status = 'RECONCILIATION_REQUIRED';
-        this.haltLiveTrading('An existing order could not be reconciled; new orders are blocked.');
+        this.haltLiveTrading(ORDER_RECONCILIATION_HALT_REASON);
         await this.persist();
         return;
       }

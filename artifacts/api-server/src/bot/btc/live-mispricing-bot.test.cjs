@@ -22,6 +22,7 @@ function createBot({ tradingEnabled = true, trader = null } = {}) {
   bot.storageHealthy = true;
   bot.liveAccount.authenticated = true;
   bot.liveAccount.accountReady = true;
+  bot.liveAccount.status = 'ready';
   bot.market = {
     id: 'market-1',
     slug: 'btc-updown-5m-123',
@@ -242,6 +243,47 @@ test('submission halt clears only after every order is resolved and the exchange
   assert.equal(bot.liveHalted, false);
   assert.equal(bot.liveHaltReason, null);
   assert.ok(saves.length > 0);
+});
+
+test('reconciliation halt clears only after confirmed orders and a fresh empty exchange order list', async () => {
+  const { bot, saves } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
+  bot.liveAccount.orders = [];
+  bot.liveOrders = [{
+    id: 'exchange-confirmed',
+    status: 'MATCHED',
+    processed: true,
+    shares: 10,
+    matchedShares: 10,
+  }];
+
+  assert.equal(await bot.clearResolvedSubmissionHalt(), true);
+  assert.equal(bot.liveHalted, false);
+  assert.equal(bot.liveHaltReason, null);
+  assert.ok(saves.length > 0);
+});
+
+test('reconciliation halt stays active if the account snapshot is stale or any order is unresolved', async () => {
+  const { bot } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
+  bot.liveAccount.orders = [];
+  bot.liveOrders = [{
+    id: 'exchange-uncertain',
+    status: 'RECONCILIATION_REQUIRED',
+    processed: false,
+    shares: 10,
+    matchedShares: 0,
+  }];
+
+  bot.liveAccount.status = 'STALE';
+  assert.equal(await bot.clearResolvedSubmissionHalt(), false);
+  assert.equal(bot.liveHalted, true);
+
+  bot.liveAccount.status = 'ready';
+  assert.equal(await bot.clearResolvedSubmissionHalt(), false);
+  assert.equal(bot.liveHalted, true);
 });
 
 test('submission halt stays active while any order state remains uncertain', async () => {
