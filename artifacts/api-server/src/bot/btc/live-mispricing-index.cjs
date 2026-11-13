@@ -84,6 +84,12 @@ async function main() {
     const state = bot.snapshot();
     const collateral = state.account?.collateral;
     const snapshotAvailable = collateral != null && Number.isFinite(Number(collateral));
+    const uncertainStatuses = new Set([
+      'SUBMITTING', 'SUBMISSION_UNCERTAIN', 'CANCEL_UNCERTAIN', 'RECONCILIATION_REQUIRED',
+    ]);
+    const unresolvedOrderCount = Array.isArray(state.liveOrders)
+      ? state.liveOrders.filter(order => uncertainStatuses.has(order.status)).length
+      : 0;
     console.log(`BTC live mispricing bot status: ${state.status}`);
     console.log(
       `Polymarket account auth=${Boolean(state.account?.authenticated)} `
@@ -96,7 +102,9 @@ async function main() {
       + `ordersEnabled=${Boolean(state.tradingEnabled && !state.liveHalted)} `
       + `halted=${Boolean(state.liveHalted)} `
       + `haltReasonClass=${classifyHaltReason(state.liveHaltReason)} `
-      + `persistence=${String(state.persistenceStatus || 'UNKNOWN')}`,
+      + `unresolvedOrders=${unresolvedOrderCount} `
+      + `exchangeOpenOrders=${Array.isArray(state.account?.orders) ? state.account.orders.length : 'UNKNOWN'} `
+      + `persistence=${String(state.persistence?.status || 'UNKNOWN')}`,
     );
   } catch (error) {
     console.error(`BTC live mispricing startup failed: ${String(error?.message || error).slice(0, 240)}`);

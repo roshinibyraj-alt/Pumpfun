@@ -224,3 +224,44 @@ test('account recovery does not clear unrelated order safety halts', async () =>
   assert.equal(bot.liveHalted, true);
   assert.equal(bot.snapshot().status, 'HALTED');
 });
+
+test('submission halt clears only after every order is resolved and the exchange has no open orders', async () => {
+  const { bot, saves } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'Order submission outcome is uncertain; automatic retries are blocked.';
+  bot.liveAccount.orders = [];
+  bot.liveOrders = [{
+    id: 'exchange-confirmed',
+    status: 'MATCHED',
+    processed: true,
+    shares: 10,
+    matchedShares: 10,
+  }];
+
+  assert.equal(await bot.clearResolvedSubmissionHalt(), true);
+  assert.equal(bot.liveHalted, false);
+  assert.equal(bot.liveHaltReason, null);
+  assert.ok(saves.length > 0);
+});
+
+test('submission halt stays active while any order state remains uncertain', async () => {
+  const { bot } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'Order submission outcome is uncertain; automatic retries are blocked.';
+  bot.liveAccount.orders = [];
+  bot.liveOrders = [{
+    id: null,
+    status: 'SUBMISSION_UNCERTAIN',
+    processed: false,
+    shares: 10,
+    matchedShares: 0,
+  }];
+
+  assert.equal(await bot.clearResolvedSubmissionHalt(), false);
+  assert.equal(bot.liveHalted, true);
+
+  bot.liveOrders = [];
+  bot.liveAccount.orders = [{ id: 'open-exchange-order' }];
+  assert.equal(await bot.clearResolvedSubmissionHalt(), false);
+  assert.equal(bot.liveHalted, true);
+});

@@ -5,6 +5,7 @@ const { feeParameters, takerFeeAt } = require('./paper-trading.js');
 
 const EPSILON = 1e-8;
 const AUTHENTICATION_HALT_REASON = 'Polymarket authentication failed; live orders are disabled.';
+const SUBMISSION_UNCERTAIN_HALT_REASON = 'Order submission outcome is uncertain; automatic retries are blocked.';
 const TERMINAL_ORDER_STATUSES = new Set([
   'MATCHED', 'FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED',
 ]);
@@ -145,6 +146,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         await this.reconcileLiveOrders();
         await this.resumePendingFlip();
         await this.clearResolvedAuthHalt();
+        await this.clearResolvedSubmissionHalt();
       } catch (error) {
         this.liveAccount.authenticated = false;
         this.liveAccount.accountReady = false;
@@ -231,6 +233,35 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     return this.persist();
   }
 
+  async clearResolvedSubmissionHalt() {
+    if (
+      !this.liveHalted
+      || this.liveHaltReason !== SUBMISSION_UNCERTAIN_HALT_REASON
+      || !this.liveAccount.accountReady
+      || !Array.isArray(this.liveAccount.orders)
+      || this.liveAccount.orders.length > 0
+      || this.pendingFlip
+      || this.activeLiveOrderId
+      || !this.stateStore
+      || !this.storageHealthy
+    ) {
+      return false;
+    }
+    const unresolved = this.liveOrders.some(order =>
+      ['SUBMITTING', 'SUBMISSION_UNCERTAIN', 'CANCEL_UNCERTAIN', 'RECONCILIATION_REQUIRED']
+        .includes(order.status)
+      || (!order.processed && !isTerminalOrder({
+        ...order,
+        shares: order.shares,
+        matchedShares: order.matchedShares,
+      })),
+    );
+    if (unresolved) return false;
+    this.liveHalted = false;
+    this.liveHaltReason = null;
+    return this.persist();
+  }
+
   async tick() {
     if (this.tickInProgress) return this.snapshot();
     this.tickInProgress = true;
@@ -250,6 +281,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       if (this.pendingFlip?.phase === 'BUY' && this.liveAccount.accountReady) {
         await this.resumePendingFlip();
       }
+      await this.clearResolvedSubmissionHalt();
       if (this.market) await this.evaluate(now);
       this.updateOpenMarks(now);
       await this.resolveDue(now);
