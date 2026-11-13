@@ -372,7 +372,7 @@ test('books partial fills and clears the halt when a fresh authenticated order l
     matchedShares: 0,
     limitPrice: 0.61,
     accountingPriceEstimate: 0.61,
-    submittedAt: bot.now() - 1_000,
+    submittedAt: new Date(bot.now() - 1_000).toISOString(),
     windowStart: bot.windowStart,
   };
   bot.liveOrders = [order];

@@ -43,6 +43,25 @@ function orderStatus(order) {
   return status;
 }
 
+function timestampMillis(value) {
+  if (value == null || value === '') return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric;
+  const parsed = Date.parse(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function orderErrorClass(value) {
+  const message = String(value || '').toLowerCase();
+  if (!message) return 'NONE';
+  if (/\b429\b|rate.?limit|too many requests/.test(message)) return 'RATE_LIMITED';
+  if (/\b404\b|not found|unknown order/.test(message)) return 'ORDER_NOT_FOUND';
+  if (/\b401\b|\b403\b|unauthori[sz]ed|forbidden/.test(message)) return 'AUTH_ERROR';
+  if (/timeout|timed out|econn|network|fetch failed/.test(message)) return 'NETWORK_ERROR';
+  if (/cancel|canceled|cancelled/.test(message)) return 'CANCEL_UNCONFIRMED';
+  return 'OTHER';
+}
+
 function isTerminalOrder(order) {
   return TERMINAL_ORDER_STATUSES.has(orderStatus(order))
     || matchedShares(order) >= Number(order?.shares || Infinity) - EPSILON;
@@ -317,8 +336,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   submissionHaltRecoveryDiagnostics() {
     const blockers = [];
     const maxSnapshotAgeMs = Math.max(60_000, this.accountRefreshMs * 3);
-    const snapshotAt = Date.parse(this.liveAccount.ordersSnapshotAt || '');
-    const snapshotAgeMs = this.now() - snapshotAt;
+    const snapshotAt = timestampMillis(this.liveAccount.ordersSnapshotAt);
+    const snapshotAgeMs = Number.isFinite(snapshotAt) ? this.now() - snapshotAt : Number.NaN;
 
     if (!RECOVERABLE_ORDER_HALT_REASONS.has(this.liveHaltReason)) {
       blockers.push('HALT_REASON_NOT_RECOVERABLE');
@@ -364,11 +383,17 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         || confirmedFillMissingDetails;
     });
     const unresolvedStatusCounts = {};
+    const orderClosureStatusCounts = {};
+    const unresolvedErrorClassCounts = {};
     for (const order of unresolvedOrders) {
       const status = String(orderStatus(order) || 'UNKNOWN')
         .replace(/[^A-Z0-9_]/g, '_')
         .slice(0, 40);
       unresolvedStatusCounts[status] = (unresolvedStatusCounts[status] || 0) + 1;
+      const closureStatus = this.orderClosureStatus(order);
+      orderClosureStatusCounts[closureStatus] = (orderClosureStatusCounts[closureStatus] || 0) + 1;
+      const errorClass = orderErrorClass(order.error);
+      unresolvedErrorClassCounts[errorClass] = (unresolvedErrorClassCounts[errorClass] || 0) + 1;
     }
     const missingOrderIdCount = unresolvedOrders.filter(order => !order.id).length;
     if (unresolvedOrders.length > 0) blockers.push('LOCAL_ORDERS_UNRESOLVED');
@@ -380,6 +405,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       unresolvedOrderCount: unresolvedOrders.length,
       missingOrderIdCount,
       unresolvedStatusCounts,
+      orderClosureStatusCounts,
+      unresolvedErrorClassCounts,
       localOrderCount: localOrders.length,
       exchangeOpenOrderCount: Array.isArray(this.liveAccount.orders)
         ? this.liveAccount.orders.length
@@ -395,9 +422,17 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       const statusSummary = Object.entries(diagnostics.unresolvedStatusCounts)
         .map(([status, count]) => `${status}:${count}`)
         .join(',') || 'NONE';
+      const closureSummary = Object.entries(diagnostics.orderClosureStatusCounts)
+        .map(([status, count]) => `${status}:${count}`)
+        .join(',') || 'NONE';
+      const errorSummary = Object.entries(diagnostics.unresolvedErrorClassCounts)
+        .map(([status, count]) => `${status}:${count}`)
+        .join(',') || 'NONE';
       const signature = [
         diagnostics.blockers.join(',') || 'UNKNOWN',
         statusSummary,
+        closureSummary,
+        errorSummary,
       ].join('|');
       if (signature !== this.lastHaltRecoverySignature) {
         this.lastHaltRecoverySignature = signature;
@@ -405,7 +440,9 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
           + `localOrders=${diagnostics.localOrderCount} `
           + `unresolvedOrders=${diagnostics.unresolvedOrderCount} `
           + `missingOrderIds=${diagnostics.missingOrderIdCount} `
-          + `statuses=${statusSummary}`;
+          + `statuses=${statusSummary} `
+          + `snapshotClosure=${closureSummary} `
+          + `orderErrors=${errorSummary}`;
         this.log('LIVE_HALT_RECOVERY_BLOCKED', message);
         console.warn(`Live halt recovery blocked ${message}`);
       }
@@ -836,35 +873,46 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   hasFreshExchangeOrderSnapshot(afterTimestamp = 0) {
-    const snapshotAt = Date.parse(this.liveAccount.ordersSnapshotAt || '');
+    const snapshotAt = timestampMillis(this.liveAccount.ordersSnapshotAt);
     const age = this.now() - snapshotAt;
+    const minSnapshotAt = timestampMillis(afterTimestamp) ?? 0;
     return this.liveAccount.accountReady
       && String(this.liveAccount.status || '').toUpperCase() === 'READY'
       && this.liveAccount.orderSnapshotStatus === 'READY'
       && Number.isFinite(snapshotAt)
       && age >= 0
       && age <= Math.max(60_000, this.accountRefreshMs * 3)
-      && snapshotAt >= Number(afterTimestamp || 0)
+      && snapshotAt >= minSnapshotAt
       && Array.isArray(this.liveAccount.orders);
   }
 
-  markOrderClosedFromFreshSnapshot(order) {
-    if (!order.id || !this.hasFreshExchangeOrderSnapshot(order.submittedAt)) return false;
-    const orderId = String(order.id);
-    if (this.liveAccount.orders.some(exchangeOrder =>
-      String(exchangeOrder?.id || exchangeOrder?.orderId || '') === orderId)) {
-      return false;
+  orderClosureStatus(order) {
+    if (!order.id) return 'MISSING_ORDER_ID';
+    if (!this.hasFreshExchangeOrderSnapshot(order.submittedAt)) {
+      return 'FRESH_SNAPSHOT_NOT_AFTER_ORDER';
     }
-
-    const matched = Math.max(0, Number(order.matchedShares) || 0);
+    const orderId = String(order.id);
+    const stillOpen = this.liveAccount.orders.some(exchangeOrder =>
+      String(exchangeOrder?.id || exchangeOrder?.orderId || '') === orderId);
+    if (stillOpen) return 'ORDER_PRESENT_IN_EXCHANGE';
     if (order.processed) {
       const alreadyAccounted = Number(order.processedMatchedShares);
-      if (!Number.isFinite(alreadyAccounted) || Math.abs(alreadyAccounted - matched) > EPSILON) {
-        return false;
+      const matched = Math.max(0, Number(order.matchedShares) || 0);
+      if (!Number.isFinite(alreadyAccounted)
+        || Math.abs(alreadyAccounted - matched) > EPSILON) {
+        return 'PROCESSED_FILL_MISMATCH';
       }
     }
     const requested = Number(order.shares);
-    if (!Number.isFinite(requested) || requested <= 0) return false;
+    if (!Number.isFinite(requested) || requested <= 0) return 'INVALID_REQUESTED_SHARES';
+    return 'CLOSEABLE_FROM_FRESH_SNAPSHOT';
+  }
+
+  markOrderClosedFromFreshSnapshot(order) {
+    if (this.orderClosureStatus(order) !== 'CLOSEABLE_FROM_FRESH_SNAPSHOT') return false;
+
+    const matched = Math.max(0, Number(order.matchedShares) || 0);
+    const requested = Number(order.shares);
     order.status = matched >= requested - EPSILON
       ? 'MATCHED'
       : matched > EPSILON

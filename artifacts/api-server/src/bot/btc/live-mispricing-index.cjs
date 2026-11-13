@@ -113,6 +113,8 @@ async function main() {
       + `unresolvedOrders=${unresolvedOrderCount} `
       + `missingOrderIds=${Number(state.haltRecovery?.missingOrderIdCount) || 0} `
       + `haltRecoveryBlockers=${state.haltRecovery?.blockers?.map(safeLogTag).join(',') || 'NONE'} `
+      + `snapshotClosure=${Object.entries(state.haltRecovery?.orderClosureStatusCounts || {}).map(([status, count]) => `${safeLogTag(status)}:${Number(count)}`).join(',') || 'NONE'} `
+      + `orderErrors=${Object.entries(state.haltRecovery?.unresolvedErrorClassCounts || {}).map(([status, count]) => `${safeLogTag(status)}:${Number(count)}`).join(',') || 'NONE'} `
       + `exchangeOpenOrders=${Array.isArray(state.account?.orders) ? state.account.orders.length : 'UNKNOWN'} `
       + `persistence=${String(state.persistence?.status || 'UNKNOWN')}`,
     );
