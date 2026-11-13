@@ -46,6 +46,17 @@ function errorText(error) {
   return String(error?.message || error || 'Unknown order error').slice(0, 240);
 }
 
+function safeErrorName(error) {
+  const name = String(error?.name || '');
+  return /^[A-Z][A-Za-z]{0,31}(?:Error|Exception)$/.test(name) ? name : null;
+}
+
+function safeErrorCode(error) {
+  const code = String(error?.code || error?.cause?.code || '');
+  return /^(?:ERR_[A-Z0-9_]{1,60}|E(?:CONN[A-Z]+|HOSTUNREACH|AI_AGAIN|ADDRINUSE|ADDRNOTAVAIL|PIPE|TIMEDOUT)|INVALID_ARGUMENT|BAD_DATA|NETWORK_ERROR|SERVER_ERROR|UNKNOWN_ERROR)$/.test(code)
+    ? code : null;
+}
+
 function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -79,6 +90,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       transactions: [],
       asOf: null,
       error: null,
+      errorName: null,
+      errorCode: null,
     };
     this.liveOrders = [];
     this.activeLiveOrderId = null;
@@ -125,6 +138,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         this.liveAccount.accountReady = false;
         this.liveAccount.status = 'READY';
         this.liveAccount.error = null;
+        this.liveAccount.errorName = null;
+        this.liveAccount.errorCode = null;
         await this.refreshAccountSnapshot();
         await this.reconcileLiveOrders();
         await this.resumePendingFlip();
@@ -133,6 +148,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         this.liveAccount.accountReady = false;
         this.liveAccount.status = 'AUTH_ERROR';
         this.liveAccount.error = errorText(error);
+        this.liveAccount.errorName = safeErrorName(error);
+        this.liveAccount.errorCode = safeErrorCode(error);
         if (this.tradingEnabled) {
           this.haltLiveTrading('Polymarket authentication failed; live orders are disabled.');
         }
@@ -179,6 +196,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       return true;
     } catch (error) {
       this.liveAccount.error = errorText(error);
+      this.liveAccount.errorName = safeErrorName(error);
+      this.liveAccount.errorCode = safeErrorCode(error);
       this.liveAccount.status = error?.rateLimited
         ? 'RATE_LIMITED'
         : 'STALE';

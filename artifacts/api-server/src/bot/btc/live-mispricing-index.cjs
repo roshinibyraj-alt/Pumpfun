@@ -45,6 +45,11 @@ function classifyHaltReason(value) {
   return 'OTHER_HALT';
 }
 
+function safeLogTag(value) {
+  const tag = String(value || '');
+  return /^[A-Z][A-Za-z0-9_]{0,63}$/.test(tag) ? tag : 'OTHER';
+}
+
 async function main() {
   if (!process.env.DATABASE_URL) {
     throw new Error('DATABASE_URL is required for the isolated live ledger.');
@@ -85,6 +90,8 @@ async function main() {
       + `keyConfigured=${Boolean(privateKey)} `
       + `accountStatus=${String(state.account?.status || 'UNKNOWN')} `
       + `authErrorClass=${classifyAuthError(state.account?.error)} `
+      + `authErrorName=${safeLogTag(state.account?.errorName || 'NONE')} `
+      + `authErrorCode=${safeLogTag(state.account?.errorCode || 'NONE')} `
       + `snapshot=${snapshotAvailable} `
       + `ordersEnabled=${Boolean(state.tradingEnabled && !state.liveHalted)} `
       + `halted=${Boolean(state.liveHalted)} `
