@@ -58,35 +58,45 @@ class LivePolymarketTrader {
     return { authenticated: true };
   }
 
-  async placeLimitOrder(tokenId, side, price, size) {
+  async placeTakerOrder(tokenId, side, price, size) {
     if (!this.client) throw new Error('Polymarket authentication is not ready.');
+    if (!this.sdk?.OrderType?.FAK) {
+      const error = new Error('Polymarket SDK does not support immediate FAK orders.');
+      error.submissionUncertain = false;
+      throw error;
+    }
     let response;
     try {
-      response = await this.client.placeLimitOrder({
+      const signedOrder = await this.client.createLimitOrder({
         assetId: String(tokenId),
         side: side === 'BUY' ? this.sdk.OrderSide.BUY : this.sdk.OrderSide.SELL,
         price: String(price),
         size: String(size),
         postOnly: false,
       });
+      response = await this.client.postOrder({
+        ...signedOrder,
+        orderType: this.sdk.OrderType.FAK,
+        postOnly: false,
+      });
     } catch (error) {
       const message = String(error?.message || error);
       const explicitRejection =
-        /not enough balance|balance is not enough|insufficient (?:balance|allowance)|invalid token id|(?:invalid|below|lower than|less than).{0,60}(?:minimum|min(?:imum)? size|size)|(?:minimum|min(?:imum)? size|size).{0,60}(?:below|lower than|less than|invalid)/i.test(message);
+        /not enough balance|balance is not enough|insufficient (?:balance|allowance)|invalid token id|(?:invalid|below|lower than|less than).{0,60}(?:minimum size|min(?:imum)? size|size)|(?:minimum|min(?:imum)? size|size).{0,60}(?:below|lower than|less than)/i.test(message);
       error.submissionUncertain = !explicitRejection;
       throw error;
     }
     if (!response?.ok) {
-      const error = new Error(response?.message || response?.error || 'Limit order rejected.');
+      const error = new Error(response?.message || response?.error || 'Taker order rejected.');
       error.submissionUncertain = false;
       throw error;
     }
     if (!response.orderId) {
-      const error = new Error('Polymarket accepted an order without returning its ID.');
+      const error = new Error('Polymarket accepted a taker order without returning its ID.');
       error.submissionUncertain = true;
       throw error;
     }
-    return { id: String(response.orderId), status: response.status || 'LIVE' };
+    return { id: String(response.orderId), status: response.status || 'MATCHED' };
   }
 
   async fetchOrder(orderId) {

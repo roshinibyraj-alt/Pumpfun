@@ -47,7 +47,7 @@ test('live copy starts at 10 shares and sizes outcomes by +2/-3 with a 10-share 
 
 test('live entry records only the amount confirmed by the exchange', async () => {
   const trader = {
-    async placeLimitOrder() { return { id: 'exchange-1', status: 'LIVE' }; },
+    async placeTakerOrder() { return { id: 'exchange-1', status: 'MATCHED' }; },
     async fetchOrder() {
       return { id: 'exchange-1', status: 'MATCHED', sizeMatched: '10' };
     },
@@ -71,6 +71,9 @@ test('live entry records only the amount confirmed by the exchange', async () =>
   assert.equal(bot.trades[0].shares, 10);
   assert.equal(bot.trades[0].orderId, 'exchange-1');
   assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(order.orderType, 'FAK');
+  assert.equal(order.limitPrice, 0.99);
+  assert.equal(order.priceLimitType, 'MAXIMUM');
   assert.equal(bot.liveHalted, false);
   assert.ok(saves.length >= 2);
 });
@@ -79,7 +82,7 @@ test('a partial exchange fill cancels the remainder and records only filled shar
   let canceled = 0;
   let fetches = 0;
   const trader = {
-    async placeLimitOrder() { return { id: 'exchange-partial', status: 'LIVE' }; },
+    async placeTakerOrder() { return { id: 'exchange-partial', status: 'LIVE' }; },
     async fetchOrder() {
       fetches += 1;
       return {
@@ -110,7 +113,7 @@ test('a partial exchange fill cancels the remainder and records only filled shar
 test('read-only mode never submits an order', async () => {
   let submissions = 0;
   const trader = {
-    async placeLimitOrder() { submissions += 1; return { id: 'never' }; },
+    async placeTakerOrder() { submissions += 1; return { id: 'never' }; },
   };
   const { bot } = createBot({ trader, tradingEnabled: false });
   const order = await bot.submitSweepOrder({
@@ -130,7 +133,7 @@ test('read-only mode never submits an order', async () => {
 test('uncertain submission halts future orders and is never retried', async () => {
   let submissions = 0;
   const trader = {
-    async placeLimitOrder() {
+    async placeTakerOrder() {
       submissions += 1;
       const error = new Error('network timeout after submit');
       error.submissionUncertain = true;

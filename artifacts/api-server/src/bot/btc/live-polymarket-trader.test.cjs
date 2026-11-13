@@ -51,3 +51,36 @@ test('account snapshot exposes collateral, marked positions, and recent real tra
   assert.equal(snapshot.transactions[0].transactionHash, '0xpublic-transaction-hash');
   assert.equal(Object.hasOwn(snapshot.transactions[0], 'proxyWallet'), false);
 });
+
+test('taker orders preserve share sizing and post as immediate FAK orders', async () => {
+  let created;
+  let posted;
+  const trader = new LivePolymarketTrader('test-private-key', {
+    sdk: {
+      OrderSide: { BUY: 'BUY_SIDE', SELL: 'SELL_SIDE' },
+      OrderType: { FAK: 'FAK_TYPE' },
+    },
+  });
+  trader.client = {
+    async createLimitOrder(request) {
+      created = request;
+      return { ...request, orderType: 'GTC_TYPE' };
+    },
+    async postOrder(order) {
+      posted = order;
+      return { ok: true, orderId: 'taker-order-1', status: 'MATCHED' };
+    },
+  };
+
+  const response = await trader.placeTakerOrder('token-1', 'BUY', 0.99, 14);
+
+  assert.equal(created.assetId, 'token-1');
+  assert.equal(created.side, 'BUY_SIDE');
+  assert.equal(created.price, '0.99');
+  assert.equal(created.size, '14');
+  assert.equal(created.postOnly, false);
+  assert.equal(posted.orderType, 'FAK_TYPE');
+  assert.equal(posted.postOnly, false);
+  assert.equal(response.id, 'taker-order-1');
+  assert.equal(response.status, 'MATCHED');
+});

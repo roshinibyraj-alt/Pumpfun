@@ -4,6 +4,7 @@ const { BtcMispricingBot, DEFAULT_CONFIG } = require('./mispricing-bot.cjs');
 const { feeParameters, takerFeeAt } = require('./paper-trading.js');
 
 const EPSILON = 1e-8;
+const MAX_TAKER_BUY_PRICE = 0.99;
 const AUTHENTICATION_HALT_REASON = 'Polymarket authentication failed; live orders are disabled.';
 const SUBMISSION_UNCERTAIN_HALT_REASON = 'Order submission outcome is uncertain; automatic retries are blocked.';
 const ORDER_RECONCILIATION_HALT_REASON = 'An existing order could not be reconciled; new orders are blocked.';
@@ -382,7 +383,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     this.currentSignal = {
       side: selected.side,
       reason: this.tradingEnabled
-        ? 'Signal qualifies; submitting a marketable limit order sized to current visible ask depth.'
+        ? `Signal qualifies; submitting an immediate FAK taker buy capped at $${MAX_TAKER_BUY_PRICE.toFixed(2)}.`
         : 'Signal qualifies, but live order submission is disabled.',
       edgePerShare: selected.edgePerShare,
     };
@@ -556,8 +557,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     if (!this.tradingEnabled || !this.liveAccount.accountReady || this.liveHalted) return null;
     if (this.activeLiveOrderId) return null;
     const lastFill = preview?.fills?.[preview.fills.length - 1];
-    const limitPrice = Number(lastFill?.price);
-    if (!Number.isFinite(limitPrice) || limitPrice <= 0 || limitPrice >= 1.01
+    const accountingPriceEstimate = Number(lastFill?.price);
+    const isSell = action.startsWith('SELL');
+    const priceLimit = isSell ? accountingPriceEstimate : MAX_TAKER_BUY_PRICE;
+    if (!Number.isFinite(accountingPriceEstimate) || accountingPriceEstimate <= 0
+      || !Number.isFinite(priceLimit) || priceLimit <= 0 || priceLimit > 1
       || !Number.isFinite(Number(shares)) || Number(shares) <= 0) {
       this.haltLiveTrading('A candidate order had an invalid size or limit price.');
       return null;
@@ -575,8 +579,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       windowEnd,
       shares: Number(shares),
       matchedShares: 0,
-      limitPrice,
-      averagePriceEstimate: limitPrice,
+      orderType: 'FAK',
+      limitPrice: priceLimit,
+      priceLimitType: isSell ? 'MINIMUM' : 'MAXIMUM',
+      accountingPriceEstimate,
+      averagePriceEstimate: Number(preview?.averagePrice) || accountingPriceEstimate,
       edgePerShare,
       tradeId: tradeId || null,
       entryReason: entryReason || null,
@@ -590,10 +597,10 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     this.activeLiveOrderId = localId;
     await this.persist();
     try {
-      const response = await this.trader.placeLimitOrder(
+      const response = await this.trader.placeTakerOrder(
         order.tokenId,
-        action.startsWith('SELL') ? 'SELL' : 'BUY',
-        limitPrice,
+        isSell ? 'SELL' : 'BUY',
+        priceLimit,
         shares,
       );
       order.id = response.id;
@@ -709,7 +716,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       );
       trade.orderId = order.id;
       trade.localOrderId = order.localId;
-      trade.fillPriceBasis = 'conservative-limit-price';
+      trade.fillPriceBasis = 'conservative-order-book-estimate';
       order.tradeId = trade.id;
       order.processed = true;
       if (order.action === 'BUY_FLIP') {
@@ -721,7 +728,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         orderId: order.id,
         orderAction: order.action,
         shares: round(filled, 4),
-        limitPrice: order.limitPrice,
+        priceLimit: order.limitPrice,
         conservativeCost: round(execution.totalCost, 4),
       });
     } else if (order.action === 'SELL_FLIP') {
@@ -757,8 +764,9 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   executionFromOrder(order, shares) {
-    const gross = shares * order.limitPrice;
-    const fees = takerFeeAt(order.limitPrice, shares, feeParameters(this.market));
+    const accountingPrice = Number(order.accountingPriceEstimate) || order.limitPrice;
+    const gross = shares * accountingPrice;
+    const fees = takerFeeAt(accountingPrice, shares, feeParameters(this.market));
     const netProceeds = gross - fees;
     const totalCost = gross + fees;
     return {
@@ -771,14 +779,14 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       fees,
       totalCost,
       netProceeds,
-      averagePrice: order.limitPrice,
+      averagePrice: accountingPrice,
       complete: shares >= order.shares - EPSILON,
       fills: [{
-        price: order.limitPrice,
+        price: accountingPrice,
         shares,
         gross,
         fee: fees,
-        estimate: 'conservative limit price; exchange activity shows actual execution prices',
+        estimate: 'conservative order-book price at signal time; account activity shows actual execution prices',
       }],
     };
   }
@@ -949,6 +957,9 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       strategy: {
         ...(base.strategy || {}),
         name: 'BTC 5-minute Binance mispricing',
+        entryOrderType: 'FAK taker sweep',
+        flipOrderType: 'FAK taker sweep',
+        maxBuyPrice: MAX_TAKER_BUY_PRICE,
         baseShares: this.config.BASE_SHARES,
         lossIncreaseShares: this.config.LOSS_SIZE_STEP_SHARES,
         winReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
