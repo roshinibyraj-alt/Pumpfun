@@ -196,3 +196,31 @@ test('profitable live closes reduce the next order size but respect the 10-share
   assert.equal(bot.nextEntryShares, 10);
   assert.equal(trade.sizingOutcome, 'WIN');
 });
+
+test('successful account recovery clears only a resolved authentication halt', async () => {
+  const { bot, saves } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'Polymarket authentication failed; live orders are disabled.';
+  bot.liveAccount.accountReady = false;
+
+  assert.equal(await bot.clearResolvedAuthHalt(), false);
+  assert.equal(bot.liveHalted, true);
+
+  bot.liveAccount.accountReady = true;
+  assert.equal(await bot.clearResolvedAuthHalt(), true);
+  assert.equal(bot.liveHalted, false);
+  assert.equal(bot.liveHaltReason, null);
+  assert.equal(bot.snapshot().status, 'READ_ONLY');
+  assert.ok(saves.length > 0);
+});
+
+test('account recovery does not clear unrelated order safety halts', async () => {
+  const { bot } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
+  bot.liveAccount.accountReady = true;
+
+  assert.equal(await bot.clearResolvedAuthHalt(), false);
+  assert.equal(bot.liveHalted, true);
+  assert.equal(bot.snapshot().status, 'HALTED');
+});

@@ -4,6 +4,7 @@ const { BtcMispricingBot, DEFAULT_CONFIG } = require('./mispricing-bot.cjs');
 const { feeParameters, takerFeeAt } = require('./paper-trading.js');
 
 const EPSILON = 1e-8;
+const AUTHENTICATION_HALT_REASON = 'Polymarket authentication failed; live orders are disabled.';
 const TERMINAL_ORDER_STATUSES = new Set([
   'MATCHED', 'FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED',
 ]);
@@ -48,7 +49,7 @@ function errorText(error) {
 
 function safeErrorName(error) {
   const name = String(error?.name || '');
-  return /^[A-Z][A-Za-z]{0,31}(?:Error|Exception)$/.test(name) ? name : null;
+  return /^(?:Error|[A-Z][A-Za-z]{0,31}(?:Error|Exception))$/.test(name) ? name : null;
 }
 
 function safeErrorCode(error) {
@@ -143,6 +144,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         await this.refreshAccountSnapshot();
         await this.reconcileLiveOrders();
         await this.resumePendingFlip();
+        await this.clearResolvedAuthHalt();
       } catch (error) {
         this.liveAccount.authenticated = false;
         this.liveAccount.accountReady = false;
@@ -151,7 +153,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         this.liveAccount.errorName = safeErrorName(error);
         this.liveAccount.errorCode = safeErrorCode(error);
         if (this.tradingEnabled) {
-          this.haltLiveTrading('Polymarket authentication failed; live orders are disabled.');
+          this.haltLiveTrading(AUTHENTICATION_HALT_REASON);
         }
       }
     } else {
@@ -212,6 +214,21 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     this.statusReason = this.liveHaltReason;
     this.log('LIVE_TRADING_HALTED', this.liveHaltReason);
     this.schedulePersist(true);
+  }
+
+  async clearResolvedAuthHalt() {
+    if (
+      !this.liveHalted
+      || this.liveHaltReason !== AUTHENTICATION_HALT_REASON
+      || !this.liveAccount.accountReady
+      || !this.stateStore
+      || !this.storageHealthy
+    ) {
+      return false;
+    }
+    this.liveHalted = false;
+    this.liveHaltReason = null;
+    return this.persist();
   }
 
   async tick() {
