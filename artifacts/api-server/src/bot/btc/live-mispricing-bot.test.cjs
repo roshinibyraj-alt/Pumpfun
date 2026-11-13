@@ -169,6 +169,7 @@ test('order matching reads CLOB response aliases and terminal states', () => {
   assert.equal(isTerminalOrder({ status: 'CANCELED', shares: 10, matchedShares: 0 }), true);
   assert.equal(isTerminalOrder({ status: 'LIVE', shares: 10, matchedShares: 10 }), true);
   assert.equal(isTerminalOrder({ status: 'LIVE', shares: 10, matchedShares: 3 }), false);
+  assert.equal(isTerminalOrder({ status: 'UNFILLED', shares: 10, matchedShares: 0 }), true);
 });
 
 test('profitable live closes reduce the next order size but respect the 10-share floor', () => {
@@ -245,7 +246,7 @@ test('submission halt clears only after every order is resolved and the exchange
   assert.ok(saves.length > 0);
 });
 
-test('reconciliation halt clears only after confirmed orders and a fresh empty exchange order list', async () => {
+test('reconciliation halt clears only after all orders are terminal and the exchange list is fresh and empty', async () => {
   const { bot, saves } = createBot({ tradingEnabled: false });
   bot.liveHalted = true;
   bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
@@ -256,6 +257,12 @@ test('reconciliation halt clears only after confirmed orders and a fresh empty e
     processed: true,
     shares: 10,
     matchedShares: 10,
+  }, {
+    id: 'exchange-canceled',
+    status: 'UNFILLED',
+    processed: true,
+    shares: 10,
+    matchedShares: 0,
   }];
 
   assert.equal(await bot.clearResolvedSubmissionHalt(), true);
