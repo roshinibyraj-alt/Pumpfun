@@ -8,7 +8,7 @@ const { normalizeLevels } = require('./btc-price-band-bot.cjs');
 
 const EPSILON = 1e-8;
 const DEFAULT_CONFIG = Object.freeze({
-  STRATEGY_VERSION: 'btc-5m-binance-taker-sizing-profit-close-v2',
+  STRATEGY_VERSION: 'btc-5m-binance-taker-sizing-reset-baseline-v3',
   WINDOW_MS: CANDLE_MS,
   STARTING_CAPITAL: 3_000,
   BASE_SHARES: 100,
@@ -152,6 +152,8 @@ class BtcMispricingBot {
     this.entryConfirmation = { side: null, count: 0, lastTickAt: null };
     this.seenTradeEvents = [];
     this.flipsThisWindow = 0;
+    this.sizingGeneration = 0;
+    this.sizingResetRequestId = null;
     this.flipConfirmation = { side: null, count: 0, lastTickAt: null };
     this.websocket = {
       status: 'WAITING',
@@ -190,6 +192,11 @@ class BtcMispricingBot {
         if (saved) this.restoreState(saved);
         this.storageHealthy = true;
         this.persistenceStatus = 'CONNECTED';
+        if (this.applySizingResetRequest(
+          process.env.BTC_MISPRICING_SIZING_RESET_REQUEST_ID,
+        ) && !(await this.persist())) {
+          throw new Error('The requested base-size reset could not be saved.');
+        }
       }
       await this.priceFeed.start?.();
       await this.tick();
@@ -257,6 +264,9 @@ class BtcMispricingBot {
     this.seenTradeEvents = Array.isArray(state.seenTradeEvents)
       ? state.seenTradeEvents.slice(-2_000) : [];
     this.flipsThisWindow = Math.max(0, Number(state.flipsThisWindow) || 0);
+    this.sizingGeneration = Math.max(0, Math.floor(Number(state.sizingGeneration) || 0));
+    this.sizingResetRequestId = typeof state.sizingResetRequestId === 'string'
+      ? state.sizingResetRequestId : null;
     this.market = null;
     this.books.clear();
     this.quotes = { UP: emptyQuote('UP'), DOWN: emptyQuote('DOWN') };
@@ -281,7 +291,28 @@ class BtcMispricingBot {
       pendingEntryOrder: this.pendingEntryOrder,
       seenTradeEvents: this.seenTradeEvents.slice(-2_000),
       flipsThisWindow: this.flipsThisWindow,
+      sizingGeneration: this.sizingGeneration,
+      sizingResetRequestId: this.sizingResetRequestId,
     };
+  }
+
+  applySizingResetRequest(requestId) {
+    const normalizedRequestId = String(requestId || '').trim();
+    if (!normalizedRequestId || normalizedRequestId === this.sizingResetRequestId) return false;
+    const previousShares = this.nextEntryShares;
+    this.sizingGeneration += 1;
+    this.sizingResetRequestId = normalizedRequestId;
+    this.nextEntryShares = this.config.BASE_SHARES;
+    this.log(
+      'NEXT_ENTRY_SIZE_RESET',
+      `Next order size reset to ${this.config.BASE_SHARES} shares; trade history was preserved.`,
+      {
+        previousShares,
+        nextShares: this.nextEntryShares,
+        sizingGeneration: this.sizingGeneration,
+      },
+    );
+    return true;
   }
 
   schedulePersist(force = false) {
@@ -1286,6 +1317,8 @@ class BtcMispricingBot {
   recalculateNextEntryShares() {
     const sizingTrades = this.trades
       .filter(trade => trade.sizingAdjustmentApplied
+        && Math.max(0, Math.floor(Number(trade.sizingGeneration) || 0))
+          === this.sizingGeneration
         && ['WIN', 'LOSS'].includes(trade.sizingOutcome || trade.outcome))
       .sort((left, right) => (
         Number(left.sizingAdjustedAt ?? left.settledAt ?? left.closedAt ?? left.windowStart) || 0
@@ -1314,6 +1347,7 @@ class BtcMispricingBot {
     trade.sizingAdjustmentApplied = true;
     trade.sizingOutcome = outcome;
     trade.sizingAdjustedAt = now;
+    trade.sizingGeneration = this.sizingGeneration;
     const previous = this.nextEntryShares;
     const next = this.recalculateNextEntryShares();
     this.log('NEXT_ENTRY_SIZE_UPDATED',
@@ -1490,6 +1524,7 @@ class BtcMispricingBot {
         lossSizeStepShares: this.config.LOSS_SIZE_STEP_SHARES,
         winSizeReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
         profitableIntrawindowCloseReducesSize: true,
+        sizingGeneration: this.sizingGeneration,
         sizeFloorShares: this.config.BASE_SHARES,
         volatilityLookbackCandles: this.config.VOLATILITY_CANDLES,
         minimumNetEdgePerShare: this.config.MIN_NET_EDGE_PER_SHARE,

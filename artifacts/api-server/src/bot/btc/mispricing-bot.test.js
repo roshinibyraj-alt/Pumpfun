@@ -495,6 +495,67 @@ test('resolved outcomes and profitable closes adjust size once; the 100-share fl
   assert.equal(restored.nextEntryShares, 100);
 });
 
+test('a manual sizing reset preserves trade history and starts a fresh sizing progression', () => {
+  const { bot } = fixture();
+  bot.trades.push(
+    {
+      id: 'before-reset-loss-1',
+      outcome: 'LOSS',
+      sizingOutcome: 'LOSS',
+      sizingAdjustmentApplied: true,
+      sizingGeneration: 0,
+      sizingAdjustedAt: 1,
+      windowStart: 1,
+    },
+    {
+      id: 'before-reset-loss-2',
+      outcome: 'LOSS',
+      sizingOutcome: 'LOSS',
+      sizingAdjustmentApplied: true,
+      sizingGeneration: 0,
+      sizingAdjustedAt: 2,
+      windowStart: 2,
+    },
+  );
+  bot.events.push({ id: 'prior-event', type: 'OLD_EVENT' });
+  bot.cash = 2_345;
+  bot.realizedPnl = 678;
+  assert.equal(bot.recalculateNextEntryShares(), 140);
+
+  assert.equal(bot.applySizingResetRequest('manual-reset-100-2026-11-13-test'), true);
+  assert.equal(bot.nextEntryShares, 100);
+  assert.equal(bot.sizingGeneration, 1);
+  assert.equal(bot.trades.length, 2);
+  assert.equal(bot.events.some(event => event.id === 'prior-event'), true);
+  assert.equal(bot.cash, 2_345);
+  assert.equal(bot.realizedPnl, 678);
+  assert.equal(
+    bot.events[0].type,
+    'NEXT_ENTRY_SIZE_RESET',
+  );
+  assert.equal(
+    bot.applySizingResetRequest('manual-reset-100-2026-11-13-test'),
+    false,
+  );
+
+  const restored = fixture().bot;
+  restored.restoreState(bot.persistentStateSnapshot());
+  assert.equal(restored.nextEntryShares, 100);
+  assert.equal(restored.sizingGeneration, 1);
+  assert.equal(restored.trades.length, 2);
+
+  const laterLoss = {
+    id: 'after-reset-loss',
+    outcome: 'LOSS',
+    settledAt: 3,
+    windowStart: 3,
+    sizingAdjustmentApplied: false,
+  };
+  restored.trades.push(laterLoss);
+  restored.applyResolutionSizing(laterLoss, 3);
+  assert.equal(restored.nextEntryShares, 120);
+});
+
 test('restoring the sizing state cancels any obsolete passive order', () => {
   const { bot } = fixture();
   bot.restoreState({
