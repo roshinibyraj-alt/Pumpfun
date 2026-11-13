@@ -1183,6 +1183,10 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       }
       if (order.processed && isTerminalOrder(order)) continue;
       try {
+        if (order.processed && this.markOrderClosedFromFreshSnapshot(order)) {
+          await this.persist();
+          continue;
+        }
         const latest = await this.trader.fetchOrder(order.id);
         this.applyExchangeOrder(order, latest);
         if (!isTerminalOrder({

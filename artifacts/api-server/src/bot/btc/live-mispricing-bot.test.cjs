@@ -427,7 +427,7 @@ test('restores a legacy processed quantity only when the linked trade ledger pro
   }];
   bot.trader = {
     async fetchOrder() {
-      return { id: order.id, status: 'LIVE', sizeMatched: '3.64' };
+      assert.fail('Exact processed-fill ledger evidence and a fresh empty snapshot should be sufficient.');
     },
     async cancelOrder() {
       assert.fail('A fresh empty snapshot should avoid canceling an already-absent order.');
