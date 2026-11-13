@@ -5,11 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "export NODE_ENV=development && pnpm run build && pnpm run start",
-    "build": "node ./build.mjs",
+    "build": "node ./build.mjs && node ./build-live-mispricing.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
+    "start:live-mispricing": "node --enable-source-maps ./dist/live-mispricing.cjs",
     "prepare:btc-history": "node ./scripts/seed-btc-paper-state.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test src/bot/*.test.js src/bot/btc/*.test.js"
+    "test": "node --test src/bot/*.test.js src/bot/btc/*.test.js src/bot/btc/*.test.cjs"
   },
   "dependencies": {
     "@polymarket/client": "0.14.0",
@@ -19,6 +20,7 @@
     "cors": "^2.8.6",
     "drizzle-orm": "catalog:",
     "express": "^5.2.1",
+    "pg": "^8.23.0",
     "pino": "^9.14.0",
     "pino-http": "^10.5.0"
   },
