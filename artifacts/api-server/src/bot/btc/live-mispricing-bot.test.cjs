@@ -271,6 +271,35 @@ test('reconciliation halt clears only after all orders are terminal and the exch
   assert.ok(saves.length > 0);
 });
 
+test('missing-order-ID halt clears only after later exchange confirmation and stays blocked if an order is unresolved', async () => {
+  const { bot } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'A saved submission has no exchange order ID; it must be reconciled manually.';
+  bot.liveAccount.orders = [];
+  bot.liveOrders = [{
+    id: 'exchange-confirmed',
+    status: 'MATCHED',
+    processed: true,
+    shares: 10,
+    matchedShares: 10,
+  }];
+
+  assert.equal(await bot.clearResolvedSubmissionHalt(), true);
+  assert.equal(bot.liveHalted, false);
+
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'A saved submission has no exchange order ID; it must be reconciled manually.';
+  bot.liveOrders = [{
+    id: null,
+    status: 'SUBMISSION_UNCERTAIN',
+    processed: false,
+    shares: 10,
+    matchedShares: 0,
+  }];
+  assert.equal(await bot.clearResolvedSubmissionHalt(), false);
+  assert.equal(bot.liveHalted, true);
+});
+
 test('reconciliation halt stays active if the account snapshot is stale or any order is unresolved', async () => {
   const { bot } = createBot({ tradingEnabled: false });
   bot.liveHalted = true;

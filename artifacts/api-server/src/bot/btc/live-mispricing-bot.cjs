@@ -7,9 +7,13 @@ const EPSILON = 1e-8;
 const AUTHENTICATION_HALT_REASON = 'Polymarket authentication failed; live orders are disabled.';
 const SUBMISSION_UNCERTAIN_HALT_REASON = 'Order submission outcome is uncertain; automatic retries are blocked.';
 const ORDER_RECONCILIATION_HALT_REASON = 'An existing order could not be reconciled; new orders are blocked.';
+const ORDER_ID_MISSING_HALT_REASON = 'A saved submission has no exchange order ID; it must be reconciled manually.';
+const RESTORED_ORDER_ID_MISSING_HALT_REASON = 'A saved order has no exchange order ID; automatic resubmission is blocked.';
 const RECOVERABLE_ORDER_HALT_REASONS = new Set([
   SUBMISSION_UNCERTAIN_HALT_REASON,
   ORDER_RECONCILIATION_HALT_REASON,
+  ORDER_ID_MISSING_HALT_REASON,
+  RESTORED_ORDER_ID_MISSING_HALT_REASON,
 ]);
 const TERMINAL_ORDER_STATUSES = new Set([
   'MATCHED', 'FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED', 'UNFILLED',
@@ -121,7 +125,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         .includes(order.status) && !order.id);
     if (uncertain) {
       this.liveHalted = true;
-      this.liveHaltReason = 'A saved order has no exchange order ID; automatic resubmission is blocked.';
+      this.liveHaltReason = RESTORED_ORDER_ID_MISSING_HALT_REASON;
     }
   }
 
