@@ -886,6 +886,37 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       && Array.isArray(this.liveAccount.orders);
   }
 
+  ledgerMatchedSharesForProcessedOrder(order) {
+    const linkedTrade = this.trades.find(trade =>
+      trade.id === order.tradeId && trade.orderId === order.id)
+      || this.trades.find(trade => trade.orderId === order.id);
+    if (!linkedTrade) return null;
+
+    if (order.action === 'BUY_ENTRY' || order.action === 'BUY_FLIP') {
+      if (!Array.isArray(linkedTrade.fills) || linkedTrade.fills.length === 0) return null;
+      return linkedTrade.fills.reduce(
+        (total, fill) => total + Math.max(0, Number(fill?.shares) || 0),
+        0,
+      );
+    }
+
+    if (order.action === 'SELL_FLIP') {
+      const partialExitShares = Array.isArray(linkedTrade.partialExits)
+        ? linkedTrade.partialExits
+          .filter(exit => exit.orderId === order.id)
+          .reduce((total, exit) => total + Math.max(0, Number(exit.shares) || 0), 0)
+        : 0;
+      if (partialExitShares > 0) return partialExitShares;
+      if (linkedTrade.exitOrderId === order.id && Array.isArray(linkedTrade.exitFills)) {
+        return linkedTrade.exitFills.reduce(
+          (total, fill) => total + Math.max(0, Number(fill?.shares) || 0),
+          0,
+        );
+      }
+    }
+    return null;
+  }
+
   orderClosureStatus(order) {
     if (!order.id) return 'MISSING_ORDER_ID';
     if (!this.hasFreshExchangeOrderSnapshot(order.submittedAt)) {
@@ -898,9 +929,14 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     if (order.processed) {
       const alreadyAccounted = Number(order.processedMatchedShares);
       const matched = Math.max(0, Number(order.matchedShares) || 0);
-      if (!Number.isFinite(alreadyAccounted)
-        || Math.abs(alreadyAccounted - matched) > EPSILON) {
-        return 'PROCESSED_FILL_MISMATCH';
+      if (Number.isFinite(alreadyAccounted) && Math.abs(alreadyAccounted - matched) <= EPSILON) {
+        // The stored processed quantity is sufficient evidence.
+      } else {
+        const ledgerMatched = this.ledgerMatchedSharesForProcessedOrder(order);
+        if (!Number.isFinite(ledgerMatched) || Math.abs(ledgerMatched - matched) > EPSILON) {
+          return 'PROCESSED_FILL_MISMATCH';
+        }
+        return 'PROCESSED_FILL_LEDGER_MATCH';
       }
     }
     const requested = Number(order.shares);
@@ -909,9 +945,16 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   markOrderClosedFromFreshSnapshot(order) {
-    if (this.orderClosureStatus(order) !== 'CLOSEABLE_FROM_FRESH_SNAPSHOT') return false;
+    const closureStatus = this.orderClosureStatus(order);
+    if (![
+      'CLOSEABLE_FROM_FRESH_SNAPSHOT',
+      'PROCESSED_FILL_LEDGER_MATCH',
+    ].includes(closureStatus)) return false;
 
     const matched = Math.max(0, Number(order.matchedShares) || 0);
+    if (closureStatus === 'PROCESSED_FILL_LEDGER_MATCH') {
+      order.processedMatchedShares = matched;
+    }
     const requested = Number(order.shares);
     order.status = matched >= requested - EPSILON
       ? 'MATCHED'

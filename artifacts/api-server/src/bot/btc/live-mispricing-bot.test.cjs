@@ -396,6 +396,82 @@ test('books partial fills and clears the halt when a fresh authenticated order l
   assert.equal(bot.liveHalted, false);
 });
 
+test('restores a legacy processed quantity only when the linked trade ledger proves the exact fill', async () => {
+  const { bot } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
+  setFreshOrderSnapshot(bot);
+  const order = {
+    id: 'legacy-partial-order',
+    localId: 'local-legacy-partial-order',
+    tradeId: 'legacy-trade',
+    action: 'BUY_ENTRY',
+    side: 'UP',
+    status: 'RECONCILIATION_REQUIRED',
+    processed: true,
+    shares: 23,
+    matchedShares: 3.64,
+    limitPrice: 0.61,
+    accountingPriceEstimate: 0.61,
+    submittedAt: new Date(bot.now() - 1_000).toISOString(),
+    windowStart: bot.windowStart,
+  };
+  bot.liveOrders = [order];
+  bot.trades = [{
+    id: 'legacy-trade',
+    orderId: order.id,
+    side: 'UP',
+    shares: 3.64,
+    fills: [{ price: 0.61, shares: 3.64 }],
+    status: 'OPEN',
+  }];
+  bot.trader = {
+    async fetchOrder() {
+      return { id: order.id, status: 'LIVE', sizeMatched: '3.64' };
+    },
+    async cancelOrder() {
+      assert.fail('A fresh empty snapshot should avoid canceling an already-absent order.');
+    },
+  };
+
+  await bot.reconcileLiveOrders();
+
+  assert.equal(order.status, 'CANCELLED');
+  assert.equal(order.processedMatchedShares, 3.64);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].shares, 3.64);
+  assert.equal(await bot.clearResolvedSubmissionHalt(), true);
+  assert.equal(bot.liveHalted, false);
+});
+
+test('keeps processed legacy orders halted when the trade ledger does not match exchange fills', async () => {
+  const { bot } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
+  setFreshOrderSnapshot(bot);
+  const order = {
+    id: 'mismatched-legacy-order',
+    tradeId: 'mismatched-trade',
+    action: 'BUY_ENTRY',
+    status: 'RECONCILIATION_REQUIRED',
+    processed: true,
+    shares: 23,
+    matchedShares: 4.8,
+    submittedAt: new Date(bot.now() - 1_000).toISOString(),
+  };
+  bot.liveOrders = [order];
+  bot.trades = [{
+    id: 'mismatched-trade',
+    orderId: order.id,
+    fills: [{ price: 0.56, shares: 3.64 }],
+  }];
+
+  assert.equal(await bot.clearResolvedSubmissionHalt(), false);
+  assert.equal(bot.liveHalted, true);
+  assert.equal(bot.submissionHaltRecoveryDiagnostics()
+    .orderClosureStatusCounts.PROCESSED_FILL_MISMATCH, 1);
+});
+
 test('reconciliation halt stays active if the account snapshot is stale or any order is unresolved', async () => {
   const { bot } = createBot({ tradingEnabled: false });
   bot.liveHalted = true;
