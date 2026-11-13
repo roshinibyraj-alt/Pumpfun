@@ -105,36 +105,6 @@ function fixture({ price = 100_400, historyCount = 3 } = {}) {
     };
   }
 
-  function confirmEntry() {
-    const firstUpdate = bot.evaluate();
-    currentTime += 500;
-    const confirmed = bot.evaluate();
-    return { firstUpdate, confirmed };
-  }
-
-  function printSell(side, price, size, transactionHash = `paper-print-${currentTime}-${side}`) {
-    bot.handleMarketMessage({
-      topic: 'market',
-      type: 'last_trade_price',
-      payload: {
-        assetId: market.tokens[side],
-        side: 'SELL',
-        price: String(price),
-        size: String(size),
-        timestamp: String(currentTime),
-        transactionHash,
-      },
-    });
-  }
-
-  function fillPendingOrder(extraShares = 0) {
-    const order = bot.pendingEntryOrder;
-    if (!order) return null;
-    const printSize = order.queueAheadShares + order.remainingShares + extraShares;
-    printSell(order.side, order.limitPrice, printSize, `fill-${order.id}`);
-    return bot.trades.find(trade => trade.id === order.tradeId) || null;
-  }
-
   setBook('UP', {
     asks: [[0.6, 100]],
     bids: [[0.4, 100]],
@@ -149,23 +119,18 @@ function fixture({ price = 100_400, historyCount = 3 } = {}) {
     feed,
     market,
     setBook,
-    confirmEntry,
-    printSell,
-    fillPendingOrder,
     setPrice(value) { price = value; },
     setNow(value) { currentTime = value; },
     getNow() { return currentTime; },
   };
 }
 
-function openMakerPosition(context, expectedSide = 'UP') {
-  const { bot, confirmEntry, fillPendingOrder } = context;
-  const result = confirmEntry();
-  assert.equal(result.firstUpdate, false);
-  assert.equal(result.confirmed, true);
-  assert.equal(bot.pendingEntryOrder.side, expectedSide);
-  const trade = fillPendingOrder();
+function openTakerPosition(context, expectedSide = 'UP') {
+  const { bot } = context;
+  assert.equal(bot.evaluate(), true);
+  const trade = bot.currentOpenTrade();
   assert.ok(trade);
+  assert.equal(trade.side, expectedSide);
   assert.equal(trade.status, 'OPEN');
   return trade;
 }
@@ -215,81 +180,67 @@ test('the bot waits when fewer than three closed candles are available', () => {
   assert.equal(bot.trades.length, 0);
 });
 
-test('entry requires two fresh confirmations and posts a post-only limit at the best bid', () => {
-  const context = fixture();
-  const { bot, confirmEntry } = context;
-  const result = confirmEntry();
-  assert.equal(result.firstUpdate, false);
-  assert.equal(result.confirmed, true);
-  assert.equal(bot.trades.length, 0);
-  assert.equal(bot.pendingEntryOrder.side, 'UP');
-  assert.equal(bot.pendingEntryOrder.limitPrice, 0.4);
-  assert.equal(bot.pendingEntryOrder.targetShares, 100);
-  assert.equal(bot.pendingEntryOrder.queueAheadShares, 100);
-  assert.equal(bot.pendingEntryOrder.postOnly, true);
+test('a taker entry sweeps exactly 100 shares and never records a partial fill', () => {
+  const { bot, setBook } = fixture();
+  setBook('UP', {
+    asks: [[0.58, 40], [0.6, 60]],
+    bids: [[0.4, 100]],
+  });
+  assert.equal(bot.evaluate(), true);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].shares, 100);
+  assert.equal(bot.trades[0].fills.length, 2);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].executionRole, 'TAKER');
   assert.equal(bot.entryTriggeredThisWindow, true);
 });
 
-test('maker order fills only after sell prints clear displayed queue and may fill partially', () => {
-  const context = fixture();
-  const { bot, confirmEntry, printSell } = context;
-  confirmEntry();
-  const order = bot.pendingEntryOrder;
-  assert.ok(order);
-
-  printSell('UP', order.limitPrice, order.queueAheadShares + 30, 'partial-sell-print');
-  const trade = bot.trades[0];
-  assert.equal(trade.shares, 30);
-  assert.equal(trade.fees, 0);
-  assert.equal(order.remainingShares, 70);
-  assert.equal(order.queueAheadShares, 0);
-
-  printSell('UP', order.limitPrice, 70, 'final-sell-print');
-  assert.equal(trade.shares, 100);
-  assert.equal(trade.totalCost, 40);
-  assert.equal(trade.status, 'OPEN');
-  assert.equal(bot.pendingEntryOrder, null);
-});
-
-test('a buy-aggressor print does not fill a resting maker buy', () => {
-  const context = fixture();
-  const { bot, confirmEntry, market } = context;
-  confirmEntry();
-  const order = bot.pendingEntryOrder;
-  bot.handleMarketMessage({
-    event_type: 'last_trade_price',
-    asset_id: market.tokens.UP,
-    side: 'BUY',
-    price: String(order.limitPrice),
-    size: '1000',
-    timestamp: String(context.getNow()),
-    transaction_hash: 'buy-side-print',
-  });
-  assert.equal(bot.trades.length, 0);
-  assert.equal(bot.pendingEntryOrder.remainingShares, 100);
-});
-
-test('no side enters when the passive bid fails the minimum edge filter', () => {
+test('insufficient ask depth does not create a partial position', () => {
   const { bot, setBook } = fixture();
   setBook('UP', {
-    asks: [[0.95, 100]],
-    bids: [[0.9, 100]],
+    asks: [[0.58, 50]],
+    bids: [[0.4, 100]],
   });
   setBook('DOWN', {
     asks: [[0.9, 100]],
     bids: [[0.8, 100]],
   });
   assert.equal(bot.evaluate(), false);
+  assert.equal(bot.trades.length, 0);
+  assert.equal(bot.entryTriggeredThisWindow, false);
+});
+
+test('resolution-adjusted share size is used for the next taker entry', () => {
+  const { bot, setBook } = fixture();
+  bot.nextEntryShares = 120;
+  setBook('UP', {
+    asks: [[0.6, 120]],
+    bids: [[0.4, 120]],
+  });
+  assert.equal(bot.evaluate(), true);
+  assert.equal(bot.trades[0].shares, 120);
+  assert.equal(bot.nextEntryShares, 120);
+});
+
+test('no side enters when full ask-sweep costs miss the minimum edge', () => {
+  const { bot, setBook } = fixture();
+  setBook('UP', {
+    asks: [[0.99, 100]],
+    bids: [[0.95, 100]],
+  });
+  setBook('DOWN', {
+    asks: [[0.9, 100]],
+    bids: [[0.8, 100]],
+  });
   assert.equal(bot.evaluate(), false);
   assert.equal(bot.trades.length, 0);
   assert.equal(bot.entryTriggeredThisWindow, false);
-  assert.equal(bot.pendingEntryOrder, null);
 });
 
 test('an opposite signal cannot flip a position that is not net profitable to sell', () => {
   const context = fixture();
   const { bot, setBook, setPrice } = context;
-  openMakerPosition(context);
+  openTakerPosition(context);
   setPrice(99_600);
   setBook('UP', {
     asks: [[0.7, 100]],
@@ -313,12 +264,11 @@ test('a profitable flip requires two fresh opposite updates at least 500 ms apar
   assert.equal(strategy.nextEntryShares, 100);
   assert.equal(strategy.lossSizeStepShares, 20);
   assert.equal(strategy.winSizeReductionShares, 30);
-  assert.equal(strategy.entryConfirmationUpdates, 2);
   assert.equal(strategy.minimumNetEdgePerShare, 0.05);
   assert.equal(strategy.minimumFlipNetEdgePerShare, 0.10);
   assert.equal(strategy.flipConfirmationUpdates, 2);
   assert.equal(strategy.flipConfirmationIntervalMs, 500);
-  openMakerPosition(context);
+  openTakerPosition(context);
   setPrice(99_600);
   setNow(960_500);
   setBook('UP', {
@@ -351,16 +301,17 @@ test('a profitable flip requires two fresh opposite updates at least 500 ms apar
   assert.equal(bot.flipsThisWindow, 1);
   assert.equal(bot.trades[0].status, 'CLOSED');
   assert.ok(bot.trades[0].realizedPnl > 0);
-  assert.equal(bot.trades[0].fees, 0);
-  assert.ok(bot.trades[0].estimatedMakerRebate > 0);
+  assert.ok(bot.trades[0].fees > 0);
   assert.ok(bot.trades[0].exitFees > 0);
-  assert.ok(Math.abs(bot.accountSnapshot().takerFees - bot.trades[0].exitFees) < 1e-9);
-  assert.equal(bot.trades.length, 1);
-  assert.equal(bot.pendingEntryOrder.side, 'DOWN');
-  assert.equal(bot.pendingEntryOrder.targetShares, 100);
-  context.printSell('DOWN', 0.05, 200, 'opposite-maker-fill');
+  assert.equal(bot.trades.length, 2);
   assert.equal(bot.trades[1].side, 'DOWN');
   assert.equal(bot.trades[1].shares, 100);
+  assert.ok(bot.trades[1].fees > 0);
+  const expectedFees = bot.trades.reduce(
+    (sum, trade) => sum + (Number(trade.fees) || 0) + (Number(trade.exitFees) || 0),
+    0,
+  );
+  assert.ok(Math.abs(bot.accountSnapshot().takerFees - expectedFees) < 1e-9);
   assert.equal(bot.flipConfirmation.count, 0);
 
   setPrice(100_400);
@@ -382,19 +333,19 @@ test('a profitable flip requires two fresh opposite updates at least 500 ms apar
 test('a profitable position does not flip when opposite edge is below ten cents', () => {
   const context = fixture();
   const { bot, setBook, setPrice, setNow, getNow } = context;
-  openMakerPosition(context);
+  openTakerPosition(context);
   setPrice(99_600);
   setNow(961_000);
   const downProbability = bot.modelSnapshot(getNow()).probabilityDown;
-  const downBid = downProbability - 0.08;
-  assert.ok(downBid > 0 && downBid < 1);
+  const downAsk = downProbability - 0.08;
+  assert.ok(downAsk > 0 && downAsk < 1);
   setBook('UP', {
     asks: [[0.7, 100]],
     bids: [[0.8, 100]],
   });
   setBook('DOWN', {
-    asks: [[downBid + 0.01, 100]],
-    bids: [[downBid, 100]],
+    asks: [[downAsk, 100]],
+    bids: [[0.05, 100]],
   });
 
   assert.equal(bot.evaluate(), false);
@@ -408,7 +359,7 @@ test('a profitable position does not flip when opposite edge is below ten cents'
 test('flip confirmation resets when the opposite edge breaks before confirmation', () => {
   const context = fixture();
   const { bot, setBook, setPrice, setNow } = context;
-  openMakerPosition(context);
+  openTakerPosition(context);
   setPrice(99_600);
   setNow(961_000);
   setBook('UP', {
@@ -513,17 +464,30 @@ test('only resolved wins and losses change size; the 100-share floor is preserve
   assert.equal(restored.nextEntryShares, 100);
 });
 
-test('a resting order is canceled when its edge filter stops qualifying', () => {
-  const context = fixture();
-  const { bot, confirmEntry, setPrice, setBook } = context;
-  confirmEntry();
-  assert.ok(bot.pendingEntryOrder);
-  setPrice(99_600);
-  context.setNow(context.getNow() + 500);
-  setBook('UP', { asks: [[0.45, 100]], bids: [[0.4, 100]] });
-  setBook('DOWN', { asks: [[0.35, 100]], bids: [[0.3, 100]] });
-  bot.evaluate();
+test('restoring the sizing state cancels any obsolete passive order', () => {
+  const { bot } = fixture();
+  bot.restoreState({
+    startingCapital: 3_000,
+    cash: 2_950,
+    realizedPnl: -50,
+    trades: [],
+    events: [],
+    tradeSequence: 0,
+    eventSequence: 0,
+    nextEntryShares: 120,
+    windowStart: 900_000,
+    entryTriggeredThisWindow: true,
+    pendingEntryOrder: {
+      id: 'misprice-order-old',
+      windowStart: 900_000,
+      side: 'UP',
+      remainingShares: 100,
+    },
+    flipsThisWindow: 0,
+  });
   assert.equal(bot.pendingEntryOrder, null);
-  assert.equal(bot.trades.length, 0);
-  assert.ok(bot.events.some(event => event.type === 'MAKER_ORDER_CANCELLED'));
+  assert.equal(bot.nextEntryShares, 120);
+  const state = bot.snapshot();
+  assert.equal(state.strategy.entryOrderType, 'TAKER SWEEP OF VISIBLE ASKS');
+  assert.equal(Object.hasOwn(state, 'pendingEntryOrder'), false);
 });

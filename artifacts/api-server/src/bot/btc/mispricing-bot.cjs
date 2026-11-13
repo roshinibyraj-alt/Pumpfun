@@ -8,7 +8,7 @@ const { normalizeLevels } = require('./btc-price-band-bot.cjs');
 
 const EPSILON = 1e-8;
 const DEFAULT_CONFIG = Object.freeze({
-  STRATEGY_VERSION: 'btc-5m-binance-maker-filter-3candle-v1',
+  STRATEGY_VERSION: 'btc-5m-binance-taker-sizing-3candle-v1',
   WINDOW_MS: CANDLE_MS,
   STARTING_CAPITAL: 3_000,
   BASE_SHARES: 100,
@@ -251,9 +251,8 @@ class BtcMispricingBot {
       ? Number(state.windowStart) : null;
     this.windowEnd = this.windowStart == null ? null : this.windowStart + this.config.WINDOW_MS;
     this.entryTriggeredThisWindow = state.entryTriggeredThisWindow === true;
-    this.pendingEntryOrder = state.pendingEntryOrder
-      && Number(state.pendingEntryOrder.windowStart) === this.windowStart
-      ? { ...state.pendingEntryOrder } : null;
+    // Passive paper orders from the previous strategy are canceled on restore.
+    this.pendingEntryOrder = null;
     this.entryConfirmation = { side: null, count: 0, lastTickAt: null };
     this.seenTradeEvents = Array.isArray(state.seenTradeEvents)
       ? state.seenTradeEvents.slice(-2_000) : [];
@@ -463,7 +462,6 @@ class BtcMispricingBot {
     if (type === 'book') this.applyBookSnapshot(payload, this.now());
     else if (type === 'price_change') this.applyPriceChanges(payload, this.now());
     else if (type === 'best_bid_ask') this.applyBestBidAsk(payload, this.now());
-    else if (type === 'last_trade_price') this.applyLastTradePrice(payload, this.now());
     void this.evaluate();
   }
 
@@ -988,11 +986,7 @@ class BtcMispricingBot {
     const model = this.modelSnapshot(now);
     this.model = model;
     if (!model.ready) {
-      this.resetEntryConfirmation();
       this.resetFlipConfirmation();
-      if (this.pendingEntryOrder) {
-        this.cancelPendingEntryOrder('Fresh Binance probability data is unavailable.', now);
-      }
       this.currentSignal = {
         side: null,
         reason: model.reason,
@@ -1000,59 +994,60 @@ class BtcMispricingBot {
       };
       return false;
     }
-    if (this.pendingEntryOrder) {
-      const invalidReason = this.pendingOrderInvalidReason(model, now);
-      if (invalidReason) this.cancelPendingEntryOrder(invalidReason, now);
-    }
     const openTrade = this.currentOpenTrade();
     if (openTrade) return this.evaluateFlip(openTrade, model, now);
-    if (this.pendingEntryOrder) return this.evaluatePendingEntryOrder(model, now);
     if (this.entryTriggeredThisWindow || now >= this.windowEnd) return false;
     const shares = this.nextEntryShares;
     const candidates = ['UP', 'DOWN'].map(side => {
-      const passive = this.passiveBidQuote(side, now);
-      if (!passive) return null;
+      if (!this.sideQuoteIsFresh(side, now)) return null;
+      const preview = this.sweep(side, 'asks', shares);
+      if (!preview?.complete) return null;
       const probability = side === 'UP' ? model.probabilityUp : model.probabilityDown;
-      const edgePerShare = probability - passive.limitPrice;
-      return { side, passive, edgePerShare, estimatedCost: shares * passive.limitPrice };
+      const expectedProfit = probability * shares - preview.totalCost;
+      return {
+        side,
+        preview,
+        expectedProfit,
+        edgePerShare: expectedProfit / shares,
+      };
     }).filter(candidate => candidate
       && candidate.edgePerShare >= this.config.MIN_NET_EDGE_PER_SHARE);
     if (!candidates.length) {
-      this.resetEntryConfirmation();
       this.currentSignal = {
         side: null,
-        reason: 'No passive bid clears the minimum edge with fresh, non-crossed order-book data.',
+        reason: 'No side clears the minimum net edge after visible ask-sweep costs and fees.',
         edgePerShare: null,
       };
       return false;
     }
     candidates.sort((left, right) => right.edgePerShare - left.edgePerShare);
     const selected = candidates[0];
-    if (selected.estimatedCost > this.cash + EPSILON) {
-      this.resetEntryConfirmation();
+    if (selected.preview.totalCost > this.cash + EPSILON) {
       this.currentSignal = {
         side: selected.side,
-        reason: `The ${selected.side} signal qualifies, but paper cash cannot fund ${shares} shares at the passive bid.`,
+        reason: `The ${selected.side} edge qualifies, but paper cash is insufficient for ${shares} shares.`,
         edgePerShare: selected.edgePerShare,
       };
       return false;
     }
-    const confirmation = this.recordEntryConfirmation(selected.side, model, now);
-    if (!confirmation.confirmed) {
-      this.currentSignal = {
-        side: selected.side,
-        reason: `Waiting for ${selected.side} signal confirmation (${confirmation.count}/${this.config.ENTRY_CONFIRMATION_UPDATES} fresh Binance updates, at least ${this.config.ENTRY_CONFIRMATION_MIN_INTERVAL_MS} ms apart).`,
-        edgePerShare: selected.edgePerShare,
-      };
-      return false;
-    }
-    return this.placeMakerEntryOrder(
+    const execution = this.sweep(selected.side, 'asks', shares, { consume: true });
+    if (!execution?.complete) return false;
+    this.buyPosition(
       selected.side,
+      execution,
       model,
       now,
       'MODEL_EDGE',
       selected.edgePerShare,
     );
+    this.entryTriggeredThisWindow = true;
+    this.currentSignal = {
+      side: selected.side,
+      reason: `${selected.side} bought because its estimated net edge cleared the configured threshold.`,
+      edgePerShare: selected.edgePerShare,
+    };
+    this.schedulePersist(true);
+    return true;
   }
 
   resetFlipConfirmation() {
@@ -1119,12 +1114,14 @@ class BtcMispricingBot {
       return false;
     }
     const liquidationPnl = salePreview.netProceeds - openTrade.totalCost;
-    const passive = this.passiveBidQuote(opposite, now);
     const targetShares = this.nextEntryShares;
+    const buyPreview = this.sweep(opposite, 'asks', targetShares);
     const oppositeProbability = opposite === 'UP' ? model.probabilityUp : model.probabilityDown;
-    const edgePerShare = passive
-      ? oppositeProbability - passive.limitPrice
+    const expectedProfit = buyPreview?.complete
+      ? oppositeProbability * targetShares - buyPreview.totalCost
       : null;
+    const edgePerShare = expectedProfit == null
+      ? null : expectedProfit / targetShares;
     if (liquidationPnl <= EPSILON) {
       this.resetFlipConfirmation();
       this.currentSignal = {
@@ -1134,24 +1131,23 @@ class BtcMispricingBot {
       };
       return false;
     }
-    if (!passive || edgePerShare == null
+    if (!buyPreview?.complete || edgePerShare == null
       || edgePerShare < this.config.MIN_FLIP_NET_EDGE_PER_SHARE) {
       this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
-        reason: !passive
-          ? 'Holding: no safe post-only bid is available for the opposite-side maker order.'
-          : `Holding: the opposite maker edge is below the $${this.config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} flip threshold.`,
+        reason: !buyPreview?.complete
+          ? `Holding: the opposite side does not have enough visible ask depth for all ${targetShares} shares.`
+          : `Holding: the opposite edge is below the $${this.config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} flip threshold after fees.`,
         edgePerShare,
       };
       return false;
     }
-    const estimatedBuyCost = targetShares * passive.limitPrice;
-    if (this.cash + salePreview.netProceeds + EPSILON < estimatedBuyCost) {
+    if (this.cash + salePreview.netProceeds + EPSILON < buyPreview.totalCost) {
       this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
-        reason: `Holding: the flip proceeds and paper cash cannot fund ${targetShares} shares at the opposite passive bid.`,
+        reason: 'Holding: paper cash cannot fund the full opposite-side buy.',
         edgePerShare,
       };
       return false;
@@ -1166,39 +1162,89 @@ class BtcMispricingBot {
       return false;
     }
     const sale = this.sweep(openTrade.side, 'bids', openTrade.shares, { consume: true });
-    if (!sale?.complete || !this.passiveBidQuote(opposite, now)) return false;
+    const buy = this.sweep(opposite, 'asks', targetShares, { consume: true });
+    if (!sale?.complete || !buy?.complete) return false;
     this.resetFlipConfirmation();
     this.closePosition(openTrade, sale, now, 'PROFITABLE_MODEL_FLIP', opposite);
-    if (this.pendingEntryOrder) {
-      this.cancelPendingEntryOrder(
-        'The existing passive order was canceled before executing the opposite-side flip.',
-        now,
-      );
-    }
-    this.flipsThisWindow += 1;
-    const orderPosted = this.placeMakerEntryOrder(
+    this.buyPosition(
       opposite,
+      buy,
       model,
       now,
       'PROFITABLE_MODEL_FLIP',
       edgePerShare,
     );
+    this.flipsThisWindow += 1;
     this.log('PROFITABLE_MODEL_FLIP',
-      `Sold ${openTrade.side} shares at market after fees and posted a ${this.nextEntryShares}-share post-only ${opposite} buy.`,
+      `Closed profitable ${openTrade.side} shares and bought ${targetShares} ${opposite} shares on the opposite model edge.`,
       {
         fromSide: openTrade.side,
         toSide: opposite,
         sharesSold: sale.shares,
-        sharesRequested: this.nextEntryShares,
+        sharesBought: buy.shares,
         liquidationPnl: round(liquidationPnl, 2),
         oppositeEdgePerShare: round(edgePerShare, 4),
         confirmationUpdates: confirmation.count,
         minimumFlipEdgePerShare: this.config.MIN_FLIP_NET_EDGE_PER_SHARE,
         flipsThisWindow: this.flipsThisWindow,
-        makerOrderPosted: orderPosted,
       });
+    this.currentSignal = {
+      side: opposite,
+      reason: `Flipped after a profitable exit and ${confirmation.count} fresh opposite-signal confirmations.`,
+      edgePerShare,
+    };
     this.schedulePersist(true);
-    return orderPosted;
+    return true;
+  }
+
+  buyPosition(side, execution, model, now, entryReason, edgePerShare) {
+    const trade = {
+      id: `misprice-trade-${++this.tradeSequence}`,
+      asset: 'BTC',
+      side,
+      marketId: String(this.market.id),
+      marketSlug: this.market.slug,
+      marketTitle: this.market.title,
+      tokenId: String(this.market.tokens[side]),
+      windowStart: this.windowStart,
+      windowEnd: this.windowEnd,
+      shares: execution.shares,
+      entryPrice: execution.averagePrice,
+      totalCost: execution.totalCost,
+      grossCost: execution.gross,
+      fees: execution.fees,
+      fills: execution.fills,
+      openedAt: now,
+      modelProbability: side === 'UP' ? model.probabilityUp : model.probabilityDown,
+      modelPriceAtEntry: model.currentPrice,
+      expectedEdgePerShare: edgePerShare,
+      entryReason,
+      executionRole: 'TAKER',
+      status: 'OPEN',
+      settlementStatus: 'OPEN',
+      markPrice: null,
+      markValue: null,
+      unrealizedPnl: null,
+      realizedPnl: null,
+      outcome: null,
+    };
+    this.cash = round(this.cash - trade.totalCost, 8);
+    this.trades.push(trade);
+    this.log('BUY_FILLED',
+      `Bought ${trade.shares} ${side} shares at a $${trade.entryPrice.toFixed(3)} average; model edge was $${Number(edgePerShare).toFixed(3)} per share after fees.`,
+      {
+        tradeId: trade.id,
+        side,
+        shares: trade.shares,
+        averagePrice: round(trade.entryPrice),
+        totalCost: round(trade.totalCost, 2),
+        fees: round(trade.fees, 2),
+        modelProbability: round(trade.modelProbability, 4),
+        expectedEdgePerShare: round(edgePerShare, 4),
+        modelPrice: round(trade.modelPriceAtEntry, 2),
+        executionRole: trade.executionRole,
+      });
+    return trade;
   }
 
   closePosition(trade, execution, now, reason, nextSide = null) {
@@ -1378,10 +1424,6 @@ class BtcMispricingBot {
       losses: settled.filter(trade => trade.outcome === 'LOSS').length,
       takerFees: round(this.trades.reduce((sum, trade) =>
         sum + (Number(trade.fees) || 0) + (Number(trade.exitFees) || 0), 0), 2),
-      estimatedMakerRebates: round(this.trades.reduce(
-        (sum, trade) => sum + (Number(trade.estimatedMakerRebate) || 0),
-        0,
-      ), 4),
       tradeCount: this.trades.length,
     };
   }
@@ -1413,15 +1455,7 @@ class BtcMispricingBot {
         volatilityLookbackCandles: this.config.VOLATILITY_CANDLES,
         minimumNetEdgePerShare: this.config.MIN_NET_EDGE_PER_SHARE,
         minimumFlipNetEdgePerShare: this.config.MIN_FLIP_NET_EDGE_PER_SHARE,
-        entryConfirmationUpdates: this.config.ENTRY_CONFIRMATION_UPDATES,
-        entryConfirmationIntervalMs: this.config.ENTRY_CONFIRMATION_MIN_INTERVAL_MS,
-        entryConfirmation: {
-          side: this.entryConfirmation.side,
-          updates: this.entryConfirmation.count,
-        },
-        entryOrderType: 'POST_ONLY LIMIT AT BEST BID',
-        makerEntryFee: 0,
-        makerRebateShare: this.config.CRYPTO_MAKER_REBATE_SHARE,
+        entryOrderType: 'TAKER SWEEP OF VISIBLE ASKS',
         flipConfirmationUpdates: this.config.FLIP_CONFIRMATION_UPDATES,
         flipConfirmationIntervalMs: this.config.FLIP_CONFIRMATION_MIN_INTERVAL_MS,
         flipConfirmation: {
@@ -1451,19 +1485,6 @@ class BtcMispricingBot {
       binance: this.priceFeed.snapshot?.() || null,
       model,
       signal: this.currentSignal,
-      pendingEntryOrder: this.pendingEntryOrder ? {
-        id: this.pendingEntryOrder.id,
-        side: this.pendingEntryOrder.side,
-        limitPrice: this.pendingEntryOrder.limitPrice,
-        targetShares: this.pendingEntryOrder.targetShares,
-        filledShares: this.pendingEntryOrder.filledShares,
-        remainingShares: this.pendingEntryOrder.remainingShares,
-        queueAheadShares: this.pendingEntryOrder.queueAheadShares,
-        estimatedEdgePerShare: this.pendingEntryOrder.estimatedEdgePerShare,
-        status: this.pendingEntryOrder.status,
-        postOnly: this.pendingEntryOrder.postOnly,
-        postedAt: this.pendingEntryOrder.postedAt,
-      } : null,
       quotes: {
         UP: { ...this.quotes.UP },
         DOWN: { ...this.quotes.DOWN },

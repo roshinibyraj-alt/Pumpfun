@@ -137,13 +137,6 @@
       .position-main small, .position-pnl small { color: var(--muted); }
       .position-pnl { text-align: right; font-variant-numeric: tabular-nums; }
       .position-pnl strong { display: block; font-size: 19px; }
-      .order-box {
-        padding: 13px; margin-top: 12px; border: 1px solid rgba(80, 213, 232, .24);
-        border-radius: 13px; background: rgba(10, 16, 32, .5);
-      }
-      .order-box-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
-      .order-box-head strong { font-size: 12px; }
-      .order-box-detail { margin-top: 5px; color: var(--muted); font-size: 11px; }
       .rules { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
       .rule {
         padding: 12px; border-radius: 12px; background: rgba(10, 16, 32, .5);
@@ -216,8 +209,8 @@
       <section class="hero" aria-labelledby="heroTitle">
         <div>
           <div class="eyebrow">Binance model × Polymarket 5-minute BTC</div>
-          <h2 id="heroTitle">Wait for a confirmed edge, then rest a maker bid.</h2>
-          <p>The bot estimates UP and DOWN probabilities from Binance BTCUSDT and three completed 5-minute candles. It requires two fresh signal updates, then posts a paper-only, post-only buy at the best bid and waits for a sell trade print behind the visible queue.</p>
+          <h2 id="heroTitle">Trade only when estimated probability beats the full ask sweep.</h2>
+          <p>The bot estimates UP and DOWN probabilities from the Binance BTCUSDT price, time left, and three completed 5-minute candles. It checks visible Polymarket ask depth and taker fees before entering; orders sweep the available asks instead of resting on the book.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Window waiting</span>
@@ -285,12 +278,12 @@
             <div class="prob-card up">
               <div class="prob-head"><span class="side-label">UP</span><span class="tag">BINANCE MODEL</span></div>
               <div class="prob-value" id="upProbability">—</div>
-              <div class="prob-detail">Post-only bid <strong id="upAsk">—</strong></div>
+              <div class="prob-detail">Polymarket ask <strong id="upAsk">—</strong></div>
             </div>
             <div class="prob-card down">
               <div class="prob-head"><span class="side-label">DOWN</span><span class="tag">BINANCE MODEL</span></div>
               <div class="prob-value" id="downProbability">—</div>
-              <div class="prob-detail">Post-only bid <strong id="downAsk">—</strong></div>
+              <div class="prob-detail">Polymarket ask <strong id="downAsk">—</strong></div>
             </div>
           </div>
           <div class="decision">
@@ -331,7 +324,7 @@
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Current position</div><div class="panel-subtitle">Maker fills can be partial; flips still sell at the bid</div></div>
+            <div><div class="panel-title">Current position</div><div class="panel-subtitle">One all-or-nothing entry per window; flips pay taker fees</div></div>
             <span class="badge" id="positionStatus">Flat</span>
           </div>
           <div class="position-box">
@@ -345,17 +338,9 @@
               <small id="positionMark">unrealized at best bid</small>
             </div>
           </div>
-          <div class="order-box">
-            <div class="order-box-head">
-              <strong>Resting maker entry</strong>
-              <span class="tag" id="makerOrderStatus">No order</span>
-            </div>
-            <div class="order-box-detail" id="makerOrderDetail">Waiting for a confirmed signal. Orders rest at the best bid and fill only from qualifying sell trade prints.</div>
-          </div>
           <div class="feed-row"><span class="feed-label">Next order size</span><strong class="feed-value" id="nextShares">100 shares</strong></div>
           <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
           <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Estimated maker rebates</span><strong class="feed-value" id="makerRebates">—</strong></div>
         </article>
 
         <article class="panel">
@@ -364,12 +349,12 @@
             <span class="badge" id="nextSizeBadge">100 shares next</span>
           </div>
           <div class="rules">
-            <div class="rule"><b>Signal filters</b>Three closed Binance 5m candles, fresh feeds, at least 5¢ estimated edge, and two matching updates at least 500 ms apart.</div>
-            <div class="rule"><b>Entry</b>Post-only paper buy at the best bid. No entry taker fee; fills require sell prints to clear the displayed queue ahead.</div>
+            <div class="rule"><b>Signal</b>Three closed Binance 5m candles; only fresh model data and fresh books can trigger an order.</div>
+            <div class="rule"><b>Entry</b>Sweep visible asks for the next order size only when the full quantity is available and estimated net edge is at least 5¢ per share after taker fees.</div>
             <div class="rule"><b>Size</b>Start at 100 shares; each resolved loss adds 20, each resolved win subtracts 30, with a 100-share floor. Paper cash limits orders.</div>
-            <div class="rule"><b>Flip</b>One profitable flip per window. Sell at visible bids with taker fees; require at least $0.10/share opposite maker edge and two fresh Binance updates at least 500 ms apart.</div>
+            <div class="rule"><b>Flip</b>One profitable flip per window. Sell at visible bids and buy the opposite side by sweeping asks; require full depth, 10¢ net edge, and two fresh Binance updates at least 500 ms apart.</div>
             <div class="rule"><b>Resolution</b>Otherwise hold until official Polymarket resolution for that exact market.</div>
-            <div class="rule"><b>Rebate</b>Shown as an estimate for eligible filled maker orders; not credited to P&amp;L as guaranteed income.</div>
+            <div class="rule"><b>Fees</b>Entries and early-flip exits are taker sweeps; fees are included in modeled cash and P&amp;L.</div>
             <div class="rule"><b>Ledger</b>Existing $3,000 paper ledger and history are preserved; open trades settle on their original markets.</div>
             <div class="rule"><b>Execution</b>Paper-only simulation. No wallet or real order is connected.</div>
           </div>
@@ -521,8 +506,8 @@
         setText("modelStatus", model.ready ? "READY · 3 CLOSED CANDLES" : "MODEL WAITING");
         setText("upProbability", percent(model.probabilityUp));
         setText("downProbability", percent(model.probabilityDown));
-        setText("upAsk", contractPrice(up.bestBid));
-        setText("downAsk", contractPrice(down.bestBid));
+        setText("upAsk", contractPrice(up.bestAsk));
+        setText("downAsk", contractPrice(down.bestAsk));
         setText("signalSide", state.signal?.side ? `${state.signal.side} signal` : "No trade signal");
         setText("signalReason", state.signal?.reason || model.reason || "Waiting for inputs.");
         setText("clobStatus", `Polymarket ${String(state.websocket?.status || "waiting").toLowerCase()}`);
@@ -543,20 +528,14 @@
         setText("positionTitle", position ? `${position.side} position · ${position.shares} shares` : "No open position");
         setText("positionDetail", position
           ? `Entry ${contractPrice(position.entryPrice)} · cost ${money(position.totalCost)}`
-          : "Waiting for a maker fill or a qualifying signal");
+          : "Waiting for a qualifying full-size ask sweep");
         setText("positionPnl", position ? signedMoney(position.unrealizedPnl) : "—");
         $("positionPnl").className = pnlClass(position?.unrealizedPnl);
         setText("positionMark", position ? `best bid ${contractPrice(position.markPrice)}` : "unrealized at best bid");
         setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
         setText("fees", money(account.takerFees));
-        setText("makerRebates", money(account.estimatedMakerRebates));
         setText("nextShares", `${Number(state.strategy?.nextEntryShares || 100).toLocaleString()} shares`);
         setText("nextSizeBadge", `${Number(state.strategy?.nextEntryShares || 100).toLocaleString()} shares next`);
-        const order = state.pendingEntryOrder;
-        setText("makerOrderStatus", order?.status || "No order");
-        setText("makerOrderDetail", order
-          ? `${order.side} post-only buy at ${contractPrice(order.limitPrice)} · ${Number(order.filledShares || 0).toLocaleString()} filled / ${Number(order.remainingShares || 0).toLocaleString()} remaining · ~${Number(order.queueAheadShares || 0).toLocaleString()} shares ahead`
-          : "Waiting for a confirmed signal. Orders rest at the best bid and fill only from qualifying sell trade prints.");
         setText("persistenceStatus", state.persistence?.status === "CONNECTED"
           ? "paper ledger saved" : `ledger ${String(state.persistence?.status || "starting").toLowerCase()}`);
         renderCandles(model.volatilityCandles);

@@ -285,9 +285,10 @@ test("the public root dashboard runs the BTC mispricing paper strategy", () => {
   assert.match(html, /three completed 5-minute candles/i);
   assert.match(html, /100 shares/);
   assert.match(html, /profitable flip/i);
-  assert.match(html, /at least \$0\.10\/share opposite maker edge.*two fresh Binance updates at least 500 ms apart/i);
-  assert.match(html, /post-only paper buy at the best bid/i);
+  assert.match(html, /taker fees before entering/i);
+  assert.match(html, /sweep visible asks/i);
   assert.match(html, /each resolved loss adds 20, each resolved win subtracts 30/i);
+  assert.doesNotMatch(html, /post-only paper buy|resting maker entry/i);
   assert.match(html, /official Polymarket resolution/i);
   assert.match(html, /paper only/i);
   assert.match(html, /fetch\(["']\/api\/strategy\/state/);
