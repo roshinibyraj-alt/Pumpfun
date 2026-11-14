@@ -4,7 +4,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   LiveBtcMispricingBot,
-  getCandleSignalPriority,
   isTerminalOrder,
   matchedShares,
 } = require('./live-mispricing-bot.cjs');
@@ -43,40 +42,16 @@ function setFreshOrderSnapshot(bot, orders = []) {
   bot.liveAccount.ordersSnapshotAt = new Date(bot.now()).toISOString();
 }
 
-test('candle gate follows candle color and reverses after a three-candle streak', () => {
-  const green = [
-    { open: 100, close: 101, closed: true },
-    { open: 101, close: 102, closed: true },
-    { open: 102, close: 103, closed: true },
-  ];
-  const red = green.map(candle => ({ open: candle.close, close: candle.open, closed: true }));
-
-  assert.deepEqual(getCandleSignalPriority(green.slice(-1)), {
-    side: 'UP',
-    color: 'GREEN',
-    streak: 1,
-    meanReversion: false,
-    reason: 'Only UP signals are allowed after the latest green candle.',
-  });
-  assert.equal(getCandleSignalPriority(green.slice(-2)).side, 'UP');
-  assert.equal(getCandleSignalPriority(green).side, 'DOWN');
-  assert.equal(getCandleSignalPriority(green).meanReversion, true);
-  assert.match(getCandleSignalPriority(green).reason, /Only DOWN signals are allowed.*mean reversion/);
-  assert.equal(getCandleSignalPriority(red.slice(-1)).side, 'DOWN');
-  assert.equal(getCandleSignalPriority(red.slice(-2)).side, 'DOWN');
-  assert.equal(getCandleSignalPriority(red).side, 'UP');
-  assert.equal(getCandleSignalPriority([{ open: 100, close: 100, closed: true }]).side, null);
-});
-
-test('only the candle-allowed side can enter, even when the opposite edge is stronger', async () => {
+test('entry evaluates both outcomes and selects the stronger qualifying fair-value edge', async () => {
   let placed;
+  const evaluated = [];
   const trader = {
     async placeTakerOrder(tokenId, action, price, size) {
       placed = { tokenId, action, price, size };
-      return { id: 'priority-entry', status: 'MATCHED' };
+      return { id: 'source-entry', status: 'MATCHED' };
     },
     async fetchOrder() {
-      return { id: 'priority-entry', status: 'MATCHED', sizeMatched: '10' };
+      return { id: 'source-entry', status: 'MATCHED', sizeMatched: '7.5' };
     },
   };
   const { bot } = createBot({ trader });
@@ -91,39 +66,38 @@ test('only the candle-allowed side can enter, even when the opposite edge is str
     probabilityDown: 0.3,
     currentPrice: 100,
   });
-  bot.priceFeed.snapshot = () => ({
-    candles: [{ open: 101, close: 100, closed: true }],
-  });
   bot.sideQuoteIsFresh = () => true;
-  bot.sweep = (side, bookSide, shares) => {
-    if (bookSide !== 'asks') return null;
-    const unitCost = side === 'UP' ? 0.4 : 0.2;
+  bot.buyPreviewForStake = (side, stakeUsd) => {
+    evaluated.push(side);
+    const shares = side === 'UP' ? 7.5 : 15;
+    const price = side === 'UP' ? 0.4 : 0.2;
     return {
       complete: true,
       shares,
-      totalCost: shares * unitCost,
-      averagePrice: unitCost,
-      fills: [{ price: unitCost, shares }],
+      gross: stakeUsd,
+      totalCost: side === 'UP' ? 3.2 : 3.1,
+      averagePrice: price,
+      fills: [{ price, shares }],
     };
   };
 
   const entered = await bot.evaluateLive(now);
 
   assert.equal(entered, true);
-  assert.equal(placed.tokenId, 'down-token');
-  assert.equal(bot.trades[0].side, 'DOWN');
-  assert.match(bot.currentSignal.reason, /Only DOWN signals are allowed after the latest red candle/);
+  assert.deepEqual(evaluated, ['UP', 'DOWN']);
+  assert.equal(placed.tokenId, 'up-token');
+  assert.equal(placed.action, 'BUY');
+  assert.equal(placed.size, 3);
+  assert.equal(bot.trades[0].side, 'UP');
+  assert.equal(bot.trades[0].shares, 7.5);
+  assert.match(bot.currentSignal.reason, /strongest qualifying net edge/);
 });
 
-test('the bot does not fall back to the opposite side when the allowed side fails its edge check', async () => {
-  let submitted = false;
+test('missing or doji candles do not gate fair-value entries', async () => {
   const trader = {
-    async placeTakerOrder() {
-      submitted = true;
-      return { id: 'unexpected-entry', status: 'MATCHED' };
-    },
+    async placeTakerOrder() { throw new Error('read-only test must not submit'); },
   };
-  const { bot } = createBot({ trader });
+  const { bot } = createBot({ trader, tradingEnabled: false });
   const now = bot.now();
   bot.windowStart = Math.floor(now / bot.config.WINDOW_MS) * bot.config.WINDOW_MS;
   bot.windowEnd = bot.windowStart + bot.config.WINDOW_MS;
@@ -135,64 +109,59 @@ test('the bot does not fall back to the opposite side when the allowed side fail
     probabilityDown: 0.2,
     currentPrice: 100,
   });
-  bot.priceFeed.snapshot = () => ({
-    candles: [{ open: 101, close: 100, closed: true }],
-  });
-  bot.sideQuoteIsFresh = () => true;
-  bot.sweep = side => ({
-    complete: true,
-    shares: 10,
-    totalCost: side === 'UP' ? 2 : 9,
-    averagePrice: side === 'UP' ? 0.2 : 0.9,
-    fills: [{ price: side === 'UP' ? 0.2 : 0.9, shares: 10 }],
-  });
+  bot.priceFeed.snapshot = () => ({ candles: [] });
+  bot.buyPreviewForStake = side => {
+    if (side !== 'UP') return null;
+    return {
+      complete: true,
+      shares: 7.5,
+      gross: 3,
+      totalCost: 3.1,
+      averagePrice: 0.4,
+      fills: [{ price: 0.4, shares: 7.5 }],
+    };
+  };
 
-  const entered = await bot.evaluateLive(now);
-
-  assert.equal(entered, false);
-  assert.equal(submitted, false);
+  assert.equal(await bot.evaluateLive(now), false);
+  assert.equal(bot.currentSignal.side, 'UP');
   assert.equal(bot.trades.length, 0);
-  assert.equal(bot.currentSignal.side, null);
-  assert.match(bot.currentSignal.reason, /Only DOWN signals are allowed/);
+  assert.equal(bot.liveHalted, false);
 });
 
-test('missing or doji candle data blocks entries instead of selecting either side', async () => {
+test('live stake progression starts at $3 and adjusts by +$1/−$1.50 with a $3 floor', () => {
   const { bot } = createBot();
-  const now = bot.now();
-  bot.windowStart = Math.floor(now / bot.config.WINDOW_MS) * bot.config.WINDOW_MS;
-  bot.windowEnd = bot.windowStart + bot.config.WINDOW_MS;
-  bot.processStartedAt = bot.windowStart;
-  bot.currentOpenTrade = () => null;
-  bot.modelSnapshot = () => ({
-    ready: true,
-    probabilityUp: 0.8,
-    probabilityDown: 0.2,
-    currentPrice: 100,
-  });
-  bot.sideQuoteIsFresh = () => true;
-  bot.sweep = () => {
-    throw new Error('No side should be evaluated without a clear candle');
+  assert.equal(bot.config.BASE_STAKE_USD, 3);
+  assert.equal(bot.nextEntryStakeUsd, 3);
+  assert.equal(bot.sizeAfterOutcome(3, 'LOSS'), 4);
+  assert.equal(bot.sizeAfterOutcome(4, 'LOSS'), 5);
+  assert.equal(bot.sizeAfterOutcome(6.5, 'WIN'), 5);
+  assert.equal(bot.sizeAfterOutcome(4, 'WIN'), 3);
+  assert.equal(bot.sizeAfterOutcome(3, 'WIN'), 3);
+});
+
+test('legacy share-sized history is kept while new USD sizing starts at its floor', () => {
+  const { bot } = createBot();
+  const oldTrade = {
+    id: 'old-share-trade',
+    outcome: 'LOSS',
+    sizingAdjustmentApplied: true,
+    sizingGeneration: 0,
   };
+  bot.restoreState({
+    trades: [oldTrade],
+    nextEntryShares: 18,
+    sizingGeneration: 0,
+    liveOrders: [],
+    liveHalted: false,
+  });
 
-  for (const candles of [
-    [],
-    [{ open: 100, close: 100, closed: true }],
-  ]) {
-    bot.priceFeed.snapshot = () => ({ candles });
-    assert.equal(await bot.evaluateLive(now), false);
-    assert.equal(bot.currentSignal.side, null);
-    assert.match(bot.currentSignal.reason, /no signal side is allowed/i);
-  }
-});
-
-test('live copy starts at 10 and sizes outcomes by +2/−3 with a 10 floor', () => {
-  const { bot } = createBot();
-  assert.equal(bot.config.BASE_SHARES, 10);
-  assert.equal(bot.config.LOSS_SIZE_STEP_SHARES, 2);
-  assert.equal(bot.config.WIN_SIZE_REDUCTION_SHARES, 3);
-  assert.equal(bot.sizeAfterOutcome(10, 'LOSS'), 12);
-  assert.equal(bot.sizeAfterOutcome(16, 'WIN'), 13);
-  assert.equal(bot.sizeAfterOutcome(11, 'WIN'), 10);
+  const saved = bot.persistentStateSnapshot();
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].id, 'old-share-trade');
+  assert.equal(bot.sizingGeneration, 1);
+  assert.equal(bot.nextEntryStakeUsd, 3);
+  assert.equal(saved.stakeSizingVersion, 1);
+  assert.equal(saved.nextEntryStakeUsd, 3);
 });
 
 test('live history reset request runs once through the durable state store', async () => {
@@ -251,15 +220,15 @@ test('live entry records only the amount confirmed by the exchange', async () =>
   assert.ok(saves.length >= 2);
 });
 
-test('normal live entry still submits the sized base entry after flip removal', async () => {
+test('normal live entry submits the $3 USD stake and records confirmed shares', async () => {
   let placed;
   const trader = {
     async placeTakerOrder(tokenId, action, price, size) {
       placed = { tokenId, action, price, size };
-      return { id: 'entry-after-flip-removal', status: 'MATCHED' };
+      return { id: 'usd-entry', status: 'MATCHED' };
     },
     async fetchOrder() {
-      return { id: 'entry-after-flip-removal', status: 'MATCHED', sizeMatched: '10' };
+      return { id: 'usd-entry', status: 'MATCHED', sizeMatched: '7.5' };
     },
   };
   const { bot } = createBot({ trader });
@@ -274,12 +243,16 @@ test('normal live entry still submits the sized base entry after flip removal', 
     probabilityDown: 0.1,
     currentPrice: 100,
   });
-  bot.priceFeed.snapshot = () => ({
-    candles: [{ open: 100, close: 101, closed: true }],
-  });
   bot.sideQuoteIsFresh = () => true;
-  bot.sweep = (_side, bookSide, shares) => bookSide === 'asks'
-    ? { complete: true, shares, totalCost: shares * 0.4, averagePrice: 0.4, fills: [{ price: 0.4, shares }] }
+  bot.buyPreviewForStake = (side, stakeUsd) => side === 'UP'
+    ? {
+      complete: true,
+      shares: stakeUsd / 0.4,
+      gross: stakeUsd,
+      totalCost: stakeUsd + 0.08,
+      averagePrice: 0.4,
+      fills: [{ price: 0.4, shares: stakeUsd / 0.4 }],
+    }
     : null;
 
   const entered = await bot.evaluateLive(now);
@@ -289,36 +262,27 @@ test('normal live entry still submits the sized base entry after flip removal', 
     tokenId: 'up-token',
     action: 'BUY',
     price: 0.99,
-    size: 10,
+    size: 3,
   });
-  assert.equal(bot.trades[0].shares, 10);
+  assert.equal(bot.trades[0].shares, 7.5);
   assert.equal(bot.trades[0].side, 'UP');
+  assert.equal(bot.liveOrders[0].amountUsd, 3);
 });
 
-test('an open position ignores the opposite signal and remains held to resolution', async () => {
+test('a qualified profitable flip submits the share sell and USD buy independently', async () => {
   const submissions = [];
-  let sellSubmissionPending = false;
-  let resolveSellSubmission;
-  let bothOrdersStarted = false;
   const trader = {
-    async getSellableShares(tokenId) {
-      assert.equal(tokenId, 'up-token');
-      return { tokenId, balance: 6, allowance: 5, shares: 5 };
-    },
     placeTakerOrder(tokenId, action, price, size) {
       submissions.push({ tokenId, action, price, size });
-      if (action === 'SELL') {
-        sellSubmissionPending = true;
-        return new Promise(resolve => { resolveSellSubmission = resolve; });
-      }
-      bothOrdersStarted = sellSubmissionPending;
-      resolveSellSubmission({ id: 'exchange-sell', status: 'UNFILLED' });
-      return Promise.resolve({ id: 'exchange-buy', status: 'MATCHED' });
+      return Promise.resolve({
+        id: action === 'SELL' ? 'exchange-sell' : 'exchange-buy',
+        status: 'MATCHED',
+      });
     },
     async fetchOrder(id) {
       return id === 'exchange-sell'
-        ? { id, status: 'UNFILLED', sizeMatched: '0' }
-        : { id, status: 'MATCHED', sizeMatched: '5' };
+        ? { id, status: 'MATCHED', sizeMatched: '7' }
+        : { id, status: 'MATCHED', sizeMatched: '6' };
     },
   };
   const { bot } = createBot({ trader });
@@ -334,6 +298,7 @@ test('an open position ignores the opposite signal and remains held to resolutio
     marketId: String(bot.market.id),
   };
   bot.trades = [trade];
+  bot.processStartedAt = bot.windowStart;
   bot.liveOrders = [
     {
       id: 'up-buy',
@@ -357,12 +322,28 @@ test('an open position ignores the opposite signal and remains held to resolutio
     },
   ];
   bot.sideQuoteIsFresh = () => true;
-  bot.sweep = (_side, bookSide, shares) => bookSide === 'asks'
-    ? { complete: true, shares, totalCost: shares * 0.3, averagePrice: 0.3, fills: [{ price: 0.3, shares }] }
+  bot.sweep = (side, bookSide, shares) => bookSide === 'bids'
+    ? {
+      complete: true,
+      shares,
+      gross: shares * 0.6,
+      netProceeds: shares * 0.6,
+      averagePrice: 0.6,
+      fills: [{ price: 0.6, shares }],
+    }
+    : null;
+  bot.buyPreviewForStake = (side, stakeUsd) => side === 'DOWN'
+    ? {
+      complete: true,
+      shares: 6,
+      gross: stakeUsd,
+      totalCost: stakeUsd + 0.08,
+      averagePrice: 0.5,
+      fills: [{ price: 0.5, shares: 6 }],
+    }
     : null;
   bot.recordFlipConfirmation = () => ({ confirmed: true, count: 2 });
   bot.persist = async () => true;
-
   bot.currentOpenTrade = () => trade;
   bot.modelSnapshot = () => ({
     ready: true,
@@ -370,22 +351,21 @@ test('an open position ignores the opposite signal and remains held to resolutio
     probabilityDown: 0.8,
     currentPrice: 100,
   });
-  const held = await bot.evaluateLive(bot.windowStart + 10_000);
+  const flipped = await bot.evaluateLive(bot.windowStart + 10_000);
 
-  assert.equal(held, false);
-  assert.deepEqual(submissions, []);
-  assert.equal(trade.status, 'OPEN');
-  assert.match(bot.currentSignal.reason, /holding this position to market resolution/i);
-  assert.match(bot.currentSignal.reason, /in-window sells .* disabled/i);
+  assert.equal(flipped, true);
+  assert.equal(submissions.length, 2);
+  assert.deepEqual(submissions.map(order => [order.tokenId, order.action, order.size]), [
+    ['up-token', 'SELL', 7],
+    ['down-token', 'BUY', 3],
+  ]);
+  assert.equal(trade.status, 'CLOSED');
+  assert.equal(bot.trades.some(item => item.side === 'DOWN' && item.shares === 6), true);
 });
 
-test('legacy flip evaluator cannot submit orders', async () => {
+test('an uncertain no-ID flip sell does not block the independent opposite buy', async () => {
   const submissions = [];
   const trader = {
-    async getSellableShares(tokenId) {
-      assert.equal(tokenId, 'up-token');
-      return { tokenId, balance: 4, allowance: 4, shares: 4 };
-    },
     async placeTakerOrder(tokenId, action, price, size) {
       submissions.push({ tokenId, action, price, size });
       if (action === 'SELL') {
@@ -396,7 +376,7 @@ test('legacy flip evaluator cannot submit orders', async () => {
       return { id: 'exchange-buy', status: 'MATCHED' };
     },
     async fetchOrder(id) {
-      return { id, status: 'MATCHED', sizeMatched: '4' };
+      return { id, status: 'MATCHED', sizeMatched: '6' };
     },
   };
   const { bot } = createBot({ trader });
@@ -405,8 +385,8 @@ test('legacy flip evaluator cannot submit orders', async () => {
     status: 'OPEN',
     side: 'UP',
     tokenId: 'up-token',
-    shares: 4,
-    totalCost: 2,
+    shares: 7,
+    totalCost: 3,
     windowStart: bot.windowStart,
     windowEnd: bot.windowEnd,
     marketId: String(bot.market.id),
@@ -419,15 +399,31 @@ test('legacy flip evaluator cannot submit orders', async () => {
     tokenId: 'up-token',
     marketId: String(bot.market.id),
     windowStart: bot.windowStart,
-    shares: 4,
-    matchedShares: 4,
+    shares: 7,
+    matchedShares: 7,
   }];
   bot.sideQuoteIsFresh = () => true;
-  bot.sweep = (_side, bookSide, shares) => bookSide === 'asks'
-    ? { complete: true, shares, totalCost: shares * 0.3, averagePrice: 0.3, fills: [{ price: 0.3, shares }] }
+  bot.sweep = (_side, bookSide, shares) => bookSide === 'bids'
+    ? {
+      complete: true,
+      shares,
+      gross: shares * 0.6,
+      netProceeds: shares * 0.6,
+      averagePrice: 0.6,
+      fills: [{ price: 0.6, shares }],
+    }
     : null;
+  bot.buyPreviewForStake = (_side, stakeUsd) => ({
+    complete: true,
+    shares: 6,
+    gross: stakeUsd,
+    totalCost: stakeUsd + 0.08,
+    averagePrice: 0.5,
+    fills: [{ price: 0.5, shares: 6 }],
+  });
   bot.recordFlipConfirmation = () => ({ confirmed: true, count: 2 });
   bot.persist = async () => true;
+  bot.processStartedAt = bot.windowStart;
 
   const flipped = await bot.evaluateLiveFlip(trade, {
     ready: true,
@@ -436,12 +432,14 @@ test('legacy flip evaluator cannot submit orders', async () => {
     currentPrice: 100,
   }, bot.windowStart + 10_000);
 
-  assert.equal(flipped, false);
-  assert.deepEqual(submissions, []);
-  assert.equal(bot.liveOrders.some(order => ['SELL_FLIP', 'BUY_FLIP'].includes(order.action)), false);
+  assert.equal(flipped, true);
+  assert.deepEqual(submissions.map(order => order.action), ['SELL', 'BUY']);
+  assert.equal(bot.liveOrders.find(order => order.action === 'SELL_FLIP').assumedFailedByPolicy, true);
+  assert.equal(bot.liveHalted, false);
+  assert.equal(bot.liveOrders.find(order => order.action === 'BUY_FLIP').matchedShares, 6);
 });
 
-test('live submitter rejects new in-window flip orders', async () => {
+test('live submitter accepts source-qualified flip order actions', async () => {
   let placed;
   const trader = {
     async placeTakerOrder(tokenId, side, price, size) {
@@ -490,9 +488,14 @@ test('live submitter rejects new in-window flip orders', async () => {
     windowEnd: bot.windowEnd,
   });
 
-  assert.equal(order, null);
-  assert.equal(oppositeBuy, null);
-  assert.equal(placed, undefined);
+  assert.equal(order.status, 'MATCHED');
+  assert.equal(oppositeBuy.status, 'MATCHED');
+  assert.deepEqual(placed, {
+    tokenId: 'down-token',
+    side: 'BUY',
+    price: 0.99,
+    size: 3,
+  });
 });
 
 test('a partial exchange fill cancels the remainder and records only filled shares', async () => {
@@ -584,7 +587,7 @@ test('uncertain submission halts future orders and is never retried', async () =
   assert.equal(bot.liveHalted, true);
 });
 
-test('new flip sells are rejected before an uncertain submission can occur', async () => {
+test('an uncertain standalone flip sell is assumed failed without halting', async () => {
   let submissions = 0;
   const trader = {
     async placeTakerOrder() {
@@ -618,8 +621,9 @@ test('new flip sells are rejected before an uncertain submission can occur', asy
     windowEnd: bot.windowEnd,
   });
 
-  assert.equal(order, null);
-  assert.equal(submissions, 0);
+  assert.equal(order.status, 'SUBMISSION_UNCERTAIN');
+  assert.equal(order.assumedFailedByPolicy, true);
+  assert.equal(submissions, 1);
   assert.equal(bot.liveHalted, false);
 });
 
@@ -669,20 +673,33 @@ test('restores a sell-only uncertain halt as assumed no-fill but preserves buy h
   assert.equal(buyBot.liveHalted, true);
 });
 
-test('prepared legacy flip orders cannot reach the exchange', async () => {
+test('prepared flip sell orders can reach the exchange', async () => {
   let submissions = 0;
   const trader = {
     async placeTakerOrder() {
       submissions += 1;
-      return { id: 'should-not-submit' };
+      return { id: 'prepared-sell', status: 'UNFILLED' };
     },
+    async fetchOrder(id) { return { id, status: 'UNFILLED', sizeMatched: '0' }; },
   };
   const { bot } = createBot({ trader });
-  const order = await bot.submitPreparedSweepOrder({ action: 'SELL_FLIP' }, bot.model);
-  const buy = await bot.submitPreparedSweepOrder({ action: 'BUY_FLIP' }, bot.model);
-  assert.equal(order, null);
-  assert.equal(buy, null);
-  assert.equal(submissions, 0);
+  const order = await bot.submitPreparedSweepOrder({
+    localId: 'prepared-sell-local',
+    id: null,
+    action: 'SELL_FLIP',
+    side: 'UP',
+    tokenId: 'up-token',
+    limitPrice: 0.01,
+    shares: 5,
+    amountUsd: null,
+    matchedShares: 0,
+    status: 'SUBMITTING',
+    processed: false,
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+  }, bot.model);
+  assert.equal(order.status, 'UNFILLED');
+  assert.equal(submissions, 1);
   assert.equal(bot.liveHalted, false);
 });
 
@@ -692,11 +709,27 @@ test('order matching reads CLOB response aliases and terminal states', () => {
   assert.equal(isTerminalOrder({ status: 'LIVE', shares: 10, matchedShares: 10 }), true);
   assert.equal(isTerminalOrder({ status: 'LIVE', shares: 10, matchedShares: 3 }), false);
   assert.equal(isTerminalOrder({ status: 'UNFILLED', shares: 10, matchedShares: 0 }), true);
+  assert.equal(isTerminalOrder({ status: 'UNMATCHED', shares: 10, matchedShares: 0 }), true);
 });
 
-test('profitable live closes reduce the next size but respect the 10 floor', () => {
+test('USD market-buy accounting scales gross spend to the confirmed fill fraction', () => {
   const { bot } = createBot();
-  bot.nextEntryShares = 13;
+  const execution = bot.executionFromOrder({
+    action: 'BUY_ENTRY',
+    amountUsd: 3,
+    shares: 6,
+    accountingPriceEstimate: 0.5,
+    limitPrice: 0.99,
+  }, 4);
+
+  assert.equal(execution.gross, 2);
+  assert.equal(execution.averagePrice, 0.5);
+  assert.equal(execution.shares, 4);
+});
+
+test('profitable live closes reduce the next USD stake but respect the $3 floor', () => {
+  const { bot } = createBot();
+  bot.nextEntryStakeUsd = 4;
   const trade = {
     id: 'trade-1',
     status: 'OPEN',
@@ -717,7 +750,7 @@ test('profitable live closes reduce the next size but respect the 10 floor', () 
     fills: [],
   }, 10_000, 'PROFITABLE_MODEL_FLIP', 'DOWN');
   assert.equal(trade.realizedPnl, 2);
-  assert.equal(bot.nextEntryShares, 10);
+  assert.equal(bot.nextEntryStakeUsd, 3);
   assert.equal(trade.sizingOutcome, 'WIN');
 });
 

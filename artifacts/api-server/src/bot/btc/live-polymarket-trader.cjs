@@ -80,17 +80,14 @@ class LivePolymarketTrader {
     }
     let response;
     try {
-      const signedOrder = await this.client.createLimitOrder({
+      const isBuy = side === 'BUY';
+      response = await this.client.placeMarketOrder({
         assetId: String(tokenId),
-        side: side === 'BUY' ? this.sdk.OrderSide.BUY : this.sdk.OrderSide.SELL,
-        price: String(price),
-        size: String(size),
-        postOnly: false,
-      });
-      response = await this.client.postOrder({
-        ...signedOrder,
+        side: isBuy ? this.sdk.OrderSide.BUY : this.sdk.OrderSide.SELL,
+        ...(isBuy
+          ? { amount: String(size), maxPrice: String(price) }
+          : { shares: String(size), minPrice: String(price) }),
         orderType: this.sdk.OrderType.FAK,
-        postOnly: false,
       });
     } catch (error) {
       const message = String(error?.message || error);

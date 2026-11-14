@@ -166,9 +166,8 @@ test('upstream positions 429 exposes its HTTP status and retry delay', async () 
   );
 });
 
-test('taker orders preserve share sizing and post as immediate FAK orders', async () => {
-  let created;
-  let posted;
+test('taker buys use USD market amounts and sells use shares with FAK limits', async () => {
+  const requests = [];
   const trader = new LivePolymarketTrader('test-private-key', {
     sdk: {
       OrderSide: { BUY: 'BUY_SIDE', SELL: 'SELL_SIDE' },
@@ -176,25 +175,32 @@ test('taker orders preserve share sizing and post as immediate FAK orders', asyn
     },
   });
   trader.client = {
-    async createLimitOrder(request) {
-      created = request;
-      return { ...request, orderType: 'GTC_TYPE' };
-    },
-    async postOrder(order) {
-      posted = order;
-      return { ok: true, orderId: 'taker-order-1', status: 'MATCHED' };
+    async placeMarketOrder(request) {
+      requests.push(request);
+      return { ok: true, orderId: `taker-order-${requests.length}`, status: 'MATCHED' };
     },
   };
 
-  const response = await trader.placeTakerOrder('token-1', 'BUY', 0.99, 14);
+  const buy = await trader.placeTakerOrder('token-1', 'BUY', 0.99, 3);
+  const sell = await trader.placeTakerOrder('token-2', 'SELL', 0.01, 6.25);
 
-  assert.equal(created.assetId, 'token-1');
-  assert.equal(created.side, 'BUY_SIDE');
-  assert.equal(created.price, '0.99');
-  assert.equal(created.size, '14');
-  assert.equal(created.postOnly, false);
-  assert.equal(posted.orderType, 'FAK_TYPE');
-  assert.equal(posted.postOnly, false);
-  assert.equal(response.id, 'taker-order-1');
-  assert.equal(response.status, 'MATCHED');
+  assert.deepEqual(requests, [
+    {
+      assetId: 'token-1',
+      side: 'BUY_SIDE',
+      amount: '3',
+      maxPrice: '0.99',
+      orderType: 'FAK_TYPE',
+    },
+    {
+      assetId: 'token-2',
+      side: 'SELL_SIDE',
+      shares: '6.25',
+      minPrice: '0.01',
+      orderType: 'FAK_TYPE',
+    },
+  ]);
+  assert.equal(buy.id, 'taker-order-1');
+  assert.equal(sell.id, 'taker-order-2');
+  assert.equal(buy.status, 'MATCHED');
 });

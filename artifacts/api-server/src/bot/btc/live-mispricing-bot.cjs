@@ -11,7 +11,6 @@ const SUBMISSION_UNCERTAIN_HALT_REASON = 'Order submission outcome is uncertain;
 const ORDER_RECONCILIATION_HALT_REASON = 'An existing order could not be reconciled; new orders are blocked.';
 const ORDER_ID_MISSING_HALT_REASON = 'A saved submission has no exchange order ID; it must be reconciled manually.';
 const RESTORED_ORDER_ID_MISSING_HALT_REASON = 'A saved order has no exchange order ID; automatic resubmission is blocked.';
-const CANDLE_STREAK_MEAN_REVERSION_THRESHOLD = 3;
 const RECOVERABLE_ORDER_HALT_REASONS = new Set([
   SUBMISSION_UNCERTAIN_HALT_REASON,
   ORDER_RECONCILIATION_HALT_REASON,
@@ -19,7 +18,7 @@ const RECOVERABLE_ORDER_HALT_REASONS = new Set([
   RESTORED_ORDER_ID_MISSING_HALT_REASON,
 ]);
 const TERMINAL_ORDER_STATUSES = new Set([
-  'MATCHED', 'FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED', 'UNFILLED',
+  'MATCHED', 'FILLED', 'CANCELLED', 'CANCELED', 'REJECTED', 'EXPIRED', 'UNFILLED', 'UNMATCHED',
 ]);
 
 function round(value, digits = 8) {
@@ -106,66 +105,6 @@ function safeErrorCode(error) {
     ? code : null;
 }
 
-function getCandleSignalPriority(candles) {
-  const closedCandles = (Array.isArray(candles) ? candles : [])
-    .filter(candle => candle?.closed !== false
-      && Number.isFinite(Number(candle?.open))
-      && Number.isFinite(Number(candle?.close))
-      && Number(candle.open) > 0
-      && Number(candle.close) > 0)
-    .slice(-CANDLE_STREAK_MEAN_REVERSION_THRESHOLD);
-  const latest = closedCandles.at(-1);
-  if (!latest) {
-    return {
-      side: null,
-      color: 'UNKNOWN',
-      streak: 0,
-      meanReversion: false,
-      reason: 'Closed candle data is unavailable; no signal side is allowed.',
-    };
-  }
-
-  const color = Number(latest.close) > Number(latest.open)
-    ? 'GREEN'
-    : Number(latest.close) < Number(latest.open) ? 'RED' : 'DOJI';
-  if (color === 'DOJI') {
-    return {
-      side: null,
-      color,
-      streak: 0,
-      meanReversion: false,
-      reason: 'The latest closed candle is a doji; no signal side is allowed.',
-    };
-  }
-
-  let streak = 0;
-  for (let index = closedCandles.length - 1; index >= 0; index -= 1) {
-    const candle = closedCandles[index];
-    const candleColor = Number(candle.close) > Number(candle.open)
-      ? 'GREEN'
-      : Number(candle.close) < Number(candle.open) ? 'RED' : 'DOJI';
-    if (candleColor !== color) break;
-    streak += 1;
-  }
-  const meanReversion = streak >= CANDLE_STREAK_MEAN_REVERSION_THRESHOLD;
-  const trendSide = color === 'GREEN' ? 'UP' : 'DOWN';
-  const side = meanReversion
-    ? (trendSide === 'UP' ? 'DOWN' : 'UP')
-    : trendSide;
-  const streakLabel = meanReversion
-    ? `${CANDLE_STREAK_MEAN_REVERSION_THRESHOLD}+`
-    : String(streak);
-  return {
-    side,
-    color,
-    streak: Math.min(streak, CANDLE_STREAK_MEAN_REVERSION_THRESHOLD),
-    meanReversion,
-    reason: meanReversion
-      ? `Only ${side} signals are allowed after ${streakLabel} consecutive ${color.toLowerCase()} candles (mean reversion).`
-      : `Only ${side} signals are allowed after the latest ${color.toLowerCase()} candle.`,
-  };
-}
-
 function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -174,13 +113,19 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   constructor(options = {}) {
     const config = {
       ...DEFAULT_CONFIG,
-      STRATEGY_VERSION: 'btc-live-mispricing-candle-streak-gate-v2',
+      STRATEGY_VERSION: 'btc-live-mispricing-source-parity-usd-stake-v1',
+      // Legacy share sizing remains only for old state compatibility. New orders
+      // are budgeted in USDC and the exchange determines the filled share count.
       BASE_SHARES: 10,
       LOSS_SIZE_STEP_SHARES: 2,
       WIN_SIZE_REDUCTION_SHARES: 3,
+      BASE_STAKE_USD: 3,
+      LOSS_STAKE_STEP_USD: 1,
+      WIN_STAKE_REDUCTION_USD: 1.5,
       ...(options.config || {}),
     };
     super({ ...options, config });
+    this.nextEntryStakeUsd = round(this.config.BASE_STAKE_USD, 2);
     this.trader = options.trader || null;
     this.tradingEnabled = options.tradingEnabled === true;
     this.orderTimeoutMs = Math.max(500, Number(options.orderTimeoutMs) || 1_500);
@@ -224,6 +169,18 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
 
   restoreState(state) {
     super.restoreState(state);
+    const savedStake = Number(state.nextEntryStakeUsd);
+    if (Number(state.stakeSizingVersion) === 1 && Number.isFinite(savedStake)) {
+      this.nextEntryStakeUsd = Math.max(
+        this.config.BASE_STAKE_USD,
+        round(savedStake, 2),
+      );
+    } else {
+      // Start the new USD sizing progression at its floor without deleting the
+      // prior live ledger or replaying old share-sized outcomes into it.
+      this.sizingGeneration = Math.max(0, Math.floor(Number(this.sizingGeneration) || 0)) + 1;
+      this.nextEntryStakeUsd = round(this.config.BASE_STAKE_USD, 2);
+    }
     this.historyResetRequestId = String(state.historyResetRequestId || '');
     this.liveOrders = Array.isArray(state.liveOrders) ? state.liveOrders : [];
     // Ignore legacy flip state so an old pending flip cannot submit a new order.
@@ -273,6 +230,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   persistentStateSnapshot() {
     return {
       ...super.persistentStateSnapshot(),
+      stakeSizingVersion: 1,
+      nextEntryStakeUsd: this.nextEntryStakeUsd,
       liveOrders: this.liveOrders,
       pendingFlip: this.pendingFlip,
       liveHalted: this.liveHalted,
@@ -630,6 +589,33 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     return this.evaluatePromise;
   }
 
+  buyPreviewForStake(side, stakeUsd) {
+    const budget = Number(stakeUsd);
+    if (!Number.isFinite(budget) || budget < this.config.BASE_STAKE_USD
+      || !this.market || !this.sideQuoteIsFresh(side, this.now())) return null;
+    const tokenId = String(this.market.tokens?.[side] || '');
+    const asks = this.books.get(tokenId)?.asks;
+    if (!Array.isArray(asks) || asks.length === 0) return null;
+
+    let remainingUsd = budget;
+    let requestedShares = 0;
+    for (const level of asks) {
+      const price = Number(level.price);
+      const available = Math.max(0, Number(level.availableSize) || 0);
+      if (!Number.isFinite(price) || price <= 0 || price > MAX_TAKER_BUY_PRICE) break;
+      if (available <= EPSILON) continue;
+      const levelUsd = Math.min(remainingUsd, available * price);
+      requestedShares += levelUsd / price;
+      remainingUsd -= levelUsd;
+      if (remainingUsd <= 1e-7) break;
+    }
+    if (remainingUsd > 1e-6 || requestedShares <= EPSILON) return null;
+
+    const preview = this.sweep(side, 'asks', requestedShares);
+    if (!preview?.complete || preview.gross > budget + 1e-6) return null;
+    return { ...preview, stakeUsd: round(budget, 2) };
+  }
+
   async evaluateLive(now) {
     if (!this.market || this.windowStart == null || !this.storageHealthy) return false;
     const model = this.modelSnapshot(now);
@@ -641,14 +627,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     }
     const openTrade = this.currentOpenTrade();
     if (openTrade) {
-      this.currentSignal = {
-        side: openTrade.side,
-        reason: this.liveHalted
-          ? this.liveHaltReason
-          : 'Holding this position to market resolution; in-window sells and opposite-side re-entries are disabled.',
-        edgePerShare: null,
-      };
-      return false;
+      return this.evaluateLiveFlip(openTrade, model, now);
     }
     if (this.entryTriggeredThisWindow || now >= this.windowEnd) return false;
     if (this.windowStart < this.processStartedAt) {
@@ -659,48 +638,46 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       };
       return false;
     }
-    const shares = this.nextEntryShares;
-    const candlePriority = getCandleSignalPriority(this.priceFeed.snapshot?.()?.candles);
-    if (!candlePriority.side) {
-      this.currentSignal = {
-        side: null,
-        reason: `${candlePriority.reason} Waiting for a clear completed candle before entering.`,
-        edgePerShare: null,
-      };
-      return false;
-    }
-    const candidates = [candlePriority.side].map(side => {
-      if (!this.sideQuoteIsFresh(side, now)) return null;
-      const preview = this.sweep(side, 'asks', shares);
-      if (!preview?.complete) return null;
+    const stakeUsd = this.nextEntryStakeUsd;
+    const candidates = ['UP', 'DOWN'].map(side => {
+      const preview = this.buyPreviewForStake(side, stakeUsd);
+      if (!preview?.complete || preview.shares <= EPSILON) return null;
       const probability = side === 'UP' ? model.probabilityUp : model.probabilityDown;
-      const expectedProfit = probability * shares - preview.totalCost;
-      return { side, preview, edgePerShare: expectedProfit / shares };
+      const expectedProfit = probability * preview.shares - preview.totalCost;
+      return {
+        side,
+        preview,
+        stakeUsd,
+        edgePerShare: expectedProfit / preview.shares,
+      };
     }).filter(candidate => candidate
       && candidate.edgePerShare >= this.config.MIN_NET_EDGE_PER_SHARE);
     if (!candidates.length) {
       this.currentSignal = {
         side: null,
-        reason: `${candlePriority.reason} This allowed side does not clear the minimum net edge after visible ask-depth and fee estimates.`,
+        reason: 'Neither side clears the minimum net edge after visible ask-depth and fee estimates.',
         edgePerShare: null,
       };
       return false;
     }
+    candidates.sort((left, right) => right.edgePerShare - left.edgePerShare);
     const selected = candidates[0];
-    const selectionReason = candlePriority.reason;
+    const selectionReason = `${selected.side} has the strongest qualifying net edge among UP and DOWN.`;
     this.currentSignal = {
       side: selected.side,
       reason: this.tradingEnabled
-        ? `${selectionReason} Signal qualifies; submitting an immediate FAK taker buy capped at $${MAX_TAKER_BUY_PRICE.toFixed(2)}.`
+        ? `${selectionReason} Submitting a $${stakeUsd.toFixed(2)} FAK buy, capped at $${MAX_TAKER_BUY_PRICE.toFixed(2)}.`
         : `${selectionReason} Signal qualifies, but live order submission is disabled.`,
       edgePerShare: selected.edgePerShare,
     };
-    if (!this.tradingEnabled || !this.liveAccount.accountReady || this.liveHalted) return false;
+    if (!this.tradingEnabled || !this.liveAccount.accountReady || this.liveHalted
+      || this.activeLiveOrderId) return false;
     this.entryTriggeredThisWindow = true;
     const order = await this.submitSweepOrder({
       action: 'BUY_ENTRY',
       side: selected.side,
-      shares,
+      shares: selected.preview.shares,
+      amountUsd: stakeUsd,
       preview: selected.preview,
       model,
       edgePerShare: selected.edgePerShare,
@@ -708,10 +685,13 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       windowStart: this.windowStart,
       windowEnd: this.windowEnd,
     });
+    this.entryTriggeredThisWindow = order?.matchedShares > EPSILON
+      || ['SUBMISSION_UNCERTAIN', 'CANCEL_UNCERTAIN', 'RECONCILIATION_REQUIRED']
+        .includes(order?.status);
     this.currentSignal = {
       side: selected.side,
       reason: order?.matchedShares > 0
-        ? `${selectionReason} Bought ${round(order.matchedShares, 2)} ${selected.side} shares from exchange-confirmed fills.`
+        ? `${selectionReason} Exchange-confirmed fill: ${round(order.matchedShares, 2)} ${selected.side} shares for a $${stakeUsd.toFixed(2)} stake.`
         : order?.status === 'REJECTED'
           ? `${selectionReason} The exchange rejected the ${selected.side} entry; no fill was recorded.`
           : `${selectionReason} No shares filled for the ${selected.side} signal; the order was canceled or requires review.`,
@@ -721,33 +701,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     return Boolean(order?.matchedShares > 0);
   }
 
-  async evaluateLiveFlip(openTrade) {
-    this.currentSignal = {
-      side: openTrade?.side || null,
-      reason: 'Holding this position to market resolution; in-window sells and opposite-side re-entries are disabled.',
-      edgePerShare: null,
-    };
-    return false;
-
+  async evaluateLiveFlip(openTrade, model = this.model, now = this.now()) {
     const opposite = openTrade.side === 'UP' ? 'DOWN' : 'UP';
     if (this.flipAttemptsWindowStart !== this.windowStart) {
       this.flipAttemptsWindowStart = this.windowStart;
       this.flipAttemptsThisWindow = 0;
-    }
-    const legacySellAttempt = this.liveOrders.some(order =>
-      order.action === 'SELL_FLIP'
-      && !order.flipPairId
-      && Number(order.windowStart) === Number(this.windowStart));
-    if (legacySellAttempt) {
-      this.flipAttemptsThisWindow = Math.max(1, this.flipAttemptsThisWindow);
-      this.resetFlipConfirmation();
-      this.currentSignal = {
-        side: opposite,
-        reason: 'A prior sell attempt exists for this window; holding the existing position instead of duplicating the sell.',
-        edgePerShare: null,
-      };
-      this.schedulePersist(true);
-      return false;
     }
     if (!this.tradingEnabled || !this.liveAccount.accountReady || this.liveHalted
       || Math.max(this.flipsThisWindow, this.flipAttemptsThisWindow)
@@ -759,10 +717,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       return false;
     }
 
-    const estimatedSellShares = Math.floor(
-      (this.currentWindowFilledExposure(openTrade.side, openTrade) + 1e-9) * 100,
+    const confirmedExposure = this.currentWindowFilledExposure(openTrade.side, openTrade);
+    const sellShares = Math.floor(
+      (Math.min(confirmedExposure, Number(openTrade.shares) || confirmedExposure) + 1e-9) * 100,
     ) / 100;
-    if (estimatedSellShares <= EPSILON) {
+    if (sellShares <= EPSILON) {
       this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
@@ -771,33 +730,20 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       };
       return false;
     }
-    const estimatedBuyPreview = this.sweep(opposite, 'asks', estimatedSellShares);
-    const probability = opposite === 'UP' ? model.probabilityUp : model.probabilityDown;
-    const estimatedEdgePerShare = estimatedBuyPreview?.complete
-      ? (probability * estimatedSellShares - estimatedBuyPreview.totalCost) / estimatedSellShares
-      : null;
-    if (!estimatedBuyPreview?.complete || estimatedEdgePerShare == null
-      || estimatedEdgePerShare < this.config.MIN_FLIP_NET_EDGE_PER_SHARE) {
+    const salePreview = this.sweep(openTrade.side, 'bids', sellShares);
+    if (!salePreview?.complete
+      || salePreview.netProceeds - (Number(openTrade.totalCost) || 0) <= EPSILON) {
       this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
-        reason: !estimatedBuyPreview?.complete
-          ? `Holding: visible asks do not cover the estimated ${estimatedSellShares} opposite shares.`
-          : `Holding: opposite edge is below the $${this.config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} flip threshold.`,
-        edgePerShare: estimatedEdgePerShare,
+        reason: !salePreview?.complete
+          ? `Holding: visible bids do not cover all ${sellShares} confirmed ${openTrade.side} shares.`
+          : 'Holding: selling the current position is not profitable after estimated fees.',
+        edgePerShare: null,
       };
       return false;
     }
-    const confirmation = this.recordFlipConfirmation(opposite, model, now);
-    if (!confirmation.confirmed) {
-      this.currentSignal = {
-        side: opposite,
-        reason: `Waiting for ${opposite} confirmation (${confirmation.count}/${this.config.FLIP_CONFIRMATION_UPDATES} fresh ticks).`,
-        edgePerShare: estimatedEdgePerShare,
-      };
-      return false;
-    }
-    this.resetFlipConfirmation();
+
     const tokenId = String(this.market.tokens?.[openTrade.side] || '');
     if (!tokenId
       || String(openTrade.marketId || '') !== String(this.market.id)
@@ -806,70 +752,39 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       this.currentSignal = {
         side: opposite,
         reason: 'The open position does not match this window’s market and outcome token; no sell was submitted.',
-        edgePerShare: estimatedEdgePerShare,
-      };
-      return false;
-    }
-    const confirmedExposure = this.currentWindowFilledExposure(
-      openTrade.side,
-      openTrade,
-    );
-    if (!tokenId || confirmedExposure <= EPSILON) {
-      this.currentSignal = {
-        side: opposite,
-        reason: `No confirmed current-window ${openTrade.side} fills were found for this market token; checking again on the next signal.`,
-        edgePerShare: estimatedEdgePerShare,
+        edgePerShare: null,
       };
       return false;
     }
 
-    let balance;
-    try {
-      if (typeof this.trader?.getSellableShares !== 'function') {
-        throw new Error('Current-token balance refresh is unavailable.');
-      }
-      balance = await this.trader.getSellableShares(tokenId);
-    } catch (error) {
-      this.currentSignal = {
-        side: opposite,
-        reason: `Could not refresh the ${openTrade.side} token balance; will retry on the next signal.`,
-        edgePerShare: estimatedEdgePerShare,
-      };
-      this.log('LIVE_FLIP_BALANCE_REFRESH_FAILED', errorText(error), {
-        marketId: String(this.market.id),
-        tokenId,
-        windowStart: this.windowStart,
-      });
-      return false;
-    }
-    const sellShares = Math.floor(
-      (Math.min(confirmedExposure, Number(balance?.shares) || 0) + 1e-9) * 100,
-    ) / 100;
-    if (sellShares <= EPSILON) {
-      this.currentSignal = {
-        side: opposite,
-        reason: `No sellable ${openTrade.side} shares are available for the current market token yet; will recheck on the next signal.`,
-        edgePerShare: estimatedEdgePerShare,
-      };
-      return false;
-    }
-
-    const buyPreview = this.sweep(opposite, 'asks', sellShares);
-    const edgePerShare = buyPreview?.complete
-      ? (probability * sellShares - buyPreview.totalCost) / sellShares
+    const nextStakeUsd = this.sizeAfterOutcome(this.nextEntryStakeUsd, 'WIN');
+    const buyPreview = this.buyPreviewForStake(opposite, nextStakeUsd);
+    const probability = opposite === 'UP' ? model.probabilityUp : model.probabilityDown;
+    const edgePerShare = buyPreview?.complete && buyPreview.shares > EPSILON
+      ? (probability * buyPreview.shares - buyPreview.totalCost) / buyPreview.shares
       : null;
     if (!buyPreview?.complete || edgePerShare == null
       || edgePerShare < this.config.MIN_FLIP_NET_EDGE_PER_SHARE) {
+      this.resetFlipConfirmation();
       this.currentSignal = {
         side: opposite,
         reason: !buyPreview?.complete
-          ? `Holding: visible asks do not cover all ${sellShares} opposite shares.`
+          ? `Holding: visible asks cannot fill the planned $${nextStakeUsd.toFixed(2)} opposite-side stake.`
           : `Holding: opposite edge is below the $${this.config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} flip threshold.`,
         edgePerShare,
       };
       return false;
     }
-    const salePreview = this.sweep(openTrade.side, 'bids', sellShares);
+    const confirmation = this.recordFlipConfirmation(opposite, model, now);
+    if (!confirmation.confirmed) {
+      this.currentSignal = {
+        side: opposite,
+        reason: `Waiting for ${opposite} confirmation (${confirmation.count}/${this.config.FLIP_CONFIRMATION_UPDATES} fresh ticks).`,
+        edgePerShare,
+      };
+      return false;
+    }
+    this.resetFlipConfirmation();
 
     const flipPairId = `flip-pair-${this.windowStart}-${this.liveOrders.length + 1}`;
     this.pendingFlip = {
@@ -880,7 +795,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       toSide: opposite,
       targetShares: sellShares,
       sellShares,
-      buyShares: sellShares,
+      buyStakeUsd: nextStakeUsd,
+      buyShares: buyPreview.shares,
       windowStart: this.windowStart,
       windowEnd: this.windowEnd,
       startedAt: now,
@@ -903,7 +819,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     const buyOrder = this.createSweepOrder({
       action: 'BUY_FLIP',
       side: opposite,
-      shares: sellShares,
+      shares: buyPreview.shares,
+      amountUsd: nextStakeUsd,
       preview: buyPreview,
       model,
       edgePerShare,
@@ -942,12 +859,14 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     }
 
     this.log('LIVE_FLIP_PAIR_SUBMITTED',
-      `Submitted independent ${sellShares}-share sell and buy orders for the ${openTrade.side}-to-${opposite} flip.`,
+      `Submitted an independent sale of ${sellShares} ${openTrade.side} shares and a $${nextStakeUsd.toFixed(2)} ${opposite} buy for the flip.`,
       {
         flipPairId,
         fromSide: openTrade.side,
         toSide: opposite,
-        requestedShares: sellShares,
+        sellRequestedShares: sellShares,
+        buyStakeUsd: nextStakeUsd,
+        buyEstimatedShares: buyPreview.shares,
         sellMatchedShares: submittedSell?.matchedShares || 0,
         buyMatchedShares: submittedBuy?.matchedShares || 0,
         sellStatus: submittedSell?.status || 'NOT_SUBMITTED',
@@ -955,7 +874,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       });
     this.currentSignal = {
       side: opposite,
-      reason: `Paired orders requested ${sellShares} shares each; sell ${submittedSell?.status || 'NOT_SUBMITTED'}, buy ${submittedBuy?.status || 'NOT_SUBMITTED'}.`,
+      reason: `Flip submitted independently: sell ${sellShares} ${openTrade.side} shares and buy $${nextStakeUsd.toFixed(2)} of ${opposite}; sell ${submittedSell?.status || 'NOT_SUBMITTED'}, buy ${submittedBuy?.status || 'NOT_SUBMITTED'}.`,
       edgePerShare,
     };
     this.schedulePersist(true);
@@ -987,23 +906,16 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   async submitSweepOrder({
-    action, side, shares, preview, model, edgePerShare, entryReason, tradeId,
+    action, side, shares, amountUsd, preview, model, edgePerShare, entryReason, tradeId,
     windowStart, windowEnd, flipPairId,
   }) {
-    if (action === 'SELL_FLIP' || action === 'BUY_FLIP') {
-      this.log('LIVE_FLIP_DISABLED', 'In-window flip orders are disabled; positions are held to resolution.', {
-        action,
-        side,
-        windowStart,
-      });
-      return null;
-    }
     if (!this.tradingEnabled || !this.liveAccount.accountReady || this.liveHalted) return null;
     if (this.activeLiveOrderId) return null;
     const order = this.createSweepOrder({
       action,
       side,
       shares,
+      amountUsd,
       preview,
       edgePerShare,
       entryReason,
@@ -1023,19 +935,23 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   createSweepOrder({
-    action, side, shares, preview, edgePerShare, entryReason, tradeId,
+    action, side, shares, amountUsd, preview, edgePerShare, entryReason, tradeId,
     windowStart, windowEnd, flipPairId,
   }) {
     const lastFill = preview?.fills?.[preview.fills.length - 1];
     const isSell = action.startsWith('SELL');
+    const stakeUsd = isSell
+      ? null
+      : Number(amountUsd ?? this.nextEntryStakeUsd ?? this.config.BASE_STAKE_USD);
     const priceLimit = isSell ? MIN_TAKER_SELL_PRICE : MAX_TAKER_BUY_PRICE;
     const accountingPriceEstimate = Number(lastFill?.price) || priceLimit;
     const tokenId = String(this.market?.tokens?.[side] || '');
     if (!Number.isFinite(accountingPriceEstimate) || accountingPriceEstimate <= 0
       || !Number.isFinite(priceLimit) || priceLimit <= 0 || priceLimit > 1
       || !Number.isFinite(Number(shares)) || Number(shares) <= 0
+      || (!isSell && (!Number.isFinite(stakeUsd) || stakeUsd < this.config.BASE_STAKE_USD))
       || !tokenId) {
-      this.haltLiveTrading('A candidate order had an invalid size or limit price.');
+      this.haltLiveTrading('A candidate order had an invalid USD stake, share estimate, or limit price.');
       return null;
     }
     const localId = `live-${Date.now()}-${this.liveOrders.length + 1}`;
@@ -1050,6 +966,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       windowStart,
       windowEnd,
       shares: Number(shares),
+      amountUsd: isSell ? null : round(stakeUsd, 2),
       matchedShares: 0,
       orderType: 'FAK',
       limitPrice: priceLimit,
@@ -1071,14 +988,13 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   async submitPreparedSweepOrder(order, model) {
-    if (order?.action === 'SELL_FLIP' || order?.action === 'BUY_FLIP') return null;
     const isSell = order.action.startsWith('SELL');
     try {
       const response = await this.trader.placeTakerOrder(
         order.tokenId,
         isSell ? 'SELL' : 'BUY',
         order.limitPrice,
-        order.shares,
+        isSell ? order.shares : order.amountUsd,
       );
       order.id = response.id;
       order.status = orderStatus(response);
@@ -1303,7 +1219,9 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
 
   async processFinalOrder(order, model = this.model) {
     if (order.processed) return;
-    const filled = Math.min(order.shares, order.matchedShares);
+    const filled = order.amountUsd != null
+      ? Math.max(0, Number(order.matchedShares) || 0)
+      : Math.min(order.shares, order.matchedShares);
     if (filled <= EPSILON) {
       if (['MATCHED', 'FILLED'].includes(order.status)) {
         order.status = 'RECONCILIATION_REQUIRED';
@@ -1377,13 +1295,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         trade.exitOrderId = order.id;
         trade.fillPriceBasis = 'conservative-limit-price';
         if (!order.flipPairId) this.flipsThisWindow += 1;
-        if (!order.flipPairId && trade.realizedPnl > EPSILON && this.pendingFlip) {
-          this.pendingFlip.phase = 'BUY';
-          this.pendingFlip.targetShares = this.nextEntryShares;
-          this.pendingFlip.sellOrderId = order.id;
-        } else if (!order.flipPairId) {
-          this.pendingFlip = null;
-        }
+        if (!order.flipPairId) this.pendingFlip = null;
       } else {
         this.closePositionPartially(trade, execution, order);
         if (!order.flipPairId) this.pendingFlip = null;
@@ -1398,8 +1310,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
 
   executionFromOrder(order, shares) {
     const accountingPrice = Number(order.accountingPriceEstimate) || order.limitPrice;
-    const gross = shares * accountingPrice;
-    const fees = takerFeeAt(accountingPrice, shares, feeParameters(this.market));
+    const gross = order.amountUsd != null && Number(order.shares) > 0
+      ? Number(order.amountUsd) * Math.min(1, shares / Number(order.shares))
+      : shares * accountingPrice;
+    const averagePrice = gross / Math.max(EPSILON, shares);
+    const fees = takerFeeAt(averagePrice, shares, feeParameters(this.market));
     const netProceeds = gross - fees;
     const totalCost = gross + fees;
     return {
@@ -1412,10 +1327,10 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       fees,
       totalCost,
       netProceeds,
-      averagePrice: accountingPrice,
+      averagePrice,
       complete: shares >= order.shares - EPSILON,
       fills: [{
-        price: accountingPrice,
+        price: averagePrice,
         shares,
         gross,
         fee: fees,
@@ -1551,6 +1466,53 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     await this.persist();
   }
 
+  sizeAfterOutcome(stakeUsd, outcome) {
+    const current = Math.max(this.config.BASE_STAKE_USD, Number(stakeUsd) || 0);
+    return outcome === 'LOSS'
+      ? round(current + this.config.LOSS_STAKE_STEP_USD, 2)
+      : Math.max(
+        this.config.BASE_STAKE_USD,
+        round(current - this.config.WIN_STAKE_REDUCTION_USD, 2),
+      );
+  }
+
+  applySizingAdjustment(trade, outcome, now, reason, adjustmentType) {
+    if (!trade || trade.sizingAdjustmentApplied || !['WIN', 'LOSS'].includes(outcome)) {
+      return false;
+    }
+    const previous = Math.max(
+      this.config.BASE_STAKE_USD,
+      Number(this.nextEntryStakeUsd) || this.config.BASE_STAKE_USD,
+    );
+    const next = this.sizeAfterOutcome(previous, outcome);
+    trade.sizingAdjustmentApplied = true;
+    trade.sizingOutcome = outcome;
+    trade.sizingAdjustedAt = now;
+    trade.sizingGeneration = this.sizingGeneration;
+    trade.sizingUnit = 'USD';
+    trade.sizeBeforeAdjustmentUsd = previous;
+    trade.sizeAfterAdjustmentUsd = next;
+    if (trade.outcome === outcome && ['WIN', 'LOSS'].includes(trade.outcome)) {
+      trade.sizeBeforeResolutionUsd = previous;
+      trade.sizeAfterResolutionUsd = next;
+    }
+    this.nextEntryStakeUsd = next;
+    this.log('NEXT_ENTRY_STAKE_UPDATED',
+      `${reason}; next order stake is $${next.toFixed(2)}.`,
+      {
+        tradeId: trade.id,
+        outcome,
+        adjustmentType,
+        previousStakeUsd: previous,
+        nextStakeUsd: next,
+        lossIncrementUsd: this.config.LOSS_STAKE_STEP_USD,
+        winReductionUsd: this.config.WIN_STAKE_REDUCTION_USD,
+        minimumStakeUsd: this.config.BASE_STAKE_USD,
+        at: now,
+      });
+    return true;
+  }
+
   async persist() {
     if (!this.stateStore || !this.storageHealthy) return false;
     const snapshot = this.persistentStateSnapshot();
@@ -1576,10 +1538,21 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   snapshot() {
     const base = super.snapshot();
     const strategy = { ...(base.strategy || {}) };
-    const candlePriority = getCandleSignalPriority(base.binance?.candles);
-    delete strategy.minimumFlipNetEdgePerShare;
-    delete strategy.flipConfirmationUpdates;
-    delete strategy.flipConfirmationIntervalMs;
+    for (const key of [
+      'baseShares',
+      'nextEntryShares',
+      'lossIncreaseShares',
+      'winReductionShares',
+      'minimumShares',
+      'minimumFlipNetEdgePerShare',
+      'flipConfirmationUpdates',
+      'flipConfirmationIntervalMs',
+      'allowedSignalSide',
+      'allowedSignalReason',
+      'previousCandleColor',
+      'sameColorStreak',
+      'meanReversionPriority',
+    ]) delete strategy[key];
     const status = this.liveHalted
       ? 'HALTED'
       : !this.tradingEnabled
@@ -1598,21 +1571,25 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       haltRecovery: this.liveHalted ? this.submissionHaltRecoveryDiagnostics() : null,
       strategy: {
         ...strategy,
-        name: 'BTC 5-minute Binance mispricing',
-        entryOrderType: 'FAK taker sweep',
-        intraWindowExitPolicy: 'Hold to market resolution; no in-window sells',
+        name: 'BTC 5-minute Binance mispricing (source strategy)',
+        entryOrderType: 'FAK market taker',
+        intraWindowExitPolicy: 'One profitable, qualified opposite-side flip per window',
         maxBuyPrice: MAX_TAKER_BUY_PRICE,
-        baseShares: this.config.BASE_SHARES,
-        lossIncreaseShares: this.config.LOSS_SIZE_STEP_SHARES,
-        winReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
-        minimumShares: this.config.BASE_SHARES,
+        minSellPrice: MIN_TAKER_SELL_PRICE,
+        sizingUnit: 'USD',
+        baseStakeUsd: this.config.BASE_STAKE_USD,
+        nextEntryStakeUsd: this.nextEntryStakeUsd,
+        lossIncreaseUsd: this.config.LOSS_STAKE_STEP_USD,
+        winReductionUsd: this.config.WIN_STAKE_REDUCTION_USD,
+        minimumStakeUsd: this.config.BASE_STAKE_USD,
         volatilityCandles: this.config.VOLATILITY_CANDLES,
         minEntryEdge: this.config.MIN_NET_EDGE_PER_SHARE,
-        allowedSignalSide: candlePriority.side,
-        allowedSignalReason: candlePriority.reason,
-        previousCandleColor: candlePriority.color,
-        sameColorStreak: candlePriority.streak,
-        meanReversionPriority: candlePriority.meanReversion,
+        minimumFlipNetEdgePerShare: this.config.MIN_FLIP_NET_EDGE_PER_SHARE,
+        flipConfirmationUpdates: this.config.FLIP_CONFIRMATION_UPDATES,
+        flipConfirmationIntervalMs: this.config.FLIP_CONFIRMATION_INTERVAL_MS,
+        maxFlipsPerWindow: this.config.MAX_FLIPS_PER_WINDOW,
+        allowedSignalSide: 'UP and DOWN',
+        allowedSignalReason: 'Both sides are evaluated against Binance fair value and visible CLOB asks.',
       },
       account: {
         ...this.liveAccount,
@@ -1622,7 +1599,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         losses: base.account?.losses ?? 0,
         settledPositions: base.account?.settledPositions ?? 0,
         botTradeCount: base.account?.tradeCount ?? 0,
-        sizingShares: this.nextEntryShares,
+        sizingStakeUsd: this.nextEntryStakeUsd,
       },
       liveOrders: this.liveOrders.slice(-100).reverse(),
       pendingFlip: this.pendingFlip,
@@ -1633,7 +1610,6 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
 
 module.exports = {
   LiveBtcMispricingBot,
-  getCandleSignalPriority,
   matchedShares,
   orderStatus,
   isTerminalOrder,
