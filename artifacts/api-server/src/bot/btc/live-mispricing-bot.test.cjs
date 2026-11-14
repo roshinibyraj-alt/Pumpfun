@@ -108,7 +108,48 @@ test('live entry records only the amount confirmed by the exchange', async () =>
   assert.ok(saves.length >= 2);
 });
 
-test('flip submits independent sell and same-size buy even when the sell does not fill', async () => {
+test('normal live entry still submits the sized base entry after flip removal', async () => {
+  let placed;
+  const trader = {
+    async placeTakerOrder(tokenId, action, price, size) {
+      placed = { tokenId, action, price, size };
+      return { id: 'entry-after-flip-removal', status: 'MATCHED' };
+    },
+    async fetchOrder() {
+      return { id: 'entry-after-flip-removal', status: 'MATCHED', sizeMatched: '10' };
+    },
+  };
+  const { bot } = createBot({ trader });
+  const now = bot.now();
+  bot.windowStart = Math.floor(now / bot.config.WINDOW_MS) * bot.config.WINDOW_MS;
+  bot.windowEnd = bot.windowStart + bot.config.WINDOW_MS;
+  bot.processStartedAt = bot.windowStart;
+  bot.currentOpenTrade = () => null;
+  bot.modelSnapshot = () => ({
+    ready: true,
+    probabilityUp: 0.9,
+    probabilityDown: 0.1,
+    currentPrice: 100,
+  });
+  bot.sideQuoteIsFresh = () => true;
+  bot.sweep = (_side, bookSide, shares) => bookSide === 'asks'
+    ? { complete: true, shares, totalCost: shares * 0.4, averagePrice: 0.4, fills: [{ price: 0.4, shares }] }
+    : null;
+
+  const entered = await bot.evaluateLive(now);
+
+  assert.equal(entered, true);
+  assert.deepEqual(placed, {
+    tokenId: 'up-token',
+    action: 'BUY',
+    price: 0.99,
+    size: 10,
+  });
+  assert.equal(bot.trades[0].shares, 10);
+  assert.equal(bot.trades[0].side, 'UP');
+});
+
+test('an open position ignores the opposite signal and remains held to resolution', async () => {
   const submissions = [];
   let sellSubmissionPending = false;
   let resolveSellSubmission;
@@ -176,27 +217,23 @@ test('flip submits independent sell and same-size buy even when the sell does no
   bot.recordFlipConfirmation = () => ({ confirmed: true, count: 2 });
   bot.persist = async () => true;
 
-  const flipped = await bot.evaluateLiveFlip(trade, {
+  bot.currentOpenTrade = () => trade;
+  bot.modelSnapshot = () => ({
     ready: true,
     probabilityUp: 0.2,
     probabilityDown: 0.8,
     currentPrice: 100,
-  }, bot.windowStart + 10_000);
+  });
+  const held = await bot.evaluateLive(bot.windowStart + 10_000);
 
-  assert.equal(flipped, true);
-  assert.equal(bothOrdersStarted, true, 'the buy starts before the sell submission returns');
-  assert.deepEqual(submissions, [
-    { tokenId: 'up-token', action: 'SELL', price: 0.01, size: 5 },
-    { tokenId: 'down-token', action: 'BUY', price: 0.99, size: 5 },
-  ]);
-  assert.equal(bot.trades.find(position => position.side === 'UP').status, 'OPEN');
-  assert.equal(bot.trades.find(position => position.side === 'DOWN').shares, 5);
-  assert.equal(bot.pendingFlip, null);
-  assert.equal(bot.flipAttemptsThisWindow, 1);
-  assert.equal(bot.flipsThisWindow, 0, 'a filled buy with an unfilled sell is not counted as a completed flip');
+  assert.equal(held, false);
+  assert.deepEqual(submissions, []);
+  assert.equal(trade.status, 'OPEN');
+  assert.match(bot.currentSignal.reason, /holding this position to market resolution/i);
+  assert.match(bot.currentSignal.reason, /in-window sells .* disabled/i);
 });
 
-test('an uncertain no-ID flip sell does not prevent the paired buy submission', async () => {
+test('legacy flip evaluator cannot submit orders', async () => {
   const submissions = [];
   const trader = {
     async getSellableShares(tokenId) {
@@ -253,17 +290,12 @@ test('an uncertain no-ID flip sell does not prevent the paired buy submission', 
     currentPrice: 100,
   }, bot.windowStart + 10_000);
 
-  assert.equal(flipped, true);
-  assert.deepEqual(submissions, [
-    { tokenId: 'up-token', action: 'SELL', price: 0.01, size: 4 },
-    { tokenId: 'down-token', action: 'BUY', price: 0.99, size: 4 },
-  ]);
-  assert.equal(bot.liveOrders.find(order => order.action === 'SELL_FLIP').status, 'SUBMISSION_UNCERTAIN');
-  assert.equal(bot.liveOrders.find(order => order.action === 'BUY_FLIP').matchedShares, 4);
-  assert.equal(bot.liveHalted, false);
+  assert.equal(flipped, false);
+  assert.deepEqual(submissions, []);
+  assert.equal(bot.liveOrders.some(order => ['SELL_FLIP', 'BUY_FLIP'].includes(order.action)), false);
 });
 
-test('flip FAK sells use the 1-cent minimum price rather than the visible bid', async () => {
+test('live submitter rejects new in-window flip orders', async () => {
   let placed;
   const trader = {
     async placeTakerOrder(tokenId, side, price, size) {
@@ -301,16 +333,20 @@ test('flip FAK sells use the 1-cent minimum price rather than the visible bid', 
     windowStart: bot.windowStart,
     windowEnd: bot.windowEnd,
   });
-
-  assert.deepEqual(placed, {
-    tokenId: 'up-token',
-    side: 'SELL',
-    price: 0.01,
-    size: 5,
+  const oppositeBuy = await bot.submitSweepOrder({
+    action: 'BUY_FLIP',
+    side: 'DOWN',
+    shares: 5,
+    preview: { fills: [{ price: 0.38, shares: 5 }] },
+    model: bot.model,
+    edgePerShare: 0.12,
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
   });
-  assert.equal(order.limitPrice, 0.01);
-  assert.equal(order.priceLimitType, 'MINIMUM');
-  assert.equal(order.accountingPriceEstimate, 0.62);
+
+  assert.equal(order, null);
+  assert.equal(oppositeBuy, null);
+  assert.equal(placed, undefined);
 });
 
 test('a partial exchange fill cancels the remainder and records only filled shares', async () => {
@@ -402,7 +438,7 @@ test('uncertain submission halts future orders and is never retried', async () =
   assert.equal(bot.liveHalted, true);
 });
 
-test('no-ID uncertain flip sells are preserved as assumed failures without halting', async () => {
+test('new flip sells are rejected before an uncertain submission can occur', async () => {
   let submissions = 0;
   const trader = {
     async placeTakerOrder() {
@@ -424,15 +460,6 @@ test('no-ID uncertain flip sells are preserved as assumed failures without halti
     marketId: String(bot.market.id),
   };
   bot.trades = [trade];
-  bot.pendingFlip = {
-    phase: 'SELL',
-    tradeId: trade.id,
-    fromSide: 'UP',
-    toSide: 'DOWN',
-    windowStart: bot.windowStart,
-    windowEnd: bot.windowEnd,
-  };
-
   const order = await bot.submitSweepOrder({
     action: 'SELL_FLIP',
     side: 'UP',
@@ -445,20 +472,9 @@ test('no-ID uncertain flip sells are preserved as assumed failures without halti
     windowEnd: bot.windowEnd,
   });
 
-  assert.equal(order.status, 'SUBMISSION_UNCERTAIN');
-  assert.equal(order.assumedFailedByPolicy, true);
-  assert.equal(order.assumptionPolicy, 'ASSUME_UNFILLED_AND_CONTINUE');
+  assert.equal(order, null);
+  assert.equal(submissions, 0);
   assert.equal(bot.liveHalted, false);
-  assert.equal(bot.pendingFlip, null);
-  assert.equal(bot.submissionHaltRecoveryDiagnostics().assumedFailedSellCount, 1);
-  assert.equal(bot.submissionHaltRecoveryDiagnostics().unresolvedOrderCount, 0);
-
-  bot.liveAccount.authenticated = true;
-  await bot.reconcileLiveOrders();
-  assert.equal(bot.liveHalted, false);
-  assert.equal(await bot.evaluateLiveFlip(trade, {}, bot.now()), false);
-  assert.equal(submissions, 1, 'the uncertain sell must not be retried in the same window');
-  assert.match(bot.currentSignal.reason, /holding the existing position/i);
 });
 
 test('restores a sell-only uncertain halt as assumed no-fill but preserves buy halts', () => {
@@ -507,32 +523,20 @@ test('restores a sell-only uncertain halt as assumed no-fill but preserves buy h
   assert.equal(buyBot.liveHalted, true);
 });
 
-test('a confirmed flip-sell rejection clears the pending flip without halting', async () => {
+test('prepared legacy flip orders cannot reach the exchange', async () => {
+  let submissions = 0;
   const trader = {
     async placeTakerOrder() {
-      const error = new Error('order rejected');
-      error.submissionUncertain = false;
-      throw error;
+      submissions += 1;
+      return { id: 'should-not-submit' };
     },
   };
   const { bot } = createBot({ trader });
-  bot.pendingFlip = { phase: 'SELL', tradeId: 'sell-trade-2' };
-
-  const order = await bot.submitSweepOrder({
-    action: 'SELL_FLIP',
-    side: 'UP',
-    shares: 10,
-    preview: { fills: [{ price: 0.62 }] },
-    model: bot.model,
-    edgePerShare: 0.12,
-    tradeId: 'sell-trade-2',
-    windowStart: bot.windowStart,
-    windowEnd: bot.windowEnd,
-  });
-
-  assert.equal(order.status, 'REJECTED');
-  assert.equal(order.processed, true);
-  assert.equal(bot.pendingFlip, null);
+  const order = await bot.submitPreparedSweepOrder({ action: 'SELL_FLIP' }, bot.model);
+  const buy = await bot.submitPreparedSweepOrder({ action: 'BUY_FLIP' }, bot.model);
+  assert.equal(order, null);
+  assert.equal(buy, null);
+  assert.equal(submissions, 0);
   assert.equal(bot.liveHalted, false);
 });
 
