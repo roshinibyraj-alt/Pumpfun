@@ -11,6 +11,7 @@ const SUBMISSION_UNCERTAIN_HALT_REASON = 'Order submission outcome is uncertain;
 const ORDER_RECONCILIATION_HALT_REASON = 'An existing order could not be reconciled; new orders are blocked.';
 const ORDER_ID_MISSING_HALT_REASON = 'A saved submission has no exchange order ID; it must be reconciled manually.';
 const RESTORED_ORDER_ID_MISSING_HALT_REASON = 'A saved order has no exchange order ID; automatic resubmission is blocked.';
+const CANDLE_STREAK_MEAN_REVERSION_THRESHOLD = 3;
 const RECOVERABLE_ORDER_HALT_REASONS = new Set([
   SUBMISSION_UNCERTAIN_HALT_REASON,
   ORDER_RECONCILIATION_HALT_REASON,
@@ -105,6 +106,66 @@ function safeErrorCode(error) {
     ? code : null;
 }
 
+function getCandleSignalPriority(candles) {
+  const closedCandles = (Array.isArray(candles) ? candles : [])
+    .filter(candle => candle?.closed !== false
+      && Number.isFinite(Number(candle?.open))
+      && Number.isFinite(Number(candle?.close))
+      && Number(candle.open) > 0
+      && Number(candle.close) > 0)
+    .slice(-CANDLE_STREAK_MEAN_REVERSION_THRESHOLD);
+  const latest = closedCandles.at(-1);
+  if (!latest) {
+    return {
+      side: null,
+      color: 'UNKNOWN',
+      streak: 0,
+      meanReversion: false,
+      reason: 'Closed candle data is unavailable; the strongest qualifying edge will be selected.',
+    };
+  }
+
+  const color = Number(latest.close) > Number(latest.open)
+    ? 'GREEN'
+    : Number(latest.close) < Number(latest.open) ? 'RED' : 'DOJI';
+  if (color === 'DOJI') {
+    return {
+      side: null,
+      color,
+      streak: 0,
+      meanReversion: false,
+      reason: 'The latest closed candle is a doji; the strongest qualifying edge will be selected.',
+    };
+  }
+
+  let streak = 0;
+  for (let index = closedCandles.length - 1; index >= 0; index -= 1) {
+    const candle = closedCandles[index];
+    const candleColor = Number(candle.close) > Number(candle.open)
+      ? 'GREEN'
+      : Number(candle.close) < Number(candle.open) ? 'RED' : 'DOJI';
+    if (candleColor !== color) break;
+    streak += 1;
+  }
+  const meanReversion = streak >= CANDLE_STREAK_MEAN_REVERSION_THRESHOLD;
+  const trendSide = color === 'GREEN' ? 'UP' : 'DOWN';
+  const side = meanReversion
+    ? (trendSide === 'UP' ? 'DOWN' : 'UP')
+    : trendSide;
+  const streakLabel = meanReversion
+    ? `${CANDLE_STREAK_MEAN_REVERSION_THRESHOLD}+`
+    : String(streak);
+  return {
+    side,
+    color,
+    streak: Math.min(streak, CANDLE_STREAK_MEAN_REVERSION_THRESHOLD),
+    meanReversion,
+    reason: meanReversion
+      ? `${side} is prioritized first after ${streakLabel} consecutive ${color.toLowerCase()} candles (mean reversion).`
+      : `${side} is prioritized first after the latest ${color.toLowerCase()} candle.`,
+  };
+}
+
 function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -113,6 +174,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   constructor(options = {}) {
     const config = {
       ...DEFAULT_CONFIG,
+      STRATEGY_VERSION: 'btc-live-mispricing-candle-streak-priority-v1',
       BASE_SHARES: 10,
       LOSS_SIZE_STEP_SHARES: 2,
       WIN_SIZE_REDUCTION_SHARES: 3,
@@ -598,6 +660,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       return false;
     }
     const shares = this.nextEntryShares;
+    const candlePriority = getCandleSignalPriority(this.priceFeed.snapshot?.()?.candles);
     const candidates = ['UP', 'DOWN'].map(side => {
       if (!this.sideQuoteIsFresh(side, now)) return null;
       const preview = this.sweep(side, 'asks', shares);
@@ -610,18 +673,27 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     if (!candidates.length) {
       this.currentSignal = {
         side: null,
-        reason: 'No side clears the minimum net edge after visible ask-depth and fee estimates.',
+        reason: `${candlePriority.reason} No side clears the minimum net edge after visible ask-depth and fee estimates.`,
         edgePerShare: null,
       };
       return false;
     }
-    candidates.sort((left, right) => right.edgePerShare - left.edgePerShare);
+    candidates.sort((left, right) => {
+      const leftPriority = left.side === candlePriority.side ? 0 : 1;
+      const rightPriority = right.side === candlePriority.side ? 0 : 1;
+      return leftPriority - rightPriority || right.edgePerShare - left.edgePerShare;
+    });
     const selected = candidates[0];
+    const selectionReason = candlePriority.side
+      ? selected.side === candlePriority.side
+        ? candlePriority.reason
+        : `Priority ${candlePriority.side} did not qualify; selecting the strongest qualifying ${selected.side} signal.`
+      : candlePriority.reason;
     this.currentSignal = {
       side: selected.side,
       reason: this.tradingEnabled
-        ? `Signal qualifies; submitting an immediate FAK taker buy capped at $${MAX_TAKER_BUY_PRICE.toFixed(2)}.`
-        : 'Signal qualifies, but live order submission is disabled.',
+        ? `${selectionReason} Signal qualifies; submitting an immediate FAK taker buy capped at $${MAX_TAKER_BUY_PRICE.toFixed(2)}.`
+        : `${selectionReason} Signal qualifies, but live order submission is disabled.`,
       edgePerShare: selected.edgePerShare,
     };
     if (!this.tradingEnabled || !this.liveAccount.accountReady || this.liveHalted) return false;
@@ -640,10 +712,10 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     this.currentSignal = {
       side: selected.side,
       reason: order?.matchedShares > 0
-        ? `Bought ${round(order.matchedShares, 2)} ${selected.side} shares from exchange-confirmed fills.`
+        ? `${selectionReason} Bought ${round(order.matchedShares, 2)} ${selected.side} shares from exchange-confirmed fills.`
         : order?.status === 'REJECTED'
-          ? `The exchange rejected the ${selected.side} entry; no fill was recorded.`
-          : `No shares filled for the ${selected.side} signal; the order was canceled or requires review.`,
+          ? `${selectionReason} The exchange rejected the ${selected.side} entry; no fill was recorded.`
+          : `${selectionReason} No shares filled for the ${selected.side} signal; the order was canceled or requires review.`,
       edgePerShare: selected.edgePerShare,
     };
     this.schedulePersist(true);
@@ -1505,6 +1577,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   snapshot() {
     const base = super.snapshot();
     const strategy = { ...(base.strategy || {}) };
+    const candlePriority = getCandleSignalPriority(base.binance?.candles);
     delete strategy.minimumFlipNetEdgePerShare;
     delete strategy.flipConfirmationUpdates;
     delete strategy.flipConfirmationIntervalMs;
@@ -1536,6 +1609,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         minimumShares: this.config.BASE_SHARES,
         volatilityCandles: this.config.VOLATILITY_CANDLES,
         minEntryEdge: this.config.MIN_NET_EDGE_PER_SHARE,
+        firstSignalPriority: candlePriority.side,
+        firstSignalPriorityReason: candlePriority.reason,
+        previousCandleColor: candlePriority.color,
+        sameColorStreak: candlePriority.streak,
+        meanReversionPriority: candlePriority.meanReversion,
       },
       account: {
         ...this.liveAccount,
@@ -1554,4 +1632,10 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 }
 
-module.exports = { LiveBtcMispricingBot, matchedShares, orderStatus, isTerminalOrder };
+module.exports = {
+  LiveBtcMispricingBot,
+  getCandleSignalPriority,
+  matchedShares,
+  orderStatus,
+  isTerminalOrder,
+};

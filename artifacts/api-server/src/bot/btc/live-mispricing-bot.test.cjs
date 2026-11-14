@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   LiveBtcMispricingBot,
+  getCandleSignalPriority,
   isTerminalOrder,
   matchedShares,
 } = require('./live-mispricing-bot.cjs');
@@ -41,6 +42,77 @@ function setFreshOrderSnapshot(bot, orders = []) {
   bot.liveAccount.orderSnapshotStatus = 'READY';
   bot.liveAccount.ordersSnapshotAt = new Date(bot.now()).toISOString();
 }
+
+test('candle priority follows one or two candles and reverses after a three-candle streak', () => {
+  const green = [
+    { open: 100, close: 101, closed: true },
+    { open: 101, close: 102, closed: true },
+    { open: 102, close: 103, closed: true },
+  ];
+  const red = green.map(candle => ({ open: candle.close, close: candle.open, closed: true }));
+
+  assert.deepEqual(getCandleSignalPriority(green.slice(-1)), {
+    side: 'UP',
+    color: 'GREEN',
+    streak: 1,
+    meanReversion: false,
+    reason: 'UP is prioritized first after the latest green candle.',
+  });
+  assert.equal(getCandleSignalPriority(green.slice(-2)).side, 'UP');
+  assert.equal(getCandleSignalPriority(green).side, 'DOWN');
+  assert.equal(getCandleSignalPriority(green).meanReversion, true);
+  assert.equal(getCandleSignalPriority(red.slice(-1)).side, 'DOWN');
+  assert.equal(getCandleSignalPriority(red.slice(-2)).side, 'DOWN');
+  assert.equal(getCandleSignalPriority(red).side, 'UP');
+  assert.equal(getCandleSignalPriority([{ open: 100, close: 100, closed: true }]).side, null);
+});
+
+test('a qualifying candle-priority side wins over a stronger opposite edge', async () => {
+  let placed;
+  const trader = {
+    async placeTakerOrder(tokenId, action, price, size) {
+      placed = { tokenId, action, price, size };
+      return { id: 'priority-entry', status: 'MATCHED' };
+    },
+    async fetchOrder() {
+      return { id: 'priority-entry', status: 'MATCHED', sizeMatched: '10' };
+    },
+  };
+  const { bot } = createBot({ trader });
+  const now = bot.now();
+  bot.windowStart = Math.floor(now / bot.config.WINDOW_MS) * bot.config.WINDOW_MS;
+  bot.windowEnd = bot.windowStart + bot.config.WINDOW_MS;
+  bot.processStartedAt = bot.windowStart;
+  bot.currentOpenTrade = () => null;
+  bot.modelSnapshot = () => ({
+    ready: true,
+    probabilityUp: 0.7,
+    probabilityDown: 0.3,
+    currentPrice: 100,
+  });
+  bot.priceFeed.snapshot = () => ({
+    candles: [{ open: 101, close: 100, closed: true }],
+  });
+  bot.sideQuoteIsFresh = () => true;
+  bot.sweep = (side, bookSide, shares) => {
+    if (bookSide !== 'asks') return null;
+    const unitCost = side === 'UP' ? 0.4 : 0.2;
+    return {
+      complete: true,
+      shares,
+      totalCost: shares * unitCost,
+      averagePrice: unitCost,
+      fills: [{ price: unitCost, shares }],
+    };
+  };
+
+  const entered = await bot.evaluateLive(now);
+
+  assert.equal(entered, true);
+  assert.equal(placed.tokenId, 'down-token');
+  assert.equal(bot.trades[0].side, 'DOWN');
+  assert.match(bot.currentSignal.reason, /DOWN is prioritized first after the latest red candle/);
+});
 
 test('live copy starts at 10 and sizes outcomes by +2/−3 with a 10 floor', () => {
   const { bot } = createBot();
