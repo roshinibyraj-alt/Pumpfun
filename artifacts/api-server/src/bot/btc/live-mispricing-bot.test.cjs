@@ -42,14 +42,45 @@ function setFreshOrderSnapshot(bot, orders = []) {
   bot.liveAccount.ordersSnapshotAt = new Date(bot.now()).toISOString();
 }
 
-test('live copy starts at 10 shares and sizes outcomes by +2/-3 with a 10-share floor', () => {
+test('live copy starts at $5 and sizes outcomes by +$1/−$1.50 with a $5 floor', () => {
   const { bot } = createBot();
-  assert.equal(bot.config.BASE_SHARES, 10);
-  assert.equal(bot.config.LOSS_SIZE_STEP_SHARES, 2);
-  assert.equal(bot.config.WIN_SIZE_REDUCTION_SHARES, 3);
-  assert.equal(bot.sizeAfterOutcome(10, 'LOSS'), 12);
-  assert.equal(bot.sizeAfterOutcome(20, 'WIN'), 17);
-  assert.equal(bot.sizeAfterOutcome(11, 'WIN'), 10);
+  assert.equal(bot.config.BASE_SHARES, 5);
+  assert.equal(bot.config.LOSS_SIZE_STEP_SHARES, 1);
+  assert.equal(bot.config.WIN_SIZE_REDUCTION_SHARES, 1.5);
+  assert.equal(bot.nextEntryAmountUsd, 5);
+  assert.equal(bot.sizeAfterOutcome(5, 'LOSS'), 6);
+  assert.equal(bot.sizeAfterOutcome(8, 'WIN'), 6.5);
+  assert.equal(bot.sizeAfterOutcome(6, 'WIN'), 5);
+});
+
+test('sizing reset starts at $5 while retaining the existing trade ledger', () => {
+  const { bot } = createBot();
+  bot.trades.push({ id: 'historical-trade' });
+  bot.nextEntryAmountUsd = 12;
+  bot.nextEntryShares = 12;
+
+  assert.equal(bot.applySizingResetRequest('usd-sizing-reset-1'), true);
+  assert.equal(bot.nextEntryAmountUsd, 5);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.applySizingResetRequest('usd-sizing-reset-1'), false);
+});
+
+test('USD budget preview sizes outcome shares to stay within the all-in stake', () => {
+  const { bot } = createBot();
+  const now = bot.now();
+  bot.books.set('up-token', {
+    asks: [{ price: 0.4, size: 100, availableSize: 100 }],
+    bids: [],
+    updatedAt: now,
+  });
+  bot.quotes.UP = { status: 'LIVE', bestAsk: 0.4, updatedAt: now };
+
+  const preview = bot.sweepBuyBudget('UP', 5);
+
+  assert.equal(preview.complete, true);
+  assert.ok(preview.shares > 0);
+  assert.ok(preview.totalCost <= 5);
+  assert.ok(preview.remainingBudgetUsd <= 0.01);
 });
 
 test('live entry records only the amount confirmed by the exchange', async () => {
@@ -83,6 +114,47 @@ test('live entry records only the amount confirmed by the exchange', async () =>
   assert.equal(order.priceLimitType, 'MAXIMUM');
   assert.equal(bot.liveHalted, false);
   assert.ok(saves.length >= 2);
+});
+
+test('USD-sized FAK entry records the full exchange-confirmed share quantity', async () => {
+  let submitted;
+  const trader = {
+    async placeTakerBuyByUsd(tokenId, amountUsd, maxSpendUsd, maxPrice) {
+      submitted = { tokenId, amountUsd, maxSpendUsd, maxPrice };
+      return { id: 'exchange-usd-1', status: 'MATCHED' };
+    },
+    async fetchOrder() {
+      return { id: 'exchange-usd-1', status: 'MATCHED', sizeMatched: '12.5' };
+    },
+  };
+  const { bot } = createBot({ trader });
+  const order = await bot.submitSweepOrder({
+    action: 'BUY_ENTRY',
+    side: 'UP',
+    shares: 10,
+    amountUsd: 5,
+    preview: {
+      fills: [{ price: 0.42 }],
+      averagePrice: 0.42,
+      totalCost: 4.95,
+      shares: 10,
+    },
+    model: bot.model,
+    edgePerShare: 0.12,
+    entryReason: 'MODEL_EDGE',
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+  });
+
+  assert.deepEqual(submitted, {
+    tokenId: 'up-token',
+    amountUsd: 5,
+    maxSpendUsd: 5,
+    maxPrice: 0.99,
+  });
+  assert.equal(order.requestedUsd, 5);
+  assert.equal(order.matchedShares, 12.5);
+  assert.equal(bot.trades[0].shares, 12.5);
 });
 
 test('a partial exchange fill cancels the remainder and records only filled shares', async () => {
@@ -182,9 +254,10 @@ test('order matching reads CLOB response aliases and terminal states', () => {
   assert.equal(isTerminalOrder({ status: 'UNFILLED', shares: 10, matchedShares: 0 }), true);
 });
 
-test('profitable live closes reduce the next order size but respect the 10-share floor', () => {
+test('profitable live closes reduce the next dollar stake but respect the $5 floor', () => {
   const { bot } = createBot();
-  bot.nextEntryShares = 12;
+  bot.nextEntryAmountUsd = 6.5;
+  bot.nextEntryShares = 6.5;
   const trade = {
     id: 'trade-1',
     status: 'OPEN',
@@ -205,7 +278,8 @@ test('profitable live closes reduce the next order size but respect the 10-share
     fills: [],
   }, 10_000, 'PROFITABLE_MODEL_FLIP', 'DOWN');
   assert.equal(trade.realizedPnl, 2);
-  assert.equal(bot.nextEntryShares, 10);
+  assert.equal(bot.nextEntryAmountUsd, 5);
+  assert.equal(bot.nextEntryShares, 5);
   assert.equal(trade.sizingOutcome, 'WIN');
 });
 

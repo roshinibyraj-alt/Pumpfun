@@ -63,8 +63,11 @@ function orderErrorClass(value) {
 }
 
 function isTerminalOrder(order) {
-  return TERMINAL_ORDER_STATUSES.has(orderStatus(order))
-    || matchedShares(order) >= Number(order?.shares || Infinity) - EPSILON;
+  if (TERMINAL_ORDER_STATUSES.has(orderStatus(order))) return true;
+  if (order?.sizeUnit === 'USD' && order?.orderType === 'FAK') {
+    return matchedShares(order) > EPSILON;
+  }
+  return matchedShares(order) >= Number(order?.shares || Infinity) - EPSILON;
 }
 
 function isActiveOrder(order) {
@@ -96,12 +99,17 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   constructor(options = {}) {
     const config = {
       ...DEFAULT_CONFIG,
-      BASE_SHARES: 10,
-      LOSS_SIZE_STEP_SHARES: 2,
-      WIN_SIZE_REDUCTION_SHARES: 3,
+      BASE_SIZE_USD: 5,
+      LOSS_SIZE_STEP_USD: 1,
+      WIN_SIZE_REDUCTION_USD: 1.5,
+      BASE_SHARES: 5,
+      LOSS_SIZE_STEP_SHARES: 1,
+      WIN_SIZE_REDUCTION_SHARES: 1.5,
+      SIZING_UNIT_LABEL: 'USD',
       ...(options.config || {}),
     };
     super({ ...options, config });
+    this.nextEntryAmountUsd = this.config.BASE_SIZE_USD;
     this.trader = options.trader || null;
     this.tradingEnabled = options.tradingEnabled === true;
     this.orderTimeoutMs = Math.max(500, Number(options.orderTimeoutMs) || 1_500);
@@ -144,6 +152,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
 
   restoreState(state) {
     super.restoreState(state);
+    const savedAmount = Number(state.nextEntryAmountUsd ?? state.nextEntryShares);
+    this.nextEntryAmountUsd = Number.isFinite(savedAmount)
+      ? Math.max(this.config.BASE_SIZE_USD, Math.round(savedAmount * 100) / 100)
+      : this.config.BASE_SIZE_USD;
+    this.nextEntryShares = this.nextEntryAmountUsd;
     this.liveOrders = Array.isArray(state.liveOrders) ? state.liveOrders : [];
     this.pendingFlip = state.pendingFlip && typeof state.pendingFlip === 'object'
       ? state.pendingFlip : null;
@@ -161,11 +174,48 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   persistentStateSnapshot() {
     return {
       ...super.persistentStateSnapshot(),
+      nextEntryAmountUsd: this.nextEntryAmountUsd,
       liveOrders: this.liveOrders,
       pendingFlip: this.pendingFlip,
       liveHalted: this.liveHalted,
       liveHaltReason: this.liveHaltReason,
     };
+  }
+
+  applySizingResetRequest(requestId) {
+    const normalizedRequestId = String(requestId || '').trim();
+    if (!normalizedRequestId || normalizedRequestId === this.sizingResetRequestId) return false;
+    const previousAmountUsd = this.nextEntryAmountUsd;
+    this.sizingGeneration += 1;
+    this.sizingResetRequestId = normalizedRequestId;
+    this.nextEntryAmountUsd = this.config.BASE_SIZE_USD;
+    this.nextEntryShares = this.nextEntryAmountUsd;
+    this.log(
+      'NEXT_ENTRY_SIZE_RESET',
+      `Next order stake reset to $${this.nextEntryAmountUsd.toFixed(2)}; trade history was preserved.`,
+      {
+        previousAmountUsd,
+        nextAmountUsd: this.nextEntryAmountUsd,
+        sizingGeneration: this.sizingGeneration,
+      },
+    );
+    return true;
+  }
+
+  sizeAfterOutcome(amountUsd, outcome) {
+    return outcome === 'LOSS'
+      ? Math.round((Number(amountUsd) + this.config.LOSS_SIZE_STEP_USD) * 100) / 100
+      : Math.max(
+        this.config.BASE_SIZE_USD,
+        Math.round((Number(amountUsd) - this.config.WIN_SIZE_REDUCTION_USD) * 100) / 100,
+      );
+  }
+
+  recalculateNextEntryShares() {
+    const nextAmountUsd = super.recalculateNextEntryShares();
+    this.nextEntryAmountUsd = Math.round(nextAmountUsd * 100) / 100;
+    this.nextEntryShares = this.nextEntryAmountUsd;
+    return this.nextEntryAmountUsd;
   }
 
   async start() {
@@ -496,6 +546,58 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     }
   }
 
+  sweepBuyBudget(side, amountUsd) {
+    const budget = Number(amountUsd);
+    if (!Number.isFinite(budget) || budget <= 0
+      || !this.market || !this.sideQuoteIsFresh(side, this.now())) return null;
+    const tokenId = String(this.market.tokens[side]);
+    const levels = this.books.get(tokenId)?.asks;
+    if (!Array.isArray(levels)) return null;
+
+    const fees = feeParameters(this.market);
+    const fills = [];
+    let remainingBudget = budget;
+    let gross = 0;
+    let feeTotal = 0;
+    let totalShares = 0;
+    for (const level of levels) {
+      const price = Number(level.price);
+      if (!Number.isFinite(price) || price <= 0 || price > MAX_TAKER_BUY_PRICE) continue;
+      const available = Math.max(0, Number(level.availableSize ?? level.size) || 0);
+      if (available <= EPSILON) continue;
+      const allInPerShare = price + takerFeeAt(price, 1, fees);
+      const affordable = remainingBudget / allInPerShare;
+      const shares = Math.floor(Math.min(available, affordable) * 10_000) / 10_000;
+      if (shares <= EPSILON) continue;
+
+      const fillGross = shares * price;
+      const fillFees = takerFeeAt(price, shares, fees);
+      fills.push({ price, shares, gross: fillGross, fee: fillFees });
+      totalShares += shares;
+      gross += fillGross;
+      feeTotal += fillFees;
+      remainingBudget = Math.max(0, budget - gross - feeTotal);
+      if (remainingBudget <= 0.01) break;
+    }
+
+    return {
+      side,
+      bookSide: 'asks',
+      requestedAmountUsd: budget,
+      requestedShares: totalShares,
+      shares: totalShares,
+      remainingShares: 0,
+      gross,
+      fees: feeTotal,
+      totalCost: gross + feeTotal,
+      remainingBudgetUsd: remainingBudget,
+      averagePrice: gross / Math.max(EPSILON, totalShares),
+      complete: totalShares > EPSILON
+        && remainingBudget <= Math.max(0.01, budget * 0.002),
+      fills,
+    };
+  }
+
   async evaluate(now = this.now()) {
     if (this.evaluatePromise) return this.evaluatePromise;
     this.evaluatePromise = this.evaluateLive(now)
@@ -535,14 +637,15 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       };
       return false;
     }
-    const shares = this.nextEntryShares;
+    const amountUsd = this.nextEntryAmountUsd;
     const candidates = ['UP', 'DOWN'].map(side => {
       if (!this.sideQuoteIsFresh(side, now)) return null;
-      const preview = this.sweep(side, 'asks', shares);
+      const preview = this.sweepBuyBudget(side, amountUsd);
       if (!preview?.complete) return null;
+      const shares = preview.shares;
       const probability = side === 'UP' ? model.probabilityUp : model.probabilityDown;
       const expectedProfit = probability * shares - preview.totalCost;
-      return { side, preview, edgePerShare: expectedProfit / shares };
+      return { side, preview, amountUsd, edgePerShare: expectedProfit / shares };
     }).filter(candidate => candidate
       && candidate.edgePerShare >= this.config.MIN_NET_EDGE_PER_SHARE);
     if (!candidates.length) {
@@ -567,7 +670,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     const order = await this.submitSweepOrder({
       action: 'BUY_ENTRY',
       side: selected.side,
-      shares,
+      shares: selected.preview.shares,
+      amountUsd: selected.amountUsd,
       preview: selected.preview,
       model,
       edgePerShare: selected.edgePerShare,
@@ -616,8 +720,9 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       };
       return false;
     }
-    const targetShares = this.sizeAfterOutcome(this.nextEntryShares, 'WIN');
-    const buyPreview = this.sweep(opposite, 'asks', targetShares);
+    const targetAmountUsd = this.sizeAfterOutcome(this.nextEntryAmountUsd, 'WIN');
+    const buyPreview = this.sweepBuyBudget(opposite, targetAmountUsd);
+    const targetShares = buyPreview?.shares || 0;
     const probability = opposite === 'UP' ? model.probabilityUp : model.probabilityDown;
     const edgePerShare = buyPreview?.complete
       ? (probability * targetShares - buyPreview.totalCost) / targetShares
@@ -628,7 +733,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       this.currentSignal = {
         side: opposite,
         reason: !buyPreview?.complete
-          ? `Holding: visible asks do not cover all ${targetShares} opposite shares.`
+          ? `Holding: visible asks do not cover the $${targetAmountUsd.toFixed(2)} opposite stake.`
           : `Holding: opposite edge is below the $${this.config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} flip threshold.`,
         edgePerShare,
       };
@@ -650,6 +755,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       fromSide: openTrade.side,
       toSide: opposite,
       targetShares,
+      targetAmountUsd,
       windowStart: this.windowStart,
       windowEnd: this.windowEnd,
       startedAt: now,
@@ -692,8 +798,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       };
       return false;
     }
-    const shares = this.nextEntryShares;
-    const preview = this.sweep(flip.toSide, 'asks', shares);
+    const amountUsd = Number(flip.targetAmountUsd) > 0
+      ? Number(flip.targetAmountUsd)
+      : this.nextEntryAmountUsd;
+    const preview = this.sweepBuyBudget(flip.toSide, amountUsd);
+    const shares = preview?.shares || 0;
     const probability = flip.toSide === 'UP' ? model.probabilityUp : model.probabilityDown;
     const edge = preview?.complete
       ? (probability * shares - preview.totalCost) / shares
@@ -713,6 +822,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       action: 'BUY_FLIP',
       side: flip.toSide,
       shares,
+      amountUsd,
       preview,
       model,
       edgePerShare: edge,
@@ -726,7 +836,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   async submitSweepOrder({
-    action, side, shares, preview, model, edgePerShare, entryReason, tradeId,
+    action, side, shares, amountUsd, preview, model, edgePerShare, entryReason, tradeId,
     windowStart, windowEnd,
   }) {
     if (!this.tradingEnabled || !this.liveAccount.accountReady || this.liveHalted) return null;
@@ -734,6 +844,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     const lastFill = preview?.fills?.[preview.fills.length - 1];
     const accountingPriceEstimate = Number(lastFill?.price);
     const isSell = action.startsWith('SELL');
+    const isDollarSizedBuy = !isSell && Number.isFinite(Number(amountUsd)) && Number(amountUsd) > 0;
     const priceLimit = isSell ? accountingPriceEstimate : MAX_TAKER_BUY_PRICE;
     if (!Number.isFinite(accountingPriceEstimate) || accountingPriceEstimate <= 0
       || !Number.isFinite(priceLimit) || priceLimit <= 0 || priceLimit > 1
@@ -753,6 +864,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       windowStart,
       windowEnd,
       shares: Number(shares),
+      requestedUsd: isDollarSizedBuy ? Number(amountUsd) : null,
+      sizeUnit: isDollarSizedBuy ? 'USD' : 'SHARES',
       matchedShares: 0,
       orderType: 'FAK',
       limitPrice: priceLimit,
@@ -772,12 +885,27 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     this.activeLiveOrderId = localId;
     await this.persist();
     try {
-      const response = await this.trader.placeTakerOrder(
-        order.tokenId,
-        isSell ? 'SELL' : 'BUY',
-        priceLimit,
-        shares,
-      );
+      let response;
+      if (isDollarSizedBuy) {
+        if (typeof this.trader.placeTakerBuyByUsd !== 'function') {
+          const error = new Error('The account adapter does not support USD-sized FAK buys.');
+          error.submissionUncertain = false;
+          throw error;
+        }
+        response = await this.trader.placeTakerBuyByUsd(
+          order.tokenId,
+          amountUsd,
+          amountUsd,
+          priceLimit,
+        );
+      } else {
+        response = await this.trader.placeTakerOrder(
+          order.tokenId,
+          isSell ? 'SELL' : 'BUY',
+          priceLimit,
+          shares,
+        );
+      }
       order.id = response.id;
       order.status = orderStatus(response);
       order.updatedAt = this.now();
@@ -808,12 +936,20 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       latest = await this.trader.fetchOrder(order.id);
       this.applyExchangeOrder(order, latest);
       if (order.matchedShares > 0 || isTerminalOrder({
-        ...latest, shares: order.shares, matchedShares: order.matchedShares,
+        ...latest,
+        shares: order.shares,
+        sizeUnit: order.sizeUnit,
+        orderType: order.orderType,
+        matchedShares: order.matchedShares,
       })) break;
       await wait(this.orderPollMs);
     }
     const stillOpen = !isTerminalOrder({
-      status: order.status, shares: order.shares, matchedShares: order.matchedShares,
+      status: order.status,
+      shares: order.shares,
+      sizeUnit: order.sizeUnit,
+      orderType: order.orderType,
+      matchedShares: order.matchedShares,
     });
     if (stillOpen) {
       try {
@@ -864,6 +1000,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     if (!isTerminalOrder({
       ...exchangeOrder,
       shares: order.shares,
+      sizeUnit: order.sizeUnit,
+      orderType: order.orderType,
       matchedShares: order.matchedShares,
     })) {
       order.status = 'CANCELLED';
@@ -939,6 +1077,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         return 'PROCESSED_FILL_LEDGER_MATCH';
       }
     }
+    if (order.sizeUnit === 'USD') {
+      return Number(order.requestedUsd) > 0
+        ? 'CLOSEABLE_FROM_FRESH_SNAPSHOT'
+        : 'INVALID_REQUESTED_USD';
+    }
     const requested = Number(order.shares);
     if (!Number.isFinite(requested) || requested <= 0) return 'INVALID_REQUESTED_SHARES';
     return 'CLOSEABLE_FROM_FRESH_SNAPSHOT';
@@ -956,11 +1099,13 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       order.processedMatchedShares = matched;
     }
     const requested = Number(order.shares);
-    order.status = matched >= requested - EPSILON
-      ? 'MATCHED'
-      : matched > EPSILON
-        ? 'CANCELLED'
-        : 'UNFILLED';
+    order.status = order.sizeUnit === 'USD'
+      ? matched > EPSILON ? 'MATCHED' : 'UNFILLED'
+      : matched >= requested - EPSILON
+        ? 'MATCHED'
+        : matched > EPSILON
+          ? 'CANCELLED'
+          : 'UNFILLED';
     order.closedByOpenOrdersSnapshotAt = this.now();
     order.closeEvidence = 'absent-from-fresh-authenticated-open-orders';
     return true;
@@ -986,7 +1131,9 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
 
   async processFinalOrder(order, model = this.model) {
     if (order.processed) return;
-    const filled = Math.min(order.shares, order.matchedShares);
+    const filled = order.sizeUnit === 'USD'
+      ? Math.max(0, Number(order.matchedShares) || 0)
+      : Math.min(order.shares, order.matchedShares);
     if (filled <= EPSILON) {
       if (['MATCHED', 'FILLED'].includes(order.status)) {
         order.status = 'RECONCILIATION_REQUIRED';
@@ -1054,7 +1201,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         this.flipsThisWindow += 1;
         if (trade.realizedPnl > EPSILON && this.pendingFlip) {
           this.pendingFlip.phase = 'BUY';
-          this.pendingFlip.targetShares = this.nextEntryShares;
+          this.pendingFlip.targetAmountUsd = this.nextEntryAmountUsd;
+          this.pendingFlip.targetShares = this.nextEntryAmountUsd;
           this.pendingFlip.sellOrderId = order.id;
         } else {
           this.pendingFlip = null;
@@ -1190,7 +1338,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         const latest = await this.trader.fetchOrder(order.id);
         this.applyExchangeOrder(order, latest);
         if (!isTerminalOrder({
-          ...latest, shares: order.shares, matchedShares: order.matchedShares,
+          ...latest,
+          shares: order.shares,
+          sizeUnit: order.sizeUnit,
+          orderType: order.orderType,
+          matchedShares: order.matchedShares,
         })) {
           if (!this.markOrderClosedFromFreshSnapshot(order)) {
             await this.cancelAndReconcileOrder(order);
@@ -1268,13 +1420,20 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       strategy: {
         ...(base.strategy || {}),
         name: 'BTC 5-minute Binance mispricing',
-        entryOrderType: 'FAK taker sweep',
-        flipOrderType: 'FAK taker sweep',
+        entryOrderType: 'USD-notional FAK taker buy',
+        flipOrderType: 'USD-notional FAK taker buy',
         maxBuyPrice: MAX_TAKER_BUY_PRICE,
-        baseShares: this.config.BASE_SHARES,
-        lossIncreaseShares: this.config.LOSS_SIZE_STEP_SHARES,
-        winReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
-        minimumShares: this.config.BASE_SHARES,
+        sizingUnit: 'USD',
+        baseAmountUsd: this.config.BASE_SIZE_USD,
+        lossIncreaseUsd: this.config.LOSS_SIZE_STEP_USD,
+        winReductionUsd: this.config.WIN_SIZE_REDUCTION_USD,
+        minimumAmountUsd: this.config.BASE_SIZE_USD,
+        nextAmountUsd: this.nextEntryAmountUsd,
+        baseShares: null,
+        lossIncreaseShares: null,
+        winReductionShares: null,
+        minimumShares: null,
+        nextEntryShares: null,
         volatilityCandles: this.config.VOLATILITY_CANDLES,
         minEntryEdge: this.config.MIN_NET_EDGE_PER_SHARE,
         minFlipEdge: this.config.MIN_FLIP_NET_EDGE_PER_SHARE,
@@ -1287,11 +1446,11 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         losses: base.account?.losses ?? 0,
         settledPositions: base.account?.settledPositions ?? 0,
         botTradeCount: base.account?.tradeCount ?? 0,
-        sizingShares: this.nextEntryShares,
+        sizingAmountUsd: this.nextEntryAmountUsd,
       },
       liveOrders: this.liveOrders.slice(-100).reverse(),
       pendingFlip: this.pendingFlip,
-      note: 'Account balances and transactions are from Polymarket. Bot trade costs use conservative limit-price estimates; transaction rows show actual account activity.',
+      note: 'Account balances and transactions are from Polymarket. Buy stakes are USD-notional FAK orders with a $0.99 maximum price and all-in spend cap; filled shares and transaction rows show actual account activity.',
     };
   }
 }
