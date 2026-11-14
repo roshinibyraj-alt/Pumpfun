@@ -381,7 +381,7 @@
       $('open-price').textContent = numeric(model.windowOpenPrice) ? `$${Number(model.windowOpenPrice).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—';
       $('volatility').textContent = `${strategy.volatilityCandles || 3} closed 5-minute candles`;
       $('edge-rules').textContent = `${money(strategy.minEntryEdge)} entry / ${money(strategy.minFlipEdge)} flip`;
-      $('execution-rule').textContent = `${strategy.entryOrderType || 'FAK taker'} · buy cap ${cents(strategy.maxBuyPrice ?? 0.99)}`;
+      $('execution-rule').textContent = `${strategy.entryOrderType || 'FAK taker'} · buy cap ${cents(strategy.maxBuyPrice ?? 0.99)} · sell floor ${cents(strategy.minSellPrice ?? 0.01)} (99¢ max slippage)`;
       $('bot-position').textContent = position ? `${position.side} · ${shares(position.shares)} shares` : 'None';
       $('open-orders').textContent = String((account.orders || []).length);
       $('account-time').textContent = account.asOf ? new Date(account.asOf).toLocaleTimeString() : '—';

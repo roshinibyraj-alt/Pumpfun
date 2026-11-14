@@ -112,6 +112,51 @@ class LivePolymarketTrader {
     return { id: String(response.orderId), status: response.status || 'MATCHED' };
   }
 
+  async getSellableShares(tokenId) {
+    if (!this.client) throw new Error('Polymarket authentication is not ready.');
+    const refreshBalance = this.actions?.updateBalanceAllowance
+      || this.actions?.fetchBalanceAllowance;
+    if (typeof refreshBalance !== 'function') {
+      throw new Error('Polymarket token-balance refresh is unavailable.');
+    }
+    if (!this.sdk?.AssetType?.CONDITIONAL) {
+      throw new Error('Polymarket conditional-token asset type is unavailable.');
+    }
+    const result = await refreshBalance(this.client, {
+      assetType: this.sdk.AssetType.CONDITIONAL,
+      assetId: String(tokenId),
+    });
+    const toBaseUnits = value => {
+      try {
+        const parsed = BigInt(value);
+        return parsed >= 0n ? parsed : null;
+      } catch {
+        return null;
+      }
+    };
+    const balanceUnits = toBaseUnits(result?.balance);
+    const allowances = Object.values(result?.allowances || {})
+      .map(toBaseUnits)
+      .filter(value => value != null);
+    if (balanceUnits == null || allowances.length === 0) {
+      throw new Error('Polymarket returned an invalid conditional-token balance or allowance.');
+    }
+    const allowanceUnits = allowances.reduce(
+      (maximum, value) => value > maximum ? value : maximum,
+      0n,
+    );
+    const balance = Number(balanceUnits) / 1e6;
+    const allowance = Number(allowanceUnits) / 1e6;
+    const shares = Number(balanceUnits < allowanceUnits ? balanceUnits : allowanceUnits) / 1e6;
+    return {
+      tokenId: String(tokenId),
+      balance,
+      allowance,
+      shares,
+      asOf: new Date(Number(this.clock())).toISOString(),
+    };
+  }
+
   async fetchOrder(orderId) {
     if (!this.client) throw new Error('Polymarket authentication is not ready.');
     const order = await this.client.fetchOrder({ orderId: String(orderId) });

@@ -52,6 +52,38 @@ test('account snapshot exposes collateral, marked positions, and recent real tra
   assert.equal(Object.hasOwn(snapshot.transactions[0], 'proxyWallet'), false);
 });
 
+test('sellable token balance is refreshed by conditional asset ID and capped by allowance', async () => {
+  let request;
+  const trader = new LivePolymarketTrader('test-private-key', {
+    sdk: { AssetType: { CONDITIONAL: 'CONDITIONAL' } },
+    actions: {
+      async updateBalanceAllowance(_client, params) {
+        request = params;
+        return {
+          balance: 12_500_000n,
+          allowances: {
+            '0xspender-a': 8_750_000n,
+            '0xspender-b': 15_000_000n,
+          },
+        };
+      },
+    },
+    clock: () => 1_800_000_000_000,
+  });
+  trader.client = {};
+
+  const result = await trader.getSellableShares('current-up-token');
+
+  assert.deepEqual(request, {
+    assetType: 'CONDITIONAL',
+    assetId: 'current-up-token',
+  });
+  assert.equal(result.tokenId, 'current-up-token');
+  assert.equal(result.balance, 12.5);
+  assert.equal(result.allowance, 15);
+  assert.equal(result.shares, 12.5);
+});
+
 test('fresh CLOB order snapshots remain available while dashboard positions are rate-limited', async () => {
   const trader = new LivePolymarketTrader('test-private-key', {
     sdk: { AssetType: { COLLATERAL: 'COLLATERAL' } },

@@ -108,6 +108,143 @@ test('live entry records only the amount confirmed by the exchange', async () =>
   assert.ok(saves.length >= 2);
 });
 
+test('flip sells use current-window token fills and the refreshed sellable quantity', async () => {
+  let submitted;
+  const { bot } = createBot({
+    trader: {
+      async getSellableShares(tokenId) {
+        assert.equal(tokenId, 'up-token');
+        return { tokenId, balance: 6, allowance: 5, shares: 5 };
+      },
+    },
+  });
+  const trade = {
+    id: 'flip-trade',
+    status: 'OPEN',
+    side: 'UP',
+    tokenId: 'up-token',
+    shares: 7,
+    totalCost: 3,
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+    marketId: String(bot.market.id),
+  };
+  bot.liveOrders = [
+    {
+      id: 'up-buy',
+      action: 'BUY_ENTRY',
+      side: 'UP',
+      tokenId: 'up-token',
+      marketId: 'market-1',
+      windowStart: bot.windowStart,
+      shares: 100,
+      matchedShares: 7,
+    },
+    {
+      id: 'down-buy-other-token',
+      action: 'BUY_ENTRY',
+      side: 'DOWN',
+      tokenId: 'down-token',
+      marketId: 'market-1',
+      windowStart: bot.windowStart,
+      shares: 100,
+      matchedShares: 99,
+    },
+    {
+      id: 'previous-confirmed-rejection',
+      action: 'SELL_FLIP',
+      side: 'UP',
+      tokenId: 'up-token',
+      marketId: 'market-1',
+      windowStart: bot.windowStart,
+      shares: 7,
+      matchedShares: 0,
+      status: 'REJECTED',
+      tradeId: trade.id,
+      processed: true,
+    },
+  ];
+  bot.sideQuoteIsFresh = () => true;
+  bot.sweep = (_side, bookSide, shares) => bookSide === 'asks'
+    ? {
+      complete: true, shares, totalCost: 3, averagePrice: 0.3,
+      fills: [{ price: 0.3, shares }],
+    }
+    : {
+      complete: false, shares: 3, netProceeds: 2.2, averagePrice: 0.73,
+      fills: [{ price: 0.73, shares: 3 }],
+    };
+  bot.recordFlipConfirmation = () => ({ confirmed: true, count: 2 });
+  bot.persist = async () => true;
+  bot.submitSweepOrder = async order => {
+    submitted = order;
+    return { matchedShares: order.shares, status: 'MATCHED' };
+  };
+
+  const flipped = await bot.evaluateLiveFlip(trade, {
+    ready: true,
+    probabilityUp: 0.2,
+    probabilityDown: 0.8,
+    currentPrice: 100,
+  }, bot.windowStart + 10_000);
+
+  assert.equal(flipped, true);
+  assert.equal(submitted.action, 'SELL_FLIP');
+  assert.equal(submitted.side, 'UP');
+  assert.equal(submitted.shares, 5);
+  assert.equal(submitted.windowStart, bot.windowStart);
+});
+
+test('flip FAK sells use the 1-cent minimum price rather than the visible bid', async () => {
+  let placed;
+  const trader = {
+    async placeTakerOrder(tokenId, side, price, size) {
+      placed = { tokenId, side, price, size };
+      return { id: 'sell-fak-1', status: 'MATCHED' };
+    },
+    async fetchOrder() {
+      return { id: 'sell-fak-1', status: 'MATCHED', sizeMatched: '5' };
+    },
+  };
+  const { bot } = createBot({ trader });
+  const trade = {
+    id: 'sell-trade',
+    status: 'OPEN',
+    side: 'UP',
+    tokenId: 'up-token',
+    shares: 10,
+    totalCost: 3,
+    grossCost: 3,
+    fees: 0,
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+    marketId: String(bot.market.id),
+  };
+  bot.trades = [trade];
+
+  const order = await bot.submitSweepOrder({
+    action: 'SELL_FLIP',
+    side: 'UP',
+    shares: 5,
+    preview: { fills: [{ price: 0.62, shares: 5 }] },
+    model: bot.model,
+    edgePerShare: 0.12,
+    tradeId: trade.id,
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+  });
+
+  assert.deepEqual(placed, {
+    tokenId: 'up-token',
+    side: 'SELL',
+    price: 0.01,
+    size: 5,
+  });
+  assert.equal(order.limitPrice, 0.01);
+  assert.equal(order.priceLimitType, 'MINIMUM');
+  assert.equal(order.accountingPriceEstimate, 0.62);
+});
+
 test('a partial exchange fill cancels the remainder and records only filled shares', async () => {
   let canceled = 0;
   let fetches = 0;
