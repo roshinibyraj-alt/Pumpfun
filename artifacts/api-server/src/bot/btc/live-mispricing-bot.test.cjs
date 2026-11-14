@@ -197,6 +197,140 @@ test('uncertain submission halts future orders and is never retried', async () =
   assert.equal(bot.liveHalted, true);
 });
 
+test('no-ID uncertain flip sells are preserved as assumed failures without halting', async () => {
+  let submissions = 0;
+  const trader = {
+    async placeTakerOrder() {
+      submissions += 1;
+      const error = new Error('network timeout after sell submit');
+      error.submissionUncertain = true;
+      throw error;
+    },
+  };
+  const { bot } = createBot({ trader });
+  const trade = {
+    id: 'sell-trade-1',
+    status: 'OPEN',
+    side: 'UP',
+    shares: 10,
+    totalCost: 4,
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+    marketId: String(bot.market.id),
+  };
+  bot.trades = [trade];
+  bot.pendingFlip = {
+    phase: 'SELL',
+    tradeId: trade.id,
+    fromSide: 'UP',
+    toSide: 'DOWN',
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+  };
+
+  const order = await bot.submitSweepOrder({
+    action: 'SELL_FLIP',
+    side: 'UP',
+    shares: 10,
+    preview: { fills: [{ price: 0.62 }] },
+    model: bot.model,
+    edgePerShare: 0.12,
+    tradeId: trade.id,
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+  });
+
+  assert.equal(order.status, 'SUBMISSION_UNCERTAIN');
+  assert.equal(order.assumedFailedByPolicy, true);
+  assert.equal(order.assumptionPolicy, 'ASSUME_UNFILLED_AND_CONTINUE');
+  assert.equal(bot.liveHalted, false);
+  assert.equal(bot.pendingFlip, null);
+  assert.equal(bot.submissionHaltRecoveryDiagnostics().assumedFailedSellCount, 1);
+  assert.equal(bot.submissionHaltRecoveryDiagnostics().unresolvedOrderCount, 0);
+
+  bot.liveAccount.authenticated = true;
+  await bot.reconcileLiveOrders();
+  assert.equal(bot.liveHalted, false);
+  assert.equal(await bot.evaluateLiveFlip(trade, {}, bot.now()), false);
+  assert.equal(submissions, 1, 'the uncertain sell must not be retried in the same window');
+  assert.match(bot.currentSignal.reason, /holding the existing position/i);
+});
+
+test('restores a sell-only uncertain halt as assumed no-fill but preserves buy halts', () => {
+  const { bot } = createBot();
+  bot.restoreState({
+    trades: [],
+    liveOrders: [{
+      localId: 'old-sell',
+      id: null,
+      action: 'SELL_FLIP',
+      tradeId: 'old-trade',
+      status: 'SUBMISSION_UNCERTAIN',
+      processed: false,
+      shares: 10,
+      matchedShares: 0,
+      windowStart: bot.windowStart,
+    }],
+    pendingFlip: {
+      phase: 'SELL',
+      tradeId: 'old-trade',
+      windowStart: bot.windowStart,
+    },
+    liveHalted: true,
+    liveHaltReason: 'Order submission outcome is uncertain; automatic retries are blocked.',
+  });
+
+  assert.equal(bot.liveOrders[0].assumedFailedByPolicy, true);
+  assert.equal(bot.pendingFlip, null);
+  assert.equal(bot.liveHalted, false);
+
+  const { bot: buyBot } = createBot();
+  buyBot.restoreState({
+    trades: [],
+    liveOrders: [{
+      localId: 'old-buy',
+      id: null,
+      action: 'BUY_ENTRY',
+      status: 'SUBMISSION_UNCERTAIN',
+      processed: false,
+      shares: 10,
+      matchedShares: 0,
+    }],
+    liveHalted: true,
+    liveHaltReason: 'Order submission outcome is uncertain; automatic retries are blocked.',
+  });
+  assert.equal(buyBot.liveHalted, true);
+});
+
+test('a confirmed flip-sell rejection clears the pending flip without halting', async () => {
+  const trader = {
+    async placeTakerOrder() {
+      const error = new Error('order rejected');
+      error.submissionUncertain = false;
+      throw error;
+    },
+  };
+  const { bot } = createBot({ trader });
+  bot.pendingFlip = { phase: 'SELL', tradeId: 'sell-trade-2' };
+
+  const order = await bot.submitSweepOrder({
+    action: 'SELL_FLIP',
+    side: 'UP',
+    shares: 10,
+    preview: { fills: [{ price: 0.62 }] },
+    model: bot.model,
+    edgePerShare: 0.12,
+    tradeId: 'sell-trade-2',
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+  });
+
+  assert.equal(order.status, 'REJECTED');
+  assert.equal(order.processed, true);
+  assert.equal(bot.pendingFlip, null);
+  assert.equal(bot.liveHalted, false);
+});
+
 test('order matching reads CLOB response aliases and terminal states', () => {
   assert.equal(matchedShares({ size_matched: '4.5' }), 4.5);
   assert.equal(isTerminalOrder({ status: 'CANCELED', shares: 10, matchedShares: 0 }), true);

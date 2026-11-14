@@ -73,6 +73,22 @@ function isActiveOrder(order) {
       .includes(orderStatus(order));
 }
 
+function isAssumedFailedSellOrder(order) {
+  return order?.action === 'SELL_FLIP'
+    && order.assumedFailedByPolicy === true
+    && !order.id
+    && ['SUBMITTING', 'SUBMISSION_UNCERTAIN'].includes(orderStatus(order));
+}
+
+function isFailedSellFlipOrder(order) {
+  return order?.action === 'SELL_FLIP'
+    && matchedShares(order) <= EPSILON
+    && (
+      ['REJECTED', 'UNFILLED'].includes(orderStatus(order))
+      || isAssumedFailedSellOrder(order)
+    );
+}
+
 function errorText(error) {
   return String(error?.message || error || 'Unknown order error').slice(0, 240);
 }
@@ -151,12 +167,50 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       ? state.pendingFlip : null;
     this.liveHalted = state.liveHalted === true;
     this.liveHaltReason = state.liveHaltReason || null;
+    for (const order of this.liveOrders) {
+      if (order.action === 'SELL_FLIP'
+        && !order.id
+        && ['SUBMITTING', 'SUBMISSION_UNCERTAIN'].includes(orderStatus(order))) {
+        order.assumedFailedByPolicy = true;
+        order.assumptionPolicy = 'ASSUME_UNFILLED_AND_CONTINUE';
+        order.assumedFailedAt ||= this.now();
+      }
+    }
+    if (this.pendingFlip?.phase === 'SELL'
+      && this.liveOrders.some(order =>
+        isFailedSellFlipOrder(order)
+        && order.tradeId === this.pendingFlip.tradeId
+        && order.windowStart === this.pendingFlip.windowStart)) {
+      this.pendingFlip = null;
+    }
     const uncertain = this.liveOrders.find(order =>
       ['SUBMITTING', 'SUBMISSION_UNCERTAIN', 'CANCEL_UNCERTAIN', 'RECONCILIATION_REQUIRED']
-        .includes(order.status) && !order.id);
+        .includes(orderStatus(order))
+        && !order.id
+        && !isAssumedFailedSellOrder(order));
     if (uncertain) {
       this.liveHalted = true;
       this.liveHaltReason = RESTORED_ORDER_ID_MISSING_HALT_REASON;
+    } else if (this.liveHalted
+      && [
+        SUBMISSION_UNCERTAIN_HALT_REASON,
+        ORDER_ID_MISSING_HALT_REASON,
+        RESTORED_ORDER_ID_MISSING_HALT_REASON,
+      ].includes(this.liveHaltReason)
+      && !this.liveOrders.some(order => !isAssumedFailedSellOrder(order)
+        && (
+          ['SUBMITTING', 'SUBMISSION_UNCERTAIN', 'CANCEL_UNCERTAIN', 'RECONCILIATION_REQUIRED']
+            .includes(orderStatus(order))
+          || !order.processed
+          || !isTerminalOrder(order)
+        ))
+      && !this.pendingFlip) {
+      this.liveHalted = false;
+      this.liveHaltReason = null;
+      if (this.status === 'ERROR') {
+        this.status = 'RUNNING';
+        this.statusReason = 'Resumed after an uncertain flip sell was treated as unfilled by policy.';
+      }
     }
   }
 
@@ -387,6 +441,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
 
     const localOrders = Array.isArray(this.liveOrders) ? this.liveOrders : [];
     const unresolvedOrders = localOrders.filter(order => {
+      if (isAssumedFailedSellOrder(order)) return false;
       const status = orderStatus(order);
       const terminal = isTerminalOrder({
         ...order,
@@ -427,6 +482,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       orderClosureStatusCounts,
       unresolvedErrorClassCounts,
       localOrderCount: localOrders.length,
+      assumedFailedSellCount: localOrders.filter(isAssumedFailedSellOrder).length,
       exchangeOpenOrderCount: Array.isArray(this.liveAccount.orders)
         ? this.liveAccount.orders.length
         : null,
@@ -609,6 +665,18 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
 
   async evaluateLiveFlip(openTrade, model, now) {
     const opposite = openTrade.side === 'UP' ? 'DOWN' : 'UP';
+    if (this.liveOrders.some(order =>
+      order.tradeId === openTrade.id
+      && order.windowStart === this.windowStart
+      && isFailedSellFlipOrder(order))) {
+      this.resetFlipConfirmation();
+      this.currentSignal = {
+        side: opposite,
+        reason: 'The flip sell did not complete; holding the existing position for this window. New windows remain enabled.',
+        edgePerShare: null,
+      };
+      return false;
+    }
     if (this.flipsThisWindow >= this.config.MAX_FLIPS_PER_WINDOW
       || now >= this.windowEnd
       || !this.sideQuoteIsFresh(openTrade.side, now)
@@ -687,6 +755,15 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     });
     if (order?.matchedShares > 0 && this.pendingFlip?.phase === 'BUY') {
       await this.resumePendingFlip();
+    }
+    if (isFailedSellFlipOrder(order)) {
+      this.currentSignal = {
+        side: opposite,
+        reason: order.assumedFailedByPolicy
+          ? 'The sell result is uncertain; treating it as no fill and holding this position until the window ends.'
+          : 'The sell was rejected or unfilled; holding this position until the window ends.',
+        edgePerShare,
+      };
     }
     this.schedulePersist(true);
     return Boolean(order?.matchedShares > 0);
@@ -809,9 +886,26 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       order.updatedAt = this.now();
       if (error?.submissionUncertain !== false) {
         order.status = 'SUBMISSION_UNCERTAIN';
-        this.haltLiveTrading('Order submission outcome is uncertain; automatic retries are blocked.');
+        if (action === 'SELL_FLIP' && !order.id) {
+          order.assumedFailedByPolicy = true;
+          order.assumptionPolicy = 'ASSUME_UNFILLED_AND_CONTINUE';
+          order.assumedFailedAt = this.now();
+          this.pendingFlip = null;
+          this.log(
+            'LIVE_SELL_FLIP_UNCERTAIN_ASSUMED_FAILED',
+            'No-ID flip sell is treated as unfilled by policy; the existing position is held for this window and later windows remain enabled.',
+            { localOrderId: order.localId, tradeId: order.tradeId, windowStart: order.windowStart },
+          );
+        } else {
+          this.haltLiveTrading('Order submission outcome is uncertain; automatic retries are blocked.');
+        }
       } else {
         order.status = 'REJECTED';
+        if (action === 'SELL_FLIP') {
+          order.processed = true;
+          order.processedMatchedShares = 0;
+          this.pendingFlip = null;
+        }
       }
       await this.persist();
       return order;
@@ -1194,6 +1288,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     if (!this.trader || !this.liveAccount.authenticated) return;
     for (const order of this.liveOrders) {
       if (!order.id) {
+        if (isAssumedFailedSellOrder(order)) continue;
         if (['SUBMITTING', 'SUBMISSION_UNCERTAIN'].includes(order.status)) {
           this.haltLiveTrading('A saved submission has no exchange order ID; it must be reconciled manually.');
           return;
