@@ -1109,3 +1109,49 @@ test('positions API failure does not gate live readiness or safe order-halt reco
   assert.equal(await bot.clearResolvedSubmissionHalt(), true);
   assert.equal(bot.liveHalted, false);
 });
+
+test('snapshot reports resolved outcomes and realized position P&L separately from order status', () => {
+  const { bot } = createBot();
+  bot.trades = [
+    {
+      id: 'settled-up',
+      status: 'SETTLED',
+      outcome: 'WIN',
+      side: 'UP',
+      marketId: 'market-up',
+      marketSlug: 'btc-updown-5m-up',
+      marketTitle: 'BTC Up or Down',
+      settledAt: 20_000,
+      realizedPnl: 1.25,
+      accumulatedRealizedPnl: 0.75,
+    },
+    {
+      id: 'closed-down',
+      status: 'CLOSED',
+      outcome: 'EXIT',
+      side: 'DOWN',
+      marketId: 'market-down',
+      marketTitle: 'BTC Up or Down',
+      closedAt: 30_000,
+      realizedPnl: 2.5,
+    },
+    {
+      id: 'still-awaiting',
+      status: 'AWAITING_RESOLUTION',
+      outcome: null,
+      side: 'UP',
+      marketId: 'market-pending',
+    },
+  ];
+
+  const results = bot.snapshot().positionResults;
+
+  assert.deepEqual(results.map(result => ({
+    tradeId: result.tradeId,
+    result: result.result,
+    realizedPnl: result.realizedPnl,
+  })), [
+    { tradeId: 'closed-down', result: 'CLOSED_EARLY', realizedPnl: 2.5 },
+    { tradeId: 'settled-up', result: 'WON', realizedPnl: 2 },
+  ]);
+});

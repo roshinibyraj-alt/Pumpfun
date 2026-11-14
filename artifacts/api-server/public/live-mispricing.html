@@ -287,6 +287,20 @@
       </section>
 
       <section class="panel">
+        <div class="section-head">
+          <div>
+            <h2>Position results</h2>
+            <p>Resolved outcomes and early exits; order statuses remain unchanged</p>
+          </div>
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Result time</th><th>Market / window</th><th>Side</th><th>Result</th><th>Bot-estimated realized P&amp;L</th></tr></thead>
+          <tbody id="position-results"></tbody>
+        </table></div>
+        <p class="footnote">Resolved wins and losses follow the original market result. P&amp;L is a conservative bot estimate; account transactions show actual executions.</p>
+      </section>
+
+      <section class="panel">
         <div class="section-head"><div><h2>Recent account transactions</h2><p>Polymarket’s trade activity for the linked account</p></div></div>
         <div class="table-wrap"><table><thead><tr><th>Time</th><th>Market</th><th>Side</th><th>Outcome</th><th>Price</th><th>Shares</th><th>USDC</th><th>Transaction</th></tr></thead><tbody id="transactions"></tbody></table></div>
         <p class="footnote">This feed may include transactions from other activity on the same Polymarket account. It is not limited to orders submitted by this bot.</p>
@@ -409,6 +423,25 @@
         <td>${shares(item.shares)}</td><td>${money(item.amount)}</td>
         <td>${item.transactionHash ? `${safe(String(item.transactionHash).slice(0, 10))}…` : '—'}</td></tr>`);
       $('transactions').innerHTML = rowsOrEmpty(transactions, 8, 'No recent account transactions returned.');
+      const positionResults = (state.positionResults || []).slice(0, 100).map(result => {
+        const badgeClass = result.result === 'WON' ? 'buy'
+          : result.result === 'LOST' ? 'sell' : '';
+        const resultLabel = result.result === 'CLOSED_EARLY'
+          ? 'Closed early' : result.result;
+        const resultTime = result.settledAt || result.closedAt;
+        return `<tr>
+          <td>${safe(dateText(resultTime))}</td>
+          <td title="${safe(result.marketSlug || result.marketId || '')}">${safe(result.marketTitle || result.marketSlug || 'BTC 5-minute market')}</td>
+          <td>${safe(result.side || '—')}</td>
+          <td><span class="tag ${badgeClass}">${safe(resultLabel || '—')}</span></td>
+          <td>${money(result.realizedPnl)}</td>
+        </tr>`;
+      });
+      $('position-results').innerHTML = rowsOrEmpty(
+        positionResults,
+        5,
+        'No resolved or early-closed positions yet.',
+      );
     }
     async function refresh() {
       try {

@@ -1602,6 +1602,35 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         sizingStakeUsd: this.nextEntryStakeUsd,
       },
       liveOrders: this.liveOrders.slice(-100).reverse(),
+      positionResults: this.trades
+        .filter(trade => trade.status === 'SETTLED' || trade.status === 'CLOSED')
+        .sort((left, right) => {
+          const leftAt = Number(left.settledAt ?? left.closedAt ?? left.openedAt) || 0;
+          const rightAt = Number(right.settledAt ?? right.closedAt ?? right.openedAt) || 0;
+          return rightAt - leftAt;
+        })
+        .slice(0, 100)
+        .map(trade => {
+          const resolved = trade.status === 'SETTLED';
+          const settledPnl = Number(trade.realizedPnl) || 0;
+          const earlierExitPnl = Number(trade.accumulatedRealizedPnl) || 0;
+          return {
+            tradeId: trade.id,
+            marketId: trade.marketId,
+            marketSlug: trade.marketSlug || null,
+            marketTitle: trade.marketTitle || trade.marketSlug || trade.marketId,
+            side: trade.side,
+            result: resolved
+              ? trade.outcome === 'WIN' ? 'WON' : 'LOST'
+              : 'CLOSED_EARLY',
+            settledAt: trade.settledAt || null,
+            closedAt: trade.closedAt || null,
+            realizedPnl: round(
+              resolved ? earlierExitPnl + settledPnl : settledPnl,
+              2,
+            ),
+          };
+        }),
       pendingFlip: this.pendingFlip,
       note: 'Account balances and transactions are from Polymarket. Bot trade costs use conservative limit-price estimates; transaction rows show actual account activity.',
     };
