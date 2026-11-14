@@ -367,7 +367,7 @@
       $('position-value').textContent = money(account.positionValue);
       $('position-count').textContent = `${Number(account.positionCount || 0)} open account positions`;
       $('next-size').textContent = `${shares(account.sizingShares ?? strategy.nextEntryShares)} shares`;
-      $('size-rule').textContent = `Base ${strategy.baseShares || 5} · +${strategy.lossIncreaseShares || 1} loss · −${strategy.winReductionShares || 1.5} win · floor ${strategy.minimumShares || 5}`;
+      $('size-rule').textContent = `Base ${strategy.baseShares || 10} · +${strategy.lossIncreaseShares || 2} loss · −${strategy.winReductionShares || 3} win · floor ${strategy.minimumShares || 10}`;
       $('market-title').textContent = state.market?.title || state.market?.slug || 'BTC 5-minute market not loaded';
       const remaining = Number(state.window?.secondsRemaining);
       $('time-left').textContent = numeric(state.window?.secondsRemaining) ? `${Math.ceil(remaining)}s remaining` : '—';

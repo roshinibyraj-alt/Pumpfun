@@ -19,6 +19,14 @@ class LiveMispricingStateStore {
         updated_at bigint NOT NULL
       )
     `);
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS btc_5m_live_mispricing_history_resets (
+        bot_key text NOT NULL,
+        request_id text NOT NULL,
+        completed_at bigint NOT NULL,
+        PRIMARY KEY (bot_key, request_id)
+      )
+    `);
   }
 
   async loadState() {
@@ -39,6 +47,43 @@ class LiveMispricingStateStore {
          updated_at = EXCLUDED.updated_at`,
       [LIVE_BOT_KEY, JSON.stringify(state), Date.now()],
     );
+  }
+
+  async resetHistoryOnce(requestId) {
+    const normalizedRequestId = String(requestId ?? '').trim();
+    if (!/^[A-Za-z0-9._:-]{1,128}$/.test(normalizedRequestId)) {
+      throw new Error('A valid live BTC history reset request ID is required.');
+    }
+
+    await this.initialize();
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const claim = await client.query(
+        `INSERT INTO btc_5m_live_mispricing_history_resets
+           (bot_key, request_id, completed_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (bot_key, request_id) DO NOTHING
+         RETURNING request_id`,
+        [LIVE_BOT_KEY, normalizedRequestId, Date.now()],
+      );
+      if (!claim.rows?.length) {
+        await client.query('COMMIT');
+        return false;
+      }
+
+      await client.query(
+        'DELETE FROM btc_5m_live_mispricing_state WHERE bot_key = $1',
+        [LIVE_BOT_KEY],
+      );
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      client.release?.();
+    }
   }
 }
 

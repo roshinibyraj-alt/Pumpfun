@@ -42,14 +42,36 @@ function setFreshOrderSnapshot(bot, orders = []) {
   bot.liveAccount.ordersSnapshotAt = new Date(bot.now()).toISOString();
 }
 
-test('live copy starts at 5 and sizes outcomes by +1/−1.5 with a 5 floor', () => {
+test('live copy starts at 10 and sizes outcomes by +2/−3 with a 10 floor', () => {
   const { bot } = createBot();
-  assert.equal(bot.config.BASE_SHARES, 5);
-  assert.equal(bot.config.LOSS_SIZE_STEP_SHARES, 1);
-  assert.equal(bot.config.WIN_SIZE_REDUCTION_SHARES, 1.5);
-  assert.equal(bot.sizeAfterOutcome(5, 'LOSS'), 6);
-  assert.equal(bot.sizeAfterOutcome(8, 'WIN'), 6.5);
-  assert.equal(bot.sizeAfterOutcome(5.5, 'WIN'), 5);
+  assert.equal(bot.config.BASE_SHARES, 10);
+  assert.equal(bot.config.LOSS_SIZE_STEP_SHARES, 2);
+  assert.equal(bot.config.WIN_SIZE_REDUCTION_SHARES, 3);
+  assert.equal(bot.sizeAfterOutcome(10, 'LOSS'), 12);
+  assert.equal(bot.sizeAfterOutcome(16, 'WIN'), 13);
+  assert.equal(bot.sizeAfterOutcome(11, 'WIN'), 10);
+});
+
+test('live history reset request runs once through the durable state store', async () => {
+  const previousRequestId = process.env.BTC_LIVE_MISPRICING_HISTORY_RESET_REQUEST_ID;
+  process.env.BTC_LIVE_MISPRICING_HISTORY_RESET_REQUEST_ID = 'live-history-reset-test';
+  try {
+    const { bot } = createBot();
+    const resetIds = [];
+    bot.stateStore.resetHistoryOnce = async requestId => {
+      resetIds.push(requestId);
+      return true;
+    };
+
+    assert.equal(await bot.applyHistoryResetRequest(), true);
+    assert.deepEqual(resetIds, ['live-history-reset-test']);
+  } finally {
+    if (previousRequestId === undefined) {
+      delete process.env.BTC_LIVE_MISPRICING_HISTORY_RESET_REQUEST_ID;
+    } else {
+      process.env.BTC_LIVE_MISPRICING_HISTORY_RESET_REQUEST_ID = previousRequestId;
+    }
+  }
 });
 
 test('live entry records only the amount confirmed by the exchange', async () => {
@@ -182,9 +204,9 @@ test('order matching reads CLOB response aliases and terminal states', () => {
   assert.equal(isTerminalOrder({ status: 'UNFILLED', shares: 10, matchedShares: 0 }), true);
 });
 
-test('profitable live closes reduce the next size but respect the 5 floor', () => {
+test('profitable live closes reduce the next size but respect the 10 floor', () => {
   const { bot } = createBot();
-  bot.nextEntryShares = 6.5;
+  bot.nextEntryShares = 13;
   const trade = {
     id: 'trade-1',
     status: 'OPEN',
@@ -205,7 +227,7 @@ test('profitable live closes reduce the next size but respect the 5 floor', () =
     fills: [],
   }, 10_000, 'PROFITABLE_MODEL_FLIP', 'DOWN');
   assert.equal(trade.realizedPnl, 2);
-  assert.equal(bot.nextEntryShares, 5);
+  assert.equal(bot.nextEntryShares, 10);
   assert.equal(trade.sizingOutcome, 'WIN');
 });
 
