@@ -252,6 +252,13 @@
           </div>
         </article>
         <article class="panel">
+          <div class="section-head"><div><h2>Bot order history</h2><p>Open positions are held to market resolution; no in-window sell orders are sent</p></div></div>
+          <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Requested</th><th>Filled</th><th>Price cap / floor</th><th>Status</th></tr></thead><tbody id="bot-orders"></tbody></table></div>
+        </article>
+      </section>
+
+      <section class="grid">
+        <article class="panel">
           <div class="section-head"><div><h2>Strategy & live status</h2><p>Actual execution, not paper fills</p></div></div>
           <div class="detail-list">
             <div class="detail"><span>Binance BTC price</span><strong id="btc-price">—</strong></div>
@@ -264,13 +271,6 @@
             <div class="detail"><span>Last account update</span><strong id="account-time">—</strong></div>
             <div class="detail"><span>Last refresh</span><strong id="refresh-time">—</strong></div>
           </div>
-        </article>
-      </section>
-
-      <section class="grid">
-        <article class="panel">
-      <div class="section-head"><div><h2>Bot order history</h2><p>Open positions are held to market resolution; no in-window sell orders are sent</p></div></div>
-          <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Requested</th><th>Filled</th><th>Price cap / floor</th><th>Status</th></tr></thead><tbody id="bot-orders"></tbody></table></div>
         </article>
         <article class="panel">
           <div class="section-head"><div><h2>Current live position</h2><p>Bot’s open position in this window</p></div></div>
