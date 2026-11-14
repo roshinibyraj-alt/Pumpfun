@@ -121,7 +121,7 @@ function getCandleSignalPriority(candles) {
       color: 'UNKNOWN',
       streak: 0,
       meanReversion: false,
-      reason: 'Closed candle data is unavailable; the strongest qualifying edge will be selected.',
+      reason: 'Closed candle data is unavailable; no signal side is allowed.',
     };
   }
 
@@ -134,7 +134,7 @@ function getCandleSignalPriority(candles) {
       color,
       streak: 0,
       meanReversion: false,
-      reason: 'The latest closed candle is a doji; the strongest qualifying edge will be selected.',
+      reason: 'The latest closed candle is a doji; no signal side is allowed.',
     };
   }
 
@@ -161,8 +161,8 @@ function getCandleSignalPriority(candles) {
     streak: Math.min(streak, CANDLE_STREAK_MEAN_REVERSION_THRESHOLD),
     meanReversion,
     reason: meanReversion
-      ? `${side} is prioritized first after ${streakLabel} consecutive ${color.toLowerCase()} candles (mean reversion).`
-      : `${side} is prioritized first after the latest ${color.toLowerCase()} candle.`,
+      ? `Only ${side} signals are allowed after ${streakLabel} consecutive ${color.toLowerCase()} candles (mean reversion).`
+      : `Only ${side} signals are allowed after the latest ${color.toLowerCase()} candle.`,
   };
 }
 
@@ -174,7 +174,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   constructor(options = {}) {
     const config = {
       ...DEFAULT_CONFIG,
-      STRATEGY_VERSION: 'btc-live-mispricing-candle-streak-priority-v1',
+      STRATEGY_VERSION: 'btc-live-mispricing-candle-streak-gate-v2',
       BASE_SHARES: 10,
       LOSS_SIZE_STEP_SHARES: 2,
       WIN_SIZE_REDUCTION_SHARES: 3,
@@ -661,7 +661,15 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     }
     const shares = this.nextEntryShares;
     const candlePriority = getCandleSignalPriority(this.priceFeed.snapshot?.()?.candles);
-    const candidates = ['UP', 'DOWN'].map(side => {
+    if (!candlePriority.side) {
+      this.currentSignal = {
+        side: null,
+        reason: `${candlePriority.reason} Waiting for a clear completed candle before entering.`,
+        edgePerShare: null,
+      };
+      return false;
+    }
+    const candidates = [candlePriority.side].map(side => {
       if (!this.sideQuoteIsFresh(side, now)) return null;
       const preview = this.sweep(side, 'asks', shares);
       if (!preview?.complete) return null;
@@ -673,22 +681,13 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     if (!candidates.length) {
       this.currentSignal = {
         side: null,
-        reason: `${candlePriority.reason} No side clears the minimum net edge after visible ask-depth and fee estimates.`,
+        reason: `${candlePriority.reason} This allowed side does not clear the minimum net edge after visible ask-depth and fee estimates.`,
         edgePerShare: null,
       };
       return false;
     }
-    candidates.sort((left, right) => {
-      const leftPriority = left.side === candlePriority.side ? 0 : 1;
-      const rightPriority = right.side === candlePriority.side ? 0 : 1;
-      return leftPriority - rightPriority || right.edgePerShare - left.edgePerShare;
-    });
     const selected = candidates[0];
-    const selectionReason = candlePriority.side
-      ? selected.side === candlePriority.side
-        ? candlePriority.reason
-        : `Priority ${candlePriority.side} did not qualify; selecting the strongest qualifying ${selected.side} signal.`
-      : candlePriority.reason;
+    const selectionReason = candlePriority.reason;
     this.currentSignal = {
       side: selected.side,
       reason: this.tradingEnabled
@@ -1609,8 +1608,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         minimumShares: this.config.BASE_SHARES,
         volatilityCandles: this.config.VOLATILITY_CANDLES,
         minEntryEdge: this.config.MIN_NET_EDGE_PER_SHARE,
-        firstSignalPriority: candlePriority.side,
-        firstSignalPriorityReason: candlePriority.reason,
+        allowedSignalSide: candlePriority.side,
+        allowedSignalReason: candlePriority.reason,
         previousCandleColor: candlePriority.color,
         sameColorStreak: candlePriority.streak,
         meanReversionPriority: candlePriority.meanReversion,

@@ -43,7 +43,7 @@ function setFreshOrderSnapshot(bot, orders = []) {
   bot.liveAccount.ordersSnapshotAt = new Date(bot.now()).toISOString();
 }
 
-test('candle priority follows one or two candles and reverses after a three-candle streak', () => {
+test('candle gate follows candle color and reverses after a three-candle streak', () => {
   const green = [
     { open: 100, close: 101, closed: true },
     { open: 101, close: 102, closed: true },
@@ -56,18 +56,19 @@ test('candle priority follows one or two candles and reverses after a three-cand
     color: 'GREEN',
     streak: 1,
     meanReversion: false,
-    reason: 'UP is prioritized first after the latest green candle.',
+    reason: 'Only UP signals are allowed after the latest green candle.',
   });
   assert.equal(getCandleSignalPriority(green.slice(-2)).side, 'UP');
   assert.equal(getCandleSignalPriority(green).side, 'DOWN');
   assert.equal(getCandleSignalPriority(green).meanReversion, true);
+  assert.match(getCandleSignalPriority(green).reason, /Only DOWN signals are allowed.*mean reversion/);
   assert.equal(getCandleSignalPriority(red.slice(-1)).side, 'DOWN');
   assert.equal(getCandleSignalPriority(red.slice(-2)).side, 'DOWN');
   assert.equal(getCandleSignalPriority(red).side, 'UP');
   assert.equal(getCandleSignalPriority([{ open: 100, close: 100, closed: true }]).side, null);
 });
 
-test('a qualifying candle-priority side wins over a stronger opposite edge', async () => {
+test('only the candle-allowed side can enter, even when the opposite edge is stronger', async () => {
   let placed;
   const trader = {
     async placeTakerOrder(tokenId, action, price, size) {
@@ -111,7 +112,77 @@ test('a qualifying candle-priority side wins over a stronger opposite edge', asy
   assert.equal(entered, true);
   assert.equal(placed.tokenId, 'down-token');
   assert.equal(bot.trades[0].side, 'DOWN');
-  assert.match(bot.currentSignal.reason, /DOWN is prioritized first after the latest red candle/);
+  assert.match(bot.currentSignal.reason, /Only DOWN signals are allowed after the latest red candle/);
+});
+
+test('the bot does not fall back to the opposite side when the allowed side fails its edge check', async () => {
+  let submitted = false;
+  const trader = {
+    async placeTakerOrder() {
+      submitted = true;
+      return { id: 'unexpected-entry', status: 'MATCHED' };
+    },
+  };
+  const { bot } = createBot({ trader });
+  const now = bot.now();
+  bot.windowStart = Math.floor(now / bot.config.WINDOW_MS) * bot.config.WINDOW_MS;
+  bot.windowEnd = bot.windowStart + bot.config.WINDOW_MS;
+  bot.processStartedAt = bot.windowStart;
+  bot.currentOpenTrade = () => null;
+  bot.modelSnapshot = () => ({
+    ready: true,
+    probabilityUp: 0.8,
+    probabilityDown: 0.2,
+    currentPrice: 100,
+  });
+  bot.priceFeed.snapshot = () => ({
+    candles: [{ open: 101, close: 100, closed: true }],
+  });
+  bot.sideQuoteIsFresh = () => true;
+  bot.sweep = side => ({
+    complete: true,
+    shares: 10,
+    totalCost: side === 'UP' ? 2 : 9,
+    averagePrice: side === 'UP' ? 0.2 : 0.9,
+    fills: [{ price: side === 'UP' ? 0.2 : 0.9, shares: 10 }],
+  });
+
+  const entered = await bot.evaluateLive(now);
+
+  assert.equal(entered, false);
+  assert.equal(submitted, false);
+  assert.equal(bot.trades.length, 0);
+  assert.equal(bot.currentSignal.side, null);
+  assert.match(bot.currentSignal.reason, /Only DOWN signals are allowed/);
+});
+
+test('missing or doji candle data blocks entries instead of selecting either side', async () => {
+  const { bot } = createBot();
+  const now = bot.now();
+  bot.windowStart = Math.floor(now / bot.config.WINDOW_MS) * bot.config.WINDOW_MS;
+  bot.windowEnd = bot.windowStart + bot.config.WINDOW_MS;
+  bot.processStartedAt = bot.windowStart;
+  bot.currentOpenTrade = () => null;
+  bot.modelSnapshot = () => ({
+    ready: true,
+    probabilityUp: 0.8,
+    probabilityDown: 0.2,
+    currentPrice: 100,
+  });
+  bot.sideQuoteIsFresh = () => true;
+  bot.sweep = () => {
+    throw new Error('No side should be evaluated without a clear candle');
+  };
+
+  for (const candles of [
+    [],
+    [{ open: 100, close: 100, closed: true }],
+  ]) {
+    bot.priceFeed.snapshot = () => ({ candles });
+    assert.equal(await bot.evaluateLive(now), false);
+    assert.equal(bot.currentSignal.side, null);
+    assert.match(bot.currentSignal.reason, /no signal side is allowed/i);
+  }
 });
 
 test('live copy starts at 10 and sizes outcomes by +2/−3 with a 10 floor', () => {
@@ -202,6 +273,9 @@ test('normal live entry still submits the sized base entry after flip removal', 
     probabilityUp: 0.9,
     probabilityDown: 0.1,
     currentPrice: 100,
+  });
+  bot.priceFeed.snapshot = () => ({
+    candles: [{ open: 100, close: 101, closed: true }],
   });
   bot.sideQuoteIsFresh = () => true;
   bot.sweep = (_side, bookSide, shares) => bookSide === 'asks'

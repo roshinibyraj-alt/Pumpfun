@@ -264,7 +264,7 @@
             <div class="detail"><span>Binance BTC price</span><strong id="btc-price">—</strong></div>
             <div class="detail"><span>Window open price</span><strong id="open-price">—</strong></div>
             <div class="detail"><span>Volatility lookback</span><strong id="volatility">3 closed candles</strong></div>
-            <div class="detail"><span>First-signal priority</span><strong id="signal-priority">—</strong></div>
+            <div class="detail"><span>Allowed signal side</span><strong id="signal-priority">—</strong></div>
             <div class="detail"><span>Minimum entry edge</span><strong id="edge-rules">$0.05 per share</strong></div>
             <div class="detail"><span>Order execution & exits</span><strong id="execution-rule">FAK taker · buy cap $0.99 · hold to resolution</strong></div>
             <div class="detail"><span>Current bot position</span><strong id="bot-position">None</strong></div>
@@ -381,9 +381,9 @@
       $('btc-price').textContent = numeric(state.binance?.price) ? `$${Number(state.binance.price).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—';
       $('open-price').textContent = numeric(model.windowOpenPrice) ? `$${Number(model.windowOpenPrice).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—';
       $('volatility').textContent = `${strategy.volatilityCandles || 3} closed 5-minute candles`;
-      $('signal-priority').textContent = strategy.firstSignalPriority
-        ? `${strategy.firstSignalPriority} first · ${strategy.meanReversionPriority ? `${strategy.sameColorStreak}+ ${String(strategy.previousCandleColor || '').toLowerCase()} candles · mean reversion` : `${String(strategy.previousCandleColor || '').toLowerCase()} candle`}`
-        : 'No candle priority · strongest edge';
+      $('signal-priority').textContent = strategy.allowedSignalSide
+        ? `${strategy.allowedSignalSide} only · ${strategy.meanReversionPriority ? `${strategy.sameColorStreak}+ ${String(strategy.previousCandleColor || '').toLowerCase()} candles · mean reversion` : `${String(strategy.previousCandleColor || '').toLowerCase()} candle`}`
+        : 'No entry · candle unavailable';
       $('edge-rules').textContent = `${money(strategy.minEntryEdge)} per share`;
       $('execution-rule').textContent = `${strategy.entryOrderType || 'FAK taker'} · buy cap ${cents(strategy.maxBuyPrice ?? 0.99)} · ${strategy.intraWindowExitPolicy || 'hold to resolution'}`;
       $('bot-position').textContent = position ? `${position.side} · ${shares(position.shares)} shares` : 'None';
