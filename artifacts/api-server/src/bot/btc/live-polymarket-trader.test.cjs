@@ -166,36 +166,3 @@ test('taker orders preserve share sizing and post as immediate FAK orders', asyn
   assert.equal(response.id, 'taker-order-1');
   assert.equal(response.status, 'MATCHED');
 });
-
-test('USD-sized FAK buys enforce both the notional stake and all-in spend cap', async () => {
-  let created;
-  let posted;
-  const trader = new LivePolymarketTrader('test-private-key', {
-    sdk: {
-      OrderSide: { BUY: 'BUY_SIDE', SELL: 'SELL_SIDE' },
-      OrderType: { FAK: 'FAK_TYPE' },
-    },
-  });
-  trader.client = {
-    async createMarketOrder(request) {
-      created = request;
-      return { ...request, orderType: 'GTC_TYPE' };
-    },
-    async postOrder(order) {
-      posted = order;
-      return { ok: true, orderId: 'usd-taker-order-1', status: 'MATCHED' };
-    },
-  };
-
-  const response = await trader.placeTakerBuyByUsd('token-1', 5, 5, 0.99);
-
-  assert.equal(created.assetId, 'token-1');
-  assert.equal(created.side, 'BUY_SIDE');
-  assert.equal(created.amount, '5');
-  assert.equal(created.maxSpend, '5');
-  assert.equal(created.maxPrice, '0.99');
-  assert.equal(created.orderType, 'FAK_TYPE');
-  assert.equal(posted.orderType, 'FAK_TYPE');
-  assert.equal(response.id, 'usd-taker-order-1');
-  assert.equal(response.status, 'MATCHED');
-});

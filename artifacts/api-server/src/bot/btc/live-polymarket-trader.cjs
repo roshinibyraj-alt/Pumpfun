@@ -71,51 +71,6 @@ class LivePolymarketTrader {
     return { authenticated: true };
   }
 
-  async placeTakerBuyByUsd(tokenId, amountUsd, maxSpendUsd, maxPrice) {
-    if (!this.client) throw new Error('Polymarket authentication is not ready.');
-    if (!this.sdk?.OrderType?.FAK) {
-      const error = new Error('Polymarket SDK does not support immediate FAK orders.');
-      error.submissionUncertain = false;
-      throw error;
-    }
-    let response;
-    try {
-      const signedOrder = await this.client.createMarketOrder({
-        assetId: String(tokenId),
-        side: this.sdk.OrderSide.BUY,
-        amount: String(amountUsd),
-        maxSpend: String(maxSpendUsd),
-        maxPrice: String(maxPrice),
-        orderType: this.sdk.OrderType.FAK,
-      });
-      response = await this.client.postOrder({
-        ...signedOrder,
-        orderType: this.sdk.OrderType.FAK,
-      });
-    } catch (error) {
-      const message = String(error?.message || error);
-      const explicitRejection =
-        /not enough balance|balance is not enough|insufficient (?:balance|allowance)|invalid token id|(?:invalid|below|lower than|less than).{0,60}(?:minimum size|min(?:imum)? size|size)|(?:minimum|min(?:imum)? size|size).{0,60}(?:below|lower than|less than)/i.test(message);
-      error.submissionUncertain = !explicitRejection;
-      throw error;
-    }
-    if (!response?.ok) {
-      const error = new Error(response?.message || response?.error || 'Taker buy rejected.');
-      error.submissionUncertain = false;
-      throw error;
-    }
-    if (!response.orderId) {
-      const error = new Error('Polymarket accepted a taker buy without returning its ID.');
-      error.submissionUncertain = true;
-      throw error;
-    }
-    return {
-      ...response,
-      id: response.orderId,
-      status: response.status || response.orderStatus || 'UNKNOWN',
-    };
-  }
-
   async placeTakerOrder(tokenId, side, price, size) {
     if (!this.client) throw new Error('Polymarket authentication is not ready.');
     if (!this.sdk?.OrderType?.FAK) {

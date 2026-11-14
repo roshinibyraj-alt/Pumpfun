@@ -1350,20 +1350,12 @@ class BtcMispricingBot {
     trade.sizingGeneration = this.sizingGeneration;
     const previous = this.nextEntryShares;
     const next = this.recalculateNextEntryShares();
-    const unit = this.config.SIZING_UNIT_LABEL || 'shares';
-    const sizeText = value => unit === 'USD' ? `$${Number(value).toFixed(2)}` : `${value} shares`;
     this.log('NEXT_ENTRY_SIZE_UPDATED',
-      `${reason}; next order size is ${sizeText(next)}.`,
+      `${reason}; next order size is ${next} shares.`,
       {
         tradeId: trade.id,
         outcome,
         adjustmentType,
-        unit,
-        previousSize: previous,
-        nextSize: next,
-        lossIncrement: this.config.LOSS_SIZE_STEP_SHARES,
-        winReduction: this.config.WIN_SIZE_REDUCTION_SHARES,
-        minimumSize: this.config.BASE_SHARES,
         previousShares: previous,
         nextShares: next,
         lossIncrementShares: this.config.LOSS_SIZE_STEP_SHARES,
