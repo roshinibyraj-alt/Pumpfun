@@ -65,6 +65,7 @@ test('live history reset request runs once through the durable state store', asy
 
     assert.equal(await bot.applyHistoryResetRequest(), true);
     assert.deepEqual(resetIds, ['live-history-reset-test']);
+    assert.equal(bot.persistentStateSnapshot().historyResetRequestId, 'live-history-reset-test');
   } finally {
     if (previousRequestId === undefined) {
       delete process.env.BTC_LIVE_MISPRICING_HISTORY_RESET_REQUEST_ID;

@@ -48,6 +48,11 @@ test('live history reset clears only its ledger and is idempotent', async () => 
     sql === 'DELETE FROM btc_5m_live_mispricing_state WHERE bot_key = $1');
   assert.equal(deletes.length, 1);
   assert.deepEqual(deletes[0].parameters, [LIVE_BOT_KEY]);
+  const triggerCreation = pool.statements.findIndex(({ sql }) =>
+    sql.includes('CREATE TRIGGER btc_5m_live_mispricing_reset_epoch_guard'));
+  const historyDeletion = pool.statements.findIndex(({ sql }) =>
+    sql === 'DELETE FROM btc_5m_live_mispricing_state WHERE bot_key = $1');
+  assert.ok(triggerCreation >= 0 && triggerCreation < historyDeletion);
 });
 
 test('live history reset rejects invalid request IDs before touching storage', async () => {

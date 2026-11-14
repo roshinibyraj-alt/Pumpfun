@@ -27,6 +27,45 @@ class LiveMispricingStateStore {
         PRIMARY KEY (bot_key, request_id)
       )
     `);
+    await this.pool.query(`
+      CREATE OR REPLACE FUNCTION btc_5m_live_mispricing_reset_guard()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $reset_guard$
+      DECLARE
+        latest_reset_request_id text;
+      BEGIN
+        SELECT request_id INTO latest_reset_request_id
+        FROM btc_5m_live_mispricing_history_resets
+        WHERE bot_key = NEW.bot_key
+        ORDER BY completed_at DESC, request_id DESC
+        LIMIT 1;
+        IF latest_reset_request_id IS NOT NULL
+          AND NEW.state->>'historyResetRequestId' IS DISTINCT FROM latest_reset_request_id THEN
+          RETURN NULL;
+        END IF;
+        RETURN NEW;
+      END;
+      $reset_guard$
+    `);
+    await this.pool.query(`
+      DO $create_reset_trigger$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_trigger
+          WHERE tgname = 'btc_5m_live_mispricing_reset_epoch_guard'
+            AND tgrelid = 'btc_5m_live_mispricing_state'::regclass
+            AND NOT tgisinternal
+        ) THEN
+          EXECUTE 'CREATE TRIGGER btc_5m_live_mispricing_reset_epoch_guard
+            BEFORE INSERT OR UPDATE ON btc_5m_live_mispricing_state
+            FOR EACH ROW
+            EXECUTE FUNCTION btc_5m_live_mispricing_reset_guard()';
+        END IF;
+      END;
+      $create_reset_trigger$
+    `);
   }
 
   async loadState() {

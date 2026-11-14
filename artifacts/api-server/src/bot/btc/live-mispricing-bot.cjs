@@ -138,12 +138,14 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     this.lastHaltRecoverySignature = null;
     this.liveHalted = false;
     this.liveHaltReason = null;
+    this.historyResetRequestId = '';
     this.evaluatePromise = null;
     this.priceFeed.onUpdate = () => { void this.tick(); };
   }
 
   restoreState(state) {
     super.restoreState(state);
+    this.historyResetRequestId = String(state.historyResetRequestId || '');
     this.liveOrders = Array.isArray(state.liveOrders) ? state.liveOrders : [];
     this.pendingFlip = state.pendingFlip && typeof state.pendingFlip === 'object'
       ? state.pendingFlip : null;
@@ -165,6 +167,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       pendingFlip: this.pendingFlip,
       liveHalted: this.liveHalted,
       liveHaltReason: this.liveHaltReason,
+      historyResetRequestId: this.historyResetRequestId || null,
     };
   }
 
@@ -230,6 +233,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       throw new Error('A live history reset was requested, but the durable live store cannot reset history.');
     }
     const reset = await this.stateStore.resetHistoryOnce(requestId);
+    this.historyResetRequestId = requestId;
     if (reset) console.log('BTC live mispricing local history reset completed.');
     return reset;
   }
