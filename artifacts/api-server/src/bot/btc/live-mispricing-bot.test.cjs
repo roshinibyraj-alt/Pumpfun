@@ -458,6 +458,103 @@ test('an uncertain no-ID flip sell does not block the independent opposite buy',
   assert.equal(bot.liveOrders.find(order => order.action === 'BUY_FLIP').matchedShares, 6);
 });
 
+test('an uncertain no-ID flip buy stays recorded, does not halt, and is never retried', async () => {
+  let submissions = 0;
+  const trader = {
+    async placeTakerOrder() {
+      submissions += 1;
+      const error = new Error('buy response timed out');
+      error.submissionUncertain = true;
+      throw error;
+    },
+  };
+  const { bot } = createBot({ trader });
+  const order = bot.createSweepOrder({
+    action: 'BUY_FLIP',
+    side: 'DOWN',
+    shares: 2,
+    amountUsd: 1,
+    preview: { fills: [{ price: 0.5, shares: 2 }], averagePrice: 0.5 },
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+  });
+
+  await bot.submitPreparedSweepOrder(order, bot.model);
+  await bot.reconcileLiveOrders();
+
+  assert.equal(order.status, 'SUBMISSION_UNCERTAIN');
+  assert.equal(order.nonBlockingByPolicy, true);
+  assert.equal(bot.liveOrders.includes(order), true);
+  assert.equal(bot.liveHalted, false);
+  assert.equal(submissions, 1);
+});
+
+test('a prior-window uncertain flip does not block a new-window entry', async () => {
+  const submissions = [];
+  const trader = {
+    async placeTakerOrder(tokenId, action, price, size) {
+      submissions.push({ tokenId, action, price, size });
+      return { id: 'new-window-entry', status: 'MATCHED' };
+    },
+    async fetchOrder(id) {
+      return { id, status: 'MATCHED', sizeMatched: '5' };
+    },
+    async cancelOrder() {
+      assert.fail('An unresolved prior-window flip must not hold the new window.');
+    },
+  };
+  const { bot } = createBot({ trader });
+  const now = bot.now();
+  const currentStart = Math.floor(now / bot.config.WINDOW_MS) * bot.config.WINDOW_MS;
+  bot.windowStart = currentStart;
+  bot.windowEnd = currentStart + bot.config.WINDOW_MS;
+  bot.processStartedAt = currentStart;
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
+  bot.liveOrders = [{
+    localId: 'old-flip',
+    id: 'old-flip-exchange-order',
+    action: 'BUY_FLIP',
+    side: 'DOWN',
+    tokenId: 'down-token',
+    marketId: 'old-market',
+    windowStart: currentStart - bot.config.WINDOW_MS,
+    windowEnd: currentStart,
+    amountUsd: 1,
+    shares: 2,
+    matchedShares: 0,
+    status: 'CANCEL_UNCERTAIN',
+    processed: false,
+  }];
+  setFreshOrderSnapshot(bot, [{ id: 'old-flip-exchange-order', status: 'LIVE' }]);
+  bot.currentOpenTrade = () => null;
+  bot.modelSnapshot = () => ({
+    ready: true,
+    probabilityUp: 0.8,
+    probabilityDown: 0.2,
+    currentPrice: 100,
+  });
+  bot.sideQuoteIsFresh = () => true;
+  bot.buyPreviewForStake = side => ({
+    complete: true,
+    shares: 5,
+    gross: 3,
+    totalCost: side === 'UP' ? 3.1 : 4,
+    averagePrice: 0.6,
+    fills: [{ price: 0.6, shares: 5 }],
+  });
+
+  await bot.reconcileLiveOrders();
+  assert.equal(await bot.clearResolvedSubmissionHalt(), true);
+  const entered = await bot.evaluateLive(now);
+
+  assert.equal(entered, true);
+  assert.deepEqual(submissions.map(order => [order.tokenId, order.action, order.size]), [
+    ['up-token', 'BUY', 3],
+  ]);
+  assert.equal(bot.liveHalted, false);
+});
+
 test('live submitter accepts source-qualified flip order actions', async () => {
   let placed;
   const trader = {
@@ -646,7 +743,7 @@ test('an uncertain standalone flip sell is assumed failed without halting', asyn
   assert.equal(bot.liveHalted, false);
 });
 
-test('restores a sell-only uncertain halt as assumed no-fill but preserves buy halts', () => {
+test('restores uncertain flip orders without blocking while preserving normal entry halts', () => {
   const { bot } = createBot();
   bot.restoreState({
     trades: [],
@@ -678,7 +775,26 @@ test('restores a sell-only uncertain halt as assumed no-fill but preserves buy h
   buyBot.restoreState({
     trades: [],
     liveOrders: [{
-      localId: 'old-buy',
+      localId: 'old-flip-buy',
+      id: null,
+      action: 'BUY_FLIP',
+      status: 'SUBMISSION_UNCERTAIN',
+      processed: false,
+      shares: 10,
+      matchedShares: 0,
+      windowStart: buyBot.windowStart,
+    }],
+    liveHalted: true,
+    liveHaltReason: 'Order submission outcome is uncertain; automatic retries are blocked.',
+  });
+  assert.equal(buyBot.liveOrders[0].nonBlockingByPolicy, true);
+  assert.equal(buyBot.liveHalted, false);
+
+  const { bot: entryBot } = createBot();
+  entryBot.restoreState({
+    trades: [],
+    liveOrders: [{
+      localId: 'old-entry-buy',
       id: null,
       action: 'BUY_ENTRY',
       status: 'SUBMISSION_UNCERTAIN',
@@ -689,7 +805,7 @@ test('restores a sell-only uncertain halt as assumed no-fill but preserves buy h
     liveHalted: true,
     liveHaltReason: 'Order submission outcome is uncertain; automatic retries are blocked.',
   });
-  assert.equal(buyBot.liveHalted, true);
+  assert.equal(entryBot.liveHalted, true);
 });
 
 test('prepared flip sell orders can reach the exchange', async () => {
@@ -838,6 +954,36 @@ test('submission halt clears only after every order is resolved and the exchange
   assert.equal(bot.liveHalted, false);
   assert.equal(bot.liveHaltReason, null);
   assert.ok(saves.length > 0);
+});
+
+test('manual open orders on another market do not block this bot from recovering', async () => {
+  const { bot } = createBot({ tradingEnabled: false });
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
+  setFreshOrderSnapshot(bot, [{
+    id: 'manual-other-market',
+    assetId: 'manual-token',
+    conditionId: 'manual-condition',
+    status: 'LIVE',
+  }]);
+
+  const diagnostics = bot.submissionHaltRecoveryDiagnostics();
+  assert.equal(diagnostics.exchangeOpenOrderCount, 1);
+  assert.equal(diagnostics.blockingExchangeOpenOrderCount, 0);
+  assert.equal(diagnostics.blockers.includes('EXCHANGE_OPEN_ORDERS_PRESENT'), false);
+  assert.equal(await bot.clearResolvedSubmissionHalt(), true);
+
+  bot.liveHalted = true;
+  bot.liveHaltReason = 'An existing order could not be reconciled; new orders are blocked.';
+  setFreshOrderSnapshot(bot, [{
+    id: 'manual-same-market',
+    assetId: 'up-token',
+    conditionId: 'market-1',
+    status: 'LIVE',
+  }]);
+  const sameMarketDiagnostics = bot.submissionHaltRecoveryDiagnostics();
+  assert.equal(sameMarketDiagnostics.blockingExchangeOpenOrderCount, 1);
+  assert.equal(sameMarketDiagnostics.blockers.includes('EXCHANGE_OPEN_ORDERS_PRESENT'), true);
 });
 
 test('reconciliation halt clears only after all orders are terminal and the exchange list is fresh and empty', async () => {
