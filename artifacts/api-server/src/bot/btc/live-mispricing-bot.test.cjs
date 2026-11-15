@@ -128,7 +128,7 @@ test('missing or doji candles do not gate fair-value entries', async () => {
   assert.equal(bot.liveHalted, false);
 });
 
-test('live stake progression starts at $3 and adjusts by +$1/−$1.50 with a $3 floor', () => {
+test('live stake progression starts at $3, adjusts by +$1/−$1.50, and caps at $15', () => {
   const { bot } = createBot();
   assert.equal(bot.config.BASE_STAKE_USD, 3);
   assert.equal(bot.nextEntryStakeUsd, 3);
@@ -137,6 +137,24 @@ test('live stake progression starts at $3 and adjusts by +$1/−$1.50 with a $3 
   assert.equal(bot.sizeAfterOutcome(6.5, 'WIN'), 5);
   assert.equal(bot.sizeAfterOutcome(4, 'WIN'), 3);
   assert.equal(bot.sizeAfterOutcome(3, 'WIN'), 3);
+  assert.equal(bot.sizeAfterOutcome(14, 'LOSS'), 15);
+  assert.equal(bot.sizeAfterOutcome(15, 'LOSS'), 15);
+  assert.equal(bot.sizeAfterOutcome(15, 'WIN'), 13.5);
+  assert.equal(bot.sizeAfterOutcome(20, 'LOSS'), 15);
+});
+
+test('restored normal stake is clamped to the $15 ceiling without deleting history', () => {
+  const { bot } = createBot();
+  bot.restoreState({
+    trades: [{ id: 'kept-trade', status: 'SETTLED', outcome: 'WIN' }],
+    stakeSizingVersion: 1,
+    nextEntryStakeUsd: 18,
+    liveOrders: [],
+    liveHalted: false,
+  });
+
+  assert.equal(bot.nextEntryStakeUsd, 15);
+  assert.equal(bot.trades.some(trade => trade.id === 'kept-trade'), true);
 });
 
 test('legacy share-sized history is kept while new USD sizing starts at its floor', () => {
@@ -357,10 +375,11 @@ test('a qualified profitable flip submits the share sell and USD buy independent
   assert.equal(submissions.length, 2);
   assert.deepEqual(submissions.map(order => [order.tokenId, order.action, order.size]), [
     ['up-token', 'SELL', 7],
-    ['down-token', 'BUY', 3],
+    ['down-token', 'BUY', 1],
   ]);
   assert.equal(trade.status, 'CLOSED');
   assert.equal(bot.trades.some(item => item.side === 'DOWN' && item.shares === 6), true);
+  assert.equal(bot.liveOrders.find(order => order.action === 'BUY_FLIP')?.amountUsd, 1);
 });
 
 test('an uncertain no-ID flip sell does not block the independent opposite buy', async () => {
@@ -725,6 +744,26 @@ test('USD market-buy accounting scales gross spend to the confirmed fill fractio
   assert.equal(execution.gross, 2);
   assert.equal(execution.averagePrice, 0.5);
   assert.equal(execution.shares, 4);
+});
+
+test('flip buy order accepts the fixed $1 stake below the normal $3 entry floor', () => {
+  const { bot } = createBot();
+  const order = bot.createSweepOrder({
+    action: 'BUY_FLIP',
+    side: 'DOWN',
+    shares: 2,
+    amountUsd: 1,
+    preview: {
+      fills: [{ price: 0.5, shares: 2 }],
+      averagePrice: 0.5,
+    },
+    windowStart: bot.windowStart,
+    windowEnd: bot.windowEnd,
+    flipPairId: 'test-flip',
+  });
+
+  assert.equal(order.amountUsd, 1);
+  assert.equal(bot.liveHalted, false);
 });
 
 test('profitable live closes reduce the next USD stake but respect the $3 floor', () => {

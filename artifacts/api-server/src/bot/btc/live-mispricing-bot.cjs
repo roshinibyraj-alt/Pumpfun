@@ -122,6 +122,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       BASE_STAKE_USD: 3,
       LOSS_STAKE_STEP_USD: 1,
       WIN_STAKE_REDUCTION_USD: 1.5,
+      MAX_STAKE_USD: 15,
+      FLIP_BUY_STAKE_USD: 1,
       ...(options.config || {}),
     };
     super({ ...options, config });
@@ -173,7 +175,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     if (Number(state.stakeSizingVersion) === 1 && Number.isFinite(savedStake)) {
       this.nextEntryStakeUsd = Math.max(
         this.config.BASE_STAKE_USD,
-        round(savedStake, 2),
+        Math.min(this.config.MAX_STAKE_USD, round(savedStake, 2)),
       );
     } else {
       // Start the new USD sizing progression at its floor without deleting the
@@ -589,9 +591,9 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     return this.evaluatePromise;
   }
 
-  buyPreviewForStake(side, stakeUsd) {
+  buyPreviewForStake(side, stakeUsd, { minimumStakeUsd = this.config.BASE_STAKE_USD } = {}) {
     const budget = Number(stakeUsd);
-    if (!Number.isFinite(budget) || budget < this.config.BASE_STAKE_USD
+    if (!Number.isFinite(budget) || budget < minimumStakeUsd
       || !this.market || !this.sideQuoteIsFresh(side, this.now())) return null;
     const tokenId = String(this.market.tokens?.[side] || '');
     const asks = this.books.get(tokenId)?.asks;
@@ -757,8 +759,10 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       return false;
     }
 
-    const nextStakeUsd = this.sizeAfterOutcome(this.nextEntryStakeUsd, 'WIN');
-    const buyPreview = this.buyPreviewForStake(opposite, nextStakeUsd);
+    const flipBuyStakeUsd = this.config.FLIP_BUY_STAKE_USD;
+    const buyPreview = this.buyPreviewForStake(opposite, flipBuyStakeUsd, {
+      minimumStakeUsd: this.config.FLIP_BUY_STAKE_USD,
+    });
     const probability = opposite === 'UP' ? model.probabilityUp : model.probabilityDown;
     const edgePerShare = buyPreview?.complete && buyPreview.shares > EPSILON
       ? (probability * buyPreview.shares - buyPreview.totalCost) / buyPreview.shares
@@ -769,7 +773,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       this.currentSignal = {
         side: opposite,
         reason: !buyPreview?.complete
-          ? `Holding: visible asks cannot fill the planned $${nextStakeUsd.toFixed(2)} opposite-side stake.`
+          ? `Holding: visible asks cannot fill the planned $${flipBuyStakeUsd.toFixed(2)} opposite-side flip stake.`
           : `Holding: opposite edge is below the $${this.config.MIN_FLIP_NET_EDGE_PER_SHARE.toFixed(2)} flip threshold.`,
         edgePerShare,
       };
@@ -795,7 +799,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       toSide: opposite,
       targetShares: sellShares,
       sellShares,
-      buyStakeUsd: nextStakeUsd,
+      buyStakeUsd: flipBuyStakeUsd,
       buyShares: buyPreview.shares,
       windowStart: this.windowStart,
       windowEnd: this.windowEnd,
@@ -820,7 +824,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       action: 'BUY_FLIP',
       side: opposite,
       shares: buyPreview.shares,
-      amountUsd: nextStakeUsd,
+      amountUsd: flipBuyStakeUsd,
       preview: buyPreview,
       model,
       edgePerShare,
@@ -859,13 +863,13 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     }
 
     this.log('LIVE_FLIP_PAIR_SUBMITTED',
-      `Submitted an independent sale of ${sellShares} ${openTrade.side} shares and a $${nextStakeUsd.toFixed(2)} ${opposite} buy for the flip.`,
+      `Submitted an independent sale of ${sellShares} ${openTrade.side} shares and a fixed $${flipBuyStakeUsd.toFixed(2)} ${opposite} buy for the flip.`,
       {
         flipPairId,
         fromSide: openTrade.side,
         toSide: opposite,
         sellRequestedShares: sellShares,
-        buyStakeUsd: nextStakeUsd,
+        buyStakeUsd: flipBuyStakeUsd,
         buyEstimatedShares: buyPreview.shares,
         sellMatchedShares: submittedSell?.matchedShares || 0,
         buyMatchedShares: submittedBuy?.matchedShares || 0,
@@ -874,7 +878,7 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       });
     this.currentSignal = {
       side: opposite,
-      reason: `Flip submitted independently: sell ${sellShares} ${openTrade.side} shares and buy $${nextStakeUsd.toFixed(2)} of ${opposite}; sell ${submittedSell?.status || 'NOT_SUBMITTED'}, buy ${submittedBuy?.status || 'NOT_SUBMITTED'}.`,
+      reason: `Flip submitted independently: sell ${sellShares} ${openTrade.side} shares and buy a fixed $${flipBuyStakeUsd.toFixed(2)} of ${opposite}; sell ${submittedSell?.status || 'NOT_SUBMITTED'}, buy ${submittedBuy?.status || 'NOT_SUBMITTED'}.`,
       edgePerShare,
     };
     this.schedulePersist(true);
@@ -943,13 +947,16 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     const stakeUsd = isSell
       ? null
       : Number(amountUsd ?? this.nextEntryStakeUsd ?? this.config.BASE_STAKE_USD);
+    const minimumStakeUsd = action === 'BUY_FLIP'
+      ? this.config.FLIP_BUY_STAKE_USD
+      : this.config.BASE_STAKE_USD;
     const priceLimit = isSell ? MIN_TAKER_SELL_PRICE : MAX_TAKER_BUY_PRICE;
     const accountingPriceEstimate = Number(lastFill?.price) || priceLimit;
     const tokenId = String(this.market?.tokens?.[side] || '');
     if (!Number.isFinite(accountingPriceEstimate) || accountingPriceEstimate <= 0
       || !Number.isFinite(priceLimit) || priceLimit <= 0 || priceLimit > 1
       || !Number.isFinite(Number(shares)) || Number(shares) <= 0
-      || (!isSell && (!Number.isFinite(stakeUsd) || stakeUsd < this.config.BASE_STAKE_USD))
+      || (!isSell && (!Number.isFinite(stakeUsd) || stakeUsd < minimumStakeUsd))
       || !tokenId) {
       this.haltLiveTrading('A candidate order had an invalid USD stake, share estimate, or limit price.');
       return null;
@@ -1467,9 +1474,15 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   sizeAfterOutcome(stakeUsd, outcome) {
-    const current = Math.max(this.config.BASE_STAKE_USD, Number(stakeUsd) || 0);
+    const current = Math.min(
+      this.config.MAX_STAKE_USD,
+      Math.max(this.config.BASE_STAKE_USD, Number(stakeUsd) || 0),
+    );
     return outcome === 'LOSS'
-      ? round(current + this.config.LOSS_STAKE_STEP_USD, 2)
+      ? Math.min(
+        this.config.MAX_STAKE_USD,
+        round(current + this.config.LOSS_STAKE_STEP_USD, 2),
+      )
       : Math.max(
         this.config.BASE_STAKE_USD,
         round(current - this.config.WIN_STAKE_REDUCTION_USD, 2),
@@ -1482,7 +1495,10 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     }
     const previous = Math.max(
       this.config.BASE_STAKE_USD,
-      Number(this.nextEntryStakeUsd) || this.config.BASE_STAKE_USD,
+      Math.min(
+        this.config.MAX_STAKE_USD,
+        Number(this.nextEntryStakeUsd) || this.config.BASE_STAKE_USD,
+      ),
     );
     const next = this.sizeAfterOutcome(previous, outcome);
     trade.sizingAdjustmentApplied = true;
@@ -1508,6 +1524,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
         lossIncrementUsd: this.config.LOSS_STAKE_STEP_USD,
         winReductionUsd: this.config.WIN_STAKE_REDUCTION_USD,
         minimumStakeUsd: this.config.BASE_STAKE_USD,
+        maximumStakeUsd: this.config.MAX_STAKE_USD,
+        flipBuyStakeUsd: this.config.FLIP_BUY_STAKE_USD,
         at: now,
       });
     return true;

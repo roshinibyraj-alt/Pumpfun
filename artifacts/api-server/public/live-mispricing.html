@@ -382,7 +382,7 @@
       $('position-value').textContent = money(account.positionValue);
       $('position-count').textContent = `${Number(account.positionCount || 0)} open account positions`;
       $('next-size').textContent = `${money(account.sizingStakeUsd ?? strategy.nextEntryStakeUsd)} stake`;
-      $('size-rule').textContent = `Base ${money(strategy.baseStakeUsd)} · +${money(strategy.lossIncreaseUsd)} loss · −${money(strategy.winReductionUsd)} win · floor ${money(strategy.minimumStakeUsd)}`;
+      $('size-rule').textContent = `Base ${money(strategy.baseStakeUsd)} · +${money(strategy.lossIncreaseUsd)} loss · −${money(strategy.winReductionUsd)} win · floor ${money(strategy.minimumStakeUsd)} · cap ${money(strategy.maximumStakeUsd)}`;
       $('market-title').textContent = state.market?.title || state.market?.slug || 'BTC 5-minute market not loaded';
       const remaining = Number(state.window?.secondsRemaining);
       $('time-left').textContent = numeric(state.window?.secondsRemaining) ? `${Math.ceil(remaining)}s remaining` : '—';
@@ -397,7 +397,7 @@
       $('volatility').textContent = `${strategy.volatilityCandles || 3} closed 5-minute candles`;
       $('signal-priority').textContent = strategy.allowedSignalReason || 'Both sides evaluated by fair-value edge';
       $('edge-rules').textContent = `${money(strategy.minEntryEdge)} per share`;
-      $('execution-rule').textContent = `${strategy.entryOrderType || 'FAK market taker'} · buy cap ${cents(strategy.maxBuyPrice ?? 0.99)} · ${strategy.intraWindowExitPolicy || 'qualified flips'}`;
+      $('execution-rule').textContent = `${strategy.entryOrderType || 'FAK market taker'} · buy cap ${cents(strategy.maxBuyPrice ?? 0.99)} · flip buy ${money(strategy.flipBuyStakeUsd)} fixed · ${strategy.intraWindowExitPolicy || 'qualified flips'}`;
       $('bot-position').textContent = position ? `${position.side} · ${shares(position.shares)} shares` : 'None';
       $('open-orders').textContent = String((account.orders || []).length);
       $('account-time').textContent = account.asOf ? new Date(account.asOf).toLocaleTimeString() : '—';
