@@ -382,6 +382,101 @@ test('a qualified profitable flip submits the share sell and USD buy independent
   assert.equal(bot.liveOrders.find(order => order.action === 'BUY_FLIP')?.amountUsd, 1);
 });
 
+for (const sellBlocker of [
+  {
+    name: 'an unprofitable sale',
+    oldSideQuoteFresh: true,
+    preview: {
+      complete: true,
+      shares: 7,
+      gross: 2.8,
+      netProceeds: 2.7,
+      averagePrice: 0.4,
+      fills: [{ price: 0.4, shares: 7 }],
+    },
+  },
+  {
+    name: 'insufficient visible bids',
+    oldSideQuoteFresh: true,
+    preview: {
+      complete: false,
+      shares: 7,
+      gross: 2.8,
+      netProceeds: 2.7,
+      averagePrice: 0.4,
+      fills: [{ price: 0.4, shares: 7 }],
+    },
+  },
+  {
+    name: 'a stale old-side quote',
+    oldSideQuoteFresh: false,
+    preview: null,
+  },
+]) {
+  test(`a qualified $1 opposite buy proceeds despite ${sellBlocker.name}`, async () => {
+    const submissions = [];
+    const trader = {
+      async placeTakerOrder(tokenId, action, price, size) {
+        submissions.push({ tokenId, action, price, size });
+        assert.equal(action, 'BUY', 'the unavailable sell must not suppress the buy');
+        return { id: 'independent-buy', status: 'MATCHED' };
+      },
+      async fetchOrder(id) {
+        return { id, status: 'MATCHED', sizeMatched: '2' };
+      },
+    };
+    const { bot } = createBot({ trader });
+    const trade = {
+      id: 'independent-buy-trade',
+      status: 'OPEN',
+      side: 'UP',
+      tokenId: 'up-token',
+      shares: 7,
+      totalCost: 3,
+      windowStart: bot.windowStart,
+      windowEnd: bot.windowEnd,
+      marketId: String(bot.market.id),
+    };
+    bot.trades = [trade];
+    bot.sideQuoteIsFresh = side =>
+      side === 'DOWN' || sellBlocker.oldSideQuoteFresh;
+    bot.sweep = (_side, bookSide) => {
+      assert.equal(bookSide, 'bids');
+      return sellBlocker.preview;
+    };
+    bot.buyPreviewForStake = (side, stakeUsd) => side === 'DOWN' && stakeUsd === 1
+      ? {
+        complete: true,
+        shares: 2,
+        gross: 1,
+        totalCost: 1.08,
+        averagePrice: 0.5,
+        fills: [{ price: 0.5, shares: 2 }],
+      }
+      : null;
+    bot.recordFlipConfirmation = () => ({ confirmed: true, count: 2 });
+    bot.persist = async () => true;
+
+    const bought = await bot.evaluateLiveFlip(trade, {
+      ready: true,
+      probabilityUp: 0.2,
+      probabilityDown: 0.8,
+      currentPrice: 100,
+    }, bot.windowStart + 10_000);
+
+    assert.equal(bought, true);
+    assert.deepEqual(submissions, [{
+      tokenId: 'down-token',
+      action: 'BUY',
+      price: 0.99,
+      size: 1,
+    }]);
+    assert.equal(bot.liveOrders.some(order => order.action === 'SELL_FLIP'), false);
+    assert.equal(bot.liveOrders.find(order => order.action === 'BUY_FLIP')?.amountUsd, 1);
+    assert.equal(trade.status, 'OPEN');
+  });
+}
+
 test('an uncertain no-ID flip sell does not block the independent opposite buy', async () => {
   const submissions = [];
   const trader = {

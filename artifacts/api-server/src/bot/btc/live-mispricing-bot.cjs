@@ -820,6 +820,10 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
   }
 
   async evaluateLiveFlip(openTrade, model = this.model, now = this.now()) {
+    if (!['UP', 'DOWN'].includes(openTrade?.side)) {
+      this.resetFlipConfirmation();
+      return false;
+    }
     const opposite = openTrade.side === 'UP' ? 'DOWN' : 'UP';
     if (this.flipAttemptsWindowStart !== this.windowStart) {
       this.flipAttemptsWindowStart = this.windowStart;
@@ -829,49 +833,8 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
       || Math.max(this.flipsThisWindow, this.flipAttemptsThisWindow)
         >= this.config.MAX_FLIPS_PER_WINDOW
       || now >= this.windowEnd
-      || !this.sideQuoteIsFresh(openTrade.side, now)
       || !this.sideQuoteIsFresh(opposite, now)) {
       this.resetFlipConfirmation();
-      return false;
-    }
-
-    const confirmedExposure = this.currentWindowFilledExposure(openTrade.side, openTrade);
-    const sellShares = Math.floor(
-      (Math.min(confirmedExposure, Number(openTrade.shares) || confirmedExposure) + 1e-9) * 100,
-    ) / 100;
-    if (sellShares <= EPSILON) {
-      this.resetFlipConfirmation();
-      this.currentSignal = {
-        side: opposite,
-        reason: `No confirmed current-window ${openTrade.side} shares are available to flip.`,
-        edgePerShare: null,
-      };
-      return false;
-    }
-    const salePreview = this.sweep(openTrade.side, 'bids', sellShares);
-    if (!salePreview?.complete
-      || salePreview.netProceeds - (Number(openTrade.totalCost) || 0) <= EPSILON) {
-      this.resetFlipConfirmation();
-      this.currentSignal = {
-        side: opposite,
-        reason: !salePreview?.complete
-          ? `Holding: visible bids do not cover all ${sellShares} confirmed ${openTrade.side} shares.`
-          : 'Holding: selling the current position is not profitable after estimated fees.',
-        edgePerShare: null,
-      };
-      return false;
-    }
-
-    const tokenId = String(this.market.tokens?.[openTrade.side] || '');
-    if (!tokenId
-      || String(openTrade.marketId || '') !== String(this.market.id)
-      || Number(openTrade.windowStart) !== Number(this.windowStart)
-      || (openTrade.tokenId && String(openTrade.tokenId) !== tokenId)) {
-      this.currentSignal = {
-        side: opposite,
-        reason: 'The open position does not match this window’s market and outcome token; no sell was submitted.',
-        edgePerShare: null,
-      };
       return false;
     }
 
@@ -906,6 +869,49 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     }
     this.resetFlipConfirmation();
 
+    let sellShares = 0;
+    let salePreview = null;
+    let sellSkipReason = null;
+    const sellTokenId = String(this.market?.tokens?.[openTrade.side] || '');
+    const positionMatchesCurrentMarket = sellTokenId
+      && String(openTrade.marketId || '') === String(this.market?.id || '')
+      && Number(openTrade.windowStart) === Number(this.windowStart)
+      && (!openTrade.tokenId || String(openTrade.tokenId) === sellTokenId);
+    if (!positionMatchesCurrentMarket) {
+      sellSkipReason = 'The open position does not match this window’s market and outcome token.';
+    } else if (!this.sideQuoteIsFresh(openTrade.side, now)) {
+      sellSkipReason = `The ${openTrade.side} quote is stale; the opposite buy can still proceed.`;
+    } else {
+      const confirmedExposure = this.currentWindowFilledExposure(openTrade.side, openTrade);
+      const candidateSellShares = Math.floor(
+        (Math.min(confirmedExposure, Number(openTrade.shares) || confirmedExposure) + 1e-9) * 100,
+      ) / 100;
+      if (candidateSellShares <= EPSILON) {
+        sellSkipReason = `No confirmed current-window ${openTrade.side} shares are available to sell.`;
+      } else {
+        const candidateSalePreview = this.sweep(openTrade.side, 'bids', candidateSellShares);
+        if (!candidateSalePreview?.complete) {
+          sellSkipReason = `Visible bids do not cover all ${candidateSellShares} confirmed ${openTrade.side} shares.`;
+        } else if (
+          candidateSalePreview.netProceeds - (Number(openTrade.totalCost) || 0) <= EPSILON
+        ) {
+          sellSkipReason = 'Selling the current position is not profitable after estimated fees.';
+        } else {
+          sellShares = candidateSellShares;
+          salePreview = candidateSalePreview;
+        }
+      }
+    }
+    if (sellSkipReason) {
+      this.log('LIVE_FLIP_SELL_SKIPPED', sellSkipReason, {
+        tradeId: openTrade.id,
+        side: openTrade.side,
+        opposite,
+        buyStakeUsd: flipBuyStakeUsd,
+        windowStart: this.windowStart,
+      });
+    }
+
     const flipPairId = `flip-pair-${this.windowStart}-${this.liveOrders.length + 1}`;
     this.pendingFlip = {
       phase: 'PAIR',
@@ -924,18 +930,20 @@ class LiveBtcMispricingBot extends BtcMispricingBot {
     this.flipAttemptsWindowStart = this.windowStart;
     this.flipAttemptsThisWindow += 1;
 
-    const sellOrder = this.createSweepOrder({
-      action: 'SELL_FLIP',
-      side: openTrade.side,
-      shares: sellShares,
-      preview: salePreview,
-      model,
-      edgePerShare,
-      tradeId: openTrade.id,
-      windowStart: this.windowStart,
-      windowEnd: this.windowEnd,
-      flipPairId,
-    });
+    const sellOrder = salePreview && sellShares > EPSILON
+      ? this.createSweepOrder({
+        action: 'SELL_FLIP',
+        side: openTrade.side,
+        shares: sellShares,
+        preview: salePreview,
+        model,
+        edgePerShare,
+        tradeId: openTrade.id,
+        windowStart: this.windowStart,
+        windowEnd: this.windowEnd,
+        flipPairId,
+      })
+      : null;
     const buyOrder = this.createSweepOrder({
       action: 'BUY_FLIP',
       side: opposite,
