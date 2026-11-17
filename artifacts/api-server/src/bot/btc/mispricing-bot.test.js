@@ -182,6 +182,32 @@ test('a qualifying signal posts one resting limit buy at the signaled best bid',
   assert.equal(bot.snapshot().strategy.entryOrderType, 'POST-ONLY LIMIT BUY AT BEST BID');
 });
 
+test('the first signal order stays open through later signals and cancels only at window end', () => {
+  const { bot, setPrice, setNow } = fixture();
+  assert.equal(bot.evaluate(), true);
+  const order = bot.pendingEntryOrder;
+  assert.equal(order.side, 'UP');
+
+  setPrice(99_600);
+  setNow(961_000);
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.pendingEntryOrder, order);
+  assert.equal(bot.pendingEntryOrder.side, 'UP');
+  assert.equal(bot.entryTriggeredThisWindow, true);
+
+  bot.priceFeed.snapshot = () => ({ status: 'DISCONNECTED' });
+  setNow(1_199_999);
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.pendingEntryOrder, order);
+
+  setNow(1_200_000);
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.pendingEntryOrder, null);
+  assert.equal(order.status, 'CANCELLED');
+  assert.equal(order.cancelledAt, 1_200_000);
+  assert.match(order.cancelReason, /window ended/);
+});
+
 test('sell-side prints walk through the bid and fill maker orders after queue-ahead volume', () => {
   const { bot, market } = fixture();
   market.raw.feesEnabled = true;
@@ -464,7 +490,17 @@ test('a paper history reset starts from fresh capital and base sizing exactly on
   }
 });
 
-test('restoring the sizing state cancels any obsolete passive order', () => {
+test('restoring state preserves a current-strategy resting order within its window', () => {
+  const { bot } = fixture();
+  assert.equal(bot.evaluate(), true);
+  const state = bot.persistentStateSnapshot();
+  const restored = fixture().bot;
+  restored.restoreState(state);
+  assert.deepEqual(restored.pendingEntryOrder, state.pendingEntryOrder);
+  assert.equal(restored.entryTriggeredThisWindow, true);
+});
+
+test('restoring state discards a passive order from an unidentified older strategy', () => {
   const { bot } = fixture();
   bot.restoreState({
     startingCapital: 3_000,

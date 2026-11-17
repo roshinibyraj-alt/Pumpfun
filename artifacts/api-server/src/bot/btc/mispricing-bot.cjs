@@ -271,8 +271,11 @@ class BtcMispricingBot {
       ? Number(state.windowStart) : null;
     this.windowEnd = this.windowStart == null ? null : this.windowStart + this.config.WINDOW_MS;
     this.entryTriggeredThisWindow = state.entryTriggeredThisWindow === true;
-    // Passive paper orders from the previous strategy are canceled on restore.
-    this.pendingEntryOrder = null;
+    const savedPendingOrder = state.pendingEntryOrder;
+    this.pendingEntryOrder = state.strategyVersion === this.config.STRATEGY_VERSION
+      && savedPendingOrder
+      && Number(savedPendingOrder.windowStart) === this.windowStart
+      ? { ...savedPendingOrder } : null;
     this.entryConfirmation = { side: null, count: 0, lastTickAt: null };
     this.seenTradeEvents = Array.isArray(state.seenTradeEvents)
       ? state.seenTradeEvents.slice(-2_000) : [];
@@ -1018,20 +1021,11 @@ class BtcMispricingBot {
       : null;
   }
 
-  pendingOrderInvalidReason(model, now) {
+  pendingOrderInvalidReason(now) {
     const order = this.pendingEntryOrder;
     if (!order) return null;
     if (now >= this.windowEnd || order.windowStart !== this.windowStart) {
       return 'The market window ended before the passive order filled.';
-    }
-    const passive = this.passiveBidQuote(order.side, now);
-    const edgePerShare = this.pendingOrderEdge(model, order);
-    if (!model.ready || !passive || edgePerShare == null
-      || edgePerShare < this.config.MIN_NET_EDGE_PER_SHARE) {
-      return 'The Binance signal, Polymarket book, or minimum edge filter no longer qualifies.';
-    }
-    if (passive.bestAsk <= order.limitPrice + EPSILON) {
-      return 'The ask reached the limit without a matching sell trade print; canceled rather than inventing a fill.';
     }
     return null;
   }
@@ -1040,19 +1034,19 @@ class BtcMispricingBot {
     const order = this.pendingEntryOrder;
     if (!order) return false;
     const edgePerShare = this.pendingOrderEdge(model, order);
-    const invalidReason = this.pendingOrderInvalidReason(model, now);
+    const invalidReason = this.pendingOrderInvalidReason(now);
     if (invalidReason) {
       this.cancelPendingEntryOrder(invalidReason, now);
       this.currentSignal = {
         side: order.side,
-        reason: 'The resting maker order was canceled because its entry filters no longer pass.',
+        reason: 'The unfilled maker order was canceled because the 5-minute window ended.',
         edgePerShare,
       };
       return false;
     }
     this.currentSignal = {
       side: order.side,
-      reason: `Post-only order resting at $${order.limitPrice.toFixed(2)}; ${round(order.queueAheadShares, 2)} shares estimated ahead in queue.`,
+      reason: `The first-signal order remains at $${order.limitPrice.toFixed(2)} until this window ends; ${round(order.queueAheadShares, 2)} shares estimated ahead in queue.`,
       edgePerShare,
     };
     return false;
@@ -1062,13 +1056,8 @@ class BtcMispricingBot {
     if (!this.market || this.windowStart == null || !this.storageHealthy) return false;
     const model = this.modelSnapshot(now);
     this.model = model;
+    if (this.pendingEntryOrder) return this.evaluatePendingEntryOrder(model, now);
     if (!model.ready) {
-      if (this.pendingEntryOrder) {
-        this.cancelPendingEntryOrder(
-          'The Binance model or Polymarket book became stale before the maker order filled.',
-          now,
-        );
-      }
       this.currentSignal = {
         side: null,
         reason: model.reason,
@@ -1076,7 +1065,6 @@ class BtcMispricingBot {
       };
       return false;
     }
-    if (this.pendingEntryOrder) return this.evaluatePendingEntryOrder(model, now);
     const openTrade = this.currentOpenTrade();
     if (openTrade) {
       this.currentSignal = {
@@ -1587,7 +1575,9 @@ class BtcMispricingBot {
         minimumNetEdgePerShare: this.config.MIN_NET_EDGE_PER_SHARE,
         minimumFlipNetEdgePerShare: null,
         entryOrderType: 'POST-ONLY LIMIT BUY AT BEST BID',
+        entryPolicy: 'Only the first qualifying signal may post one order per 5-minute window.',
         makerFillRule: 'SELL-side last-trade print at or through the resting bid, after modeled queue-ahead volume.',
+        unfilledOrderPolicy: 'Keep the order resting until the 5-minute window ends; then cancel if still unfilled.',
         makerRebateShare: this.config.CRYPTO_MAKER_REBATE_SHARE,
         flipConfirmationUpdates: 0,
         flipConfirmationIntervalMs: null,

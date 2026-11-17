@@ -285,7 +285,8 @@ test("the public root dashboard runs the BTC mispricing paper strategy", () => {
   assert.match(html, /three closed Binance 5m candles/i);
   assert.match(html, /100 shares/);
   assert.doesNotMatch(html, /profitable flip/i);
-  assert.match(html, /resting limit buy at the signaled outcome’s best bid/i);
+  assert.match(html, /one resting limit buy at the best bid on the first qualifying signal/i);
+  assert.match(html, /canceled only when that 5-minute window ends/i);
   assert.match(html, /sell-side trade print/i);
   assert.match(html, /no flips or sells/i);
   assert.match(html, /each resolved loss adds 20 shares and each resolved win subtracts 30/i);
