@@ -8,7 +8,7 @@ const { normalizeLevels } = require('./btc-price-band-bot.cjs');
 
 const EPSILON = 1e-8;
 const DEFAULT_CONFIG = Object.freeze({
-  STRATEGY_VERSION: 'btc-5m-binance-taker-sizing-reset-baseline-v3',
+  STRATEGY_VERSION: 'btc-5m-binance-maker-walkthrough-no-exit-v1',
   WINDOW_MS: CANDLE_MS,
   STARTING_CAPITAL: 3_000,
   BASE_SHARES: 100,
@@ -493,7 +493,10 @@ class BtcMispricingBot {
     if (type === 'book') this.applyBookSnapshot(payload, this.now());
     else if (type === 'price_change') this.applyPriceChanges(payload, this.now());
     else if (type === 'best_bid_ask') this.applyBestBidAsk(payload, this.now());
-    void this.evaluate();
+    else if (type === 'last_trade_price' && !this.liveAccount) {
+      this.applyLastTradePrice(payload, this.now());
+    }
+    if (!this.liveAccount) void this.evaluate();
   }
 
   applyBookSnapshot(event, now) {
@@ -769,6 +772,7 @@ class BtcMispricingBot {
         entryOrderId: order.id,
         executionRole: 'MAKER',
         estimatedMakerRebate: 0,
+        rebates: 0,
         status: 'OPEN',
         settlementStatus: 'OPEN',
         markPrice: null,
@@ -782,10 +786,11 @@ class BtcMispricingBot {
     }
     trade.shares += filledShares;
     trade.grossCost += grossCost;
-    trade.totalCost += grossCost + makerFee;
+    trade.totalCost += grossCost + makerFee - estimatedRebate;
     trade.entryPrice = trade.grossCost / trade.shares;
     trade.fees += makerFee;
     trade.estimatedMakerRebate += estimatedRebate;
+    trade.rebates += estimatedRebate;
     trade.fills.push({
       price: order.limitPrice,
       shares: filledShares,
@@ -795,13 +800,13 @@ class BtcMispricingBot {
       transactionHash,
       at: now,
     });
-    this.cash = round(this.cash - grossCost - makerFee, 8);
+    this.cash = round(this.cash - grossCost - makerFee + estimatedRebate, 8);
     order.filledShares += filledShares;
     order.remainingShares = Math.max(0, order.targetShares - order.filledShares);
     order.lastFillAt = now;
     order.status = order.remainingShares <= EPSILON ? 'FILLED' : 'PARTIALLY_FILLED';
     this.log('MAKER_BUY_FILLED',
-      `Filled ${round(filledShares, 4)} ${order.side} shares at the resting $${order.limitPrice.toFixed(2)} bid; entry fee $0, estimated rebate $${round(estimatedRebate, 4)}.`,
+      `Filled ${round(filledShares, 4)} ${order.side} shares at the resting $${order.limitPrice.toFixed(2)} bid after a sell trade walked through; maker fee $0, estimated rebate $${round(estimatedRebate, 4)}.`,
       {
         orderId: order.id,
         tradeId: trade.id,
@@ -967,8 +972,13 @@ class BtcMispricingBot {
   pendingOrderEdge(model, order = this.pendingEntryOrder) {
     if (!order || !model?.ready) return null;
     const probability = order.side === 'UP' ? model.probabilityUp : model.probabilityDown;
+    const rebatePerShare = takerFeeAt(
+      order.limitPrice,
+      1,
+      feeParameters(this.market),
+    ) * this.config.CRYPTO_MAKER_REBATE_SHARE;
     return Number.isFinite(Number(probability))
-      ? Number(probability) - Number(order.limitPrice)
+      ? Number(probability) - Number(order.limitPrice) + rebatePerShare
       : null;
   }
 
@@ -1017,7 +1027,12 @@ class BtcMispricingBot {
     const model = this.modelSnapshot(now);
     this.model = model;
     if (!model.ready) {
-      this.resetFlipConfirmation();
+      if (this.pendingEntryOrder) {
+        this.cancelPendingEntryOrder(
+          'The Binance model or Polymarket book became stale before the maker order filled.',
+          now,
+        );
+      }
       this.currentSignal = {
         side: null,
         reason: model.reason,
@@ -1025,8 +1040,16 @@ class BtcMispricingBot {
       };
       return false;
     }
+    if (this.pendingEntryOrder) return this.evaluatePendingEntryOrder(model, now);
     const openTrade = this.currentOpenTrade();
-    if (openTrade) return this.evaluateFlip(openTrade, model, now);
+    if (openTrade) {
+      this.currentSignal = {
+        side: openTrade.side,
+        reason: 'Holding the position for exact original-market resolution; flips and sells are disabled.',
+        edgePerShare: null,
+      };
+      return false;
+    }
     if (this.entryTriggeredThisWindow || now >= this.windowEnd) return false;
     const shares = this.nextEntryShares;
     const candidates = ['UP', 'DOWN'].map(side => {
@@ -1053,32 +1076,28 @@ class BtcMispricingBot {
     }
     candidates.sort((left, right) => right.edgePerShare - left.edgePerShare);
     const selected = candidates[0];
-    if (selected.preview.totalCost > this.cash + EPSILON) {
+    const bidOrder = {
+      side: selected.side,
+      limitPrice: Number(this.quotes[selected.side].bestBid),
+    };
+    const makerEdgePerShare = Number.isFinite(bidOrder.limitPrice)
+      ? this.pendingOrderEdge(model, bidOrder) : null;
+    if (makerEdgePerShare == null
+      || makerEdgePerShare < this.config.MIN_NET_EDGE_PER_SHARE) {
       this.currentSignal = {
         side: selected.side,
-        reason: `The ${selected.side} edge qualifies, but paper cash is insufficient for ${shares} shares.`,
-        edgePerShare: selected.edgePerShare,
+        reason: 'The signaled side has no valid resting bid with the required maker edge.',
+        edgePerShare: makerEdgePerShare,
       };
       return false;
     }
-    const execution = this.sweep(selected.side, 'asks', shares, { consume: true });
-    if (!execution?.complete) return false;
-    this.buyPosition(
+    return this.placeMakerEntryOrder(
       selected.side,
-      execution,
       model,
       now,
       'MODEL_EDGE',
-      selected.edgePerShare,
+      makerEdgePerShare,
     );
-    this.entryTriggeredThisWindow = true;
-    this.currentSignal = {
-      side: selected.side,
-      reason: `${selected.side} bought because its estimated net edge cleared the configured threshold.`,
-      edgePerShare: selected.edgePerShare,
-    };
-    this.schedulePersist(true);
-    return true;
   }
 
   resetFlipConfirmation() {
@@ -1496,6 +1515,8 @@ class BtcMispricingBot {
       losses: settled.filter(trade => trade.outcome === 'LOSS').length,
       takerFees: round(this.trades.reduce((sum, trade) =>
         sum + (Number(trade.fees) || 0) + (Number(trade.exitFees) || 0), 0), 2),
+      estimatedMakerRebates: round(this.trades.reduce((sum, trade) =>
+        sum + (Number(trade.estimatedMakerRebate) || 0), 0), 4),
       tradeCount: this.trades.length,
     };
   }
@@ -1523,23 +1544,21 @@ class BtcMispricingBot {
         nextEntryShares: this.nextEntryShares,
         lossSizeStepShares: this.config.LOSS_SIZE_STEP_SHARES,
         winSizeReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
-        profitableIntrawindowCloseReducesSize: true,
+        profitableIntrawindowCloseReducesSize: false,
         sizingGeneration: this.sizingGeneration,
         sizeFloorShares: this.config.BASE_SHARES,
         volatilityLookbackCandles: this.config.VOLATILITY_CANDLES,
         minimumNetEdgePerShare: this.config.MIN_NET_EDGE_PER_SHARE,
-        minimumFlipNetEdgePerShare: this.config.MIN_FLIP_NET_EDGE_PER_SHARE,
-        entryOrderType: 'TAKER SWEEP OF VISIBLE ASKS',
-        flipConfirmationUpdates: this.config.FLIP_CONFIRMATION_UPDATES,
-        flipConfirmationIntervalMs: this.config.FLIP_CONFIRMATION_MIN_INTERVAL_MS,
-        flipConfirmation: {
-          side: this.flipConfirmation.side,
-          updates: this.flipConfirmation.count,
-        },
-        maximumFlipsPerWindow: this.config.MAX_FLIPS_PER_WINDOW,
-        flipsThisWindow: this.flipsThisWindow,
+        minimumFlipNetEdgePerShare: null,
+        entryOrderType: 'POST-ONLY LIMIT BUY AT BEST BID',
+        makerFillRule: 'SELL-side last-trade print at or through the resting bid, after modeled queue-ahead volume.',
+        makerRebateShare: this.config.CRYPTO_MAKER_REBATE_SHARE,
+        flipConfirmationUpdates: 0,
+        flipConfirmationIntervalMs: null,
+        maximumFlipsPerWindow: 0,
+        flipsThisWindow: 0,
         entryTriggeredThisWindow: this.entryTriggeredThisWindow,
-        exitPolicy: 'Hold to exact original-market resolution unless a profitable opposite edge of at least $0.10/share persists across two fresh Binance updates, at least 500 ms apart.',
+        exitPolicy: 'No flips or sells; hold filled shares to exact original-market resolution.',
         priceSource: 'Binance BTCUSDT aggregate trades',
       },
       window: {
@@ -1559,6 +1578,17 @@ class BtcMispricingBot {
       binance: this.priceFeed.snapshot?.() || null,
       model,
       signal: this.currentSignal,
+      pendingOrder: this.pendingEntryOrder ? {
+        id: this.pendingEntryOrder.id,
+        side: this.pendingEntryOrder.side,
+        limitPrice: this.pendingEntryOrder.limitPrice,
+        targetShares: this.pendingEntryOrder.targetShares,
+        filledShares: this.pendingEntryOrder.filledShares,
+        remainingShares: this.pendingEntryOrder.remainingShares,
+        queueAheadShares: this.pendingEntryOrder.queueAheadShares,
+        status: this.pendingEntryOrder.status,
+        postedAt: this.pendingEntryOrder.postedAt,
+      } : null,
       quotes: {
         UP: { ...this.quotes.UP },
         DOWN: { ...this.quotes.DOWN },

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101628">
-    <title>BTCUSDT Mispricing Paper Bot</title>
+    <title>BTCUSDT Maker Paper Bot</title>
     <style>
       :root {
         color-scheme: dark;
@@ -196,7 +196,7 @@
           <div class="brand-mark" aria-hidden="true">₿</div>
           <div>
             <div class="eyebrow">Pumpfun · replacement strategy</div>
-            <h1>BTCUSDT Mispricing Paper Bot</h1>
+            <h1>BTCUSDT Maker Paper Bot</h1>
           </div>
         </div>
         <div class="top-meta">
@@ -209,8 +209,8 @@
       <section class="hero" aria-labelledby="heroTitle">
         <div>
           <div class="eyebrow">Binance model × Polymarket 5-minute BTC</div>
-          <h2 id="heroTitle">Trade only when estimated probability beats the full ask sweep.</h2>
-          <p>The bot estimates UP and DOWN probabilities from the Binance BTCUSDT price, time left, and three completed 5-minute candles. It checks visible Polymarket ask depth and taker fees before entering; orders sweep the available asks instead of resting on the book.</p>
+          <h2 id="heroTitle">Rest at the signaled side’s best bid and hold to resolution.</h2>
+          <p>The bot keeps its current Binance probability and edge filters, then posts a resting limit buy at the signaled outcome’s best bid. Paper fills require a sell-side trade print to reach or pass the bid, after estimated queue-ahead volume. It does not flip or sell; filled shares wait for official market resolution.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Window waiting</span>
@@ -228,7 +228,7 @@
         <article class="metric">
           <div class="metric-label">Realized P&amp;L</div>
           <div class="metric-value" id="realizedPnl">—</div>
-          <div class="metric-sub">after recorded trading fees</div>
+          <div class="metric-sub">after recorded fees and estimated rebates</div>
         </article>
         <article class="metric">
           <div class="metric-label">Paper cash</div>
@@ -324,14 +324,14 @@
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Current position</div><div class="panel-subtitle">One all-or-nothing entry per window; flips pay taker fees</div></div>
+            <div><div class="panel-title">Current position</div><div class="panel-subtitle">One entry per window; no flips or sells</div></div>
             <span class="badge" id="positionStatus">Flat</span>
           </div>
           <div class="position-box">
             <div class="position-icon empty" id="positionIcon">—</div>
             <div class="position-main">
               <strong id="positionTitle">No open position</strong>
-              <small id="positionDetail">Waiting for a qualifying full-size entry</small>
+              <small id="positionDetail">Waiting for a qualifying resting limit order</small>
             </div>
             <div class="position-pnl">
               <strong id="positionPnl">—</strong>
@@ -341,6 +341,7 @@
           <div class="feed-row"><span class="feed-label">Next order size</span><strong class="feed-value" id="nextShares">100 shares</strong></div>
           <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
           <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Estimated maker rebates</span><strong class="feed-value" id="rebates">—</strong></div>
         </article>
 
         <article class="panel">
@@ -349,12 +350,11 @@
             <span class="badge" id="nextSizeBadge">100 shares next</span>
           </div>
           <div class="rules">
-            <div class="rule"><b>Signal</b>Three closed Binance 5m candles; only fresh model data and fresh books can trigger an order.</div>
-            <div class="rule"><b>Entry</b>Sweep visible asks for the next order size only when the full quantity is available and estimated net edge is at least 5¢ per share after taker fees.</div>
-            <div class="rule"><b>Size</b>Start at 100 shares; each resolved loss adds 20, while a resolved win or profitable intra-window close subtracts 30, with a 100-share floor. Paper cash limits orders.</div>
-            <div class="rule"><b>Flip</b>One profitable flip per window. Sell at visible bids and buy the opposite side by sweeping asks; require full depth, 10¢ net edge, and two fresh Binance updates at least 500 ms apart.</div>
-            <div class="rule"><b>Resolution</b>Otherwise hold until official Polymarket resolution for that exact market.</div>
-            <div class="rule"><b>Fees</b>Entries and early-flip exits are taker sweeps; fees are included in modeled cash and P&amp;L.</div>
+            <div class="rule"><b>Signal</b>Keep the current model: three closed Binance 5m candles and fresh model/book data.</div>
+            <div class="rule"><b>Entry</b>Post a limit buy at the signaled side’s best bid; fills require a sell-side trade to walk through the bid and clear modeled queue ahead.</div>
+            <div class="rule"><b>Size</b>Keep the saved next size; each resolved loss adds 20 shares and each resolved win subtracts 30, with a 100-share floor.</div>
+            <div class="rule"><b>Position</b>No flips or sells. Hold filled shares to resolution of their exact original market.</div>
+            <div class="rule"><b>Fees</b>Maker fills model zero taker fees and credit an estimated rebate; actual rebate eligibility and amount can differ.</div>
             <div class="rule"><b>Ledger</b>Existing $3,000 paper ledger and history are preserved; open trades settle on their original markets.</div>
             <div class="rule"><b>Execution</b>Paper-only simulation. No wallet or real order is connected.</div>
           </div>
@@ -373,14 +373,14 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry</th><th>Fees</th><th>Status</th><th>P&amp;L</th></tr></thead>
+              <thead><tr><th>Time</th><th>Side</th><th>Shares</th><th>Entry</th><th>Fees / rebate</th><th>Status</th><th>P&amp;L</th></tr></thead>
               <tbody id="recentTrades"><tr><td class="empty-row" colspan="7">Waiting for the first trade</td></tr></tbody>
             </table>
           </div>
         </article>
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Entries, profitable flips, and official settlements</div></div>
+            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Resting orders, trade-through fills, and official settlements</div></div>
             <span class="badge" id="activityCount">0 events</span>
           </div>
           <div class="activity-list" id="activity"><div class="empty-row">Waiting for bot activity</div></div>
@@ -443,7 +443,7 @@
             <td><strong>${escapeHtml(trade.side || "—")}</strong></td>
             <td>${Number(trade.shares || 0)}</td>
             <td>${contractPrice(trade.entryPrice)}</td>
-            <td>${money((Number(trade.fees) || 0) + (Number(trade.exitFees) || 0))}</td>
+            <td>${money((Number(trade.fees) || 0) + (Number(trade.exitFees) || 0))} / +${money(Number(trade.estimatedMakerRebate) || 0)}</td>
             <td><span class="tag ${outcomeClass}">${escapeHtml(trade.status || "—")}</span></td>
             <td class="${pnlClass(pnl)}">${pnl == null ? "—" : signedMoney(pnl)}</td>
           </tr>`;
@@ -528,12 +528,15 @@
         setText("positionTitle", position ? `${position.side} position · ${position.shares} shares` : "No open position");
         setText("positionDetail", position
           ? `Entry ${contractPrice(position.entryPrice)} · cost ${money(position.totalCost)}`
-          : "Waiting for a qualifying full-size ask sweep");
+          : state.pendingOrder
+            ? `Resting at ${contractPrice(state.pendingOrder.limitPrice)} · ${Number(state.pendingOrder.remainingShares || 0)} shares unfilled`
+            : "Waiting for a qualifying resting limit order");
         setText("positionPnl", position ? signedMoney(position.unrealizedPnl) : "—");
         $("positionPnl").className = pnlClass(position?.unrealizedPnl);
         setText("positionMark", position ? `best bid ${contractPrice(position.markPrice)}` : "unrealized at best bid");
         setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
         setText("fees", money(account.takerFees));
+        setText("rebates", `+${money(account.estimatedMakerRebates)}`);
         setText("nextShares", `${Number(state.strategy?.nextEntryShares || 100).toLocaleString()} shares`);
         setText("nextSizeBadge", `${Number(state.strategy?.nextEntryShares || 100).toLocaleString()} shares next`);
         setText("persistenceStatus", state.persistence?.status === "CONNECTED"
