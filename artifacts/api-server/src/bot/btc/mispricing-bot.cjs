@@ -681,7 +681,6 @@ class BtcMispricingBot {
       || Math.abs(ask.price - quote.bestAsk) >= EPSILON) return null;
     return {
       limitPrice: bid.price,
-      queueAheadShares: Math.max(0, Number(bid.availableSize) || 0),
       bestAsk: ask.price,
     };
   }
@@ -736,7 +735,7 @@ class BtcMispricingBot {
       targetShares: shares,
       filledShares: 0,
       remainingShares: shares,
-      queueAheadShares: passive.queueAheadShares,
+      queueAheadShares: 0,
       estimatedCost,
       estimatedEdgePerShare: edgePerShare,
       modelProbability: side === 'UP' ? model.probabilityUp : model.probabilityDown,
@@ -751,7 +750,7 @@ class BtcMispricingBot {
     this.resetEntryConfirmation();
     this.currentSignal = {
       side,
-      reason: `Post-only ${side} bid resting at $${passive.limitPrice.toFixed(2)}; waiting for a sell trade to fill it.`,
+      reason: `Post-only ${side} bid resting at $${passive.limitPrice.toFixed(2)}; full fill when price reaches $${(passive.limitPrice - 0.01).toFixed(2)} or lower.`,
       edgePerShare,
     };
     this.log('MAKER_ORDER_PLACED',
@@ -761,7 +760,6 @@ class BtcMispricingBot {
         side,
         limitPrice: order.limitPrice,
         targetShares: order.targetShares,
-        queueAheadShares: round(order.queueAheadShares, 4),
         estimatedCost: round(order.estimatedCost, 4),
         estimatedEdgePerShare: round(edgePerShare, 4),
         postOnly: true,
@@ -770,7 +768,7 @@ class BtcMispricingBot {
     return true;
   }
 
-  recordMakerFill(order, shares, now, transactionHash = null) {
+  recordMakerFill(order, shares, now, transactionHash = null, trigger = null) {
     const filledShares = Math.min(
       Math.max(0, Number(shares) || 0),
       Math.max(0, Number(order.remainingShares) || 0),
@@ -844,8 +842,11 @@ class BtcMispricingBot {
     order.remainingShares = Math.max(0, order.targetShares - order.filledShares);
     order.lastFillAt = now;
     order.status = order.remainingShares <= EPSILON ? 'FILLED' : 'PARTIALLY_FILLED';
+    const triggerLabel = trigger?.source === 'BEST_ASK' ? 'best ask' : 'last trade price';
+    const triggerPrice = Number.isFinite(Number(trigger?.price))
+      ? Number(trigger.price) : null;
     this.log('MAKER_BUY_FILLED',
-      `Filled ${round(filledShares, 4)} ${order.side} shares at the resting $${order.limitPrice.toFixed(2)} bid after a sell trade walked through; maker fee $0, estimated rebate $${round(estimatedRebate, 4)}.`,
+      `Filled ${round(filledShares, 4)} ${order.side} shares at the resting $${order.limitPrice.toFixed(2)} bid after ${triggerLabel} reached ${triggerPrice == null ? 'at least one cent below the limit' : `$${triggerPrice.toFixed(2)}`}; maker fee $0, estimated rebate $${round(estimatedRebate, 4)}.`,
       {
         orderId: order.id,
         tradeId: trade.id,
@@ -856,6 +857,8 @@ class BtcMispricingBot {
         entryFee: 0,
         estimatedMakerRebate: round(estimatedRebate, 4),
         remainingShares: round(order.remainingShares, 4),
+        fillTrigger: trigger?.source || 'TRADE_PRINT',
+        triggerPrice,
       });
     if (order.remainingShares <= EPSILON) {
       order.status = 'FILLED';
@@ -869,8 +872,7 @@ class BtcMispricingBot {
   applyLastTradePrice(event, now) {
     const order = this.pendingEntryOrder;
     if (!order || order.windowStart !== this.windowStart
-      || String(event.asset_id || event.assetId || '') !== order.tokenId
-      || String(event.side || '').toUpperCase() !== 'SELL') return false;
+      || String(event.asset_id || event.assetId || '') !== order.tokenId) return false;
     const price = Number(event.price);
     const size = Number(event.size);
     const tradeAt = timestamp(event.timestamp, now);
@@ -886,19 +888,16 @@ class BtcMispricingBot {
     if (this.seenTradeEvents.length > 2_000) {
       this.seenTradeEvents.splice(0, this.seenTradeEvents.length - 2_000);
     }
-    if (price > order.limitPrice + EPSILON) return false;
-
-    let executableShares = size;
-    if (price + EPSILON >= order.limitPrice) {
-      const queueConsumed = Math.min(order.queueAheadShares, executableShares);
-      order.queueAheadShares = Math.max(0, order.queueAheadShares - queueConsumed);
-      executableShares -= queueConsumed;
-    } else {
-      // A print below the resting limit means the order was traded through.
-      order.queueAheadShares = 0;
-    }
-    if (executableShares <= EPSILON) return false;
-    return this.recordMakerFill(order, executableShares, now, txHash);
+    const fullFillThreshold = order.limitPrice - 0.01;
+    if (price > fullFillThreshold + EPSILON) return false;
+    order.queueAheadShares = 0;
+    return this.recordMakerFill(
+      order,
+      order.remainingShares,
+      now,
+      txHash,
+      { source: 'TRADE_PRINT', price },
+    );
   }
 
   modelSnapshot(now = this.now()) {
@@ -1033,6 +1032,7 @@ class BtcMispricingBot {
   evaluatePendingEntryOrder(model, now) {
     const order = this.pendingEntryOrder;
     if (!order) return false;
+    order.queueAheadShares = 0;
     const edgePerShare = this.pendingOrderEdge(model, order);
     const invalidReason = this.pendingOrderInvalidReason(now);
     if (invalidReason) {
@@ -1044,9 +1044,25 @@ class BtcMispricingBot {
       };
       return false;
     }
+    const quote = this.quotes[order.side];
+    const bestAsk = Number(quote?.bestAsk);
+    const fullFillThreshold = order.limitPrice - 0.01;
+    if (quote?.status === 'LIVE'
+      && Number(quote.updatedAt) >= order.postedAt
+      && Number.isFinite(bestAsk)
+      && bestAsk <= fullFillThreshold + EPSILON) {
+      order.queueAheadShares = 0;
+      return this.recordMakerFill(
+        order,
+        order.remainingShares,
+        now,
+        null,
+        { source: 'BEST_ASK', price: bestAsk },
+      );
+    }
     this.currentSignal = {
       side: order.side,
-      reason: `The first-signal order remains at $${order.limitPrice.toFixed(2)} until this window ends; ${round(order.queueAheadShares, 2)} shares estimated ahead in queue.`,
+      reason: `The first-signal order remains at $${order.limitPrice.toFixed(2)}; full fill at the limit when price reaches $${fullFillThreshold.toFixed(2)} or lower, or cancel at window end.`,
       edgePerShare,
     };
     return false;
@@ -1576,7 +1592,7 @@ class BtcMispricingBot {
         minimumFlipNetEdgePerShare: null,
         entryOrderType: 'POST-ONLY LIMIT BUY AT BEST BID',
         entryPolicy: 'Only the first qualifying signal may post one order per 5-minute window.',
-        makerFillRule: 'SELL-side last-trade print at or through the resting bid, after modeled queue-ahead volume.',
+        makerFillRule: 'A post-order trade print or live best ask at least $0.01 below the resting bid confirms the full remaining order at its limit.',
         unfilledOrderPolicy: 'Keep the order resting until the 5-minute window ends; then cancel if still unfilled.',
         makerRebateShare: this.config.CRYPTO_MAKER_REBATE_SHARE,
         flipConfirmationUpdates: 0,

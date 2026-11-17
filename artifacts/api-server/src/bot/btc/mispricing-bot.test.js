@@ -208,54 +208,62 @@ test('the first signal order stays open through later signals and cancels only a
   assert.match(order.cancelReason, /window ended/);
 });
 
-test('sell-side prints walk through the bid and fill maker orders after queue-ahead volume', () => {
+test('a trade one cent below the bid confirms the full order at its limit', () => {
   const { bot, market } = fixture();
   market.raw.feesEnabled = true;
   assert.equal(bot.evaluate(), true);
   const order = bot.pendingEntryOrder;
-  assert.equal(order.queueAheadShares, 100);
-
-  bot.handleMarketMessage({
-    event_type: 'last_trade_price',
-    asset_id: market.tokens.UP,
-    side: 'SELL',
-    price: '0.40',
-    size: '100',
-    timestamp: 960_000,
-  });
-  assert.equal(bot.trades.length, 0);
   assert.equal(order.queueAheadShares, 0);
 
   bot.handleMarketMessage({
     event_type: 'last_trade_price',
     asset_id: market.tokens.UP,
-    side: 'SELL',
+    side: 'BUY',
     price: '0.40',
-    size: '40',
-    timestamp: 960_001,
+    size: '100',
+    timestamp: 960_000,
   });
-  assert.equal(bot.trades[0].shares, 40);
-  assert.equal(bot.trades[0].status, 'OPEN');
-  assert.equal(bot.trades[0].executionRole, 'MAKER');
-  assert.equal(bot.trades[0].fees, 0);
-  assert.ok(bot.trades[0].estimatedMakerRebate > 0);
-  assert.ok(bot.trades[0].totalCost < 16);
+  assert.equal(bot.trades.length, 0);
 
   bot.handleMarketMessage({
     event_type: 'last_trade_price',
     asset_id: market.tokens.UP,
-    side: 'SELL',
+    side: 'BUY',
     price: '0.39',
-    size: '60',
-    timestamp: 960_002,
+    size: '1',
+    timestamp: 960_001,
   });
   assert.equal(bot.trades[0].shares, 100);
+  assert.equal(bot.trades[0].fills.length, 1);
+  assert.equal(bot.trades[0].fills[0].price, 0.4);
+  assert.equal(bot.trades[0].fills[0].shares, 100);
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.trades[0].executionRole, 'MAKER');
+  assert.equal(bot.trades[0].fees, 0);
+  assert.ok(bot.trades[0].estimatedMakerRebate > 0);
+  assert.ok(bot.trades[0].totalCost < 40);
   assert.equal(bot.pendingEntryOrder, null);
   assert.equal(bot.trades[0].fees, 0);
   assert.ok(Math.abs(bot.trades[0].estimatedMakerRebate - 0.336) < 1e-10);
   assert.ok(Math.abs(bot.trades[0].totalCost - 39.664) < 1e-10);
   assert.ok(Math.abs(bot.accountSnapshot().estimatedMakerRebates - 0.336) < 1e-10);
   assert.equal(bot.accountSnapshot().takerFees, 0);
+});
+
+test('best ask one cent below the bid confirms the full order without trade-size modeling', () => {
+  const { bot, market, setNow } = fixture();
+  assert.equal(bot.evaluate(), true);
+  setNow(960_001);
+  bot.handleMarketMessage({
+    event_type: 'best_bid_ask',
+    asset_id: market.tokens.UP,
+    best_bid: '0.38',
+    best_ask: '0.39',
+    timestamp: 960_001,
+  });
+  assert.equal(bot.trades[0].shares, 100);
+  assert.equal(bot.trades[0].fills[0].price, 0.4);
+  assert.equal(bot.pendingEntryOrder, null);
 });
 
 test('current next-entry size and sizing progression are retained for maker orders', () => {
@@ -301,11 +309,11 @@ test('an opposite model signal never sells or flips a filled maker position', ()
   const order = bot.pendingEntryOrder;
   bot.applyLastTradePrice({
     asset_id: market.tokens.UP,
-    side: 'SELL',
-    price: order.limitPrice,
-    size: order.queueAheadShares + order.targetShares,
-    timestamp: 960_000,
-  }, 960_000);
+    side: 'BUY',
+    price: (order.limitPrice - 0.01).toFixed(2),
+    size: '1',
+    timestamp: 960_001,
+  }, 960_001);
   const trade = bot.currentOpenTrade();
   assert.ok(trade);
   assert.equal(trade.side, 'UP');

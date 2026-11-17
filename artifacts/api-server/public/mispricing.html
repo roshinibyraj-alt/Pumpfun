@@ -210,7 +210,7 @@
         <div>
           <div class="eyebrow">Binance model × Polymarket 5-minute BTC</div>
           <h2 id="heroTitle">Rest at the signaled side’s best bid and hold to resolution.</h2>
-          <p>The bot keeps its current Binance probability and edge filters, then posts one resting limit buy at the best bid on the first qualifying signal. It ignores later signals and keeps the order open through the window; an unfilled order is canceled only when that 5-minute window ends. Paper fills require a sell-side trade print to reach or pass the bid, after estimated queue-ahead volume. It does not flip or sell; filled shares wait for official market resolution.</p>
+          <p>The bot keeps its current Binance probability and edge filters, then posts one resting limit buy at the best bid on the first qualifying signal. It ignores later signals and keeps the order open through the window; an unfilled order is canceled only when that 5-minute window ends. A post-order trade print or live best ask $0.01 below the limit marks the full remaining order filled at the limit price, without queue-ahead or partial-fill modeling. It does not flip or sell; filled shares wait for official market resolution.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Window waiting</span>
@@ -351,7 +351,7 @@
           </div>
           <div class="rules">
             <div class="rule"><b>Signal</b>Keep the current model: three closed Binance 5m candles and fresh model/book data.</div>
-            <div class="rule"><b>Entry</b>Use only the first qualifying signal per window; keep its best-bid limit order resting until the window ends, then cancel only if still unfilled.</div>
+            <div class="rule"><b>Entry</b>Use only the first qualifying signal per window; fill the full order at its limit after a $0.01 price walk-through, or cancel it at window end.</div>
             <div class="rule"><b>Size</b>Keep the saved next size; each resolved loss adds 20 shares and each resolved win subtracts 30, with a 100-share floor.</div>
             <div class="rule"><b>Position</b>No flips or sells. Hold filled shares to resolution of their exact original market.</div>
             <div class="rule"><b>Fees</b>Maker fills model zero taker fees and credit an estimated rebate; actual rebate eligibility and amount can differ.</div>
