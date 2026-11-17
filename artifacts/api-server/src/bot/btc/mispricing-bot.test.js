@@ -417,6 +417,53 @@ test('a manual sizing reset preserves trade history and starts a fresh sizing pr
   assert.equal(restored.nextEntryShares, 120);
 });
 
+test('a paper history reset starts from fresh capital and base sizing exactly once', async () => {
+  const previousRequestId = process.env.BTC_PAPER_MISPRICING_HISTORY_RESET_REQUEST_ID;
+  process.env.BTC_PAPER_MISPRICING_HISTORY_RESET_REQUEST_ID = 'paper-history-reset-test';
+  const { bot } = fixture();
+  const resetCalls = [];
+  let savedState = {
+    schemaVersion: 2,
+    startingCapital: 3_000,
+    cash: 2_000,
+    realizedPnl: -1_000,
+    trades: [{ id: 'old-trade' }],
+    events: [{ id: 'old-event' }],
+    nextEntryShares: 280,
+  };
+  bot.stateStore = {
+    async initialize() {},
+    async resetHistoryOnce(requestId, initialState) {
+      resetCalls.push({ requestId, initialState });
+      savedState = initialState;
+      return true;
+    },
+    async loadState() { return savedState; },
+    async saveState(state) { savedState = state; },
+  };
+  bot.tick = async () => {};
+
+  try {
+    await bot.start();
+    assert.equal(resetCalls.length, 1);
+    assert.equal(resetCalls[0].requestId, 'paper-history-reset-test');
+    assert.equal(resetCalls[0].initialState.schemaVersion, 1);
+    assert.equal(bot.trades.length, 0);
+    assert.equal(bot.events.length, 0);
+    assert.equal(bot.cash, 3_000);
+    assert.equal(bot.realizedPnl, 0);
+    assert.equal(bot.nextEntryShares, 100);
+    assert.equal(bot.sizingGeneration, 0);
+  } finally {
+    bot.stop();
+    if (previousRequestId === undefined) {
+      delete process.env.BTC_PAPER_MISPRICING_HISTORY_RESET_REQUEST_ID;
+    } else {
+      process.env.BTC_PAPER_MISPRICING_HISTORY_RESET_REQUEST_ID = previousRequestId;
+    }
+  }
+});
+
 test('restoring the sizing state cancels any obsolete passive order', () => {
   const { bot } = fixture();
   bot.restoreState({

@@ -188,6 +188,19 @@ class BtcMispricingBot {
       if (this.stateStore) {
         this.persistenceStatus = 'CONNECTING';
         await this.stateStore.initialize();
+        const historyResetRequestId = this.liveAccount
+          ? ''
+          : String(process.env.BTC_PAPER_MISPRICING_HISTORY_RESET_REQUEST_ID || '').trim();
+        if (historyResetRequestId) {
+          if (typeof this.stateStore.resetHistoryOnce !== 'function') {
+            throw new Error('A paper history reset was requested, but the durable store cannot reset history.');
+          }
+          const reset = await this.stateStore.resetHistoryOnce(
+            historyResetRequestId,
+            this.emptyHistoryState(),
+          );
+          if (reset) console.log('BTC paper mispricing history reset completed.');
+        }
         const saved = await this.stateStore.loadState();
         if (saved) this.restoreState(saved);
         this.storageHealthy = true;
@@ -293,6 +306,29 @@ class BtcMispricingBot {
       flipsThisWindow: this.flipsThisWindow,
       sizingGeneration: this.sizingGeneration,
       sizingResetRequestId: this.sizingResetRequestId,
+    };
+  }
+
+  emptyHistoryState() {
+    return {
+      schemaVersion: 1,
+      strategyVersion: this.config.STRATEGY_VERSION,
+      startingCapital: this.config.STARTING_CAPITAL,
+      cash: this.config.STARTING_CAPITAL,
+      realizedPnl: 0,
+      trades: [],
+      events: [],
+      tradeSequence: 0,
+      orderSequence: 0,
+      eventSequence: 0,
+      nextEntryShares: this.config.BASE_SHARES,
+      windowStart: null,
+      entryTriggeredThisWindow: false,
+      pendingEntryOrder: null,
+      seenTradeEvents: [],
+      flipsThisWindow: 0,
+      sizingGeneration: 0,
+      sizingResetRequestId: null,
     };
   }
 
