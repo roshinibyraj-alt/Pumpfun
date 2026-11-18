@@ -8,7 +8,7 @@ const { normalizeLevels } = require('./btc-price-band-bot.cjs');
 
 const EPSILON = 1e-8;
 const DEFAULT_CONFIG = Object.freeze({
-  STRATEGY_VERSION: 'btc-5m-binance-maker-walkthrough-no-exit-v1',
+  STRATEGY_VERSION: 'btc-5m-binance-taker-candle-gate-tp099-sl001-v2',
   WINDOW_MS: CANDLE_MS,
   STARTING_CAPITAL: 3_000,
   BASE_SHARES: 100,
@@ -17,6 +17,10 @@ const DEFAULT_CONFIG = Object.freeze({
   VOLATILITY_CANDLES: 3,
   MIN_NET_EDGE_PER_SHARE: 0.05,
   MIN_FLIP_NET_EDGE_PER_SHARE: 0.10,
+  TAKE_PROFIT_BID: 0.99,
+  TAKE_PROFIT_PAYOUT_PER_SHARE: 1,
+  STOP_LOSS_BID: 0.01,
+  STOP_LOSS_PAYOUT_PER_SHARE: 0,
   ENTRY_CONFIRMATION_UPDATES: 2,
   ENTRY_CONFIRMATION_MIN_INTERVAL_MS: 500,
   ENTRY_CONFIRMATION_MAX_INTERVAL_MS: 2_000,
@@ -66,6 +70,50 @@ function calculateVolatility(candles, candleCount = DEFAULT_CONFIG.VOLATILITY_CA
   const variance = returns.reduce((sum, value) => sum + value ** 2, 0) / returns.length;
   const volatility = Math.sqrt(variance);
   return Number.isFinite(volatility) && volatility > 1e-10 ? volatility : null;
+}
+
+function selectInitialSideFromCandles(candles) {
+  const sample = (Array.isArray(candles) ? candles : []).slice(-3);
+  const returns = sample.map(candle => {
+    const open = Number(candle?.open);
+    const close = Number(candle?.close);
+    return open > 0 && Number.isFinite(open) && Number.isFinite(close)
+      ? (close / open) - 1
+      : null;
+  });
+  if (returns.length !== 3 || returns.some(value => !Number.isFinite(value))) {
+    return {
+      side: null,
+      averageFirstTwoReturnPct: null,
+      latestReturnPct: null,
+      reason: 'Waiting for three complete candle returns to select an initial side.',
+    };
+  }
+
+  const averageFirstTwo = (returns[0] + returns[1]) / 2;
+  const latest = returns[2];
+  if (averageFirstTwo > latest) {
+    return {
+      side: 'UP',
+      averageFirstTwoReturnPct: averageFirstTwo * 100,
+      latestReturnPct: latest * 100,
+      reason: 'UP: the average return of candles 1 and 2 is greater than candle 3.',
+    };
+  }
+  if (averageFirstTwo < latest) {
+    return {
+      side: 'DOWN',
+      averageFirstTwoReturnPct: averageFirstTwo * 100,
+      latestReturnPct: latest * 100,
+      reason: 'DOWN: the average return of candles 1 and 2 is less than candle 3.',
+    };
+  }
+  return {
+    side: null,
+    averageFirstTwoReturnPct: averageFirstTwo * 100,
+    latestReturnPct: latest * 100,
+    reason: 'No initial side: the average return of candles 1 and 2 exactly matches candle 3.',
+  };
 }
 
 function estimateUpProbability({ currentPrice, windowOpenPrice, volatility5m, secondsRemaining }) {
@@ -270,12 +318,18 @@ class BtcMispricingBot {
     this.windowStart = Number.isFinite(Number(state.windowStart))
       ? Number(state.windowStart) : null;
     this.windowEnd = this.windowStart == null ? null : this.windowStart + this.config.WINDOW_MS;
-    this.entryTriggeredThisWindow = state.entryTriggeredThisWindow === true;
     const savedPendingOrder = state.pendingEntryOrder;
     this.pendingEntryOrder = state.strategyVersion === this.config.STRATEGY_VERSION
       && savedPendingOrder
       && Number(savedPendingOrder.windowStart) === this.windowStart
       ? { ...savedPendingOrder } : null;
+    const discardedSameWindowOrder = savedPendingOrder
+      && Number(savedPendingOrder.windowStart) === this.windowStart
+      && state.strategyVersion !== this.config.STRATEGY_VERSION;
+    const hasOpenTradeInWindow = this.trades.some(trade => trade.status === 'OPEN'
+      && Number(trade.windowStart) === this.windowStart);
+    this.entryTriggeredThisWindow = state.entryTriggeredThisWindow === true
+      && !(discardedSameWindowOrder && !hasOpenTradeInWindow);
     this.entryConfirmation = { side: null, count: 0, lastTickAt: null };
     this.seenTradeEvents = Array.isArray(state.seenTradeEvents)
       ? state.seenTradeEvents.slice(-2_000) : [];
@@ -768,6 +822,73 @@ class BtcMispricingBot {
     return true;
   }
 
+  closeAtThreshold(trade, outcome, triggerBid, now) {
+    if (!trade || trade.status !== 'OPEN' || !['WIN', 'LOSS'].includes(outcome)) return false;
+    const payout = outcome === 'WIN'
+      ? this.config.TAKE_PROFIT_PAYOUT_PER_SHARE
+      : this.config.STOP_LOSS_PAYOUT_PER_SHARE;
+    const proceeds = trade.shares * payout;
+    trade.status = 'SETTLED';
+    trade.settlementStatus = 'SETTLED';
+    trade.settlementSource = 'INTRAWINDOW_THRESHOLD';
+    trade.exitReason = outcome === 'WIN' ? 'TAKE_PROFIT_BID' : 'STOP_LOSS_BID';
+    trade.exitPrice = payout;
+    trade.exitTriggerBid = triggerBid;
+    trade.proceeds = proceeds;
+    trade.realizedPnl = round(proceeds - trade.totalCost, 8);
+    trade.outcome = outcome;
+    trade.settledAt = now;
+    trade.closedAt = now;
+    this.cash = round(this.cash + proceeds, 8);
+    this.realizedPnl = round(this.realizedPnl + trade.realizedPnl, 8);
+    this.applySizingAdjustment(
+      trade,
+      outcome,
+      now,
+      `${outcome === 'WIN' ? 'Take-profit' : 'Stop-loss'} threshold recorded`,
+      outcome === 'WIN' ? 'INTRAWINDOW_TAKE_PROFIT' : 'INTRAWINDOW_STOP_LOSS',
+    );
+    this.log(outcome === 'WIN' ? 'INTRAWINDOW_TAKE_PROFIT' : 'INTRAWINDOW_STOP_LOSS',
+      `${trade.side} best bid reached $${triggerBid.toFixed(3)}; recorded a $${payout.toFixed(2)} per-share paper payout and updated next-window sizing.`,
+      {
+        tradeId: trade.id,
+        side: trade.side,
+        shares: trade.shares,
+        triggerBid,
+        payoutPerShare: payout,
+        proceeds: round(proceeds, 4),
+        realizedPnl: round(trade.realizedPnl, 4),
+        outcome,
+      });
+    this.schedulePersist(true);
+    return true;
+  }
+
+  processThresholdExit(now = this.now()) {
+    if (!this.market || this.windowEnd == null || now >= this.windowEnd) return false;
+    const trade = this.currentOpenTrade();
+    if (!trade || !this.sideQuoteIsFresh(trade.side, now)) return false;
+    const bestBid = Number(this.quotes[trade.side]?.bestBid);
+    if (!Number.isFinite(bestBid)) return false;
+    if (bestBid >= this.config.TAKE_PROFIT_BID) {
+      return this.closeAtThreshold(
+        trade,
+        'WIN',
+        bestBid,
+        now,
+      );
+    }
+    if (bestBid <= this.config.STOP_LOSS_BID) {
+      return this.closeAtThreshold(
+        trade,
+        'LOSS',
+        bestBid,
+        now,
+      );
+    }
+    return false;
+  }
+
   recordMakerFill(order, shares, now, transactionHash = null, trigger = null) {
     const filledShares = Math.min(
       Math.max(0, Number(shares) || 0),
@@ -904,6 +1025,7 @@ class BtcMispricingBot {
     const feed = this.priceFeed.snapshot?.() || {};
     const candles = (feed.candles || []).slice(-this.config.VOLATILITY_CANDLES);
     const volatility5m = calculateVolatility(candles, this.config.VOLATILITY_CANDLES);
+    const initialSideSelection = selectInitialSideFromCandles(candles);
     const currentCandle = feed.currentCandle;
     const windowOpenPrice = currentCandle
       && Number(currentCandle.start) === this.windowStart
@@ -940,6 +1062,7 @@ class BtcMispricingBot {
       windowOpenPrice: Number.isFinite(windowOpenPrice) ? windowOpenPrice : null,
       secondsRemaining,
       volatility5m,
+      initialSideSelection,
       volatilityCandles: candles.map(candle => ({
         start: candle.start,
         open: candle.open,
@@ -1072,6 +1195,19 @@ class BtcMispricingBot {
     if (!this.market || this.windowStart == null || !this.storageHealthy) return false;
     const model = this.modelSnapshot(now);
     this.model = model;
+    if (this.processThresholdExit(now)) {
+      const settled = this.trades.find(trade => trade.status === 'SETTLED'
+        && trade.settledAt === now
+        && trade.settlementSource === 'INTRAWINDOW_THRESHOLD');
+      this.currentSignal = {
+        side: settled?.side || null,
+        reason: settled?.outcome === 'WIN'
+          ? 'Take-profit recorded at a $1-per-share payout; next-window sizing was reduced.'
+          : 'Stop-loss recorded at a $0-per-share payout; next-window sizing was increased.',
+        edgePerShare: null,
+      };
+      return false;
+    }
     if (this.pendingEntryOrder) return this.evaluatePendingEntryOrder(model, now);
     if (!model.ready) {
       this.currentSignal = {
@@ -1085,14 +1221,24 @@ class BtcMispricingBot {
     if (openTrade) {
       this.currentSignal = {
         side: openTrade.side,
-        reason: 'Holding the position for exact original-market resolution; flips and sells are disabled.',
+        reason: 'Holding the position for its $0.99/$0.01 thresholds or exact original-market resolution; flips are disabled.',
         edgePerShare: null,
       };
       return false;
     }
     if (this.entryTriggeredThisWindow || now >= this.windowEnd) return false;
+    const initialSide = model.initialSideSelection?.side;
+    if (!initialSide) {
+      this.currentSignal = {
+        side: null,
+        reason: model.initialSideSelection?.reason
+          || 'The candle comparison did not select an initial side.',
+        edgePerShare: null,
+      };
+      return false;
+    }
     const shares = this.nextEntryShares;
-    const candidates = ['UP', 'DOWN'].map(side => {
+    const candidates = [initialSide].map(side => {
       if (!this.sideQuoteIsFresh(side, now)) return null;
       const preview = this.sweep(side, 'asks', shares);
       if (!preview?.complete) return null;
@@ -1108,36 +1254,47 @@ class BtcMispricingBot {
       && candidate.edgePerShare >= this.config.MIN_NET_EDGE_PER_SHARE);
     if (!candidates.length) {
       this.currentSignal = {
-        side: null,
-        reason: 'No side clears the minimum net edge after visible ask-sweep costs and fees.',
+        side: initialSide,
+        reason: `${initialSide} was selected by the candle comparison, but it does not clear the minimum net edge after visible ask-sweep costs and fees.`,
         edgePerShare: null,
       };
       return false;
     }
     candidates.sort((left, right) => right.edgePerShare - left.edgePerShare);
     const selected = candidates[0];
-    const bidOrder = {
-      side: selected.side,
-      limitPrice: Number(this.quotes[selected.side].bestBid),
-    };
-    const makerEdgePerShare = Number.isFinite(bidOrder.limitPrice)
-      ? this.pendingOrderEdge(model, bidOrder) : null;
-    if (makerEdgePerShare == null
-      || makerEdgePerShare < this.config.MIN_NET_EDGE_PER_SHARE) {
+    if (selected.preview.totalCost > this.cash + EPSILON) {
       this.currentSignal = {
         side: selected.side,
-        reason: 'The signaled side has no valid resting bid with the required maker edge.',
-        edgePerShare: makerEdgePerShare,
+        reason: `The ${selected.side} signal qualifies, but paper cash cannot fund the full taker buy and its fees.`,
+        edgePerShare: selected.edgePerShare,
       };
       return false;
     }
-    return this.placeMakerEntryOrder(
+    const execution = this.sweep(selected.side, 'asks', shares, { consume: true });
+    if (!execution?.complete) {
+      this.currentSignal = {
+        side: selected.side,
+        reason: `The ${selected.side} signal qualified, but the fresh ask book no longer has full depth for the taker buy.`,
+        edgePerShare: selected.edgePerShare,
+      };
+      return false;
+    }
+    this.entryTriggeredThisWindow = true;
+    const trade = this.buyPosition(
       selected.side,
+      execution,
       model,
       now,
-      'MODEL_EDGE',
-      makerEdgePerShare,
+      'MODEL_EDGE_CANDLE_SELECTED',
+      selected.edgePerShare,
     );
+    this.currentSignal = {
+      side: selected.side,
+      reason: `Immediate taker buy filled across visible asks at a $${trade.entryPrice.toFixed(3)} average; estimated entry fees are included.`,
+      edgePerShare: selected.edgePerShare,
+    };
+    this.schedulePersist(true);
+    return true;
   }
 
   resetFlipConfirmation() {
@@ -1584,23 +1741,28 @@ class BtcMispricingBot {
         nextEntryShares: this.nextEntryShares,
         lossSizeStepShares: this.config.LOSS_SIZE_STEP_SHARES,
         winSizeReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
-        profitableIntrawindowCloseReducesSize: false,
+        thresholdPayoutsAdjustSizingImmediately: true,
         sizingGeneration: this.sizingGeneration,
         sizeFloorShares: this.config.BASE_SHARES,
         volatilityLookbackCandles: this.config.VOLATILITY_CANDLES,
         minimumNetEdgePerShare: this.config.MIN_NET_EDGE_PER_SHARE,
+        initialSideRule: 'Compare the average percent return of candles 1 and 2 with candle 3: greater selects UP, lower selects DOWN, equal selects no side.',
         minimumFlipNetEdgePerShare: null,
-        entryOrderType: 'POST-ONLY LIMIT BUY AT BEST BID',
-        entryPolicy: 'Only the first qualifying signal may post one order per 5-minute window.',
-        makerFillRule: 'A post-order trade print or live best ask at least $0.01 below the resting bid confirms the full remaining order at its limit.',
-        unfilledOrderPolicy: 'Keep the order resting until the 5-minute window ends; then cancel if still unfilled.',
-        makerRebateShare: this.config.CRYPTO_MAKER_REBATE_SHARE,
+        entryOrderType: 'MARKET BUY (TAKER)',
+        entryPolicy: 'Only the candle-selected side is evaluated; the first qualified signal immediately sweeps visible asks once per 5-minute window.',
+        makerFillRule: null,
+        unfilledOrderPolicy: 'No resting entry orders; taker buys fill immediately from visible asks or are skipped if depth is insufficient.',
+        takeProfitBid: this.config.TAKE_PROFIT_BID,
+        takeProfitPayoutPerShare: this.config.TAKE_PROFIT_PAYOUT_PER_SHARE,
+        stopLossBid: this.config.STOP_LOSS_BID,
+        stopLossPayoutPerShare: this.config.STOP_LOSS_PAYOUT_PER_SHARE,
+        makerRebateShare: 0,
         flipConfirmationUpdates: 0,
         flipConfirmationIntervalMs: null,
         maximumFlipsPerWindow: 0,
         flipsThisWindow: 0,
         entryTriggeredThisWindow: this.entryTriggeredThisWindow,
-        exitPolicy: 'No flips or sells; hold filled shares to exact original-market resolution.',
+        exitPolicy: 'During the window, a fresh own-side best bid at or above $0.99 records a $1/share paper payout; at or below $0.01 records $0/share. Sizing updates immediately. Positions not crossing either threshold wait for exact original-market resolution.',
         priceSource: 'Binance BTCUSDT aggregate trades',
       },
       window: {
@@ -1658,6 +1820,7 @@ module.exports = {
   BtcMispricingBot,
   DEFAULT_CONFIG,
   calculateVolatility,
+  selectInitialSideFromCandles,
   estimateUpProbability,
   normalCdf,
 };

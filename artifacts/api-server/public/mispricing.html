@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101628">
-    <title>BTCUSDT Maker Paper Bot</title>
+    <title>BTCUSDT Taker Paper Bot</title>
     <style>
       :root {
         color-scheme: dark;
@@ -196,7 +196,7 @@
           <div class="brand-mark" aria-hidden="true">₿</div>
           <div>
             <div class="eyebrow">Pumpfun · replacement strategy</div>
-            <h1>BTCUSDT Maker Paper Bot</h1>
+            <h1>BTCUSDT Taker Paper Bot</h1>
           </div>
         </div>
         <div class="top-meta">
@@ -209,8 +209,8 @@
       <section class="hero" aria-labelledby="heroTitle">
         <div>
           <div class="eyebrow">Binance model × Polymarket 5-minute BTC</div>
-          <h2 id="heroTitle">Rest at the signaled side’s best bid and hold to resolution.</h2>
-          <p>The bot keeps its current Binance probability and edge filters, then posts one resting limit buy at the best bid on the first qualifying signal. It ignores later signals and keeps the order open through the window; an unfilled order is canceled only when that 5-minute window ends. A post-order trade print or live best ask $0.01 below the limit marks the full remaining order filled at the limit price, without queue-ahead or partial-fill modeling. It does not flip or sell; filled shares wait for official market resolution.</p>
+          <h2 id="heroTitle">Choose an initial side from candles, then buy immediately when all filters pass.</h2>
+          <p>Compare the average percentage return of candles 1 and 2 with candle 3: higher selects UP, lower selects DOWN. The selected side must still pass the existing fresh-data, model-probability, visible ask-depth, and $0.05 net-edge checks. The first qualifying entry per five-minute window immediately sweeps visible asks as a taker buy and includes modeled fees. A fresh own-side best bid at $0.99 records a $1-per-share paper payout; at $0.01 it records $0. Otherwise, hold for exact original-market resolution. No flips.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Window waiting</span>
@@ -228,7 +228,7 @@
         <article class="metric">
           <div class="metric-label">Realized P&amp;L</div>
           <div class="metric-value" id="realizedPnl">—</div>
-          <div class="metric-sub">after recorded fees and estimated rebates</div>
+          <div class="metric-sub">after modeled taker fees and recorded payouts</div>
         </article>
         <article class="metric">
           <div class="metric-label">Paper cash</div>
@@ -258,6 +258,7 @@
           </div>
           <div class="feed-row"><span class="feed-label">Binance price at window open</span><strong class="feed-value" id="windowOpen">—</strong></div>
           <div class="feed-row"><span class="feed-label">Last-three-candle volatility</span><strong class="feed-value" id="volatility">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Initial side from candles 1–3</span><strong class="feed-value" id="candleSidePick">Waiting</strong></div>
           <div class="feed-row"><span class="feed-label">Polymarket market window</span><strong class="feed-value" id="marketName">—</strong></div>
           <div class="candles" id="candles">
             <div class="candle"><div class="candle-time">Candle 1</div><div class="candle-return">Waiting</div></div>
@@ -324,14 +325,14 @@
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Current position</div><div class="panel-subtitle">One entry per window; no flips or sells</div></div>
+            <div><div class="panel-title">Current position</div><div class="panel-subtitle">One entry per window · no flips</div></div>
             <span class="badge" id="positionStatus">Flat</span>
           </div>
           <div class="position-box">
             <div class="position-icon empty" id="positionIcon">—</div>
             <div class="position-main">
               <strong id="positionTitle">No open position</strong>
-              <small id="positionDetail">Waiting for a qualifying resting limit order</small>
+              <small id="positionDetail">Waiting for a qualifying taker entry</small>
             </div>
             <div class="position-pnl">
               <strong id="positionPnl">—</strong>
@@ -341,7 +342,7 @@
           <div class="feed-row"><span class="feed-label">Next order size</span><strong class="feed-value" id="nextShares">100 shares</strong></div>
           <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
           <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Estimated maker rebates</span><strong class="feed-value" id="rebates">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Historical estimated maker rebates</span><strong class="feed-value" id="rebates">—</strong></div>
         </article>
 
         <article class="panel">
@@ -350,13 +351,14 @@
             <span class="badge" id="nextSizeBadge">100 shares next</span>
           </div>
           <div class="rules">
-            <div class="rule"><b>Signal</b>Keep the current model: three closed Binance 5m candles and fresh model/book data.</div>
-            <div class="rule"><b>Entry</b>Use only the first qualifying signal per window; fill the full order at its limit after a $0.01 price walk-through, or cancel it at window end.</div>
-            <div class="rule"><b>Size</b>Keep the saved next size; each resolved loss adds 20 shares and each resolved win subtracts 30, with a 100-share floor.</div>
-            <div class="rule"><b>Position</b>No flips or sells. Hold filled shares to resolution of their exact original market.</div>
-            <div class="rule"><b>Fees</b>Maker fills model zero taker fees and credit an estimated rebate; actual rebate eligibility and amount can differ.</div>
-            <div class="rule"><b>Ledger</b>Existing $3,000 paper ledger and history are preserved; open trades settle on their original markets.</div>
-            <div class="rule"><b>Execution</b>Paper-only simulation. No wallet or real order is connected.</div>
+            <div class="rule"><b>Initial side</b>Average candle 1 and 2 percentage returns: above candle 3 selects UP; below selects DOWN. A tie selects neither.</div>
+            <div class="rule"><b>Initial side</b>Average candle 1 and 2 percentage returns: above candle 3 selects UP; below selects DOWN. A tie selects neither.</div>
+            <div class="rule"><b>Signal</b>Only evaluate the selected side; its estimated probability, full visible ask depth, $0.05 net edge after modeled fees, and fresh-data checks must pass.</div>
+            <div class="rule"><b>Entry</b>One immediate taker market buy per window; sweep visible asks and record modeled taker fees.</div>
+            <div class="rule"><b>Exit</b>Fresh own-side bid at $0.99 records $1/share; at $0.01 records $0/share. Otherwise wait for exact-market resolution.</div>
+            <div class="rule"><b>Size</b>Preserve saved size; a win subtracts 30 shares and a loss adds 20, with a 100-share floor. Threshold results update size immediately.</div>
+            <div class="rule"><b>Ledger</b>Preserve paper history and existing positions; threshold payouts do not model a separate sell or sell fee.</div>
+            <div class="rule"><b>Execution</b>Paper-only simulation. Taker fees are modeled; no wallet or real order is connected.</div>
           </div>
         </article>
       </section>
@@ -400,6 +402,9 @@
       const percent = (value) => Number.isFinite(Number(value)) ? (Number(value) * 100).toFixed(1) + "%" : "—";
       const signedMoney = (value) => Number.isFinite(Number(value))
         ? (Number(value) >= 0 ? "+" : "−") + money(Math.abs(Number(value)))
+        : "—";
+      const signedPercent = (value) => Number.isFinite(Number(value))
+        ? (Number(value) >= 0 ? "+" : "−") + Math.abs(Number(value)).toFixed(3) + "%"
         : "—";
       const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
         "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -499,6 +504,11 @@
         setText("volatility", Number.isFinite(Number(model.volatility5m))
           ? (Number(model.volatility5m) * 100).toFixed(3) + "% RMS / candle"
           : "Waiting for 3 candles");
+        const candlePick = model.initialSideSelection || {};
+        const candlePickText = candlePick.side
+          ? `${candlePick.side} · avg ${signedPercent(candlePick.averageFirstTwoReturnPct)} vs C3 ${signedPercent(candlePick.latestReturnPct)}`
+          : candlePick.reason || "Waiting for three complete candles";
+        setText("candleSidePick", candlePickText);
         setText("marketName", state.market?.title || state.market?.slug || "Market not loaded");
         setText("feedFreshness", Number.isFinite(Number(binance.tickAgeMs))
           ? `Tick age ${Math.max(0, Math.round(Number(binance.tickAgeMs)))} ms`
@@ -530,7 +540,7 @@
           ? `Entry ${contractPrice(position.entryPrice)} · cost ${money(position.totalCost)}`
           : state.pendingOrder
             ? `Resting at ${contractPrice(state.pendingOrder.limitPrice)} · ${Number(state.pendingOrder.remainingShares || 0)} shares unfilled`
-            : "Waiting for a qualifying resting limit order");
+            : "Waiting for a qualifying taker entry");
         setText("positionPnl", position ? signedMoney(position.unrealizedPnl) : "—");
         $("positionPnl").className = pnlClass(position?.unrealizedPnl);
         setText("positionMark", position ? `best bid ${contractPrice(position.markPrice)}` : "unrealized at best bid");

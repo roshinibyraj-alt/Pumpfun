@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   BtcMispricingBot,
   calculateVolatility,
+  selectInitialSideFromCandles,
   estimateUpProbability,
 } = require('./mispricing-bot.cjs');
 const { CANDLE_MS, STREAM_URL, parseClosedCandles } = require('./binance-tick-feed.cjs');
@@ -20,14 +21,14 @@ function makeClosedCandle(start, open, close) {
   };
 }
 
-function fixture({ price = 100_400, historyCount = 3 } = {}) {
+function fixture({ price = 100_400, historyCount = 3, candleSet = null } = {}) {
   let currentTime = 960_000;
   const windowStart = 900_000;
-  const candles = [
+  const candles = (candleSet || [
     makeClosedCandle(0, 100_000, 100_200),
     makeClosedCandle(300_000, 100_200, 100_100),
-    makeClosedCandle(600_000, 100_100, 100_200),
-  ].slice(-historyCount);
+    makeClosedCandle(600_000, 100_100, 100_120),
+  ]).slice(-historyCount);
   const feed = {
     snapshot() {
       return {
@@ -157,6 +158,36 @@ test('volatility uses only the latest three closed candle returns', () => {
   assert.equal(calculateVolatility(candles.slice(-2), 3), null);
 });
 
+test('initial side is UP when candles 1 and 2 average above candle 3', () => {
+  const selection = selectInitialSideFromCandles([
+    makeClosedCandle(0, 100, 102),
+    makeClosedCandle(CANDLE_MS, 100, 99),
+    makeClosedCandle(2 * CANDLE_MS, 100, 100.2),
+  ]);
+  assert.equal(selection.side, 'UP');
+  assert.ok(selection.averageFirstTwoReturnPct > selection.latestReturnPct);
+});
+
+test('initial side is DOWN when candles 1 and 2 average below candle 3', () => {
+  const selection = selectInitialSideFromCandles([
+    makeClosedCandle(0, 100, 99.8),
+    makeClosedCandle(CANDLE_MS, 100, 99.9),
+    makeClosedCandle(2 * CANDLE_MS, 100, 100.2),
+  ]);
+  assert.equal(selection.side, 'DOWN');
+  assert.ok(selection.averageFirstTwoReturnPct < selection.latestReturnPct);
+});
+
+test('an exact candle comparison tie selects no initial side', () => {
+  const selection = selectInitialSideFromCandles([
+    makeClosedCandle(0, 100, 101),
+    makeClosedCandle(CANDLE_MS, 100, 99),
+    makeClosedCandle(2 * CANDLE_MS, 100, 100),
+  ]);
+  assert.equal(selection.side, null);
+  assert.match(selection.reason, /exactly matches/);
+});
+
 test('estimated probability is balanced at the window open and follows price direction', () => {
   const base = { windowOpenPrice: 100, volatility5m: 0.01, secondsRemaining: 150 };
   assert.ok(Math.abs(estimateUpProbability({ ...base, currentPrice: 100 }) - 0.5) < 0.00001);
@@ -170,103 +201,153 @@ test('the bot waits when fewer than three closed candles are available', () => {
   assert.equal(bot.trades.length, 0);
 });
 
-test('a qualifying signal posts one resting limit buy at the signaled best bid', () => {
+test('a qualifying signal immediately sweeps asks with one taker buy', () => {
   const { bot } = fixture();
   assert.equal(bot.evaluate(), true);
-  assert.equal(bot.trades.length, 0);
-  assert.equal(bot.pendingEntryOrder.side, 'UP');
-  assert.equal(bot.pendingEntryOrder.limitPrice, 0.4);
-  assert.equal(bot.pendingEntryOrder.targetShares, 100);
-  assert.equal(bot.pendingEntryOrder.status, 'RESTING');
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0].side, 'UP');
+  assert.equal(bot.trades[0].shares, 100);
+  assert.equal(bot.trades[0].entryPrice, 0.6);
+  assert.equal(bot.trades[0].executionRole, 'TAKER');
+  assert.equal(bot.trades[0].status, 'OPEN');
+  assert.equal(bot.pendingEntryOrder, null);
   assert.equal(bot.entryTriggeredThisWindow, true);
-  assert.equal(bot.snapshot().strategy.entryOrderType, 'POST-ONLY LIMIT BUY AT BEST BID');
+  assert.equal(bot.snapshot().strategy.entryOrderType, 'MARKET BUY (TAKER)');
 });
 
-test('the first signal order stays open through later signals and cancels only at window end', () => {
+test('the candle-selected DOWN side is the only side evaluated for entry', () => {
+  const { bot } = fixture({
+    price: 99_900,
+    candleSet: [
+      makeClosedCandle(0, 100_000, 99_800),
+      makeClosedCandle(300_000, 100_000, 99_900),
+      makeClosedCandle(600_000, 100_000, 100_200),
+    ],
+  });
+  assert.equal(bot.evaluate(), true);
+  assert.equal(bot.trades[0].side, 'DOWN');
+  assert.equal(bot.snapshot().model.initialSideSelection.side, 'DOWN');
+});
+
+test('a qualifying opposite model side cannot bypass the candle-selected side', () => {
+  const { bot, setBook } = fixture({
+    price: 99_900,
+    candleSet: [
+      makeClosedCandle(0, 100_000, 99_800),
+      makeClosedCandle(300_000, 100_000, 99_900),
+      makeClosedCandle(600_000, 100_000, 100_200),
+    ],
+  });
+  setBook('UP', {
+    asks: [[0.05, 100]],
+    bids: [[0.04, 100]],
+  });
+  setBook('DOWN', {
+    asks: [[0.99, 100]],
+    bids: [[0.98, 100]],
+  });
+  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.pendingEntryOrder, null);
+  assert.equal(bot.snapshot().model.initialSideSelection.side, 'DOWN');
+  assert.match(bot.currentSignal.reason, /DOWN was selected/);
+});
+
+test('only one taker entry is allowed in the window even if the model changes later', () => {
   const { bot, setPrice, setNow } = fixture();
   assert.equal(bot.evaluate(), true);
-  const order = bot.pendingEntryOrder;
-  assert.equal(order.side, 'UP');
+  const trade = bot.trades[0];
+  assert.equal(trade.side, 'UP');
 
   setPrice(99_600);
   setNow(961_000);
   assert.equal(bot.evaluate(), false);
-  assert.equal(bot.pendingEntryOrder, order);
-  assert.equal(bot.pendingEntryOrder.side, 'UP');
-  assert.equal(bot.entryTriggeredThisWindow, true);
-
-  bot.priceFeed.snapshot = () => ({ status: 'DISCONNECTED' });
-  setNow(1_199_999);
-  assert.equal(bot.evaluate(), false);
-  assert.equal(bot.pendingEntryOrder, order);
-
-  setNow(1_200_000);
-  assert.equal(bot.evaluate(), false);
+  assert.equal(bot.trades.length, 1);
+  assert.equal(bot.trades[0], trade);
   assert.equal(bot.pendingEntryOrder, null);
-  assert.equal(order.status, 'CANCELLED');
-  assert.equal(order.cancelledAt, 1_200_000);
-  assert.match(order.cancelReason, /window ended/);
+  assert.equal(bot.entryTriggeredThisWindow, true);
 });
 
-test('a trade one cent below the bid confirms the full order at its limit', () => {
+test('taker entry records ask-sweep prices and modeled fees', () => {
   const { bot, market } = fixture();
   market.raw.feesEnabled = true;
+  bot.books.set(market.tokens.UP, {
+    asks: [
+      { price: 0.6, size: 40, availableSize: 40 },
+      { price: 0.61, size: 60, availableSize: 60 },
+    ],
+    bids: [{ price: 0.4, size: 100, availableSize: 100 }],
+    updatedAt: bot.now(),
+    sourceTimestamp: bot.now(),
+  });
+  bot.quotes.UP.bestAsk = 0.6;
   assert.equal(bot.evaluate(), true);
-  const order = bot.pendingEntryOrder;
-  assert.equal(order.queueAheadShares, 0);
-
-  bot.handleMarketMessage({
-    event_type: 'last_trade_price',
-    asset_id: market.tokens.UP,
-    side: 'BUY',
-    price: '0.40',
-    size: '100',
-    timestamp: 960_000,
-  });
-  assert.equal(bot.trades.length, 0);
-
-  bot.handleMarketMessage({
-    event_type: 'last_trade_price',
-    asset_id: market.tokens.UP,
-    side: 'BUY',
-    price: '0.39',
-    size: '1',
-    timestamp: 960_001,
-  });
-  assert.equal(bot.trades[0].shares, 100);
-  assert.equal(bot.trades[0].fills.length, 1);
-  assert.equal(bot.trades[0].fills[0].price, 0.4);
-  assert.equal(bot.trades[0].fills[0].shares, 100);
-  assert.equal(bot.trades[0].status, 'OPEN');
-  assert.equal(bot.trades[0].executionRole, 'MAKER');
-  assert.equal(bot.trades[0].fees, 0);
-  assert.ok(bot.trades[0].estimatedMakerRebate > 0);
-  assert.ok(bot.trades[0].totalCost < 40);
-  assert.equal(bot.pendingEntryOrder, null);
-  assert.equal(bot.trades[0].fees, 0);
-  assert.ok(Math.abs(bot.trades[0].estimatedMakerRebate - 0.336) < 1e-10);
-  assert.ok(Math.abs(bot.trades[0].totalCost - 39.664) < 1e-10);
-  assert.ok(Math.abs(bot.accountSnapshot().estimatedMakerRebates - 0.336) < 1e-10);
-  assert.equal(bot.accountSnapshot().takerFees, 0);
+  const trade = bot.trades[0];
+  assert.equal(trade.shares, 100);
+  assert.equal(trade.grossCost, 60.6);
+  assert.equal(trade.entryPrice, 0.606);
+  assert.equal(trade.executionRole, 'TAKER');
+  assert.ok(trade.fees > 0);
+  assert.ok(trade.totalCost > trade.grossCost);
+  assert.equal(trade.estimatedMakerRebate, undefined);
+  assert.equal(bot.accountSnapshot().takerFees, Number(trade.fees.toFixed(2)));
+  assert.equal(bot.accountSnapshot().estimatedMakerRebates, 0);
 });
 
-test('best ask one cent below the bid confirms the full order without trade-size modeling', () => {
-  const { bot, market, setNow } = fixture();
+test('a $0.99 best bid records a $1 payout and reduces size for the next window', () => {
+  const { bot, setBook, setNow } = fixture();
+  bot.trades.push(
+    { id: 'prior-loss-1', status: 'SETTLED', outcome: 'LOSS', sizingOutcome: 'LOSS', sizingAdjustmentApplied: true, sizingGeneration: 0, sizingAdjustedAt: 1, windowStart: 1 },
+    { id: 'prior-loss-2', status: 'SETTLED', outcome: 'LOSS', sizingOutcome: 'LOSS', sizingAdjustmentApplied: true, sizingGeneration: 0, sizingAdjustedAt: 2, windowStart: 2 },
+  );
+  bot.recalculateNextEntryShares();
+  setBook('UP', { asks: [[0.6, 140]], bids: [[0.4, 140]] });
   assert.equal(bot.evaluate(), true);
-  setNow(960_001);
-  bot.handleMarketMessage({
-    event_type: 'best_bid_ask',
-    asset_id: market.tokens.UP,
-    best_bid: '0.38',
-    best_ask: '0.39',
-    timestamp: 960_001,
-  });
-  assert.equal(bot.trades[0].shares, 100);
-  assert.equal(bot.trades[0].fills[0].price, 0.4);
-  assert.equal(bot.pendingEntryOrder, null);
+  const trade = bot.trades.at(-1);
+  assert.equal(trade.shares, 140);
+  setNow(961_000);
+  setBook('UP', { asks: [[0.99, 100]], bids: [[0.99, 100]] });
+  assert.equal(bot.evaluate(), false);
+  assert.equal(trade.status, 'SETTLED');
+  assert.equal(trade.outcome, 'WIN');
+  assert.equal(trade.settlementSource, 'INTRAWINDOW_THRESHOLD');
+  assert.equal(trade.exitReason, 'TAKE_PROFIT_BID');
+  assert.equal(trade.exitPrice, 1);
+  assert.equal(trade.proceeds, 140);
+  assert.equal(bot.nextEntryShares, 110);
+  assert.equal(bot.accountSnapshot().wins, 1);
+  assert.equal(bot.snapshot().strategy.takeProfitBid, 0.99);
 });
 
-test('current next-entry size and sizing progression are retained for maker orders', () => {
+test('a $0.01 best bid records a zero payout and increases next-window size', () => {
+  const { bot, setBook, setNow } = fixture();
+  assert.equal(bot.evaluate(), true);
+  const trade = bot.trades[0];
+  setNow(961_000);
+  setBook('UP', { asks: [[0.02, 100]], bids: [[0.01, 100]] });
+  assert.equal(bot.evaluate(), false);
+  assert.equal(trade.status, 'SETTLED');
+  assert.equal(trade.outcome, 'LOSS');
+  assert.equal(trade.settlementSource, 'INTRAWINDOW_THRESHOLD');
+  assert.equal(trade.exitReason, 'STOP_LOSS_BID');
+  assert.equal(trade.exitPrice, 0);
+  assert.equal(trade.proceeds, 0);
+  assert.equal(bot.nextEntryShares, 120);
+  assert.equal(bot.accountSnapshot().losses, 1);
+  assert.equal(bot.snapshot().strategy.stopLossBid, 0.01);
+});
+
+test('TP and SL do not book a threshold result after the market window ends', () => {
+  const { bot, setBook, setNow } = fixture();
+  assert.equal(bot.evaluate(), true);
+  const trade = bot.trades[0];
+  setBook('UP', { asks: [[0.99, 100]], bids: [[0.99, 100]] });
+  setNow(bot.windowEnd);
+  assert.equal(bot.evaluate(), false);
+  assert.equal(trade.status, 'OPEN');
+  assert.equal(bot.nextEntryShares, 100);
+});
+
+test('current next-entry size and sizing progression are retained for taker entries', () => {
   const { bot, setBook } = fixture();
   bot.nextEntryShares = 150;
   setBook('UP', {
@@ -274,14 +355,14 @@ test('current next-entry size and sizing progression are retained for maker orde
     bids: [[0.4, 150]],
   });
   assert.equal(bot.evaluate(), true);
-  assert.equal(bot.pendingEntryOrder.targetShares, 150);
+  assert.equal(bot.trades[0].shares, 150);
   assert.equal(bot.nextEntryShares, 150);
   assert.equal(bot.snapshot().strategy.baseShares, 100);
   assert.equal(bot.snapshot().strategy.lossSizeStepShares, 20);
   assert.equal(bot.snapshot().strategy.winSizeReductionShares, 30);
 });
 
-test('insufficient ask depth or insufficient net edge does not post an order', () => {
+test('insufficient ask depth or insufficient net edge does not submit a taker buy', () => {
   const { bot, setBook } = fixture();
   setBook('UP', {
     asks: [[0.58, 50]],
@@ -292,6 +373,7 @@ test('insufficient ask depth or insufficient net edge does not post an order', (
     bids: [[0.8, 100]],
   });
   assert.equal(bot.evaluate(), false);
+  assert.equal(bot.trades.length, 0);
   assert.equal(bot.pendingEntryOrder, null);
   assert.equal(bot.entryTriggeredThisWindow, false);
 
@@ -301,19 +383,12 @@ test('insufficient ask depth or insufficient net edge does not post an order', (
   });
   assert.equal(bot.evaluate(), false);
   assert.equal(bot.pendingEntryOrder, null);
+  assert.equal(bot.trades.length, 0);
 });
 
-test('an opposite model signal never sells or flips a filled maker position', () => {
-  const { bot, market, setBook, setPrice, setNow } = fixture();
+test('an opposite model signal does not flip or sell a taker-filled position', () => {
+  const { bot, setBook, setPrice, setNow } = fixture();
   assert.equal(bot.evaluate(), true);
-  const order = bot.pendingEntryOrder;
-  bot.applyLastTradePrice({
-    asset_id: market.tokens.UP,
-    side: 'BUY',
-    price: (order.limitPrice - 0.01).toFixed(2),
-    size: '1',
-    timestamp: 960_001,
-  }, 960_001);
   const trade = bot.currentOpenTrade();
   assert.ok(trade);
   assert.equal(trade.side, 'UP');
@@ -326,7 +401,7 @@ test('an opposite model signal never sells or flips a filled maker position', ()
   assert.equal(trade.status, 'OPEN');
   assert.equal(trade.exitFills, undefined);
   assert.equal(bot.flipsThisWindow, 0);
-  assert.match(bot.currentSignal.reason, /flips and sells are disabled/);
+  assert.match(bot.currentSignal.reason, /flips are disabled/);
 });
 
 test('positions settle only from the exact original market result', async () => {
@@ -498,17 +573,19 @@ test('a paper history reset starts from fresh capital and base sizing exactly on
   }
 });
 
-test('restoring state preserves a current-strategy resting order within its window', () => {
+test('restoring state preserves taker entry history and the one-entry window lock', () => {
   const { bot } = fixture();
   assert.equal(bot.evaluate(), true);
   const state = bot.persistentStateSnapshot();
   const restored = fixture().bot;
   restored.restoreState(state);
-  assert.deepEqual(restored.pendingEntryOrder, state.pendingEntryOrder);
+  assert.equal(restored.pendingEntryOrder, null);
   assert.equal(restored.entryTriggeredThisWindow, true);
+  assert.equal(restored.trades.length, 1);
+  assert.equal(restored.trades[0].executionRole, 'TAKER');
 });
 
-test('restoring state discards a passive order from an unidentified older strategy', () => {
+test('restoring an old passive order releases the entry lock for a fresh taker check', () => {
   const { bot } = fixture();
   bot.restoreState({
     startingCapital: 3_000,
@@ -531,7 +608,8 @@ test('restoring state discards a passive order from an unidentified older strate
   });
   assert.equal(bot.pendingEntryOrder, null);
   assert.equal(bot.nextEntryShares, 120);
+  assert.equal(bot.entryTriggeredThisWindow, false);
   const state = bot.snapshot();
-  assert.equal(state.strategy.entryOrderType, 'POST-ONLY LIMIT BUY AT BEST BID');
+  assert.equal(state.strategy.entryOrderType, 'MARKET BUY (TAKER)');
   assert.equal(Object.hasOwn(state, 'pendingEntryOrder'), false);
 });
