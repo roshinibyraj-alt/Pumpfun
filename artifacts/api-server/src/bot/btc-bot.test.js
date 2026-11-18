@@ -292,6 +292,9 @@ test("the public root dashboard runs the BTC mispricing paper strategy", () => {
   assert.match(html, /win subtracts 30 shares and a loss adds 20/i);
   assert.match(html, /threshold payouts do not model a separate sell or sell fee/i);
   assert.match(html, /official market resolution/i);
+  assert.ok(html.indexOf('id="positionPanelTitle"') < html.indexOf("Binance signal inputs"));
+  assert.equal((html.match(/<b>Initial side<\/b>/g) || []).length, 1);
+  assert.match(html, /Taker entries, threshold payouts, and official settlements/i);
   assert.match(html, /paper only/i);
   assert.match(html, /fetch\(["']\/api\/strategy\/state/);
   assert.match(html, /id="upProbability"/);

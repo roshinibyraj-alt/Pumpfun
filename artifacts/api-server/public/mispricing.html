@@ -247,6 +247,28 @@
         </article>
       </section>
 
+      <section class="panel" aria-labelledby="positionPanelTitle">
+        <div class="panel-head">
+          <div><div class="panel-title" id="positionPanelTitle">Current position</div><div class="panel-subtitle">One entry per window · no flips</div></div>
+          <span class="badge" id="positionStatus">Flat</span>
+        </div>
+        <div class="position-box">
+          <div class="position-icon empty" id="positionIcon">—</div>
+          <div class="position-main">
+            <strong id="positionTitle">No open position</strong>
+            <small id="positionDetail">Waiting for a qualifying taker entry</small>
+          </div>
+          <div class="position-pnl">
+            <strong id="positionPnl">—</strong>
+            <small id="positionMark">unrealized at best bid</small>
+          </div>
+        </div>
+        <div class="feed-row"><span class="feed-label">Next order size</span><strong class="feed-value" id="nextShares">100 shares</strong></div>
+        <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
+        <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
+        <div class="feed-row"><span class="feed-label">Historical estimated maker rebates</span><strong class="feed-value" id="rebates">—</strong></div>
+      </section>
+
       <section class="grid two-col">
         <article class="panel">
           <div class="panel-head">
@@ -295,7 +317,7 @@
         </article>
       </section>
 
-      <section class="grid three-col">
+      <section class="grid two-col">
         <article class="panel">
           <div class="panel-head">
             <div><div class="panel-title">Polymarket book</div><div class="panel-subtitle">Best visible bid/ask and top-level size</div></div>
@@ -325,33 +347,10 @@
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Current position</div><div class="panel-subtitle">One entry per window · no flips</div></div>
-            <span class="badge" id="positionStatus">Flat</span>
-          </div>
-          <div class="position-box">
-            <div class="position-icon empty" id="positionIcon">—</div>
-            <div class="position-main">
-              <strong id="positionTitle">No open position</strong>
-              <small id="positionDetail">Waiting for a qualifying taker entry</small>
-            </div>
-            <div class="position-pnl">
-              <strong id="positionPnl">—</strong>
-              <small id="positionMark">unrealized at best bid</small>
-            </div>
-          </div>
-          <div class="feed-row"><span class="feed-label">Next order size</span><strong class="feed-value" id="nextShares">100 shares</strong></div>
-          <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Historical estimated maker rebates</span><strong class="feed-value" id="rebates">—</strong></div>
-        </article>
-
-        <article class="panel">
-          <div class="panel-head">
             <div><div class="panel-title">Rules in effect</div><div class="panel-subtitle">This replaces the previous active bot</div></div>
             <span class="badge" id="nextSizeBadge">100 shares next</span>
           </div>
           <div class="rules">
-            <div class="rule"><b>Initial side</b>Average candle 1 and 2 percentage returns: above candle 3 selects UP; below selects DOWN. A tie selects neither.</div>
             <div class="rule"><b>Initial side</b>Average candle 1 and 2 percentage returns: above candle 3 selects UP; below selects DOWN. A tie selects neither.</div>
             <div class="rule"><b>Signal</b>Only evaluate the selected side; its estimated probability, full visible ask depth, $0.05 net edge after modeled fees, and fresh-data checks must pass.</div>
             <div class="rule"><b>Entry</b>One immediate taker market buy per window; sweep visible asks and record modeled taker fees.</div>
@@ -382,7 +381,7 @@
         </article>
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Resting orders, trade-through fills, and official settlements</div></div>
+            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Taker entries, threshold payouts, and official settlements</div></div>
             <span class="badge" id="activityCount">0 events</span>
           </div>
           <div class="activity-list" id="activity"><div class="empty-row">Waiting for bot activity</div></div>
