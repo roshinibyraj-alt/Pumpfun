@@ -1,6 +1,6 @@
 'use strict';
 
-const { BinanceTickFeed, CANDLE_MS } = require('./binance-tick-feed.cjs');
+const { CANDLE_MS } = require('./binance-tick-feed.cjs');
 const marketDataDefault = require('./wick-market-data.js');
 const { feeParameters, takerFeeAt } = require('./paper-trading.js');
 const { resolvedPayout } = require('./position-exits.js');
@@ -8,9 +8,13 @@ const { normalizeLevels } = require('./btc-price-band-bot.cjs');
 
 const EPSILON = 1e-8;
 const DEFAULT_CONFIG = Object.freeze({
-  STRATEGY_VERSION: 'btc-5m-binance-taker-candle-gate-tp099-sl001-v2',
+  STRATEGY_VERSION: 'btc-5m-clob-092-rung-ladder-hold-resolution-v1',
   WINDOW_MS: CANDLE_MS,
   STARTING_CAPITAL: 3_000,
+  LADDER_TRIGGER_PRICE: 0.92,
+  LADDER_ORDER_SHARES: 100,
+  LADDER_PRICES: Object.freeze([0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20]),
+  LADDER_FILL_OFFSET: 0.01,
   BASE_SHARES: 100,
   LOSS_SIZE_STEP_SHARES: 20,
   WIN_SIZE_REDUCTION_SHARES: 30,
@@ -163,24 +167,12 @@ class BtcMispricingBot {
     this.stateStore = options.stateStore || null;
     this.storageHealthy = !this.stateStore;
     this.persistenceStatus = this.stateStore ? 'NOT_STARTED' : 'DISABLED';
-    this.priceFeed = options.priceFeed || new BinanceTickFeed({
-      WebSocketImpl: options.WebSocketImpl,
-      fetchImpl: options.fetchImpl,
-      now: this.now,
-      onUpdate: () => {
-        void this.evaluate();
-      },
-    });
-    if (options.priceFeed && typeof this.priceFeed === 'object') {
-      this.priceFeed.onUpdate = () => {
-        void this.evaluate();
-      };
-    }
+    this.priceFeed = options.priceFeed || null;
 
     this.running = false;
     this.error = null;
     this.status = 'STARTING';
-    this.statusReason = 'Starting Binance and Polymarket feeds.';
+    this.statusReason = 'Starting the Polymarket CLOB WebSocket and paper ledger.';
     this.startingCapital = this.config.STARTING_CAPITAL;
     this.cash = this.startingCapital;
     this.realizedPnl = 0;
@@ -197,6 +189,8 @@ class BtcMispricingBot {
     this.quotes = { UP: emptyQuote('UP'), DOWN: emptyQuote('DOWN') };
     this.entryTriggeredThisWindow = false;
     this.pendingEntryOrder = null;
+    this.activeLadder = null;
+    this.latestTradePrices = { UP: null, DOWN: null };
     this.entryConfirmation = { side: null, count: 0, lastTickAt: null };
     this.seenTradeEvents = [];
     this.flipsThisWindow = 0;
@@ -224,7 +218,7 @@ class BtcMispricingBot {
     this.lastEvaluationSignature = null;
     this.currentSignal = {
       side: null,
-      reason: 'Waiting for three closed Binance 5-minute candles and live prices.',
+      reason: 'Waiting for a Polymarket UP or DOWN price to reach $0.92.',
       edgePerShare: null,
     };
   }
@@ -259,7 +253,6 @@ class BtcMispricingBot {
           throw new Error('The requested base-size reset could not be saved.');
         }
       }
-      await this.priceFeed.start?.();
       await this.tick();
       this.timer = setInterval(() => {
         void this.tick();
@@ -286,7 +279,7 @@ class BtcMispricingBot {
     this.timer = null;
     this.persistenceTimer = null;
     this.closeMarketStream();
-    this.priceFeed.stop?.();
+    this.priceFeed?.stop?.();
     this.status = 'STOPPED';
   }
 
@@ -318,18 +311,28 @@ class BtcMispricingBot {
     this.windowStart = Number.isFinite(Number(state.windowStart))
       ? Number(state.windowStart) : null;
     this.windowEnd = this.windowStart == null ? null : this.windowStart + this.config.WINDOW_MS;
+    const sameStrategy = state.strategyVersion === this.config.STRATEGY_VERSION;
     const savedPendingOrder = state.pendingEntryOrder;
-    this.pendingEntryOrder = state.strategyVersion === this.config.STRATEGY_VERSION
+    this.pendingEntryOrder = sameStrategy
       && savedPendingOrder
       && Number(savedPendingOrder.windowStart) === this.windowStart
       ? { ...savedPendingOrder } : null;
     const discardedSameWindowOrder = savedPendingOrder
       && Number(savedPendingOrder.windowStart) === this.windowStart
-      && state.strategyVersion !== this.config.STRATEGY_VERSION;
-    const hasOpenTradeInWindow = this.trades.some(trade => trade.status === 'OPEN'
-      && Number(trade.windowStart) === this.windowStart);
-    this.entryTriggeredThisWindow = state.entryTriggeredThisWindow === true
-      && !(discardedSameWindowOrder && !hasOpenTradeInWindow);
+      && !sameStrategy;
+    this.activeLadder = sameStrategy
+      && state.activeLadder
+      && Number(state.activeLadder.windowStart) === this.windowStart
+      ? {
+        ...state.activeLadder,
+        rungs: Array.isArray(state.activeLadder.rungs)
+          ? state.activeLadder.rungs.map(rung => ({ ...rung }))
+          : [],
+      }
+      : null;
+    this.entryTriggeredThisWindow = sameStrategy
+      ? Boolean(this.activeLadder || state.entryTriggeredThisWindow)
+      : false;
     this.entryConfirmation = { side: null, count: 0, lastTickAt: null };
     this.seenTradeEvents = Array.isArray(state.seenTradeEvents)
       ? state.seenTradeEvents.slice(-2_000) : [];
@@ -340,7 +343,20 @@ class BtcMispricingBot {
     this.market = null;
     this.books.clear();
     this.quotes = { UP: emptyQuote('UP'), DOWN: emptyQuote('DOWN') };
-    this.statusReason = 'Restored the separate mispricing paper ledger.';
+    this.latestTradePrices = { UP: null, DOWN: null };
+    if (discardedSameWindowOrder) {
+      this.log(
+        'LEGACY_ENTRY_ORDER_CANCELLED',
+        'The previous strategy’s unfilled entry order was discarded during the strategy change; prior fills remain in the ledger.',
+        {
+          orderId: savedPendingOrder.id || null,
+          side: savedPendingOrder.side || null,
+          filledShares: Number(savedPendingOrder.filledShares) || 0,
+          remainingShares: Number(savedPendingOrder.remainingShares) || 0,
+        },
+      );
+    }
+    this.statusReason = 'Restored paper history; the new CLOB rung strategy is active.';
   }
 
   persistentStateSnapshot() {
@@ -359,6 +375,7 @@ class BtcMispricingBot {
       windowStart: this.windowStart,
       entryTriggeredThisWindow: this.entryTriggeredThisWindow,
       pendingEntryOrder: this.pendingEntryOrder,
+      activeLadder: this.activeLadder,
       seenTradeEvents: this.seenTradeEvents.slice(-2_000),
       flipsThisWindow: this.flipsThisWindow,
       sizingGeneration: this.sizingGeneration,
@@ -382,6 +399,7 @@ class BtcMispricingBot {
       windowStart: null,
       entryTriggeredThisWindow: false,
       pendingEntryOrder: null,
+      activeLadder: null,
       seenTradeEvents: [],
       flipsThisWindow: 0,
       sizingGeneration: 0,
@@ -474,6 +492,24 @@ class BtcMispricingBot {
         this.now(),
       );
     }
+    if (this.activeLadder && this.activeLadder.windowStart < start) {
+      const unfilledRungs = this.activeLadder.rungs.filter(rung => rung.status === 'RESTING');
+      for (const rung of unfilledRungs) {
+        rung.status = 'CANCELLED';
+        rung.cancelledAt = this.now();
+      }
+      this.log(
+        'LADDER_EXPIRED',
+        `The ${this.activeLadder.side} ladder expired at window end; ${unfilledRungs.length} unfilled limit rungs were cancelled.`,
+        {
+          side: this.activeLadder.side,
+          marketId: this.activeLadder.marketId,
+          filledRungs: this.activeLadder.rungs.filter(rung => rung.status === 'FILLED').length,
+          cancelledRungs: unfilledRungs.length,
+          lowestObservedPrice: this.activeLadder.lowestObservedPrice,
+        },
+      );
+    }
     if (previousStart != null) {
       let moved = 0;
       for (const trade of this.trades) {
@@ -497,6 +533,8 @@ class BtcMispricingBot {
     this.books.clear();
     this.quotes = { UP: emptyQuote('UP'), DOWN: emptyQuote('DOWN') };
     this.entryTriggeredThisWindow = false;
+    this.activeLadder = null;
+    this.latestTradePrices = { UP: null, DOWN: null };
     this.resetEntryConfirmation();
     this.flipsThisWindow = 0;
     this.resetFlipConfirmation();
@@ -991,34 +1029,27 @@ class BtcMispricingBot {
   }
 
   applyLastTradePrice(event, now) {
-    const order = this.pendingEntryOrder;
-    if (!order || order.windowStart !== this.windowStart
-      || String(event.asset_id || event.assetId || '') !== order.tokenId) return false;
+    const tokenId = String(event.asset_id || event.assetId || '');
+    const side = sideForToken(this.market, tokenId);
+    if (!side || this.windowStart == null) return false;
     const price = Number(event.price);
     const size = Number(event.size);
     const tradeAt = timestamp(event.timestamp, now);
     if (!Number.isFinite(price) || price <= 0 || price >= 1
       || !Number.isFinite(size) || size <= 0
-      || tradeAt < order.postedAt || tradeAt > now + 1_000) return false;
+      || tradeAt < this.windowStart || tradeAt > now + 1_000
+      || tradeAt >= this.windowEnd) return false;
     const txHash = event.transaction_hash || event.transactionHash || event.hash || null;
     const eventKey = txHash
-      ? `${order.tokenId}:${txHash}:${tradeAt}:${price}:${size}`
-      : `${order.tokenId}:${tradeAt}:${price}:${size}:${String(event.side).toUpperCase()}`;
+      ? `${tokenId}:${txHash}:${tradeAt}:${price}:${size}`
+      : `${tokenId}:${tradeAt}:${price}:${size}:${String(event.side).toUpperCase()}`;
     if (this.seenTradeEvents.includes(eventKey)) return false;
     this.seenTradeEvents.push(eventKey);
     if (this.seenTradeEvents.length > 2_000) {
       this.seenTradeEvents.splice(0, this.seenTradeEvents.length - 2_000);
     }
-    const fullFillThreshold = order.limitPrice - 0.01;
-    if (price > fullFillThreshold + EPSILON) return false;
-    order.queueAheadShares = 0;
-    return this.recordMakerFill(
-      order,
-      order.remainingShares,
-      now,
-      txHash,
-      { source: 'TRADE_PRINT', price },
-    );
+    this.latestTradePrices[side] = { price, at: tradeAt, size };
+    return true;
   }
 
   modelSnapshot(now = this.now()) {
@@ -1191,109 +1222,276 @@ class BtcMispricingBot {
     return false;
   }
 
+  quoteIsFresh(side, now = this.now()) {
+    const quote = this.quotes[side];
+    return quote?.status === 'LIVE'
+      && Number.isFinite(Number(quote.updatedAt))
+      && now >= Number(quote.updatedAt)
+      && now - Number(quote.updatedAt) <= this.config.MAX_DATA_AGE_MS;
+  }
+
+  priceSnapshot(side, now = this.now(), afterAt = null) {
+    const quote = this.quotes[side];
+    const observations = [];
+    const bestAsk = Number(quote.bestAsk);
+    if (this.quoteIsFresh(side, now)
+      && Number.isFinite(bestAsk) && bestAsk > 0 && bestAsk < 1
+      && (afterAt == null || Number(quote.updatedAt) > afterAt)) {
+      observations.push({ source: 'BEST_ASK', price: bestAsk, at: Number(quote.updatedAt) });
+    }
+    const trade = this.latestTradePrices[side];
+    if (trade && Number.isFinite(Number(trade.price))
+      && Number.isFinite(Number(trade.at))
+      && now >= trade.at && now - trade.at <= this.config.MAX_DATA_AGE_MS
+      && (afterAt == null || Number(trade.at) > afterAt)) {
+      observations.push({ source: 'LAST_TRADE', price: Number(trade.price), at: Number(trade.at) });
+    }
+    return observations.length
+      ? observations.reduce((lowest, current) => current.price < lowest.price ? current : lowest)
+      : null;
+  }
+
+  armRungLadder(side, triggerPrice, now) {
+    const ladder = {
+      side,
+      marketId: String(this.market.id),
+      tokenId: String(this.market.tokens[side]),
+      marketSlug: this.market.slug,
+      marketTitle: this.market.title,
+      windowStart: this.windowStart,
+      windowEnd: this.windowEnd,
+      triggerPrice,
+      triggeredAt: now,
+      lowestObservedPrice: null,
+      lowestObservedAt: null,
+      lowestObservedSource: null,
+      rungs: this.config.LADDER_PRICES.map((limitPrice, index) => ({
+        id: `misprice-order-${++this.orderSequence}`,
+        rung: index + 1,
+        side,
+        marketId: String(this.market.id),
+        tokenId: String(this.market.tokens[side]),
+        windowStart: this.windowStart,
+        windowEnd: this.windowEnd,
+        limitPrice,
+        targetShares: this.config.LADDER_ORDER_SHARES,
+        filledShares: 0,
+        remainingShares: this.config.LADDER_ORDER_SHARES,
+        status: 'RESTING',
+        postedAt: now,
+      })),
+    };
+    this.activeLadder = ladder;
+    this.entryTriggeredThisWindow = true;
+    this.currentSignal = {
+      side,
+      reason: `${side} reached $${this.config.LADDER_TRIGGER_PRICE.toFixed(2)}; armed eight resting 100-share buy limits from $0.90 to $0.20.`,
+      edgePerShare: null,
+    };
+    this.log(
+      'LADDER_ARMED',
+      `${side} reached $${this.config.LADDER_TRIGGER_PRICE.toFixed(2)}. Posted eight paper resting buy rungs, 100 shares each, from $0.90 down to $0.20. Only this first side may arm in the window.`,
+      {
+        side,
+        marketId: ladder.marketId,
+        triggerPrice,
+        rungPrices: this.config.LADDER_PRICES,
+        sharesPerRung: this.config.LADDER_ORDER_SHARES,
+        armedAt: now,
+      },
+    );
+    this.schedulePersist(true);
+    return ladder;
+  }
+
+  fillRung(rung, observedPrice, observedSource, now) {
+    if (!this.activeLadder || rung.status !== 'RESTING') return false;
+    const shares = this.config.LADDER_ORDER_SHARES;
+    const grossCost = round(rung.limitPrice * shares, 8);
+    if (grossCost > this.cash + EPSILON) {
+      rung.status = 'BLOCKED_INSUFFICIENT_CASH';
+      rung.blockedAt = now;
+      this.log(
+        'LADDER_RUNG_BLOCKED',
+        `The ${this.activeLadder.side} $${rung.limitPrice.toFixed(2)} rung was not paper-filled because available cash cannot cover all ${shares} shares.`,
+        {
+          side: this.activeLadder.side,
+          rung: rung.rung,
+          limitPrice: rung.limitPrice,
+          shares,
+          requiredCash: grossCost,
+          availableCash: round(this.cash, 4),
+        },
+      );
+      return false;
+    }
+
+    const trade = {
+      id: `misprice-trade-${++this.tradeSequence}`,
+      strategyVersion: this.config.STRATEGY_VERSION,
+      asset: 'BTC',
+      side: this.activeLadder.side,
+      marketId: this.activeLadder.marketId,
+      marketSlug: this.activeLadder.marketSlug,
+      marketTitle: this.activeLadder.marketTitle,
+      tokenId: this.activeLadder.tokenId,
+      windowStart: this.activeLadder.windowStart,
+      windowEnd: this.activeLadder.windowEnd,
+      shares,
+      entryPrice: rung.limitPrice,
+      totalCost: grossCost,
+      grossCost,
+      fees: 0,
+      estimatedMakerRebate: 0,
+      rebates: 0,
+      fills: [{
+        price: rung.limitPrice,
+        shares,
+        gross: grossCost,
+        fee: 0,
+        role: 'MAKER',
+        at: now,
+        fillSource: observedSource,
+        observedPrice,
+      }],
+      openedAt: now,
+      entryReason: 'CLOB_PRICE_LADDER',
+      entryOrderId: rung.id,
+      rung: rung.rung,
+      rungLimitPrice: rung.limitPrice,
+      executionRole: 'MAKER',
+      status: 'OPEN',
+      settlementStatus: 'OPEN',
+      markPrice: null,
+      markValue: null,
+      unrealizedPnl: null,
+      realizedPnl: null,
+      outcome: null,
+    };
+    this.trades.push(trade);
+    this.cash = round(this.cash - grossCost, 8);
+    rung.status = 'FILLED';
+    rung.filledShares = shares;
+    rung.remainingShares = 0;
+    rung.filledAt = now;
+    rung.tradeId = trade.id;
+    rung.fillObservedPrice = observedPrice;
+    rung.fillSource = observedSource;
+    this.log(
+      'LADDER_RUNG_FILLED',
+      `${shares} ${trade.side} shares paper-filled at the $${rung.limitPrice.toFixed(2)} resting limit after ${observedSource.toLowerCase().replaceAll('_', ' ')} reached $${observedPrice.toFixed(2)} (one cent through the rung).`,
+      {
+        tradeId: trade.id,
+        orderId: rung.id,
+        side: trade.side,
+        rung: rung.rung,
+        limitPrice: rung.limitPrice,
+        shares,
+        totalCost: grossCost,
+        observedPrice,
+        observedSource,
+        entryFee: 0,
+        estimatedMakerRebate: 0,
+      },
+    );
+    return true;
+  }
+
+  processRungLadder(now = this.now()) {
+    const ladder = this.activeLadder;
+    if (!ladder || ladder.windowStart !== this.windowStart
+      || now >= ladder.windowEnd) return false;
+    const snapshot = this.priceSnapshot(ladder.side, now, ladder.triggeredAt);
+    if (!snapshot) return false;
+
+    if (ladder.lowestObservedPrice == null
+      || snapshot.price < ladder.lowestObservedPrice) {
+      ladder.lowestObservedPrice = snapshot.price;
+      ladder.lowestObservedAt = snapshot.at;
+      ladder.lowestObservedSource = snapshot.source;
+    }
+    const fillThresholdOffset = this.config.LADDER_FILL_OFFSET;
+    let fills = 0;
+    let changed = false;
+    for (const rung of ladder.rungs) {
+      if (rung.status !== 'RESTING') continue;
+      const threshold = rung.limitPrice - fillThresholdOffset;
+      if (ladder.lowestObservedPrice <= threshold + EPSILON) {
+        const previousStatus = rung.status;
+        if (this.fillRung(
+          rung,
+          ladder.lowestObservedPrice,
+          ladder.lowestObservedSource || snapshot.source,
+          now,
+        )) fills += 1;
+        if (rung.status !== previousStatus) changed = true;
+      }
+    }
+    const filled = ladder.rungs.filter(rung => rung.status === 'FILLED');
+    this.currentSignal = {
+      side: ladder.side,
+      reason: filled.length
+        ? `${ladder.side} ladder active: ${filled.length}/8 rungs filled; lowest observed price $${ladder.lowestObservedPrice.toFixed(2)}. Filled positions wait for official resolution.`
+        : `${ladder.side} ladder armed; waiting for a post-trigger price at least $0.01 below a rung.`,
+      edgePerShare: null,
+    };
+    if (changed) this.schedulePersist(true);
+    return fills > 0;
+  }
+
   evaluate(now = this.now()) {
     if (!this.market || this.windowStart == null || !this.storageHealthy) return false;
-    const model = this.modelSnapshot(now);
-    this.model = model;
-    if (this.processThresholdExit(now)) {
-      const settled = this.trades.find(trade => trade.status === 'SETTLED'
-        && trade.settledAt === now
-        && trade.settlementSource === 'INTRAWINDOW_THRESHOLD');
-      this.currentSignal = {
-        side: settled?.side || null,
-        reason: settled?.outcome === 'WIN'
-          ? 'Take-profit recorded at a $1-per-share payout; next-window sizing was reduced.'
-          : 'Stop-loss recorded at a $0-per-share payout; next-window sizing was increased.',
-        edgePerShare: null,
-      };
-      return false;
-    }
-    if (this.pendingEntryOrder) return this.evaluatePendingEntryOrder(model, now);
-    if (!model.ready) {
+    if (now >= this.windowEnd) return false;
+
+    if (this.activeLadder) return this.processRungLadder(now);
+    if (this.entryTriggeredThisWindow) {
       this.currentSignal = {
         side: null,
-        reason: model.reason,
+        reason: 'The first-side ladder was already armed this window; the other side is ignored.',
         edgePerShare: null,
       };
       return false;
     }
-    const openTrade = this.currentOpenTrade();
-    if (openTrade) {
-      this.currentSignal = {
-        side: openTrade.side,
-        reason: 'Holding the position for its $0.99/$0.01 thresholds or exact original-market resolution; flips are disabled.',
-        edgePerShare: null,
-      };
-      return false;
-    }
-    if (this.entryTriggeredThisWindow || now >= this.windowEnd) return false;
-    const initialSide = model.initialSideSelection?.side;
-    if (!initialSide) {
-      this.currentSignal = {
-        side: null,
-        reason: model.initialSideSelection?.reason
-          || 'The candle comparison did not select an initial side.',
-        edgePerShare: null,
-      };
-      return false;
-    }
-    const shares = this.nextEntryShares;
-    const candidates = [initialSide].map(side => {
-      if (!this.sideQuoteIsFresh(side, now)) return null;
-      const preview = this.sweep(side, 'asks', shares);
-      if (!preview?.complete) return null;
-      const probability = side === 'UP' ? model.probabilityUp : model.probabilityDown;
-      const expectedProfit = probability * shares - preview.totalCost;
-      return {
-        side,
-        preview,
-        expectedProfit,
-        edgePerShare: expectedProfit / shares,
-      };
-    }).filter(candidate => candidate
-      && candidate.edgePerShare >= this.config.MIN_NET_EDGE_PER_SHARE);
+
+    const candidates = ['UP', 'DOWN'].map(side => {
+      const quote = this.quotes[side];
+      const trade = this.latestTradePrices[side];
+      const quoteIsFresh = this.quoteIsFresh(side, now);
+      const tradeIsFresh = trade
+        && Number.isFinite(Number(trade.at))
+        && now >= trade.at
+        && now - trade.at <= this.config.MAX_DATA_AGE_MS;
+      const prices = [
+        quoteIsFresh ? Number(quote.bestAsk) : null,
+        quoteIsFresh ? Number(quote.bestBid) : null,
+        tradeIsFresh ? Number(trade.price) : null,
+      ]
+        .filter(price => Number.isFinite(price) && price > 0 && price < 1);
+      const triggerPrice = prices.length ? Math.max(...prices) : null;
+      const updatedAt = Math.max(
+        quoteIsFresh ? Number(quote.updatedAt) : -Infinity,
+        tradeIsFresh ? Number(trade.at) : -Infinity,
+      );
+      return triggerPrice != null && triggerPrice >= this.config.LADDER_TRIGGER_PRICE
+        ? { side, triggerPrice, updatedAt }
+        : null;
+    }).filter(Boolean);
+
     if (!candidates.length) {
       this.currentSignal = {
-        side: initialSide,
-        reason: `${initialSide} was selected by the candle comparison, but it does not clear the minimum net edge after visible ask-sweep costs and fees.`,
+        side: null,
+        reason: `Watching live UP and DOWN prices; the first fresh side to reach $${this.config.LADDER_TRIGGER_PRICE.toFixed(2)} will arm its ladder.`,
         edgePerShare: null,
       };
       return false;
     }
-    candidates.sort((left, right) => right.edgePerShare - left.edgePerShare);
+
+    candidates.sort((left, right) => {
+      if (left.updatedAt !== right.updatedAt) return left.updatedAt - right.updatedAt;
+      return right.triggerPrice - left.triggerPrice;
+    });
     const selected = candidates[0];
-    if (selected.preview.totalCost > this.cash + EPSILON) {
-      this.currentSignal = {
-        side: selected.side,
-        reason: `The ${selected.side} signal qualifies, but paper cash cannot fund the full taker buy and its fees.`,
-        edgePerShare: selected.edgePerShare,
-      };
-      return false;
-    }
-    const execution = this.sweep(selected.side, 'asks', shares, { consume: true });
-    if (!execution?.complete) {
-      this.currentSignal = {
-        side: selected.side,
-        reason: `The ${selected.side} signal qualified, but the fresh ask book no longer has full depth for the taker buy.`,
-        edgePerShare: selected.edgePerShare,
-      };
-      return false;
-    }
-    this.entryTriggeredThisWindow = true;
-    const trade = this.buyPosition(
-      selected.side,
-      execution,
-      model,
-      now,
-      'MODEL_EDGE_CANDLE_SELECTED',
-      selected.edgePerShare,
-    );
-    this.currentSignal = {
-      side: selected.side,
-      reason: `Immediate taker buy filled across visible asks at a $${trade.entryPrice.toFixed(3)} average; estimated entry fees are included.`,
-      edgePerShare: selected.edgePerShare,
-    };
-    this.schedulePersist(true);
+    this.armRungLadder(selected.side, selected.triggerPrice, now);
     return true;
   }
 
@@ -1598,7 +1796,7 @@ class BtcMispricingBot {
       if (trade.status !== 'OPEN' || trade.windowStart !== this.windowStart
         || trade.marketId !== String(this.market?.id)) continue;
       const quote = this.quotes[trade.side];
-      if (!this.sideQuoteIsFresh(trade.side, now) || !Number.isFinite(quote.bestBid)) {
+        if (!this.quoteIsFresh(trade.side, now) || !Number.isFinite(quote.bestBid)) {
         trade.markPrice = null;
         trade.markValue = null;
         trade.unrealizedPnl = null;
@@ -1642,7 +1840,9 @@ class BtcMispricingBot {
           trade.outcome = payout === 1 ? 'WIN' : 'LOSS';
           this.cash = round(this.cash + proceeds, 8);
           this.realizedPnl = round(this.realizedPnl + trade.realizedPnl, 8);
-          this.applyResolutionSizing(trade, now);
+          if (trade.strategyVersion !== this.config.STRATEGY_VERSION) {
+            this.applyResolutionSizing(trade, now);
+          }
           this.log('POSITION_RESOLVED',
             `${trade.side} settled from its exact original Polymarket market as a ${trade.outcome.toLowerCase()}.`,
             {
@@ -1720,8 +1920,27 @@ class BtcMispricingBot {
 
   snapshot() {
     const now = this.now();
-    const model = this.modelSnapshot(now);
-    const openTrade = this.currentOpenTrade();
+    const currentOpenTrades = this.trades.filter(trade => trade.status === 'OPEN'
+      && trade.windowStart === this.windowStart
+      && trade.marketId === String(this.market?.id));
+    const positionSide = this.activeLadder?.side || currentOpenTrades[0]?.side || null;
+    const positionShares = currentOpenTrades.reduce(
+      (sum, trade) => sum + (Number(trade.shares) || 0), 0,
+    );
+    const positionCost = currentOpenTrades.reduce(
+      (sum, trade) => sum + (Number(trade.totalCost) || 0), 0,
+    );
+    const marksComplete = currentOpenTrades.length > 0
+      && currentOpenTrades.every(trade => Number.isFinite(Number(trade.markValue))
+        && Number.isFinite(Number(trade.unrealizedPnl)));
+    const activeRungs = this.activeLadder?.rungs || [];
+    const filledRungs = activeRungs.filter(rung => rung.status === 'FILLED');
+    const filledShares = filledRungs.reduce(
+      (sum, rung) => sum + (Number(rung.filledShares) || 0), 0,
+    );
+    const filledCost = filledRungs.reduce(
+      (sum, rung) => sum + (Number(rung.filledShares) || 0) * Number(rung.limitPrice), 0,
+    );
     return {
       mode: 'PAPER ONLY',
       running: this.running,
@@ -1736,34 +1955,21 @@ class BtcMispricingBot {
       strategy: {
         version: this.config.STRATEGY_VERSION,
         timeframe: '5m',
-        symbol: 'BTCUSDT',
-        baseShares: this.config.BASE_SHARES,
-        nextEntryShares: this.nextEntryShares,
-        lossSizeStepShares: this.config.LOSS_SIZE_STEP_SHARES,
-        winSizeReductionShares: this.config.WIN_SIZE_REDUCTION_SHARES,
-        thresholdPayoutsAdjustSizingImmediately: true,
-        sizingGeneration: this.sizingGeneration,
-        sizeFloorShares: this.config.BASE_SHARES,
-        volatilityLookbackCandles: this.config.VOLATILITY_CANDLES,
-        minimumNetEdgePerShare: this.config.MIN_NET_EDGE_PER_SHARE,
-        initialSideRule: 'Compare the average percent return of candles 1 and 2 with candle 3: greater selects UP, lower selects DOWN, equal selects no side.',
-        minimumFlipNetEdgePerShare: null,
-        entryOrderType: 'MARKET BUY (TAKER)',
-        entryPolicy: 'Only the candle-selected side is evaluated; the first qualified signal immediately sweeps visible asks once per 5-minute window.',
-        makerFillRule: null,
-        unfilledOrderPolicy: 'No resting entry orders; taker buys fill immediately from visible asks or are skipped if depth is insufficient.',
-        takeProfitBid: this.config.TAKE_PROFIT_BID,
-        takeProfitPayoutPerShare: this.config.TAKE_PROFIT_PAYOUT_PER_SHARE,
-        stopLossBid: this.config.STOP_LOSS_BID,
-        stopLossPayoutPerShare: this.config.STOP_LOSS_PAYOUT_PER_SHARE,
-        makerRebateShare: 0,
-        flipConfirmationUpdates: 0,
-        flipConfirmationIntervalMs: null,
-        maximumFlipsPerWindow: 0,
-        flipsThisWindow: 0,
+        symbol: 'BTC 5-minute Up or Down',
+        triggerPrice: this.config.LADDER_TRIGGER_PRICE,
+        entryOrderType: 'RESTING LIMIT BUY (PAPER)',
+        entryPolicy: 'The first fresh UP or DOWN price to reach $0.92 arms one ladder for that side; the other side is ignored for the rest of the window.',
+        rungPrices: this.config.LADDER_PRICES,
+        sharesPerRung: this.config.LADDER_ORDER_SHARES,
+        rungCount: this.config.LADDER_PRICES.length,
+        fillRule: 'A full 100-share rung is paper-filled at its limit when a post-arm best ask or last trade reaches at least $0.01 below that limit. The lowest observed post-arm price is retained to catch gaps.',
+        unfilledOrderPolicy: 'Unfilled rungs are canceled at window end.',
+        takerFees: false,
+        modeledMakerRebate: false,
+        exitPolicy: 'No take-profit or stop-loss. Every filled rung is held until the exact original Polymarket market officially resolves.',
         entryTriggeredThisWindow: this.entryTriggeredThisWindow,
-        exitPolicy: 'During the window, a fresh own-side best bid at or above $0.99 records a $1/share paper payout; at or below $0.01 records $0/share. Sizing updates immediately. Positions not crossing either threshold wait for exact original-market resolution.',
-        priceSource: 'Binance BTCUSDT aggregate trades',
+        priceSource: 'Polymarket CLOB best bid/ask and last-trade ticks',
+        fixedSize: true,
       },
       window: {
         start: this.windowStart,
@@ -1779,35 +1985,48 @@ class BtcMispricingBot {
         start: this.market.start,
         end: this.market.end,
       } : null,
-      binance: this.priceFeed.snapshot?.() || null,
-      model,
+      binance: null,
+      model: null,
       signal: this.currentSignal,
-      pendingOrder: this.pendingEntryOrder ? {
-        id: this.pendingEntryOrder.id,
-        side: this.pendingEntryOrder.side,
-        limitPrice: this.pendingEntryOrder.limitPrice,
-        targetShares: this.pendingEntryOrder.targetShares,
-        filledShares: this.pendingEntryOrder.filledShares,
-        remainingShares: this.pendingEntryOrder.remainingShares,
-        queueAheadShares: this.pendingEntryOrder.queueAheadShares,
-        status: this.pendingEntryOrder.status,
-        postedAt: this.pendingEntryOrder.postedAt,
+      ladder: this.activeLadder ? {
+        side: this.activeLadder.side,
+        marketId: this.activeLadder.marketId,
+        windowStart: this.activeLadder.windowStart,
+        triggerPrice: this.activeLadder.triggerPrice,
+        triggeredAt: this.activeLadder.triggeredAt,
+        lowestObservedPrice: this.activeLadder.lowestObservedPrice,
+        lowestObservedAt: this.activeLadder.lowestObservedAt,
+        totalRungs: activeRungs.length,
+        filledRungs: filledRungs.length,
+        filledShares,
+        averageEntryPrice: filledShares > 0 ? filledCost / filledShares : null,
+        remainingRungs: activeRungs.filter(rung => rung.status === 'RESTING').length,
+        rungs: activeRungs.map(rung => ({ ...rung })),
       } : null,
+      pendingOrder: null,
       quotes: {
         UP: { ...this.quotes.UP },
         DOWN: { ...this.quotes.DOWN },
       },
+      lastTradePrices: {
+        UP: this.latestTradePrices.UP ? { ...this.latestTradePrices.UP } : null,
+        DOWN: this.latestTradePrices.DOWN ? { ...this.latestTradePrices.DOWN } : null,
+      },
       websocket: { ...this.websocket },
-      position: openTrade ? {
-        tradeId: openTrade.id,
-        side: openTrade.side,
-        shares: openTrade.shares,
-        entryPrice: openTrade.entryPrice,
-        totalCost: openTrade.totalCost,
-        markPrice: openTrade.markPrice,
-        markValue: openTrade.markValue,
-        unrealizedPnl: openTrade.unrealizedPnl,
-        openedAt: openTrade.openedAt,
+      position: positionShares > 0 ? {
+        side: positionSide,
+        shares: positionShares,
+        entryPrice: positionCost / positionShares,
+        totalCost: positionCost,
+        markPrice: marksComplete ? this.quotes[positionSide]?.bestBid ?? null : null,
+        markValue: marksComplete
+          ? currentOpenTrades.reduce((sum, trade) => sum + Number(trade.markValue), 0)
+          : null,
+        unrealizedPnl: marksComplete
+          ? currentOpenTrades.reduce((sum, trade) => sum + Number(trade.unrealizedPnl), 0)
+          : null,
+        openedAt: Math.min(...currentOpenTrades.map(trade => Number(trade.openedAt) || now)),
+        rungCount: currentOpenTrades.length,
       } : null,
       account: this.accountSnapshot(),
       trades: this.trades.slice().sort((left, right) => right.openedAt - left.openedAt).slice(0, 100),

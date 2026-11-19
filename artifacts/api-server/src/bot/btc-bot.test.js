@@ -269,7 +269,7 @@ test("dashboard renders Renko direction, taker orders, inventory and analytics",
   assert.equal(elements.upRole.textContent, "MONITORING");
 });
 
-test("the public root dashboard runs the BTC mispricing paper strategy", () => {
+test("the public root dashboard runs the CLOB rung paper strategy", () => {
   const vm = require("node:vm");
   const html = fs.readFileSync(path.join(__dirname, "../../public/mispricing.html"), "utf8");
   const app = fs.readFileSync(path.join(__dirname, "../app.ts"), "utf8");
@@ -281,27 +281,26 @@ test("the public root dashboard runs the BTC mispricing paper strategy", () => {
   assert.match(route, /btc-5m-mispricing/);
   assert.match(route, /LegacyPaperSettlementWorker/);
   assert.match(route, /btc-5m-price-band/);
-  assert.match(html, /BTCUSDT Taker Paper Bot/);
-  assert.match(html, /Last-three-candle volatility/i);
-  assert.match(html, /average percentage return of candles 1 and 2 with candle 3/i);
-  assert.match(html, /higher selects UP, lower selects DOWN/i);
-  assert.match(html, /100 shares/);
-  assert.doesNotMatch(html, /profitable flip/i);
-  assert.match(html, /immediately sweeps visible asks as a taker buy/i);
-  assert.match(html, /fresh own-side best bid at \$0\.99 records a \$1-per-share paper payout; at \$0\.01 it records \$0/i);
-  assert.match(html, /win subtracts 30 shares and a loss adds 20/i);
-  assert.match(html, /threshold payouts do not model a separate sell or sell fee/i);
+  assert.match(html, /BTC CLOB Rung Paper Bot/);
+  assert.match(html, /first side to reach \$0\.92/i);
+  assert.match(html, /eight 100-share limit buys/i);
+  assert.match(html, /\$0\.90.*\$0\.80.*\$0\.70.*\$0\.60.*\$0\.50.*\$0\.40.*\$0\.30.*\$0\.20/);
+  assert.match(html, /a later tick at \$0\.40 fills the \$0\.90 through \$0\.50 rungs/i);
+  assert.match(html, /other side is ignored/i);
+  assert.match(html, /no take-profit or stop-loss/i);
+  assert.match(html, /full 100-share paper fill/i);
   assert.match(html, /official market resolution/i);
-  assert.ok(html.indexOf('id="positionPanelTitle"') < html.indexOf("Binance signal inputs"));
-  assert.equal((html.match(/<b>Initial side<\/b>/g) || []).length, 1);
-  assert.match(html, /Taker entries, threshold payouts, and official settlements/i);
+  assert.ok(html.indexOf('id="positionPanelTitle"') < html.indexOf("Window trigger"));
+  assert.match(html, /Ladder rung progress/);
+  assert.match(html, /Resting limit rungs/);
+  assert.match(html, /Ladder triggers, rung fills, window expiry, and official settlements/i);
   assert.match(html, /paper only/i);
   assert.match(html, /fetch\(["']\/api\/strategy\/state/);
-  assert.match(html, /id="upProbability"/);
-  assert.match(html, /id="downProbability"/);
+  assert.match(html, /id="rungGrid"/);
+  assert.match(html, /id="sharesInLadder"/);
   assert.match(html, /id="recentTrades"/);
   assert.match(html, /id="activity"/);
-  assert.doesNotMatch(html, /Ask-Band|stop-loss|martingale|recovery additions/i);
+  assert.doesNotMatch(html, /Ask-Band|martingale|recovery additions/i);
 
   for (const script of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) {
     new vm.Script(script[1]);

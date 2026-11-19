@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#101628">
-    <title>BTCUSDT Taker Paper Bot</title>
+    <title>BTC CLOB Rung Paper Bot</title>
     <style>
       :root {
         color-scheme: dark;
@@ -143,6 +143,14 @@
         color: #d4def4; font-size: 12px;
       }
       .rule b { display: block; margin-bottom: 4px; color: var(--cyan); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+      .rung-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+      .rung-card { min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: rgba(10, 16, 32, .55); }
+      .rung-card.filled { border-color: rgba(66, 214, 164, .45); background: rgba(24, 83, 67, .18); }
+      .rung-card.blocked, .rung-card.cancelled { opacity: .62; }
+      .rung-price { font-size: 18px; font-weight: 850; font-variant-numeric: tabular-nums; }
+      .rung-meta { margin-top: 3px; color: var(--muted); font-size: 11px; }
+      .rung-state { margin-top: 6px; color: var(--cyan); font-size: 10px; font-weight: 850; text-transform: uppercase; }
+      .rung-card.filled .rung-state { color: var(--green); }
       .table-wrap { overflow-x: auto; }
       table { width: 100%; border-collapse: collapse; min-width: 620px; font-size: 12px; }
       th { padding: 9px 8px; color: var(--muted); font-size: 10px; text-align: left; text-transform: uppercase; letter-spacing: .08em; }
@@ -178,7 +186,7 @@
         .hero-state { justify-self: start; text-align: left; }
         .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .three-col { grid-template-columns: 1fr; }
-        .candles { grid-template-columns: 1fr; }
+        .rung-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .rules { grid-template-columns: 1fr; }
         .position-box { grid-template-columns: auto 1fr; }
         .position-pnl { grid-column: 2; text-align: left; }
@@ -196,7 +204,7 @@
           <div class="brand-mark" aria-hidden="true">₿</div>
           <div>
             <div class="eyebrow">Pumpfun · replacement strategy</div>
-            <h1>BTCUSDT Taker Paper Bot</h1>
+            <h1>BTC CLOB Rung Paper Bot</h1>
           </div>
         </div>
         <div class="top-meta">
@@ -208,13 +216,13 @@
 
       <section class="hero" aria-labelledby="heroTitle">
         <div>
-          <div class="eyebrow">Binance model × Polymarket 5-minute BTC</div>
-          <h2 id="heroTitle">Choose an initial side from candles, then buy immediately when all filters pass.</h2>
-          <p>Compare the average percentage return of candles 1 and 2 with candle 3: higher selects UP, lower selects DOWN. The selected side must still pass the existing fresh-data, model-probability, visible ask-depth, and $0.05 net-edge checks. The first qualifying entry per five-minute window immediately sweeps visible asks as a taker buy and includes modeled fees. A fresh own-side best bid at $0.99 records a $1-per-share paper payout; at $0.01 it records $0. Otherwise, hold for exact original-market resolution. No flips.</p>
+          <div class="eyebrow">Polymarket CLOB · BTC 5-minute market</div>
+          <h2 id="heroTitle">Arm one resting buy ladder when either side reaches $0.92.</h2>
+          <p>The first side to reach $0.92 gets eight 100-share limit buys at $0.90, $0.80, $0.70, $0.60, $0.50, $0.40, $0.30 and $0.20. The other side is ignored for the rest of the window. A later tick at $0.40 fills the $0.90 through $0.50 rungs; the $0.40 rung needs a tick at $0.39 or lower. Filled rungs are held for official resolution, with no take-profit or stop-loss.</p>
         </div>
         <div class="hero-state">
           <span class="badge" id="windowBadge">Window waiting</span>
-          <strong id="statusReason">Starting feeds and the separate paper ledger…</strong>
+          <strong id="statusReason">Starting CLOB updates and the paper ledger…</strong>
           <small id="windowClock">— seconds remaining</small>
         </div>
       </section>
@@ -223,12 +231,12 @@
         <article class="metric">
           <div class="metric-label">Paper equity</div>
           <div class="metric-value" id="equity">—</div>
-          <div class="metric-sub">cash plus currently marked position</div>
+          <div class="metric-sub">cash plus currently marked positions</div>
         </article>
         <article class="metric">
           <div class="metric-label">Realized P&amp;L</div>
           <div class="metric-value" id="realizedPnl">—</div>
-          <div class="metric-sub">after modeled taker fees and recorded payouts</div>
+          <div class="metric-sub">net paper-ledger result including prior strategy history</div>
         </article>
         <article class="metric">
           <div class="metric-label">Paper cash</div>
@@ -236,9 +244,9 @@
           <div class="metric-sub">available before a new buy</div>
         </article>
         <article class="metric">
-          <div class="metric-label">BTC price</div>
-          <div class="metric-value" id="btcPrice">—</div>
-          <div class="metric-sub" id="binanceStatus">Binance stream waiting</div>
+          <div class="metric-label">Current ladder shares</div>
+          <div class="metric-value" id="sharesInLadder">0</div>
+          <div class="metric-sub" id="ladderSharesDetail">No side armed</div>
         </article>
         <article class="metric">
           <div class="metric-label">Ledger positions</div>
@@ -249,21 +257,22 @@
 
       <section class="panel" aria-labelledby="positionPanelTitle">
         <div class="panel-head">
-          <div><div class="panel-title" id="positionPanelTitle">Current position</div><div class="panel-subtitle">One entry per window · no flips</div></div>
+          <div><div class="panel-title" id="positionPanelTitle">Current ladder and position</div><div class="panel-subtitle">First side only · each filled rung is 100 shares</div></div>
           <span class="badge" id="positionStatus">Flat</span>
         </div>
         <div class="position-box">
           <div class="position-icon empty" id="positionIcon">—</div>
           <div class="position-main">
             <strong id="positionTitle">No open position</strong>
-            <small id="positionDetail">Waiting for a qualifying taker entry</small>
+            <small id="positionDetail">Waiting for either CLOB side to reach $0.92</small>
           </div>
           <div class="position-pnl">
             <strong id="positionPnl">—</strong>
             <small id="positionMark">unrealized at best bid</small>
           </div>
         </div>
-        <div class="feed-row"><span class="feed-label">Next order size</span><strong class="feed-value" id="nextShares">100 shares</strong></div>
+        <div class="feed-row"><span class="feed-label">Ladder rung progress</span><strong class="feed-value" id="rungProgress">Not armed</strong></div>
+        <div class="feed-row"><span class="feed-label">Lowest price since trigger</span><strong class="feed-value" id="lowestPrice">—</strong></div>
         <div class="feed-row"><span class="feed-label">Positions awaiting resolution</span><strong class="feed-value" id="pendingCount">—</strong></div>
         <div class="feed-row"><span class="feed-label">Fees recorded</span><strong class="feed-value" id="fees">—</strong></div>
         <div class="feed-row"><span class="feed-label">Historical estimated maker rebates</span><strong class="feed-value" id="rebates">—</strong></div>
@@ -273,46 +282,31 @@
         <article class="panel">
           <div class="panel-head">
             <div>
-              <div class="panel-title">Binance signal inputs</div>
-              <div class="panel-subtitle">Live BTCUSDT aggregate trades · 5-minute window</div>
+              <div class="panel-title">Window trigger</div>
+              <div class="panel-subtitle">CLOB prices control entries; BTC feed is diagnostic only</div>
             </div>
-            <span class="badge" id="feedFreshness">Waiting for ticks</span>
+            <span class="badge" id="clobTriggerStatus">WebSocket waiting</span>
           </div>
-          <div class="feed-row"><span class="feed-label">Binance price at window open</span><strong class="feed-value" id="windowOpen">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Last-three-candle volatility</span><strong class="feed-value" id="volatility">—</strong></div>
-          <div class="feed-row"><span class="feed-label">Initial side from candles 1–3</span><strong class="feed-value" id="candleSidePick">Waiting</strong></div>
-          <div class="feed-row"><span class="feed-label">Polymarket market window</span><strong class="feed-value" id="marketName">—</strong></div>
-          <div class="candles" id="candles">
-            <div class="candle"><div class="candle-time">Candle 1</div><div class="candle-return">Waiting</div></div>
-            <div class="candle"><div class="candle-time">Candle 2</div><div class="candle-return">Waiting</div></div>
-            <div class="candle"><div class="candle-time">Candle 3</div><div class="candle-return">Waiting</div></div>
-          </div>
+          <div class="feed-row"><span class="feed-label">Trigger price</span><strong class="feed-value">$0.92</strong></div>
+          <div class="feed-row"><span class="feed-label">First side rule</span><strong class="feed-value" id="sideRule">Either side · first touch</strong></div>
+          <div class="feed-row"><span class="feed-label">Market</span><strong class="feed-value" id="marketName">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Window slug</span><strong class="feed-value" id="windowSlug">—</strong></div>
+          <div class="feed-row"><span class="feed-label">Polymarket tick age</span><strong class="feed-value" id="clobAge">—</strong></div>
         </article>
 
         <article class="panel">
           <div class="panel-head">
             <div>
-              <div class="panel-title">Model probabilities</div>
-              <div class="panel-subtitle">Estimated chance of each side paying $1 at resolution</div>
+              <div class="panel-title">Resting limit rungs</div>
+              <div class="panel-subtitle">Full 100-share paper fill at each rung after price trades through by $0.01</div>
             </div>
-            <span class="badge" id="modelStatus">Model waiting</span>
+            <span class="badge" id="ladderBadge">No ladder armed</span>
           </div>
-          <div class="probabilities">
-            <div class="prob-card up">
-              <div class="prob-head"><span class="side-label">UP</span><span class="tag">BINANCE MODEL</span></div>
-              <div class="prob-value" id="upProbability">—</div>
-              <div class="prob-detail">Polymarket ask <strong id="upAsk">—</strong></div>
-            </div>
-            <div class="prob-card down">
-              <div class="prob-head"><span class="side-label">DOWN</span><span class="tag">BINANCE MODEL</span></div>
-              <div class="prob-value" id="downProbability">—</div>
-              <div class="prob-detail">Polymarket ask <strong id="downAsk">—</strong></div>
-            </div>
-          </div>
+          <div class="rung-grid" id="rungGrid"></div>
           <div class="decision">
-            <div class="decision-title">Current decision</div>
+            <div class="decision-title">Current ladder state</div>
             <div class="decision-text" id="signalSide">Waiting for live inputs</div>
-            <div class="decision-reason" id="signalReason">No signal is evaluated until the three candle returns, Binance tick, and Polymarket book are fresh.</div>
+            <div class="decision-reason" id="signalReason">Watching both CLOB outcomes for the first $0.92 trigger.</div>
           </div>
         </article>
       </section>
@@ -347,23 +341,23 @@
 
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Rules in effect</div><div class="panel-subtitle">This replaces the previous active bot</div></div>
-            <span class="badge" id="nextSizeBadge">100 shares next</span>
+            <div><div class="panel-title">Rules in effect</div><div class="panel-subtitle">Paper-only CLOB ladder · existing history retained</div></div>
+            <span class="badge" id="nextSizeBadge">100 shares per rung</span>
           </div>
           <div class="rules">
-            <div class="rule"><b>Initial side</b>Average candle 1 and 2 percentage returns: above candle 3 selects UP; below selects DOWN. A tie selects neither.</div>
-            <div class="rule"><b>Signal</b>Only evaluate the selected side; its estimated probability, full visible ask depth, $0.05 net edge after modeled fees, and fresh-data checks must pass.</div>
-            <div class="rule"><b>Entry</b>One immediate taker market buy per window; sweep visible asks and record modeled taker fees.</div>
-            <div class="rule"><b>Exit</b>Fresh own-side bid at $0.99 records $1/share; at $0.01 records $0/share. Otherwise wait for exact-market resolution.</div>
-            <div class="rule"><b>Size</b>Preserve saved size; a win subtracts 30 shares and a loss adds 20, with a 100-share floor. Threshold results update size immediately.</div>
-            <div class="rule"><b>Ledger</b>Preserve paper history and existing positions; threshold payouts do not model a separate sell or sell fee.</div>
-            <div class="rule"><b>Execution</b>Paper-only simulation. Taker fees are modeled; no wallet or real order is connected.</div>
+            <div class="rule"><b>Trigger</b>Continuously watch both UP and DOWN CLOB prices. The first side to reach $0.92 wins the window’s single ladder.</div>
+            <div class="rule"><b>Orders</b>Place eight resting paper limits at $0.90 through $0.20 in $0.10 steps; each rung requests 100 shares.</div>
+            <div class="rule"><b>Fill</b>Record a full rung at its limit after a later best ask or last trade is at least $0.01 below it.</div>
+            <div class="rule"><b>Gap handling</b>Keep the lowest post-trigger tick. A $0.40 tick fills $0.90–$0.50; $0.40 fills only at $0.39 or lower.</div>
+            <div class="rule"><b>Exit</b>No TP or SL. Filled rungs stay open until the original Polymarket market officially resolves.</div>
+            <div class="rule"><b>Window end</b>Cancel unfilled rungs. The next 5-minute window starts with a fresh first-side trigger.</div>
+            <div class="rule"><b>Ledger</b>Keep existing paper history. New maker-style paper fills add no taker fees or assumed rebate.</div>
           </div>
         </article>
       </section>
 
       <div class="notice">
-        This is an experimental probability model, not risk-free arbitrage. Volatility estimated from only three candles is noisy, Binance prices may differ from Polymarket’s settlement reference, and the official Polymarket result determines paper settlement.
+        Paper fills use observed CLOB price ticks and do not model queue position, hidden liquidity, or actual exchange acknowledgements. They are not proof that a live limit order would fill.
       </div>
 
       <section class="grid two-col">
@@ -381,7 +375,7 @@
         </article>
         <article class="panel">
           <div class="panel-head">
-            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Taker entries, threshold payouts, and official settlements</div></div>
+            <div><div class="panel-title">Activity</div><div class="panel-subtitle">Ladder triggers, rung fills, window expiry, and official settlements</div></div>
             <span class="badge" id="activityCount">0 events</span>
           </div>
           <div class="activity-list" id="activity"><div class="empty-row">Waiting for bot activity</div></div>
@@ -389,7 +383,7 @@
       </section>
 
       <footer class="footer">
-        Paper simulation only · Binance BTCUSDT aggregate-trade feed · Polymarket CLOB book and official market resolution · <span id="persistenceStatus">Ledger starting</span>
+        Paper simulation only · Polymarket CLOB prices and official market resolution · <span id="persistenceStatus">Ledger starting</span>
       </footer>
     </main>
     <script>
@@ -417,17 +411,33 @@
       const setText = (id, value) => { if ($(id)) $(id).textContent = value; };
       const pnlClass = (value) => Number(value) > 0 ? "positive" : Number(value) < 0 ? "negative" : "neutral";
 
-      function renderCandles(candles) {
-        const rows = Array.isArray(candles) ? candles.slice(-3) : [];
-        $("candles").innerHTML = [0, 1, 2].map((index) => {
-          const candle = rows[index];
-          if (!candle) return `<div class="candle"><div class="candle-time">Candle ${index + 1}</div><div class="candle-return">Waiting</div></div>`;
-          const change = (Number(candle.close) / Number(candle.open)) - 1;
-          const tone = change >= 0 ? "green" : "red";
-          const label = change >= 0 ? "UP candle" : "DOWN candle";
-          return `<div class="candle ${tone}">
-            <div class="candle-time">${escapeHtml(new Date(Number(candle.start)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))} · ${label}</div>
-            <div class="candle-return">${change >= 0 ? "+" : "−"}${Math.abs(change * 100).toFixed(3)}%</div>
+      const defaultRungPrices = [0.90, 0.80, 0.70, 0.60, 0.50, 0.40, 0.30, 0.20];
+
+      function renderRungs(ladder) {
+        const rungs = Array.isArray(ladder?.rungs) && ladder.rungs.length
+          ? ladder.rungs
+          : defaultRungPrices.map((limitPrice, index) => ({
+            rung: index + 1,
+            limitPrice,
+            targetShares: 100,
+            status: "NOT_ARMED",
+          }));
+        setText("ladderBadge", ladder
+          ? `${ladder.side} · ${Number(ladder.filledRungs || 0)}/${Number(ladder.totalRungs || 8)} filled`
+          : "No ladder armed");
+        $("rungGrid").innerHTML = rungs.map((rung) => {
+          const status = String(rung.status || "RESTING").toUpperCase();
+          const className = status === "FILLED" ? "filled"
+            : status.includes("BLOCKED") ? "blocked"
+              : status === "CANCELLED" ? "cancelled" : "";
+          const label = status === "FILLED" ? `Filled · ${Number(rung.filledShares || 100)} shares`
+            : status === "NOT_ARMED" ? "Waiting for $0.92 trigger"
+              : status === "RESTING" ? "Resting · 100 shares"
+                : status.replaceAll("_", " ");
+          return `<div class="rung-card ${className}">
+            <div class="rung-price">${contractPrice(rung.limitPrice)}</div>
+            <div class="rung-meta">Rung ${Number(rung.rung || 0)} · ${Number(rung.targetShares || 100)} shares</div>
+            <div class="rung-state">${escapeHtml(label)}</div>
           </div>`;
         }).join("");
       }
@@ -475,9 +485,8 @@
 
       function render(state) {
         const account = state.account || {};
-        const model = state.model || {};
-        const binance = state.binance || {};
         const quotes = state.quotes || {};
+        const ladder = state.ladder || null;
         const up = quotes.UP || {};
         const down = quotes.DOWN || {};
         const status = String(state.status || "WAITING").toUpperCase();
@@ -495,30 +504,25 @@
         setText("realizedPnl", money(account.realizedPnl));
         $("realizedPnl").className = "metric-value " + pnlClass(account.realizedPnl);
         setText("cash", money(account.cash));
-        setText("btcPrice", money(binance.price, 2));
-        setText("binanceStatus", binance.status === "CONNECTED" ? "Binance tick stream connected" : `Binance ${String(binance.status || "waiting").toLowerCase()}`);
+        setText("sharesInLadder", `${Number(ladder?.filledShares || 0).toLocaleString()}`);
+        setText("ladderSharesDetail", ladder
+          ? `${ladder.side} · ${Number(ladder.filledRungs || 0)}/${Number(ladder.totalRungs || 8)} rungs filled`
+          : "No side armed");
         setText("tradeCount", Number(account.tradeCount || 0).toLocaleString());
         setText("ledgerDetail", `${Number(account.openPositions || 0)} open · ${Number(account.pendingResolutionPositions || 0)} awaiting resolution`);
-        setText("windowOpen", money(model.windowOpenPrice, 2));
-        setText("volatility", Number.isFinite(Number(model.volatility5m))
-          ? (Number(model.volatility5m) * 100).toFixed(3) + "% RMS / candle"
-          : "Waiting for 3 candles");
-        const candlePick = model.initialSideSelection || {};
-        const candlePickText = candlePick.side
-          ? `${candlePick.side} · avg ${signedPercent(candlePick.averageFirstTwoReturnPct)} vs C3 ${signedPercent(candlePick.latestReturnPct)}`
-          : candlePick.reason || "Waiting for three complete candles";
-        setText("candleSidePick", candlePickText);
         setText("marketName", state.market?.title || state.market?.slug || "Market not loaded");
-        setText("feedFreshness", Number.isFinite(Number(binance.tickAgeMs))
-          ? `Tick age ${Math.max(0, Math.round(Number(binance.tickAgeMs)))} ms`
-          : "Waiting for ticks");
-        setText("modelStatus", model.ready ? "READY · 3 CLOSED CANDLES" : "MODEL WAITING");
-        setText("upProbability", percent(model.probabilityUp));
-        setText("downProbability", percent(model.probabilityDown));
-        setText("upAsk", contractPrice(up.bestAsk));
-        setText("downAsk", contractPrice(down.bestAsk));
-        setText("signalSide", state.signal?.side ? `${state.signal.side} signal` : "No trade signal");
-        setText("signalReason", state.signal?.reason || model.reason || "Waiting for inputs.");
+        setText("windowSlug", state.window?.slug || "—");
+        setText("sideRule", ladder ? `${ladder.side} selected · other side ignored` : "First side to reach $0.92");
+        const lastTrades = state.lastTradePrices || {};
+        const quoteTimes = [up.updatedAt, down.updatedAt, lastTrades.UP?.at, lastTrades.DOWN?.at]
+          .filter(value => value != null && Number.isFinite(Number(value)));
+        const newestQuoteAt = quoteTimes.length ? Math.max(...quoteTimes.map(Number)) : null;
+        setText("clobAge", newestQuoteAt == null
+          ? "Waiting for CLOB quotes"
+          : `${Math.max(0, Number(state.now) - newestQuoteAt)} ms`);
+        setText("clobTriggerStatus", `CLOB ${String(state.websocket?.status || "waiting").toLowerCase()}`);
+        setText("signalSide", ladder ? `${ladder.side} ladder active` : "Watching UP and DOWN");
+        setText("signalReason", state.signal?.reason || "Watching both CLOB outcomes for the $0.92 trigger.");
         setText("clobStatus", `Polymarket ${String(state.websocket?.status || "waiting").toLowerCase()}`);
         setText("upAskBook", contractPrice(up.bestAsk));
         setText("upAskSize", Number(up.askSize || 0).toLocaleString());
@@ -531,26 +535,30 @@
 
         const position = state.position;
         const icon = $("positionIcon");
-        icon.className = `position-icon ${position ? String(position.side).toLowerCase() : "empty"}`;
+        icon.className = `position-icon ${position ? String(position.side).toLowerCase() : ladder ? String(ladder.side).toLowerCase() : "empty"}`;
         setText("positionIcon", position ? position.side : "—");
-        setText("positionStatus", position ? `${position.side} · ${position.shares} shares` : "Flat");
+        setText("positionStatus", position ? `${position.side} · ${position.shares} shares`
+          : ladder ? `${ladder.side} ladder armed` : "Waiting");
         setText("positionTitle", position ? `${position.side} position · ${position.shares} shares` : "No open position");
         setText("positionDetail", position
           ? `Entry ${contractPrice(position.entryPrice)} · cost ${money(position.totalCost)}`
-          : state.pendingOrder
-            ? `Resting at ${contractPrice(state.pendingOrder.limitPrice)} · ${Number(state.pendingOrder.remainingShares || 0)} shares unfilled`
-            : "Waiting for a qualifying taker entry");
+          : ladder
+            ? `${Number(ladder.remainingRungs || 0)} rungs resting · lowest since trigger ${contractPrice(ladder.lowestObservedPrice)}`
+            : "Waiting for either side to reach $0.92");
         setText("positionPnl", position ? signedMoney(position.unrealizedPnl) : "—");
         $("positionPnl").className = pnlClass(position?.unrealizedPnl);
         setText("positionMark", position ? `best bid ${contractPrice(position.markPrice)}` : "unrealized at best bid");
+        setText("rungProgress", ladder
+          ? `${Number(ladder.filledRungs || 0)}/${Number(ladder.totalRungs || 8)} filled · ${Number(ladder.filledShares || 0)} shares`
+          : "Not armed");
+        setText("lowestPrice", contractPrice(ladder?.lowestObservedPrice));
         setText("pendingCount", Number(account.pendingResolutionPositions || 0).toLocaleString());
         setText("fees", money(account.takerFees));
         setText("rebates", `+${money(account.estimatedMakerRebates)}`);
-        setText("nextShares", `${Number(state.strategy?.nextEntryShares || 100).toLocaleString()} shares`);
-        setText("nextSizeBadge", `${Number(state.strategy?.nextEntryShares || 100).toLocaleString()} shares next`);
+        setText("nextSizeBadge", `${Number(state.strategy?.sharesPerRung || 100)} shares per rung`);
         setText("persistenceStatus", state.persistence?.status === "CONNECTED"
           ? "paper ledger saved" : `ledger ${String(state.persistence?.status || "starting").toLowerCase()}`);
-        renderCandles(model.volatilityCandles);
+        renderRungs(ladder);
         renderTrades(state.trades, account.tradeCount);
         renderActivity(state.events);
       }

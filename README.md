@@ -2,16 +2,16 @@
 
 This is a **paper-only** BTC 5-minute cross-venue scanner for Polymarket and Predict.fun. It reads market data and simulates one-sided positions. It does not place orders and contains no wallet signing, private keys, or live-trading execution path.
 
-## Active Pumpfun BTC 5-minute maker strategy
+## Active Pumpfun BTC 5-minute CLOB rung strategy
 
-The Railway Pumpfun dashboard runs a separate Binance/Polymarket BTCUSDT 5-minute paper bot:
+The Railway Pumpfun dashboard runs a paper-only, Polymarket-CLOB-driven BTC 5-minute rung strategy:
 
-- The signal model still estimates UP/DOWN probability from the Binance price versus the current window open and volatility from the last three closed 5-minute candles. It requires fresh Binance and Polymarket data.
-- The current entry filter is retained: the model side must clear the existing $0.05-per-share edge check based on a full visible ask sweep and modeled taker fees. The bot then posts a post-only limit buy at that side's best bid; it does not buy the asks.
-- A paper maker order stays resting despite later signal, edge, or book changes, and is canceled only at window end if unfilled. A post-order trade print or live best ask at least $0.01 below its limit marks the full remaining order filled at the limit price, with no queue-ahead or partial-fill modeling.
-- Only the first qualifying signal can post an entry per 5-minute window; later signals are ignored. There are no flips or sells. Filled shares are held for official resolution of their exact original market; positions in older windows do not block the next window.
-- Existing sizing and saved size are preserved: start/floor at 100 shares, add 20 after a resolved loss, and subtract 30 after a resolved win. No sizing or history reset is performed by this strategy change.
-- Maker fills record zero taker fees and credit an **estimated** rebate based on the market fee schedule and a 20% share assumption. This is a paper estimate, not a promise of an actual Polymarket rebate.
+- UP and DOWN quotes are monitored continuously. The first side whose fresh best bid, best ask, or last trade reaches **$0.92** arms the only ladder for that window; the other side is ignored even if it later reaches the trigger.
+- The ladder has eight resting paper limit orders on that side: **100 shares each** at **$0.90, $0.80, $0.70, $0.60, $0.50, $0.40, $0.30, and $0.20**.
+- After arming, the lowest observed **best ask or last-trade** price is retained to catch gaps. A rung is recorded as fully filled at its own limit when a later observation is at least **$0.01 below** that limit. For example, a $0.40 observation fills $0.90 through $0.50; the $0.40 rung needs $0.39 or lower. This is a paper touch model, not a live exchange fill acknowledgement.
+- Rungs that remain unfilled are canceled at window end. Filled positions stay tied to their original market and are held until its official resolution; they do not block the next window.
+- There are no take-profit or stop-loss exits and no sizing progression. New rungs are fixed at 100 shares.
+- Existing paper history and capital are preserved. New paper limit fills accrue no taker fee and assume no maker rebate.
 
 ## Paper strategy
 
