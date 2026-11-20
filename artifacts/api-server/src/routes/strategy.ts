@@ -3,8 +3,8 @@ import { Router, type IRouter } from "express";
 import { pool } from "@workspace/db";
 
 const require = createRequire(import.meta.url);
-const { BtcMispricingBot } = require("./bot/btc/mispricing-bot.cjs") as {
-  BtcMispricingBot: new (options?: {
+const { BtcDoubleRungBot } = require("./bot/btc/double-rung-bot.cjs") as {
+  BtcDoubleRungBot: new (options?: {
     stateStore?: unknown;
   }) => {
     start: () => void | Promise<void>;
@@ -24,7 +24,7 @@ const { LegacyPaperSettlementWorker } = require("./bot/btc/legacy-paper-settleme
 };
 
 const router: IRouter = Router();
-const bot = new BtcMispricingBot({
+const bot = new BtcDoubleRungBot({
   stateStore: new PaperStateStore(pool, "btc-5m-mispricing"),
 });
 const legacySettlementWorker = new LegacyPaperSettlementWorker({

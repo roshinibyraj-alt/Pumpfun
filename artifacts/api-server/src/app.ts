@@ -74,6 +74,8 @@ app.use("/api", router);
 
 app.get("/", (_req, res, next) => {
   const dashboardPath = [
+    path.resolve(process.cwd(), "public/double-rung-dashboard.html"),
+    path.resolve(process.cwd(), "artifacts/api-server/public/double-rung-dashboard.html"),
     path.resolve(process.cwd(), "public/mispricing.html"),
     path.resolve(process.cwd(), "artifacts/api-server/public/mispricing.html"),
   ].find(existsSync);
