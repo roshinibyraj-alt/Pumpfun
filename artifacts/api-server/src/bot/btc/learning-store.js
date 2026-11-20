@@ -83,7 +83,8 @@ class LearningStore {
     if (!/^[A-Za-z0-9._:-]{1,128}$/.test(normalizedRequestId)) {
       throw new Error('A valid BTC history reset request ID is required.');
     }
-    if (initialState && (initialState.schemaVersion !== 1
+    if (initialState && (!Number.isSafeInteger(initialState.schemaVersion)
+      || initialState.schemaVersion < 1
       || !Array.isArray(initialState.trades) || !Array.isArray(initialState.events)
       || !Number.isFinite(Number(initialState.startingCapital)))) {
       throw new Error('A valid fresh BTC paper ledger is required for this reset.');

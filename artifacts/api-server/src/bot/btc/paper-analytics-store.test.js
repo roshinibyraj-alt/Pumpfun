@@ -88,3 +88,38 @@ test('completed-window and equity writes retain their window and account-session
   ]);
   assert.equal(calls[1].params[8], 'current-v2');
 });
+
+test('history reset accepts a fresh ledger from a newer strategy schema', async () => {
+  const calls = [];
+  const store = new LearningStore({
+    async connect() {
+      return {
+        async query(sql, params = []) {
+          calls.push({ sql, params });
+          return { rows: [] };
+        },
+        release() {},
+      };
+    },
+  });
+  const initialState = {
+    schemaVersion: 3,
+    strategyVersion: 'btc-5m-clob-independent-double-rungs-tp099-v1',
+    startingCapital: 3000,
+    cash: 3000,
+    trades: [],
+    events: [],
+  };
+
+  assert.equal(await store.resetHistoryOnce('double-rung-reset', {
+    botKey: 'btc-5m-mispricing',
+    initialState,
+  }), true);
+
+  const insert = calls.find(call => call.sql.includes('INSERT INTO btc_5m_paper_bot_state'));
+  assert.ok(insert);
+  assert.equal(insert.params[0], 'btc-5m-mispricing');
+  assert.equal(JSON.parse(insert.params[1]).schemaVersion, 3);
+  assert.equal(JSON.parse(insert.params[1]).historyResetRequestId, 'double-rung-reset');
+  assert.equal(calls.at(-1).sql, 'COMMIT');
+});
