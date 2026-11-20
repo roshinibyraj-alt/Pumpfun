@@ -172,6 +172,9 @@ class BtcDoubleRungBot {
       if (this.stateStore) {
         this.persistenceStatus = 'CONNECTING';
         await this.stateStore.initialize();
+        if (typeof this.beforeLoadState === 'function') {
+          await this.beforeLoadState();
+        }
         const resetRequestId = String(
           process.env.BTC_PAPER_MISPRICING_HISTORY_RESET_REQUEST_ID || '',
         ).trim();
@@ -287,7 +290,7 @@ class BtcDoubleRungBot {
     this.market = null;
     this.books.clear();
     this.quotes = { UP: emptyQuote('UP'), DOWN: emptyQuote('DOWN') };
-    this.statusReason = 'Restored paper ledger; the independent double-rung strategy is active.';
+    this.statusReason = `Restored paper ledger; the ${this.config.WINDOW_MS / 60_000}-minute strategy is active.`;
   }
 
   persistentStateSnapshot() {
@@ -385,7 +388,7 @@ class BtcDoubleRungBot {
       trade.awaitingResolutionAt = this.now();
       this.log(
         'POSITION_AWAITING_RESOLUTION',
-        `${trade.side} position moved to official resolution for its original 5-minute market.`,
+        `${trade.side} position moved to official resolution for its original ${this.config.WINDOW_MS / 60_000}-minute market.`,
         { tradeId: trade.id, marketId: trade.marketId, shares: trade.shares },
       );
     }
@@ -410,7 +413,7 @@ class BtcDoubleRungBot {
       const market = await this.marketData.getBtcMarket(start, this.config.WINDOW_MS);
       if (!market || Number(market.start) !== start
         || !market.tokens?.UP || !market.tokens?.DOWN) {
-        throw new Error('The current Polymarket BTC 5-minute market is unavailable.');
+        throw new Error(`The current Polymarket BTC ${this.config.WINDOW_MS / 60_000}-minute market is unavailable.`);
       }
       this.market = market;
       await Promise.all(SIDES.map(async side => {
@@ -424,7 +427,7 @@ class BtcDoubleRungBot {
       }));
       this.startMarketStream(market);
       this.error = null;
-      this.statusReason = 'The BTC 5-minute CLOB is live; UP and DOWN entries are managed independently.';
+      this.statusReason = `The BTC ${this.config.WINDOW_MS / 60_000}-minute CLOB is live.`;
       this.nextMarketLoadAt = 0;
       return true;
     } catch (error) {
@@ -972,7 +975,7 @@ class BtcDoubleRungBot {
       await this.resolveDue(now);
       if (this.market) {
         this.status = this.storageHealthy ? 'RUNNING' : 'ERROR';
-        this.statusReason = `BTC 5-minute market active; Polymarket WebSocket ${this.websocket.status.toLowerCase()}.`;
+        this.statusReason = `BTC ${this.config.WINDOW_MS / 60_000}-minute market active; Polymarket WebSocket ${this.websocket.status.toLowerCase()}.`;
       } else if (this.storageHealthy && this.status !== 'STOPPED') {
         this.status = 'WAITING';
       }
