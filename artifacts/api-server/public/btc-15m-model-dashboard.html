@@ -156,7 +156,7 @@
         <div>
           <div class="eyebrow">BTC · Polymarket 15-minute market</div>
           <h1>Use candle evidence.<br>Trade one side, not a guess.</h1>
-          <p>At each new window, score the latest closed Binance 15-minute, 1-hour, and 4-hour candles. A stretched 15-minute move with a rejection wick can add a mean-reversion vote. Weak or conflicting evidence means no orders.</p>
+          <p>At each new window, score the latest closed Binance 15-minute and 1-hour candles. A stretched 15-minute move with a rejection wick can add a mean-reversion vote. The 4-hour candle is context only and never changes the score.</p>
         </div>
         <div class="clock"><div class="label">Window closes in</div><strong id="countdown">--:--</strong><small id="windowLabel">Waiting for market</small></div>
       </section>
@@ -167,7 +167,7 @@
         <article class="metric"><div class="metric-label">Paper equity</div><div class="metric-value" id="equity">—</div><div class="metric-sub">Cash plus open and pending-resolution marks</div></article>
         <article class="metric"><div class="metric-label">Realized P&amp;L</div><div class="metric-value" id="realized">—</div><div class="metric-sub">Fresh ledger starts at $3,000</div></article>
         <article class="metric"><div class="metric-label">Paper cash</div><div class="metric-value" id="cash">—</div><div class="metric-sub">After filled rung costs and payouts</div></article>
-        <article class="metric"><div class="metric-label">Maximum ladder cost</div><div class="metric-value">$105.00</div><div class="metric-sub">All six 100-share rungs fill</div></article>
+        <article class="metric"><div class="metric-label">Maximum ladder cost</div><div class="metric-value">$330.00</div><div class="metric-sub">Both 300-share upper rungs and six 100-share rungs fill</div></article>
       </section>
 
       <div class="section-head"><div><h2>Window signal</h2><p>One model decision at window start; the score is not a probability.</p></div><span class="chip" id="hourSlot">UTC slot —</span></div>
@@ -195,7 +195,7 @@
 
       <div class="section-head"><div><h2>Resting limit ladder</h2><p id="ladderCaption">Six orders are placed only for the model-selected side.</p></div><span class="section-note" id="ladderSide">SIDE —</span></div>
       <section class="panel">
-        <div class="panel-title"><div><h3>100 shares at each limit price</h3><div class="note">Unfilled orders expire when this 15-minute window ends.</div></div><span class="tag" id="fillRule">PAPER PRICE-TOUCH</span></div>
+        <div class="panel-title"><div><h3>Mixed-size limit rungs</h3><div class="note">Unfilled orders expire when this 15-minute window ends.</div></div><span class="tag" id="fillRule">PAPER PRICE-TOUCH</span></div>
         <div class="grid" id="orders"><div class="empty">Waiting for a UP or DOWN signal.</div></div>
       </section>
 
@@ -213,8 +213,8 @@
 
       <div class="section-head"><div><h2>Strategy rules</h2><p>What the bot does and what this paper simulation does not claim.</p></div></div>
       <section class="grid rules">
-        <div class="rule"><b>Model decision</b>15m candle ±1, 1h ±1, 4h ±2. A strong 15m extension-and-rejection can add ±2 mean-reversion points. Trade only at a total score of +2 or more for UP, or −2 or less for DOWN. Otherwise wait.</div>
-        <div class="rule"><b>Limit ladder</b>One selected side receives six 100-share paper limits at $0.30, $0.25, $0.20, $0.15, $0.10, and $0.05. Maximum planned cost is $105. The other side receives no orders.</div>
+        <div class="rule"><b>Model decision</b>15m candle ±1 and 1h candle ±1. The 4h candle is context only and adds zero points. A strong 15m extension-and-rejection can add ±2 mean-reversion points. Trade only at a total score of +2 or more for UP, or −2 or less for DOWN. Otherwise wait.</div>
+        <div class="rule"><b>Limit ladder</b>One selected side receives 300-share paper limits at $0.40 and $0.35, then 100-share limits at $0.30, $0.25, $0.20, $0.15, $0.10, and $0.05. Maximum planned cost is $330. The other side receives no orders.</div>
         <div class="rule"><b>Fill and exit</b>A fresh best ask must touch or cross down through a rung after placement; the paper fill is recorded at exactly that rung. Filled positions hold to resolution; no TP or stop-loss.</div>
       </section>
       <div class="disclaimer">Paper orders do not fill immediately if the ask is already below a rung; they wait for a rise above and a later downward touch/cross. This simulation does not model queue priority, available maker liquidity, partial fills, fees, or rebates. Binance candle direction is a proxy; settlement uses the official Polymarket result.</div>
@@ -258,7 +258,7 @@
         $("modelSide").textContent = side;
         $("modelSide").className = `decision-side ${side === "UP" ? "positive" : side === "DOWN" ? "negative" : ""}`;
         $("modelScore").textContent = numeric(model.score) ? `${Number(model.score) > 0 ? "+" : ""}${model.score}` : "—";
-        $("modelReason").textContent = model.reason || "Waiting for model evidence.";
+         $("modelReason").textContent = [model.reason, model.scorePolicyNote].filter(Boolean).join(" ");
         $("modelStatus").textContent = (model.status || "WAITING").replaceAll("_"," ");
         $("modelStatus").className = `tag ${model.status === "SIGNAL" ? "good" : model.status === "NO_SIGNAL" ? "warn" : "warn"}`;
         $("hourSlot").textContent = model.slot ? `${model.slot.label} · ${model.slot.rangeBrisbane}` : "Brisbane slot —";
@@ -285,7 +285,7 @@
         </article>`;
       }
 
-      function orderCard(order, side) {
+      function orderCard(order, side, defaultShares = 100) {
         const status = order?.status || "NOT_ARMED";
         const cls = status === "FILLED" ? "filled" : status.startsWith("CANCELLED") ? "cancelled" : "";
         const detail = status === "FILLED"
@@ -293,7 +293,7 @@
           : status === "RESTING" ? `${shares(order.requestedShares)} shares · waiting for price`
             : status.replaceAll("_"," ");
         return `<div class="order-row ${cls}">
-          <div class="order-left"><div class="order-price">${price(order?.price)}</div><div><b>${shares(order?.requestedShares || 100)} shares</b><div class="order-meta">${esc(side || "No side")} · limit order</div></div></div>
+          <div class="order-left"><div class="order-price">${price(order?.price)}</div><div><b>${shares(order?.requestedShares ?? defaultShares)} shares</b><div class="order-meta">${esc(side || "No side")} · limit order</div></div></div>
           <div class="order-status">${esc(detail)}${order?.fillAt ? `<br>${time(order.fillAt)}` : ""}</div>
         </div>`;
       }
@@ -339,18 +339,23 @@
         $("candles").innerHTML = [
           candleCard("15 MIN", model?.inputs?.["15m"]),
           candleCard("1 HOUR", model?.inputs?.["1h"]),
-          candleCard("4 HOURS", model?.inputs?.["4h"]),
+          candleCard("4 HOURS · CONTEXT ONLY", model?.inputs?.["4h"]),
         ].join("");
         const orders = Array.isArray(state.orderLadder) ? state.orderLadder : [];
         const side = state.selectedSide || "—";
         $("ladderSide").textContent = `SIDE ${side}`;
         $("ladderCaption").textContent = side === "—"
           ? "No orders until the model selects a side."
-          : `All six limits are on ${side}; no opposite-side orders this window.`;
-        const prices = state.strategy?.rungPrices || [0.30,0.25,0.20,0.15,0.10,0.05];
-        $("orders").innerHTML = prices.map(p => {
-          const order = orders.find(item => Math.abs(Number(item.price) - Number(p)) < 1e-8);
-          return orderCard(order, side);
+          : `All eight limits are on ${side}; no opposite-side orders this window.`;
+        const rungs = state.strategy?.rungSpecs || [
+          {price:0.40,shares:300},{price:0.35,shares:300},
+          {price:0.30,shares:100},{price:0.25,shares:100},
+          {price:0.20,shares:100},{price:0.15,shares:100},
+          {price:0.10,shares:100},{price:0.05,shares:100},
+        ];
+        $("orders").innerHTML = rungs.map(rung => {
+          const order = orders.find(item => Math.abs(Number(item.price) - Number(rung.price)) < 1e-8);
+          return orderCard(order, side, rung.shares);
         }).join("");
         const trades = Array.isArray(state.trades) ? state.trades : [];
         $("tradeCount").textContent = `${trades.length} recorded trades`;

@@ -26,7 +26,7 @@ function flatHistory(windowStart) {
   };
 }
 
-test('aligned closed 15m, 1h, and 4h candles select UP at the evidence threshold', () => {
+test('aligned closed 15m and 1h candles select UP without 4h points', () => {
   const windowStart = 21 * FIFTEEN_MINUTES;
   const candles = flatHistory(windowStart);
   candles['15m'][20] = candle(windowStart - FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.2, 99.9, 100.1);
@@ -39,9 +39,44 @@ test('aligned closed 15m, 1h, and 4h candles select UP at the evidence threshold
 
   assert.equal(result.status, 'SIGNAL');
   assert.equal(result.side, 'UP');
-  assert.equal(result.score, 4);
+  assert.equal(result.score, 2);
+  assert.equal(result.factors.find(factor => factor.timeframe === '4h context only').points, 0);
   assert.equal(result.slot.label, 'Quarter 2/4');
   assert.equal(result.factors.find(factor => factor.timeframe === 'Hour slot').points, 0);
+});
+
+test('an opposing 4h candle is informational and cannot change the score or direction', () => {
+  const windowStart = 21 * FIFTEEN_MINUTES;
+  const candles = flatHistory(windowStart);
+  candles['15m'][20] = candle(windowStart - FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.2, 99.9, 100.1);
+  candles['1h'][0] = candle(windowStart - 60 * 60_000, 60 * 60_000, 100, 100.3, 99.9, 100.2);
+  candles['4h'][0] = candle(windowStart - 4 * 60 * 60_000, 4 * 60 * 60_000, 100, 100.1, 98, 98.2);
+
+  const result = analyze15mWindow({
+    candles, windowStart, feedUpdatedAt: windowStart, now: windowStart + 500,
+  });
+
+  assert.equal(result.side, 'UP');
+  assert.equal(result.score, 2);
+  assert.equal(result.factors.find(factor => factor.timeframe === '4h context only').points, 0);
+  assert.equal(result.factors.find(factor => factor.timeframe === '4h context only').direction, 'DOWN');
+});
+
+test('a missing 4h candle does not prevent a 15m and 1h score', () => {
+  const windowStart = 21 * FIFTEEN_MINUTES;
+  const candles = flatHistory(windowStart);
+  candles['15m'][20] = candle(windowStart - FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.2, 99.9, 100.1);
+  candles['1h'][0] = candle(windowStart - 60 * 60_000, 60 * 60_000, 100, 100.3, 99.9, 100.2);
+  candles['4h'] = [];
+
+  const result = analyze15mWindow({
+    candles, windowStart, feedUpdatedAt: windowStart, now: windowStart + 500,
+  });
+
+  assert.equal(result.status, 'SIGNAL');
+  assert.equal(result.side, 'UP');
+  assert.equal(result.score, 2);
+  assert.equal(result.inputs['4h'], null);
 });
 
 test('an extended 15m candle with upper-wick rejection can produce a DOWN mean-reversion signal', () => {

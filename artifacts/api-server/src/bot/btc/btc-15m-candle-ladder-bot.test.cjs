@@ -6,6 +6,7 @@ const {
   Btc15mCandleLadderBot,
   MAX_LADDER_COST,
   RUNG_PRICES,
+  RUNG_SPECS,
   SHARES_PER_RUNG,
   HISTORY_RESET_REQUEST_ID,
 } = require('./btc-15m-candle-ladder-bot.cjs');
@@ -120,7 +121,7 @@ test('first startup resets the old paper ledger once before loading state', asyn
     async resetHistoryOnce(requestId, state) {
       calls.push('reset');
       assert.equal(requestId, HISTORY_RESET_REQUEST_ID);
-      assert.equal(state.strategyVersion, 'btc-15m-candle-score-limit-ladder-v1');
+      assert.equal(state.strategyVersion, 'btc-15m-candle-score-limit-ladder-v2');
       assert.equal(state.startingCapital, 3_000);
       assert.deepEqual(state.trades, []);
       return true;
@@ -143,7 +144,7 @@ test('first startup resets the old paper ledger once before loading state', asyn
   }
 });
 
-test('one candle signal arms six 100-share limits on only the selected side', () => {
+test('one candle signal arms eight mixed-size limits on only the selected side', () => {
   const context = fixture();
   context.setAsk('UP', 0.50);
   context.setAsk('DOWN', 0.60);
@@ -152,15 +153,19 @@ test('one candle signal arms six 100-share limits on only the selected side', ()
   assert.equal(context.bot.modelResult.side, 'UP');
   assert.equal(context.bot.selectedSide, 'UP');
   assert.deepEqual(context.bot.ladderOrders.map(order => order.price), RUNG_PRICES);
-  assert.ok(context.bot.ladderOrders.every(order =>
-    order.status === 'RESTING'
-    && order.side === 'UP'
-    && order.requestedShares === SHARES_PER_RUNG));
+  assert.deepEqual(context.bot.ladderOrders.map(order => order.requestedShares),
+    [300, 300, 100, 100, 100, 100, 100, 100]);
+  assert.ok(context.bot.ladderOrders.every(order => order.status === 'RESTING' && order.side === 'UP'));
   assert.equal(context.bot.ladderOrders.filter(order => order.side === 'DOWN').length, 0);
-  assert.equal(MAX_LADDER_COST, 105);
+  assert.deepEqual(RUNG_SPECS.map(rung => [rung.price, rung.shares]), [
+    [0.40, 300], [0.35, 300], [0.30, 100], [0.25, 100],
+    [0.20, 100], [0.15, 100], [0.10, 100], [0.05, 100],
+  ]);
+  assert.equal(SHARES_PER_RUNG, 100);
+  assert.equal(MAX_LADDER_COST, 330);
 });
 
-test('a downward ask touch fills at the exact limit price and records all shares', () => {
+test('a downward ask move fills every crossed rung at its exact limit price', () => {
   const context = fixture();
   context.setAsk('UP', 0.50);
   context.setAsk('DOWN', 0.60);
@@ -169,17 +174,17 @@ test('a downward ask touch fills at the exact limit price and records all shares
   context.setNow(context.getNow() + 500);
   context.setAsk('UP', 0.30);
   context.bot.evaluate(context.getNow());
-  assert.equal(context.bot.trades.length, 1, 'touching the rung is the limit-price fill');
+  assert.equal(context.bot.trades.length, 3, 'the move crosses $0.40, $0.35, and $0.30');
 
   context.setNow(context.getNow() + 500);
   context.setAsk('UP', 0.29);
   context.bot.evaluate(context.getNow());
 
-  assert.equal(context.bot.trades.length, 1);
-  assert.equal(context.bot.trades[0].side, 'UP');
-  assert.equal(context.bot.trades[0].shares, 100);
-  assert.equal(context.bot.trades[0].entryPrice, 0.30);
-  assert.equal(context.bot.trades[0].fees, 0);
+  assert.equal(context.bot.trades.length, 3);
+  assert.deepEqual(context.bot.trades.map(trade => [trade.rungPrice, trade.shares, trade.entryPrice]), [
+    [0.40, 300, 0.40], [0.35, 300, 0.35], [0.30, 100, 0.30],
+  ]);
+  assert.ok(context.bot.trades.every(trade => trade.side === 'UP' && trade.fees === 0));
   assert.equal(context.bot.ladderOrders.find(order => order.price === 0.30).status, 'FILLED');
 });
 
@@ -215,10 +220,30 @@ test('a price jump fills every crossed qualifying rung exactly once', () => {
   context.bot.evaluate(context.getNow());
 
   const filled = context.bot.ladderOrders.filter(order => order.status === 'FILLED');
-  assert.deepEqual(filled.map(order => order.price), [0.30, 0.25, 0.20, 0.15]);
-  assert.equal(context.bot.trades.length, 4);
-  assert.ok(context.bot.trades.every(trade => trade.shares === 100));
+  assert.deepEqual(filled.map(order => order.price), [0.40, 0.35, 0.30, 0.25, 0.20, 0.15]);
+  assert.equal(context.bot.trades.length, 6);
+  assert.deepEqual(context.bot.trades.map(trade => trade.shares), [300, 300, 100, 100, 100, 100]);
   assert.ok(context.bot.trades.every(trade => trade.entryPrice === trade.rungPrice));
+});
+
+test('the $0.40 and $0.35 rungs each fill their configured 300 shares', () => {
+  const context = fixture();
+  context.setAsk('UP', 0.50);
+  context.setAsk('DOWN', 0.60);
+  context.bot.evaluate(context.getNow());
+
+  context.setNow(context.getNow() + 500);
+  context.setAsk('UP', 0.39);
+  context.bot.evaluate(context.getNow());
+  assert.deepEqual(context.bot.trades.map(trade => [trade.rungPrice, trade.shares]), [[0.40, 300]]);
+
+  context.setNow(context.getNow() + 500);
+  context.setAsk('UP', 0.34);
+  context.bot.evaluate(context.getNow());
+  assert.deepEqual(context.bot.trades.map(trade => [trade.rungPrice, trade.shares]), [
+    [0.40, 300], [0.35, 300],
+  ]);
+  assert.equal(context.bot.sidePositionSnapshot('UP', context.getNow()).totalCost, 225);
 });
 
 test('unfilled limits expire at window end and filled shares await original-market resolution', async () => {
@@ -259,6 +284,39 @@ test('a restart restores the selected side, resting orders, filled shares, and o
   assert.equal(restored.bot.trades[0].status, 'OPEN');
   assert.equal(restored.bot.trades[0].marketId, context.bot.trades[0].marketId);
   assert.equal(restored.bot.ladderOrders.filter(order => order.status === 'RESTING').length, 5);
+});
+
+test('the current v1 window keeps its old decision, fills, and six resting orders during upgrade', () => {
+  const context = fixture();
+  context.setAsk('UP', 0.50);
+  context.setAsk('DOWN', 0.60);
+  context.bot.evaluate(context.getNow());
+  context.setNow(context.getNow() + 500);
+  context.setAsk('UP', 0.29);
+  context.bot.evaluate(context.getNow());
+  const saved = context.bot.persistentStateSnapshot();
+  saved.strategyVersion = 'btc-15m-candle-score-limit-ladder-v1';
+  saved.sideStates.UP.rungs = saved.sideStates.UP.rungs
+    .filter(rung => [0.30, 0.25, 0.20, 0.15, 0.10, 0.05].includes(rung.price));
+  saved.ladderOrders = saved.ladderOrders
+    .filter(order => [0.30, 0.25, 0.20, 0.15, 0.10, 0.05].includes(order.price));
+  saved.modelResult = {
+    ...saved.modelResult,
+    factors: [...saved.modelResult.factors, {
+      timeframe: '4h', direction: 'DOWN', points: -2, explanation: 'Prior 4h score.',
+    }],
+  };
+
+  const restored = fixture();
+  restored.setNow(context.getNow());
+  restored.bot.restoreState(saved);
+
+  assert.equal(restored.bot.selectedSide, 'UP');
+  assert.equal(restored.bot.trades[0].status, 'OPEN');
+  assert.equal(restored.bot.ladderOrders.length, 6);
+  assert.equal(restored.bot.ladderOrders.find(order => order.price === 0.30).status, 'FILLED');
+  assert.equal(restored.bot.sideStates.UP.rungs.find(rung => rung.price === 0.40).status, 'AVAILABLE');
+  assert.match(restored.bot.modelResult.scorePolicyNote, /take effect next window/);
 });
 
 test('old strategy open positions are preserved for resolution during version migration', () => {

@@ -2,9 +2,9 @@
 
 const BINANCE_DATA = 'https://data-api.binance.vision/api/v3/klines';
 const TIMEFRAMES = Object.freeze([
-  { key: '15m', interval: '15m', durationMs: 15 * 60_000, limit: 64 },
-  { key: '1h', interval: '1h', durationMs: 60 * 60_000, limit: 32 },
-  { key: '4h', interval: '4h', durationMs: 4 * 60 * 60_000, limit: 16 },
+  { key: '15m', interval: '15m', durationMs: 15 * 60_000, limit: 64, required: true },
+  { key: '1h', interval: '1h', durationMs: 60 * 60_000, limit: 32, required: true },
+  { key: '4h', interval: '4h', durationMs: 4 * 60 * 60_000, limit: 16, required: false },
 ]);
 
 function parseKlines(rows, durationMs, now) {
@@ -50,6 +50,7 @@ class BinanceMultiTimeframeFeed {
     this.refreshInFlight = null;
     this.status = 'WAITING';
     this.error = null;
+    this.contextError = null;
     this.lastUpdatedAt = null;
     this.candles = { '15m': [], '1h': [], '4h': [] };
   }
@@ -99,11 +100,15 @@ class BinanceMultiTimeframeFeed {
         candles: await this.fetchTimeframe(timeframe),
       })));
       const failures = [];
-      for (const result of results) {
+      const contextFailures = [];
+      for (const [index, result] of results.entries()) {
         if (result.status === 'fulfilled') {
           this.candles[result.value.key] = result.value.candles;
         } else {
-          failures.push(result.reason?.message || 'A Binance candle request failed.');
+          const timeframe = TIMEFRAMES[index];
+          const message = result.reason?.message || `A Binance ${timeframe.interval} candle request failed.`;
+          if (timeframe.required) failures.push(message);
+          else contextFailures.push(message);
         }
       }
       if (failures.length) {
@@ -114,6 +119,7 @@ class BinanceMultiTimeframeFeed {
       this.lastUpdatedAt = this.now();
       this.status = 'READY';
       this.error = null;
+      this.contextError = contextFailures.join(' ') || null;
       return true;
     })().finally(() => {
       this.refreshInFlight = null;
@@ -138,6 +144,7 @@ class BinanceMultiTimeframeFeed {
       source: 'Binance public klines',
       status: this.status,
       error: this.error,
+      contextError: this.contextError,
       lastUpdatedAt: this.lastUpdatedAt,
       ageMs: this.lastUpdatedAt == null
         ? null : Math.max(0, this.now() - this.lastUpdatedAt),

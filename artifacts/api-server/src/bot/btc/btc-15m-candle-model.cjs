@@ -184,11 +184,11 @@ function analyze15mWindow({ candles, windowStart, feedUpdatedAt, now = Date.now(
   const history15m = closedBefore(candles?.['15m'], windowStart);
   const history1h = closedBefore(candles?.['1h'], windowStart);
   const history4h = closedBefore(candles?.['4h'], windowStart);
-  if (history15m.length < 21 || !history1h.length || !history4h.length) {
+  if (history15m.length < 21 || !history1h.length) {
     return {
       status: 'WAITING_DATA',
       side: null,
-      reason: 'Waiting for 20 earlier 15-minute candles and closed 1-hour and 4-hour candles.',
+      reason: 'Waiting for 20 earlier closed 15-minute candles and a closed 1-hour candle.',
       slot,
       available: { '15m': history15m.length, '1h': history1h.length, '4h': history4h.length },
     };
@@ -207,10 +207,10 @@ function analyze15mWindow({ candles, windowStart, feedUpdatedAt, now = Date.now(
   const trends = [
     describeTrend('15m', last15m),
     describeTrend('1h', history1h.at(-1)),
-    describeTrend('4h', history4h.at(-1)),
   ];
   const meanReversion = assessMeanReversion(history15m);
   const score = trends.reduce((sum, item) => sum + item.points, 0) + meanReversion.points;
+  const context4h = history4h.length ? candleSummary(history4h.at(-1)) : null;
   const side = score >= SCORE_THRESHOLD ? 'UP'
     : score <= -SCORE_THRESHOLD ? 'DOWN' : null;
   const factors = [
@@ -222,6 +222,14 @@ function analyze15mWindow({ candles, windowStart, feedUpdatedAt, now = Date.now(
       explanation: meanReversion.explanation,
       zScore: meanReversion.zScore,
       rangeRatio: meanReversion.rangeRatio,
+    },
+    {
+      timeframe: '4h context only',
+      direction: context4h?.direction || 'UNAVAILABLE',
+      points: 0,
+      explanation: context4h
+        ? 'Shown for background only; the 4-hour candle is excluded from the score.'
+        : 'No closed 4-hour candle is available; it is not required for a decision.',
     },
     {
       timeframe: 'Hour slot',
@@ -244,7 +252,7 @@ function analyze15mWindow({ candles, windowStart, feedUpdatedAt, now = Date.now(
     inputs: {
       '15m': candleSummary(last15m),
       '1h': candleSummary(history1h.at(-1)),
-      '4h': candleSummary(history4h.at(-1)),
+      '4h': context4h,
       meanReversion,
       historyCount: { '15m': history15m.length, '1h': history1h.length, '4h': history4h.length },
     },

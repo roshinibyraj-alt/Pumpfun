@@ -7,14 +7,25 @@ const {
 const { BinanceMultiTimeframeFeed } = require('./binance-multitimeframe-feed.cjs');
 const { analyze15mWindow } = require('./btc-15m-candle-model.cjs');
 
-const RUNG_PRICES = Object.freeze([0.30, 0.25, 0.20, 0.15, 0.10, 0.05]);
+const RUNG_SPECS = Object.freeze([
+  Object.freeze({ price: 0.40, shares: 300 }),
+  Object.freeze({ price: 0.35, shares: 300 }),
+  Object.freeze({ price: 0.30, shares: 100 }),
+  Object.freeze({ price: 0.25, shares: 100 }),
+  Object.freeze({ price: 0.20, shares: 100 }),
+  Object.freeze({ price: 0.15, shares: 100 }),
+  Object.freeze({ price: 0.10, shares: 100 }),
+  Object.freeze({ price: 0.05, shares: 100 }),
+]);
+const RUNG_PRICES = Object.freeze(RUNG_SPECS.map(rung => rung.price));
 const SHARES_PER_RUNG = 100;
 const EPSILON = 1e-8;
 const HISTORY_RESET_REQUEST_ID = 'pumpfun-btc-15m-candle-ladder-reset-20261121';
+const PREVIOUS_STRATEGY_VERSION = 'btc-15m-candle-score-limit-ladder-v1';
 
 const CONFIG = Object.freeze({
   ...BASE_CONFIG,
-  STRATEGY_VERSION: 'btc-15m-candle-score-limit-ladder-v1',
+  STRATEGY_VERSION: 'btc-15m-candle-score-limit-ladder-v2',
   WINDOW_MS: 15 * 60 * 1000,
   BASE_ENTRY_SHARES: 0,
   RUNG_PRICES,
@@ -24,16 +35,21 @@ const CONFIG = Object.freeze({
 });
 
 const MAX_LADDER_COST = RUNG_PRICES.reduce(
-  (sum, price) => sum + price * SHARES_PER_RUNG,
+  (sum, price) => sum + price * RUNG_SPECS.find(rung => rung.price === price).shares,
   0,
 );
 
-function newOrder(price, side, windowStart, placedAt, initialAsk) {
+function sharesForRung(price) {
+  return RUNG_SPECS.find(rung => Math.abs(rung.price - price) < EPSILON)?.shares
+    ?? SHARES_PER_RUNG;
+}
+
+function newOrder(price, side, windowStart, placedAt, initialAsk, requestedShares) {
   return {
     id: `btc-15m-order-${windowStart}-${side}-${Math.round(price * 100)}`,
     side,
     price,
-    requestedShares: SHARES_PER_RUNG,
+    requestedShares,
     filledShares: 0,
     status: 'RESTING',
     placedAt,
@@ -85,11 +101,21 @@ class Btc15mCandleLadderBot extends BtcDoubleRungBot {
   }
 
   restoreState(state) {
-    super.restoreState(state);
+    const compatiblePreviousStrategy = state.strategyVersion === PREVIOUS_STRATEGY_VERSION;
+    const stateForRestore = compatiblePreviousStrategy
+      ? { ...state, strategyVersion: this.config.STRATEGY_VERSION }
+      : state;
+    super.restoreState(stateForRestore);
     const currentStart = Math.floor(this.now() / this.config.WINDOW_MS) * this.config.WINDOW_MS;
-    if (state.strategyVersion !== this.config.STRATEGY_VERSION
+    if ((state.strategyVersion !== this.config.STRATEGY_VERSION && !compatiblePreviousStrategy)
       || Number(state.windowStart) !== currentStart) return;
     this.modelResult = state.modelResult || null;
+    if (compatiblePreviousStrategy && this.modelResult) {
+      this.modelResult = {
+        ...this.modelResult,
+        scorePolicyNote: 'This active window keeps its original decision and resting orders. The 15m/1h-only score and updated rung sizes take effect next window.',
+      };
+    }
     this.modelDecided = Boolean(state.modelDecided);
     this.selectedSide = state.selectedSide === 'UP' || state.selectedSide === 'DOWN'
       ? state.selectedSide : null;
@@ -171,24 +197,25 @@ class Btc15mCandleLadderBot extends BtcDoubleRungBot {
         this.selectedSide = result.side;
         const initialAsk = this.quoteIsFresh(this.selectedSide, now)
           ? Number(this.quotes[this.selectedSide].bestAsk) : null;
-        this.ladderOrders = RUNG_PRICES.map(price =>
-          newOrder(price, this.selectedSide, this.windowStart, now, initialAsk));
+        this.ladderOrders = RUNG_SPECS.map(({ price, shares }) =>
+          newOrder(price, this.selectedSide, this.windowStart, now, initialAsk, shares));
         for (const rung of this.sideStates[this.selectedSide].rungs) {
+          const rungSpec = RUNG_SPECS.find(item => item.price === rung.price);
           rung.status = 'RESTING';
-          rung.requestedShares = SHARES_PER_RUNG;
+          rung.requestedShares = rungSpec?.shares ?? SHARES_PER_RUNG;
           rung.triggeredAt = now;
           rung.tradeIds = [];
         }
         this.log(
           'MODEL_SIGNAL',
-          `${result.side} selected for the 15-minute window with an evidence score of ${result.score > 0 ? '+' : ''}${result.score}; six 100-share paper limit orders are resting.`,
+          `${result.side} selected for the 15-minute window with an evidence score of ${result.score > 0 ? '+' : ''}${result.score}; eight mixed-size paper limit orders are resting.`,
           {
             side: result.side,
             score: result.score,
             factors: result.factors,
             slot: result.slot,
             rungPrices: RUNG_PRICES,
-            sharesPerRung: SHARES_PER_RUNG,
+            rungSpecs: RUNG_SPECS,
             maximumLadderCost: MAX_LADDER_COST,
           },
         );
@@ -379,11 +406,12 @@ class Btc15mCandleLadderBot extends BtcDoubleRungBot {
       executionMode: 'PAPER ONLY',
       entryOrderType: 'RESTING LIMIT (PAPER SIMULATION)',
       entryPolicy: 'One model-selected side per 15-minute window; no entry on the opposite side.',
-      model: 'Closed Binance 15m, 1h, and 4h candles; 15m extension/rejection mean-reversion check; UTC hour slot shown as context.',
+      model: 'Closed Binance 15m and 1h candles plus a 15m extension/rejection mean-reversion check; 4h is context only and contributes zero score.',
       rungPrices: RUNG_PRICES,
+      rungSpecs: RUNG_SPECS,
       sharesPerRung: SHARES_PER_RUNG,
       maxLadderCost: MAX_LADDER_COST,
-      fillRule: 'A fresh Polymarket best ask must touch or cross down through a rung after it is placed. The full 100 shares are recorded at exactly the rung price; an ask already below the rung does not fill it immediately.',
+      fillRule: 'A fresh Polymarket best ask must touch or cross down through a rung after it is placed. Each rung records its configured full share amount at exactly the limit price; an ask already below the rung does not fill it immediately.',
       orderExpiry: 'Unfilled limits are cancelled at the 15-minute window end.',
       exitPolicy: 'Filled shares are held for the exact original Polymarket market resolution; no take-profit or stop-loss.',
       resolutionSource: 'Official resolution of the original Polymarket market.',
@@ -403,6 +431,7 @@ module.exports = {
   CONFIG,
   MAX_LADDER_COST,
   RUNG_PRICES,
+  RUNG_SPECS,
   SHARES_PER_RUNG,
   HISTORY_RESET_REQUEST_ID,
 };
