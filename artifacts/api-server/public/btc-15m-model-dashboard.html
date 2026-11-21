@@ -344,15 +344,20 @@
         const orders = Array.isArray(state.orderLadder) ? state.orderLadder : [];
         const side = state.selectedSide || "—";
         $("ladderSide").textContent = `SIDE ${side}`;
-        $("ladderCaption").textContent = side === "—"
-          ? "No orders until the model selects a side."
-          : `All eight limits are on ${side}; no opposite-side orders this window.`;
-        const rungs = state.strategy?.rungSpecs || [
+        $("ladderCaption").textContent = state.model?.scorePolicyNote && side !== "—"
+          ? `This window keeps its six earlier limits on ${side}; the updated eight-rung plan starts next window.`
+          : side === "—"
+            ? "No orders until the model selects a side."
+            : `All eight limits are on ${side}; no opposite-side orders this window.`;
+        const configuredRungs = state.strategy?.rungSpecs || [
           {price:0.40,shares:300},{price:0.35,shares:300},
           {price:0.30,shares:100},{price:0.25,shares:100},
           {price:0.20,shares:100},{price:0.15,shares:100},
           {price:0.10,shares:100},{price:0.05,shares:100},
         ];
+        const rungs = orders.length
+          ? orders.map(order => ({ price: order.price, shares: order.requestedShares }))
+          : configuredRungs;
         $("orders").innerHTML = rungs.map(rung => {
           const order = orders.find(item => Math.abs(Number(item.price) - Number(rung.price)) < 1e-8);
           return orderCard(order, side, rung.shares);
