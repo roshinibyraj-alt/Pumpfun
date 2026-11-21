@@ -114,7 +114,7 @@ test("buys 10 shares on the side with verified ask absorption and price confirma
   assert.equal(context.bot.snapshot().absorption.lastDecision.status, "BUY_FILLED");
 });
 
-test("measures ask depth across $0.15-$0.85 and caps the selected best ask below $0.55", () => {
+test("measures ask depth across $0.15-$0.85 without limiting the entry price", () => {
   const context = fixture();
   context.setBook("UP", {
     asks: [
@@ -129,14 +129,15 @@ test("measures ask depth across $0.15-$0.85 and caps the selected best ask below
   context.setBook("DOWN");
   assert.equal(context.bot.askDepthInBand("UP").depth, 60);
 
-  context.setBook("UP", { asks: [{ price: 0.54, size: 40 }], bids: [{ price: 0.53, size: 100 }] });
-  context.trade("UP", { price: 0.54, shares: 20 });
+  context.setBook("UP", { asks: [{ price: 0.75, size: 40 }], bids: [{ price: 0.74, size: 100 }] });
+  context.trade("UP", { price: 0.75, shares: 20 });
 
   assert.equal(context.bot.trades.length, 1);
   assert.equal(context.bot.trades[0].side, "UP");
+  assert.equal(context.bot.trades[0].entryPrice, 0.75);
   assert.equal(context.bot.snapshot().strategy.askBand.min, 0.15);
   assert.equal(context.bot.snapshot().strategy.askBand.max, 0.85);
-  assert.equal(context.bot.snapshot().strategy.maxEntryBestAsk, 0.55);
+  assert.equal("maxEntryBestAsk" in context.bot.snapshot().strategy, false);
 });
 
 test("allows a qualifying entry below the $0.50 pivot", () => {
@@ -154,18 +155,18 @@ test("allows a qualifying entry below the $0.50 pivot", () => {
   assert.equal(context.bot.trades[0].entryPrice, 0.49);
 });
 
-test("rejects a selected side when its best ask is exactly $0.55", () => {
+test("allows a qualifying entry above the former $0.55 ask gate", () => {
   const context = fixture();
   context.seedBooks();
+  context.bot.absorptionSides.UP.previousBestAsk = 0.74;
   context.setNow(START + 9_000);
-  context.setBook("UP", { asks: [{ price: 0.55, size: 80 }], bids: [{ price: 0.54, size: 100 }] });
+  context.setBook("UP", { asks: [{ price: 0.76, size: 80 }], bids: [{ price: 0.75, size: 100 }] });
   context.setBook("DOWN");
   context.setNow(START + 9_500);
-  context.trade("UP", { price: 0.55, shares: 20 });
+  context.trade("UP", { price: 0.76, shares: 20 });
 
-  assert.equal(context.bot.trades.length, 0);
-  assert.equal(context.bot.snapshot().absorption.lastDecision.status, "NO_SIGNAL");
-  assert.match(context.bot.snapshot().absorption.lastDecision.sides.UP.reason, /below \$0\.55/);
+  assert.equal(context.bot.trades.length, 1);
+  assert.equal(context.bot.trades[0].entryPrice, 0.76);
 });
 
 test("book-depth disappearance without buy-side trade prints is not treated as absorption", () => {
@@ -340,7 +341,7 @@ test("the approved deployment reset seeds one fresh ledger for this strategy ver
   };
   await bot.beforeLoadState();
 
-  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-best-ask-under-055-reset-20261122");
+  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-any-price-reset-20261122");
   assert.equal(resetState.strategyVersion, bot.config.STRATEGY_VERSION);
   assert.equal(resetState.trades.length, 0);
   assert.equal(resetState.cash, bot.config.STARTING_CAPITAL);
