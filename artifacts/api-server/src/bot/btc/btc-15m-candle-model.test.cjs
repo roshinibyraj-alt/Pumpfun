@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { analyze15mWindow } = require('./btc-15m-candle-model.cjs');
+const { analyze15mWindow, assessCandleStreak } = require('./btc-15m-candle-model.cjs');
 const { parseKlines } = require('./binance-multitimeframe-feed.cjs');
 
 const FIFTEEN_MINUTES = 15 * 60_000;
@@ -106,6 +106,55 @@ test('flat and conflicting evidence results in no order side', () => {
   assert.equal(result.status, 'NO_SIGNAL');
   assert.equal(result.side, null);
   assert.equal(result.score, 0);
+});
+
+test('two consecutive green 15m closes select UP even below the score threshold', () => {
+  const windowStart = 21 * FIFTEEN_MINUTES;
+  const candles = flatHistory(windowStart);
+  candles['15m'][18] = candle(windowStart - 3 * FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.1, 99.8, 99.9);
+  candles['15m'][19] = candle(windowStart - 2 * FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.1, 100, 100.1);
+  candles['15m'][20] = candle(windowStart - FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.1, 100, 100.1);
+
+  const result = analyze15mWindow({
+    candles, windowStart, feedUpdatedAt: windowStart, now: windowStart + 500,
+  });
+
+  assert.equal(result.score, 1);
+  assert.equal(result.baseSide, null);
+  assert.equal(result.status, 'SIGNAL');
+  assert.equal(result.side, 'UP');
+  assert.equal(result.signalSource, 'CANDLE_STREAK_SELECTOR');
+  assert.equal(result.inputs.candleStreak.count, 2);
+});
+
+test('a red streak overrides an opposing evidence-score side without blocking the window', () => {
+  const windowStart = 21 * FIFTEEN_MINUTES;
+  const candles = flatHistory(windowStart);
+  candles['15m'][19] = candle(windowStart - 2 * FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.1, 99.8, 99.9);
+  candles['15m'][20] = candle(windowStart - FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.2, 90, 95);
+  candles['1h'][0] = candle(windowStart - 60 * 60_000, 60 * 60_000, 100, 100.3, 99.9, 100.2);
+
+  const result = analyze15mWindow({
+    candles, windowStart, feedUpdatedAt: windowStart, now: windowStart + 500,
+  });
+
+  assert.equal(result.baseSide, 'UP');
+  assert.equal(result.score, 2);
+  assert.equal(result.status, 'SIGNAL');
+  assert.equal(result.side, 'DOWN');
+  assert.equal(result.signalSource, 'CANDLE_STREAK_SELECTOR');
+});
+
+test('a single colored candle does not activate the streak selector', () => {
+  const history = flatHistory(21 * FIFTEEN_MINUTES)['15m'];
+  history[20] = candle(20 * FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.2, 99.9, 100.1);
+
+  const result = assessCandleStreak(history);
+
+  assert.equal(result.status, 'INACTIVE');
+  assert.equal(result.side, null);
+  assert.equal(result.count, 1);
+  assert.equal(result.direction, 'UP');
 });
 
 test('stale candle snapshots and an old last 15m close do not generate a signal', () => {
