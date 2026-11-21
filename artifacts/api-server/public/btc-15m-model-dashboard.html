@@ -156,7 +156,7 @@
         <div>
           <div class="eyebrow">BTC · Polymarket 15-minute market</div>
           <h1>Use candle evidence.<br>Trade one side, not a guess.</h1>
-          <p>At each new window, score the latest closed Binance 15-minute and 1-hour candles. A stretched 15-minute move with a rejection wick can add a mean-reversion vote. The 4-hour candle is context only and never changes the score.</p>
+          <p>At each new window, score the latest closed Binance 15-minute and 1-hour candles. Two or more consecutive green 15-minute closes select UP; two or more red closes select DOWN. The first red close after at least two consecutive green candles selects DOWN as a reversal. Otherwise, the existing score chooses the side. A stretched move with a rejection wick can add a mean-reversion vote. The 4-hour candle is context only.</p>
         </div>
         <div class="clock"><div class="label">Window closes in</div><strong id="countdown">--:--</strong><small id="windowLabel">Waiting for market</small></div>
       </section>
@@ -213,7 +213,7 @@
 
       <div class="section-head"><div><h2>Strategy rules</h2><p>What the bot does and what this paper simulation does not claim.</p></div></div>
       <section class="grid rules">
-        <div class="rule"><b>Model decision</b>15m candle ±1 and 1h candle ±1. The 4h candle is context only and adds zero points. A strong 15m extension-and-rejection can add ±2 mean-reversion points. Trade only at a total score of +2 or more for UP, or −2 or less for DOWN. Otherwise wait.</div>
+        <div class="rule"><b>Model and side selector</b>15m candle ±1 and 1h candle ±1. The 4h candle is context only and adds zero points. A strong 15m extension-and-rejection can add ±2 mean-reversion points. Two or more consecutive green closes select UP; two or more red closes select DOWN. The first red close after at least two consecutive green candles selects DOWN as a reversal. These candle rules override the score's side. Otherwise, use the existing ±2 score threshold. The selector does not veto a side.</div>
         <div class="rule"><b>Limit ladder</b>One selected side receives 300-share paper limits at $0.40 and $0.35, then 100-share limits at $0.30, $0.25, $0.20, $0.15, $0.10, and $0.05. Maximum planned cost is $330. The other side receives no orders.</div>
         <div class="rule"><b>Fill and exit</b>A fresh best ask must touch or cross down through a rung after placement; the paper fill is recorded at exactly that rung. Filled positions hold to resolution; no TP or stop-loss.</div>
       </section>

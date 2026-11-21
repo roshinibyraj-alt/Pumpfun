@@ -121,7 +121,7 @@ test('first startup resets the old paper ledger once before loading state', asyn
     async resetHistoryOnce(requestId, state) {
       calls.push('reset');
       assert.equal(requestId, HISTORY_RESET_REQUEST_ID);
-      assert.equal(state.strategyVersion, 'btc-15m-candle-score-limit-ladder-v2');
+      assert.equal(state.strategyVersion, 'btc-15m-candle-score-limit-ladder-v4');
       assert.equal(state.startingCapital, 3_000);
       assert.deepEqual(state.trades, []);
       return true;
@@ -316,7 +316,49 @@ test('the current v1 window keeps its old decision, fills, and six resting order
   assert.equal(restored.bot.ladderOrders.length, 6);
   assert.equal(restored.bot.ladderOrders.find(order => order.price === 0.30).status, 'FILLED');
   assert.equal(restored.bot.sideStates.UP.rungs.find(rung => rung.price === 0.40).status, 'AVAILABLE');
-  assert.match(restored.bot.modelResult.scorePolicyNote, /take effect next window/);
+  assert.match(restored.bot.modelResult.scorePolicyNote, /effect next window/);
+});
+
+test('the current v2 window keeps its decision and orders during streak-selector upgrade', () => {
+  const context = fixture();
+  context.setAsk('UP', 0.50);
+  context.setAsk('DOWN', 0.60);
+  context.bot.evaluate(context.getNow());
+  context.setNow(context.getNow() + 500);
+  context.setAsk('UP', 0.29);
+  context.bot.evaluate(context.getNow());
+  const saved = context.bot.persistentStateSnapshot();
+  saved.strategyVersion = 'btc-15m-candle-score-limit-ladder-v2';
+
+  const restored = fixture();
+  restored.setNow(context.getNow());
+  restored.bot.restoreState(saved);
+
+  assert.equal(restored.bot.selectedSide, 'UP');
+  assert.equal(restored.bot.trades.length, context.bot.trades.length);
+  assert.deepEqual(restored.bot.ladderOrders, context.bot.ladderOrders);
+  assert.match(restored.bot.modelResult.scorePolicyNote, /reversal selector takes effect next window/);
+});
+
+test('the current v3 window preserves its decision and orders during reversal-selector upgrade', () => {
+  const context = fixture();
+  context.setAsk('UP', 0.50);
+  context.setAsk('DOWN', 0.60);
+  context.bot.evaluate(context.getNow());
+  context.setNow(context.getNow() + 500);
+  context.setAsk('UP', 0.29);
+  context.bot.evaluate(context.getNow());
+  const saved = context.bot.persistentStateSnapshot();
+  saved.strategyVersion = 'btc-15m-candle-score-limit-ladder-v3';
+
+  const restored = fixture();
+  restored.setNow(context.getNow());
+  restored.bot.restoreState(saved);
+
+  assert.equal(restored.bot.selectedSide, 'UP');
+  assert.equal(restored.bot.trades.length, context.bot.trades.length);
+  assert.deepEqual(restored.bot.ladderOrders, context.bot.ladderOrders);
+  assert.match(restored.bot.modelResult.scorePolicyNote, /reversal selector takes effect next window/);
 });
 
 test('old strategy open positions are preserved for resolution during version migration', () => {
