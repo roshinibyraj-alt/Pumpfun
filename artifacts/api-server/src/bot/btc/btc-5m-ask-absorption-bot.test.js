@@ -257,3 +257,22 @@ test("the new strategy ignores any leftover environment history-reset request", 
   const { bot } = fixture();
   assert.equal(bot.shouldApplyEnvironmentHistoryReset(), false);
 });
+
+test("the approved deployment reset seeds one fresh ledger for this strategy version", async () => {
+  const { bot } = fixture();
+  let savedRequestId = null;
+  let resetState = null;
+  bot.stateStore = {
+    async resetHistoryOnce(requestId, state) {
+      savedRequestId = requestId;
+      resetState = state;
+      return true;
+    },
+  };
+  await bot.beforeLoadState();
+
+  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-reset-20261122");
+  assert.equal(resetState.strategyVersion, bot.config.STRATEGY_VERSION);
+  assert.equal(resetState.trades.length, 0);
+  assert.equal(resetState.cash, bot.config.STARTING_CAPITAL);
+});

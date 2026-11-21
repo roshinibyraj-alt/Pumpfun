@@ -81,9 +81,19 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
   }
 
   shouldApplyEnvironmentHistoryReset() {
-    // This strategy replacement preserves the existing paper ledger. An old
-    // one-time reset variable must not erase that history during startup.
+    // Ignore any leftover reset variable from an earlier deployment. The
+    // newly approved reset is performed once through beforeLoadState below.
     return false;
+  }
+
+  async beforeLoadState() {
+    if (typeof this.stateStore?.resetHistoryOnce !== 'function') {
+      throw new Error('The approved paper history reset requires the durable reset operation.');
+    }
+    await this.stateStore.resetHistoryOnce(
+      'pumpfun-btc-5m-ask-absorption-reset-20261122',
+      this.emptyHistoryState(),
+    );
   }
 
   restoreState(state) {
