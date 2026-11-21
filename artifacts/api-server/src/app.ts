@@ -74,6 +74,8 @@ app.use("/api", router);
 
 app.get("/", (_req, res, next) => {
   const dashboardPath = [
+    path.resolve(process.cwd(), "public/btc-5m-ask-absorption-dashboard.html"),
+    path.resolve(process.cwd(), "artifacts/api-server/public/btc-5m-ask-absorption-dashboard.html"),
     path.resolve(process.cwd(), "public/btc-15m-model-dashboard.html"),
     path.resolve(process.cwd(), "artifacts/api-server/public/btc-15m-model-dashboard.html"),
     path.resolve(process.cwd(), "public/double-rung-dashboard.html"),

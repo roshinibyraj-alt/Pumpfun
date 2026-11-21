@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#09131f">
+  <title>BTC 5-Minute Ask Absorption Bot</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #09131f;
+      --panel: #101f30;
+      --panel-2: #14283b;
+      --line: #23384b;
+      --text: #f3f7fc;
+      --muted: #91a4b8;
+      --green: #34d399;
+      --red: #fb7185;
+      --blue: #60a5fa;
+      --amber: #fbbf24;
+      --radius: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(ellipse at 50% -20%, #183550 0, var(--bg) 55%);
+      color: var(--text);
+      font: 500 15px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { width: min(100%, 760px); margin: 0 auto; padding: 16px 13px 36px; }
+    .header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 4px 2px 16px; }
+    h1 { margin: 0; font-size: 21px; letter-spacing: -.035em; }
+    .sub { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .pill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: #102236; padding: 7px 10px; border-radius: 999px; color: var(--muted); font-size: 11px; font-weight: 800; white-space: nowrap; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 10px currentColor; }
+    .dot.ok { background: var(--green); }
+    .dot.bad { background: var(--red); }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .card { border: 1px solid var(--line); background: linear-gradient(145deg, rgba(20,40,59,.98), rgba(14,28,43,.98)); border-radius: var(--radius); padding: 15px; box-shadow: 0 12px 30px rgba(0,0,0,.16); }
+    .full { margin-top: 11px; }
+    .label { color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .045em; text-transform: uppercase; }
+    .value { margin-top: 4px; font-size: 22px; font-weight: 900; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+    .small-value { font-size: 16px; }
+    .muted { color: var(--muted); }
+    .green { color: var(--green); }
+    .red { color: var(--red); }
+    .amber { color: var(--amber); }
+    .blue { color: var(--blue); }
+    .top-status { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .window-line { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 10px; color: var(--muted); font-size: 12px; }
+    .decision { margin-top: 12px; border-radius: 14px; padding: 13px; border: 1px solid #31506c; background: #0d1b2a; }
+    .decision.signal { border-color: rgba(52,211,153,.55); background: rgba(16,65,57,.26); }
+    .decision.wait { border-color: rgba(251,191,36,.45); }
+    .decision-title { display: flex; justify-content: space-between; gap: 8px; font-weight: 900; }
+    .decision-reason { margin-top: 6px; color: #c2d0df; font-size: 13px; }
+    .side-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 11px; }
+    .side-card { padding: 14px; border-radius: var(--radius); background: var(--panel); border: 1px solid var(--line); min-width: 0; }
+    .side-card.up { border-top: 3px solid var(--green); }
+    .side-card.down { border-top: 3px solid var(--red); }
+    .side-heading { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-weight: 950; font-size: 18px; }
+    .tag { border-radius: 99px; padding: 4px 8px; font-size: 10px; font-weight: 900; letter-spacing: .03em; background: #20384c; color: #c9d8e8; text-transform: uppercase; }
+    .side-card.up .tag { color: #86efac; background: rgba(52,211,153,.13); }
+    .side-card.down .tag { color: #fda4af; background: rgba(251,113,133,.13); }
+    .quote-row { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 11px; }
+    .quote-box, .metric { min-width: 0; padding: 9px; border-radius: 12px; background: #0b1826; }
+    .quote-box b { display: block; margin-top: 2px; font-size: 18px; font-weight: 900; font-variant-numeric: tabular-nums; }
+    .quote-box span, .metric span { color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 7px; }
+    .metric b { display: block; margin-top: 3px; font-size: 14px; font-weight: 850; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .section-title { margin: 0 0 11px; font-size: 16px; font-weight: 950; }
+    .list { display: grid; gap: 7px; }
+    .row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid rgba(145,164,184,.14); font-size: 12px; }
+    .row:first-child { border-top: 0; padding-top: 0; }
+    .row-main { min-width: 0; }
+    .row-title { font-weight: 850; }
+    .row-sub { color: var(--muted); font-size: 11px; margin-top: 2px; overflow-wrap: anywhere; }
+    .row-end { text-align: right; white-space: nowrap; font-weight: 850; }
+    .empty { padding: 8px 0; color: var(--muted); font-size: 12px; }
+    details { margin-top: 11px; }
+    summary { cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 900; }
+    summary::-webkit-details-marker { display: none; }
+    summary::after { content: "+"; color: var(--blue); font-size: 20px; line-height: 1; }
+    details[open] summary::after { content: "−"; }
+    .rules { margin: 12px 0 0; padding-left: 18px; color: #c2d0df; font-size: 12px; }
+    .rules li { margin: 7px 0; }
+    .footer { text-align: center; color: #73869a; font-size: 10px; margin: 14px 0 0; }
+    @media (min-width: 620px) {
+      main { padding: 24px 18px 42px; }
+      h1 { font-size: 25px; }
+      .value { font-size: 25px; }
+      .side-card { padding: 17px; }
+    }
+    @media (max-width: 370px) {
+      main { padding-left: 9px; padding-right: 9px; }
+      .grid, .side-grid { gap: 7px; }
+      .card, .side-card { padding: 11px; }
+      .value { font-size: 19px; }
+      .quote-box b { font-size: 16px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header class="header">
+    <div>
+      <h1>BTC Ask Absorption</h1>
+      <p class="sub">5-minute paper bot · UP and DOWN tracked separately</p>
+    </div>
+    <div class="pill"><i id="statusDot" class="dot"></i><span id="botStatus">CONNECTING</span></div>
+  </header>
+
+  <section class="grid" aria-label="Account overview">
+    <article class="card"><div class="label">Equity</div><div id="equity" class="value">$—</div></article>
+    <article class="card"><div class="label">Cash</div><div id="cash" class="value">$—</div></article>
+    <article class="card"><div class="label">Realized P&amp;L</div><div id="realized" class="value">$—</div></article>
+    <article class="card"><div class="label">Open shares</div><div id="openShares" class="value">—</div></article>
+  </section>
+
+  <section class="card full">
+    <div class="top-status">
+      <div>
+        <div class="label">Current 5-minute market</div>
+        <div id="marketTitle" class="value small-value">Loading market…</div>
+      </div>
+      <div class="pill"><i id="feedDot" class="dot"></i><span id="feedStatus">CLOB FEED</span></div>
+    </div>
+    <div class="window-line"><span id="windowTimes">Waiting for window</span><b id="remaining" class="blue">—</b></div>
+    <div id="decision" class="decision wait">
+      <div class="decision-title"><span id="decisionTitle">Collecting data</span><span id="nextCheck" class="amber">—</span></div>
+      <div id="decisionReason" class="decision-reason">Waiting for a fresh order book and trade sample.</div>
+    </div>
+  </section>
+
+  <section id="sides" class="side-grid" aria-label="UP and DOWN positions"></section>
+
+  <section class="card full">
+    <h2 class="section-title">Recent trades</h2>
+    <div id="trades" class="list"><div class="empty">No entries yet.</div></div>
+  </section>
+
+  <section class="card full">
+    <h2 class="section-title">Recent bot activity</h2>
+    <div id="events" class="list"><div class="empty">Waiting for activity.</div></div>
+  </section>
+
+  <details class="card">
+    <summary>Strategy rules</summary>
+    <ul id="rules" class="rules"></ul>
+  </details>
+  <p id="updated" class="footer">Updating…</p>
+</main>
+<script>
+  const hasValue = value => value !== null && value !== undefined && value !== "";
+  const money = value => hasValue(value) && Number.isFinite(Number(value))
+    ? `$${Number(value).toFixed(2)}` : "—";
+  const number = (value, digits = 2) => hasValue(value) && Number.isFinite(Number(value))
+    ? Number(value).toLocaleString(undefined, { maximumFractionDigits: digits }) : "—";
+  const signedMoney = value => {
+    if (!hasValue(value)) return "—";
+    const amount = Number(value);
+    if (!Number.isFinite(amount)) return "—";
+    return `${amount >= 0 ? "+" : "−"}$${Math.abs(amount).toFixed(2)}`;
+  };
+  const time = value => value ? new Date(Number(value)).toLocaleTimeString([], {
+    hour: "2-digit", minute: "2-digit", second: "2-digit"
+  }) : "—";
+  const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[char]));
+  const sideCard = (side, quote, position) => {
+    const isUp = side === "UP";
+    const pnl = Number(position?.unrealizedPnl);
+    const pnlClass = Number.isFinite(pnl) ? pnl >= 0 ? "green" : "red" : "muted";
+    const ratio = Number(position?.absorptionRatio);
+    const wall = position?.largestAskLevel;
+    const status = String(position?.fillStatus || "WAITING").replaceAll("_", " ");
+    return `<article class="side-card ${isUp ? "up" : "down"}">
+      <div class="side-heading"><span>${side}</span><span class="tag">${escapeHtml(status)}</span></div>
+      <div class="quote-row">
+        <div class="quote-box"><span>Best bid</span><b>${money(quote?.bestBid)}</b></div>
+        <div class="quote-box"><span>Best ask</span><b>${money(quote?.bestAsk)}</b></div>
+      </div>
+      <div class="metrics">
+        <div class="metric"><span>Ask depth $0.45–$0.55</span><b>${number(position?.askDepth)} shares</b></div>
+        <div class="metric"><span>Largest ask level</span><b>${wall ? `${money(wall.price)} · ${number(wall.shares)} sh` : "—"}</b></div>
+        <div class="metric"><span>Buy prints / ratio</span><b>${number(position?.absorbedBuyShares)} sh · ${Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : "—"}</b></div>
+        <div class="metric"><span>Open position</span><b>${number(position?.shares)} shares</b></div>
+        <div class="metric"><span>Average cost</span><b>${position?.averageCost == null ? "—" : money(position.averageCost)}</b></div>
+        <div class="metric"><span>Floating P&amp;L</span><b class="${pnlClass}">${signedMoney(position?.unrealizedPnl)}</b></div>
+      </div>
+    </article>`;
+  };
+
+  function render(data) {
+    const account = data.account || {};
+    const strategy = data.strategy || {};
+    const absorption = data.absorption || {};
+    const up = data.sideState?.UP || {};
+    const down = data.sideState?.DOWN || {};
+    document.getElementById("botStatus").textContent = data.running
+      ? (data.status || "RUNNING").replaceAll("_", " ")
+      : "STOPPED";
+    document.getElementById("statusDot").className = `dot ${data.running ? "ok" : "bad"}`;
+    document.getElementById("equity").textContent = money(account.equity);
+    document.getElementById("cash").textContent = money(account.cash);
+    document.getElementById("realized").textContent = signedMoney(account.realizedPnl);
+    document.getElementById("realized").className = `value ${Number(account.realizedPnl) >= 0 ? "green" : "red"}`;
+    document.getElementById("openShares").textContent = number(
+      Number(up.shares || 0) + Number(down.shares || 0)
+    );
+    const feedFresh = data.websocket?.status === "CONNECTED" || data.websocket?.status === "LIVE";
+    document.getElementById("feedDot").className = `dot ${feedFresh ? "ok" : "bad"}`;
+    document.getElementById("feedStatus").textContent = (data.websocket?.status || "WAITING").replaceAll("_", " ");
+    document.getElementById("marketTitle").textContent = data.market?.title || data.market?.slug || "Loading market…";
+    const secs = data.window?.secondsRemaining;
+    document.getElementById("remaining").textContent = Number.isFinite(Number(secs))
+      ? `${Math.ceil(Number(secs))}s left` : "—";
+    document.getElementById("windowTimes").textContent = data.window?.start
+      ? `${time(data.window.start)} – ${time(data.window.end)}` : "Waiting for market";
+
+    const decision = absorption.lastDecision || {};
+    const decisionBox = document.getElementById("decision");
+    decisionBox.className = `decision ${decision.status === "BUY_FILLED" || decision.status === "BUY_PARTIAL" ? "signal" : "wait"}`;
+    document.getElementById("decisionTitle").textContent = decision.side
+      ? `${decision.status?.replaceAll("_", " ") || "SIGNAL"} · ${decision.side}`
+      : (decision.status || "COLLECTING DATA").replaceAll("_", " ");
+    document.getElementById("decisionReason").textContent = decision.reason
+      || "The bot checks ask absorption every 10 seconds.";
+    const until = Number(absorption.nextCheckInMs);
+    document.getElementById("nextCheck").textContent = Number.isFinite(until)
+      ? `Next check ${Math.ceil(until / 1000)}s` : "—";
+
+    document.getElementById("sides").innerHTML =
+      sideCard("UP", data.quotes?.UP, up) + sideCard("DOWN", data.quotes?.DOWN, down);
+
+    const trades = Array.isArray(data.trades) ? data.trades.slice(0, 12) : [];
+    document.getElementById("trades").innerHTML = trades.length ? trades.map(trade => {
+      const pnl = Number(trade.realizedPnl);
+      const resultClass = Number.isFinite(pnl) ? pnl >= 0 ? "green" : "red" : "muted";
+      const result = Number.isFinite(pnl) ? signedMoney(pnl) : (trade.status || "OPEN").replaceAll("_", " ");
+      const exit = trade.exitPrice == null ? "still open / resolution pending" : `exit ${money(trade.exitPrice)}`;
+      return `<div class="row">
+        <div class="row-main"><div class="row-title">${escapeHtml(trade.side)} · ${number(trade.shares)} shares · ${escapeHtml(trade.status)}</div>
+        <div class="row-sub">${time(trade.openedAt)} · entry ${money(trade.entryPrice)} · ${exit}</div></div>
+        <div class="row-end ${resultClass}">${result}</div>
+      </div>`;
+    }).join("") : `<div class="empty">No entries in this window yet.</div>`;
+
+    const events = Array.isArray(data.events) ? data.events.slice(0, 8) : [];
+    document.getElementById("events").innerHTML = events.length ? events.map(event => {
+      const code = String(event.type || "").toLowerCase();
+      const color = code.includes("stop") || code.includes("loss") ? "red"
+        : code.includes("take") || code.includes("filled") || code.includes("signal") ? "green" : "blue";
+      return `<div class="row"><div class="row-main"><div class="row-title ${color}">${escapeHtml(event.type || "BOT EVENT")}</div>
+        <div class="row-sub">${escapeHtml(event.message || "")}</div></div><div class="row-end muted">${time(event.at)}</div></div>`;
+    }).join("") : `<div class="empty">Waiting for activity.</div>`;
+
+    const rules = [
+      `BTC 5-minute markets only; check both sides every ${strategy.checkIntervalMs / 1000 || 10} seconds.`,
+      `Pivot $${Number(strategy.pivotPrice || 0.5).toFixed(2)}; inspect asks from $${Number(strategy.askBand?.min || 0.45).toFixed(2)} to $${Number(strategy.askBand?.max || 0.55).toFixed(2)}.`,
+      strategy.absorptionRule || "A trade requires verified buy-side trade volume, sufficient absorption, fresh books, and a price that holds above the pivot.",
+      `Each qualifying check requests ${strategy.sharesPerCheck || 10} shares on the stronger side. Paper market buys sweep visible asks, allow partial fills, and include modeled fees.`,
+      "Take-profit: a fresh best bid at $0.99 closes that side at $1 per share. Stop: an empty bid on a fresh book closes that side at $0.",
+      "Any shares still open at the end of a window wait for the original market’s official resolution."
+    ];
+    document.getElementById("rules").innerHTML = rules.map(rule => `<li>${escapeHtml(rule)}</li>`).join("");
+    document.getElementById("updated").textContent =
+      `Updated ${new Date(data.now || Date.now()).toLocaleTimeString()} · ${data.persistence?.status || "storage status unavailable"}`;
+  }
+
+  async function refresh() {
+    try {
+      const response = await fetch("/api/strategy/state", { cache: "no-store" });
+      if (!response.ok) throw new Error(`State request failed (${response.status})`);
+      render(await response.json());
+    } catch (error) {
+      document.getElementById("botStatus").textContent = "DASHBOARD ERROR";
+      document.getElementById("statusDot").className = "dot bad";
+      document.getElementById("decisionReason").textContent = error.message || "Could not load bot state.";
+    }
+  }
+  refresh();
+  setInterval(refresh, 1000);
+</script>
+</body>
+</html>

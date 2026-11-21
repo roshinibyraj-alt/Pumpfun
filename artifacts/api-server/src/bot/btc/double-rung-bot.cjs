@@ -175,9 +175,12 @@ class BtcDoubleRungBot {
         if (typeof this.beforeLoadState === 'function') {
           await this.beforeLoadState();
         }
-        const resetRequestId = String(
-          process.env.BTC_PAPER_MISPRICING_HISTORY_RESET_REQUEST_ID || '',
-        ).trim();
+        const shouldApplyEnvironmentHistoryReset =
+          typeof this.shouldApplyEnvironmentHistoryReset !== 'function'
+          || this.shouldApplyEnvironmentHistoryReset();
+        const resetRequestId = shouldApplyEnvironmentHistoryReset
+          ? String(process.env.BTC_PAPER_MISPRICING_HISTORY_RESET_REQUEST_ID || '').trim()
+          : '';
         if (resetRequestId) {
           if (typeof this.stateStore.resetHistoryOnce !== 'function') {
             throw new Error('A paper history reset was requested, but the durable store cannot reset history.');
