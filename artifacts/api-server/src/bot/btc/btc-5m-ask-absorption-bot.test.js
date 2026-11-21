@@ -150,7 +150,7 @@ test("book-depth disappearance without buy-side trade prints is not treated as a
   assert.equal(context.bot.snapshot().absorption.lastDecision.status, "NO_SIGNAL");
 });
 
-test("rolling absorption on both sides does not switch to an ambiguous second side", () => {
+test("fresh qualifying ticks can buy both sides independently", () => {
   const context = fixture();
   context.seedBooks();
   context.setNow(START + 9_500);
@@ -159,12 +159,11 @@ test("rolling absorption on both sides does not switch to an ambiguous second si
   context.trade("UP", { shares: 20 });
   context.trade("DOWN", { shares: 20 });
 
-  assert.equal(context.bot.trades.length, 1);
-  assert.equal(context.bot.trades[0].side, "UP");
-  assert.match(context.bot.snapshot().absorption.lastDecision.reason, /similar absorption/i);
+  assert.equal(context.bot.trades.length, 2);
+  assert.deepEqual(context.bot.trades.map(trade => trade.side), ["UP", "DOWN"]);
 });
 
-test("each qualifying book tick can place another 10-share buy from rolling trade flow", () => {
+test("a book tick cannot reuse already-consumed trade flow", () => {
   const context = fixture();
   context.seedBooks();
   context.setNow(START + 9_500);
@@ -175,6 +174,10 @@ test("each qualifying book tick can place another 10-share buy from rolling trad
 
   context.setNow(START + 9_600);
   context.setBook("UP");
+  assert.equal(context.bot.trades.length, 1);
+
+  context.setNow(START + 9_700);
+  context.trade("UP", { shares: 10 });
   assert.equal(context.bot.trades.length, 2);
   assert.deepEqual(context.bot.trades.map(trade => trade.requestedShares), [10, 10]);
 });
@@ -307,7 +310,7 @@ test("the approved deployment reset seeds one fresh ledger for this strategy ver
   };
   await bot.beforeLoadState();
 
-  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-reset-20261122");
+  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-fresh-flow-reset-20261122");
   assert.equal(resetState.strategyVersion, bot.config.STRATEGY_VERSION);
   assert.equal(resetState.trades.length, 0);
   assert.equal(resetState.cash, bot.config.STARTING_CAPITAL);

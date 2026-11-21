@@ -17,7 +17,7 @@ const SIDE_DOMINANCE_RATIO = 1.25;
 
 const CONFIG = Object.freeze({
   ...BASE_CONFIG,
-  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-tick-band015-085-flow10s-tp099-sl000-v2',
+  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-tick-band015-085-fresh-flow-tp099-sl000-v3',
   WINDOW_MS: 5 * 60 * 1000,
   BASE_ENTRY_SHARES: 10,
   RUNG_PRICES: Object.freeze([]),
@@ -74,6 +74,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     this.lastCheckAt = null;
     this.marketTickSequence = 0;
     this.lastProcessedTickSequence = 0;
+    this.lastConsumedTradeSequence = { UP: 0, DOWN: 0 };
     this.tradeTape = [];
     this.lastDecision = null;
     this.absorptionSides = {
@@ -93,7 +94,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       throw new Error('The approved paper history reset requires the durable reset operation.');
     }
     await this.stateStore.resetHistoryOnce(
-      'pumpfun-btc-5m-ask-absorption-reset-20261122',
+      'pumpfun-btc-5m-ask-absorption-fresh-flow-reset-20261122',
       this.emptyHistoryState(),
     );
   }
@@ -110,6 +111,10 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       ? Number(saved.lastCheckAt) : currentStart;
     this.marketTickSequence = 0;
     this.lastProcessedTickSequence = 0;
+    this.lastConsumedTradeSequence = {
+      UP: Math.max(0, Number(saved.lastConsumedTradeSequence?.UP) || 0),
+      DOWN: Math.max(0, Number(saved.lastConsumedTradeSequence?.DOWN) || 0),
+    };
     this.lastDecision = saved.lastDecision || null;
     this.absorptionSides = {
       UP: { ...emptyAbsorptionSide('UP'), ...(saved.sides?.UP || {}) },
@@ -126,6 +131,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       askAbsorption: {
         lastCheckIndex: this.lastCheckIndex,
         lastCheckAt: this.lastCheckAt,
+        lastConsumedTradeSequence: this.lastConsumedTradeSequence,
         lastDecision: this.lastDecision,
         sides: this.absorptionSides,
       },
@@ -137,6 +143,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     this.lastCheckAt = start;
     this.marketTickSequence = 0;
     this.lastProcessedTickSequence = 0;
+    this.lastConsumedTradeSequence = { UP: 0, DOWN: 0 };
     this.tradeTape = [];
     this.lastDecision = {
       status: 'WAITING',
@@ -177,7 +184,13 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
         && Number.isFinite(price) && price >= ASK_BAND_MIN && price <= ASK_BAND_MAX
         && Number.isFinite(shares) && shares > 0
         && at >= this.windowStart && at < this.windowEnd) {
-        this.tradeTape.push({ side, price, shares, at });
+        this.tradeTape.push({
+          side,
+          price,
+          shares,
+          at,
+          tickSequence: this.marketTickSequence,
+        });
         if (this.tradeTape.length > 1_000) this.tradeTape.splice(0, this.tradeTape.length - 1_000);
       }
     }
@@ -284,7 +297,9 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
 
   evaluateAbsorption(now, intervalIndex) {
     const intervalTrades = this.tradeTape.filter(trade =>
-      trade.at >= now - TRADE_FLOW_LOOKBACK_MS && trade.at <= now);
+      trade.tickSequence > this.lastConsumedTradeSequence[trade.side]
+      && trade.at >= now - TRADE_FLOW_LOOKBACK_MS
+      && trade.at <= now);
     const bothBooksReady = SIDES.every(side =>
       this.hasExecutableAskBook(side, now) && this.bookIsFresh(side, now));
 
@@ -369,6 +384,12 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
 
     let trade = null;
     if (selected) {
+      this.lastConsumedTradeSequence[selected.side] = Math.max(
+        this.lastConsumedTradeSequence[selected.side],
+        ...intervalTrades
+          .filter(item => item.side === selected.side)
+          .map(item => item.tickSequence),
+      );
       trade = this.recordMarketBuy(
         selected.side,
         this.config.BASE_ENTRY_SHARES,
@@ -463,7 +484,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       sharesPerTick: this.config.BASE_ENTRY_SHARES,
       entryOrderType: 'TAKER MARKET BUY (PAPER SIMULATION)',
       entryPolicy: 'On every qualifying Polymarket CLOB tick, buy 10 shares on the side with clearly stronger ask absorption around the $0.50 pivot.',
-      absorptionRule: 'On every CLOB tick, count recent Polymarket BUY-side trade prints from the rolling last 10 seconds and visible ask depth from $0.15 to $0.85; require at least 10 traded shares, at least 10% of starting visible ask depth, and a best ask that holds or rises from the $0.50 pivot through $0.85. If both sides qualify, the stronger ratio must be at least 1.25× the other.',
+      absorptionRule: 'On every CLOB tick, count fresh, not-yet-used Polymarket BUY-side trade prints from the rolling last 10 seconds and visible ask depth from $0.15 to $0.85; each print contributes to at most one buy. Require at least 10 traded shares, at least 10% of starting visible ask depth, and a best ask that holds or rises from the $0.50 pivot through $0.85. If both sides qualify, the stronger ratio must be at least 1.25× the other.',
       fillRule: 'Paper taker buys sweep fresh visible asks, allow partial fills, and include modeled taker fees.',
       takeProfitBid: this.config.TAKE_PROFIT_BID,
       takeProfitPayoutPerShare: this.config.TAKE_PROFIT_PAYOUT_PER_SHARE,
