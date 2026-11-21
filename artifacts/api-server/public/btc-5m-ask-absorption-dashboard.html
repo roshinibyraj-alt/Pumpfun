@@ -255,8 +255,8 @@
 
     const rules = [
       "BTC 5-minute markets only; check both sides on every Polymarket CLOB tick.",
-      `Pivot $${Number(strategy.pivotPrice || 0.5).toFixed(2)}; inspect asks from $${Number(strategy.askBand?.min || 0.15).toFixed(2)} to $${Number(strategy.askBand?.max || 0.85).toFixed(2)}.`,
-      strategy.absorptionRule || "A trade requires verified buy-side trade volume, sufficient absorption, fresh books, and a price that holds above the pivot.",
+      `The $${Number(strategy.pivotPrice || 0.5).toFixed(2)} UP/DOWN price pivot is not an entry floor. The selected side's best ask must be below $${Number(strategy.maxEntryBestAsk || 0.55).toFixed(2)}; depth is measured from $${Number(strategy.askBand?.min || 0.15).toFixed(2)} to $${Number(strategy.askBand?.max || 0.85).toFixed(2)}.`,
+      strategy.absorptionRule || "A trade requires fresh buy-side trade volume, sufficient ask absorption, and the selected side's best ask below $0.55.",
       `Each qualifying CLOB tick requests ${strategy.sharesPerTick || 10} shares on the stronger side. Paper market buys sweep visible asks, allow partial fills, and include modeled fees.`,
       "Take-profit: a fresh best bid at $0.99 closes that side at $1 per share. Stop: an empty bid on a fresh book closes that side at $0.",
       "Any shares still open at the end of a window wait for the original market’s official resolution."

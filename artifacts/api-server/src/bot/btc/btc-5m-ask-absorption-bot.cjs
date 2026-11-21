@@ -9,6 +9,7 @@ const SIDES = Object.freeze(['UP', 'DOWN']);
 const EPSILON = 1e-8;
 const TRADE_FLOW_LOOKBACK_MS = 10_000;
 const PIVOT_PRICE = 0.50;
+const MAX_ENTRY_BEST_ASK = 0.55;
 const ASK_BAND_MIN = 0.15;
 const ASK_BAND_MAX = 0.85;
 const MIN_ABSORBED_SHARES = 10;
@@ -17,7 +18,7 @@ const SIDE_DOMINANCE_RATIO = 1.25;
 
 const CONFIG = Object.freeze({
   ...BASE_CONFIG,
-  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-tick-band015-085-fresh-flow-tp099-sl000-v3',
+  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-best-ask-under-055-v4',
   WINDOW_MS: 5 * 60 * 1000,
   BASE_ENTRY_SHARES: 10,
   RUNG_PRICES: Object.freeze([]),
@@ -94,7 +95,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       throw new Error('The approved paper history reset requires the durable reset operation.');
     }
     await this.stateStore.resetHistoryOnce(
-      'pumpfun-btc-5m-ask-absorption-fresh-flow-reset-20261122',
+      'pumpfun-btc-5m-ask-absorption-best-ask-under-055-reset-20261122',
       this.emptyHistoryState(),
     );
   }
@@ -317,8 +318,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       const absorptionRatio = buyTradeShares / Math.max(previousDepth, MIN_ABSORBED_SHARES);
       const currentAsk = Number(quote.bestAsk);
       const priceConfirmed = Number.isFinite(currentAsk)
-        && currentAsk >= PIVOT_PRICE - EPSILON
-        && currentAsk <= ASK_BAND_MAX + EPSILON
+        && currentAsk < MAX_ENTRY_BEST_ASK
         && (!Number.isFinite(previousAsk) || currentAsk >= previousAsk - EPSILON);
       const qualifies = bothBooksReady
         && buyTradeShares >= MIN_ABSORBED_SHARES
@@ -330,9 +330,11 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
           ? `Only ${round(buyTradeShares, 2)} buy shares traded in the rolling 10-second window; ${MIN_ABSORBED_SHARES} are required.`
           : absorptionRatio < MIN_ABSORPTION_RATIO
             ? `Absorption was ${(absorptionRatio * 100).toFixed(1)}% of visible ask depth; ${(MIN_ABSORPTION_RATIO * 100).toFixed(0)}% is required.`
-            : !priceConfirmed
-              ? 'The ask flow has not held or advanced above the $0.50 pivot.'
-              : 'Ask-side buy trades met the absorption and price-confirmation checks.';
+            : !Number.isFinite(currentAsk) || currentAsk >= MAX_ENTRY_BEST_ASK
+              ? `The selected side's best ask must be below $${MAX_ENTRY_BEST_ASK.toFixed(2)}.`
+              : !priceConfirmed
+                ? 'The best ask has not held or risen from the previous check.'
+                : 'Ask-side buy trades met the absorption and best-ask price checks.';
       interval[side] = {
         side,
         askDepth: depth,
@@ -398,6 +400,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
         {
           checkIndex: intervalIndex,
           pivotPrice: PIVOT_PRICE,
+          maxEntryBestAsk: MAX_ENTRY_BEST_ASK,
           absorptionShares: selected.buyTradeShares,
           absorptionRatio: selected.absorptionRatio,
           askDepthBefore: selected.previousAskDepth,
@@ -482,9 +485,10 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       pivotPrice: PIVOT_PRICE,
       askBand: { min: ASK_BAND_MIN, max: ASK_BAND_MAX },
       sharesPerTick: this.config.BASE_ENTRY_SHARES,
+      maxEntryBestAsk: MAX_ENTRY_BEST_ASK,
       entryOrderType: 'TAKER MARKET BUY (PAPER SIMULATION)',
-      entryPolicy: 'On every qualifying Polymarket CLOB tick, buy 10 shares on the side with clearly stronger ask absorption around the $0.50 pivot.',
-      absorptionRule: 'On every CLOB tick, count fresh, not-yet-used Polymarket BUY-side trade prints from the rolling last 10 seconds and visible ask depth from $0.15 to $0.85; each print contributes to at most one buy. Require at least 10 traded shares, at least 10% of starting visible ask depth, and a best ask that holds or rises from the $0.50 pivot through $0.85. If both sides qualify, the stronger ratio must be at least 1.25× the other.',
+      entryPolicy: `On every qualifying Polymarket CLOB tick, buy 10 shares on the side with clearly stronger ask absorption only when its best ask is below $${MAX_ENTRY_BEST_ASK.toFixed(2)}.`,
+      absorptionRule: `On every CLOB tick, count fresh, not-yet-used Polymarket BUY-side trade prints from the rolling last 10 seconds and visible ask depth from $${ASK_BAND_MIN.toFixed(2)} to $${ASK_BAND_MAX.toFixed(2)}; each print contributes to at most one buy. Require at least ${MIN_ABSORBED_SHARES} traded shares, at least ${(MIN_ABSORPTION_RATIO * 100).toFixed(0)}% of starting visible ask depth, a best ask strictly below $${MAX_ENTRY_BEST_ASK.toFixed(2)}, and an ask that holds or rises from the previous check. The $${PIVOT_PRICE.toFixed(2)} pivot is informational, not a minimum entry price. If both sides qualify, the stronger ratio must be at least ${SIDE_DOMINANCE_RATIO.toFixed(2)}× the other.`,
       fillRule: 'Paper taker buys sweep fresh visible asks, allow partial fills, and include modeled taker fees.',
       takeProfitBid: this.config.TAKE_PROFIT_BID,
       takeProfitPayoutPerShare: this.config.TAKE_PROFIT_PAYOUT_PER_SHARE,
@@ -498,6 +502,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       checkMode: 'EVERY_CLOB_TICK',
       tradeFlowLookbackMs: TRADE_FLOW_LOOKBACK_MS,
       pivotPrice: PIVOT_PRICE,
+      maxEntryBestAsk: MAX_ENTRY_BEST_ASK,
       askBand: { min: ASK_BAND_MIN, max: ASK_BAND_MAX },
       lastCheckAt: this.lastCheckAt,
       ticksChecked: this.lastCheckIndex,
