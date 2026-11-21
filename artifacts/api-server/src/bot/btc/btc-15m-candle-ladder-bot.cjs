@@ -24,11 +24,12 @@ const HISTORY_RESET_REQUEST_ID = 'pumpfun-btc-15m-candle-ladder-reset-20261121';
 const COMPATIBLE_PREVIOUS_STRATEGY_VERSIONS = new Set([
   'btc-15m-candle-score-limit-ladder-v1',
   'btc-15m-candle-score-limit-ladder-v2',
+  'btc-15m-candle-score-limit-ladder-v3',
 ]);
 
 const CONFIG = Object.freeze({
   ...BASE_CONFIG,
-  STRATEGY_VERSION: 'btc-15m-candle-score-limit-ladder-v3',
+  STRATEGY_VERSION: 'btc-15m-candle-score-limit-ladder-v4',
   WINDOW_MS: 15 * 60 * 1000,
   BASE_ENTRY_SHARES: 0,
   RUNG_PRICES,
@@ -117,7 +118,7 @@ class Btc15mCandleLadderBot extends BtcDoubleRungBot {
     if (compatiblePreviousStrategy && this.modelResult) {
       this.modelResult = {
         ...this.modelResult,
-        scorePolicyNote: 'This active window keeps its original decision and resting orders. The 15-minute candle-streak selector takes effect next window.',
+        scorePolicyNote: 'This active window keeps its original decision and resting orders. The first-red-after-green-run reversal selector takes effect next window.',
       };
     }
     this.modelDecided = Boolean(state.modelDecided);

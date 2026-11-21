@@ -145,6 +145,43 @@ test('a red streak overrides an opposing evidence-score side without blocking th
   assert.equal(result.signalSource, 'CANDLE_STREAK_SELECTOR');
 });
 
+test('the first red close after at least two green candles selects DOWN', () => {
+  const windowStart = 21 * FIFTEEN_MINUTES;
+  const candles = flatHistory(windowStart);
+  candles['15m'][18] = candle(windowStart - 3 * FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.2, 99.9, 100.1);
+  candles['15m'][19] = candle(windowStart - 2 * FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.2, 99.9, 100.1);
+  candles['15m'][20] = candle(windowStart - FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.1, 99.8, 99.9);
+
+  const result = analyze15mWindow({
+    candles, windowStart, feedUpdatedAt: windowStart, now: windowStart + 500,
+  });
+
+  assert.equal(result.score, -1);
+  assert.equal(result.baseSide, null);
+  assert.equal(result.status, 'SIGNAL');
+  assert.equal(result.side, 'DOWN');
+  assert.equal(result.signalSource, 'GREEN_RUN_RED_REVERSAL');
+  assert.equal(result.inputs.candleStreak.status, 'REVERSAL');
+  assert.equal(result.inputs.candleStreak.precedingGreenCount, 2);
+  assert.match(result.reason, /first red close after 2 consecutive green/);
+});
+
+test('one green candle followed by red does not activate the green-run reversal', () => {
+  const windowStart = 21 * FIFTEEN_MINUTES;
+  const candles = flatHistory(windowStart);
+  candles['15m'][18] = candle(windowStart - 3 * FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.1, 99.8, 99.9);
+  candles['15m'][19] = candle(windowStart - 2 * FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.2, 99.9, 100.1);
+  candles['15m'][20] = candle(windowStart - FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.1, 99.8, 99.9);
+
+  const result = analyze15mWindow({
+    candles, windowStart, feedUpdatedAt: windowStart, now: windowStart + 500,
+  });
+
+  assert.equal(result.inputs.candleStreak.status, 'INACTIVE');
+  assert.equal(result.inputs.candleStreak.precedingGreenCount, 0);
+  assert.equal(result.status, 'NO_SIGNAL');
+});
+
 test('a single colored candle does not activate the streak selector', () => {
   const history = flatHistory(21 * FIFTEEN_MINUTES)['15m'];
   history[20] = candle(20 * FIFTEEN_MINUTES, FIFTEEN_MINUTES, 100, 100.2, 99.9, 100.1);

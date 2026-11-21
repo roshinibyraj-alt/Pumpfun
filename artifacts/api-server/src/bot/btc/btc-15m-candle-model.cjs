@@ -61,10 +61,30 @@ function assessCandleStreak(closed15m) {
     count += 1;
   }
 
+  if (latestDirection === 'DOWN' && count === 1) {
+    let precedingGreenCount = 0;
+    for (let index = closed15m.length - 2; index >= 0; index -= 1) {
+      if (colorOf(closed15m[index]) !== 'UP') break;
+      precedingGreenCount += 1;
+    }
+    if (precedingGreenCount >= 2) {
+      return {
+        side: 'DOWN',
+        direction: latestDirection,
+        count,
+        precedingGreenCount,
+        pattern: 'FIRST_RED_AFTER_GREEN_RUN',
+        status: 'REVERSAL',
+      };
+    }
+  }
+
   return {
     side: count >= 2 ? latestDirection : null,
     direction: latestDirection,
     count,
+    precedingGreenCount: 0,
+    pattern: count >= 2 ? 'SAME_COLOR_STREAK' : null,
     status: count >= 2 ? 'ACTIVE' : 'INACTIVE',
   };
 }
@@ -249,9 +269,13 @@ function analyze15mWindow({ candles, windowStart, feedUpdatedAt, now = Date.now(
   const scoreSide = score >= SCORE_THRESHOLD ? 'UP'
     : score <= -SCORE_THRESHOLD ? 'DOWN' : null;
   const side = candleStreak.side || scoreSide;
-  const signalSource = candleStreak.side ? 'CANDLE_STREAK_SELECTOR'
-    : scoreSide ? 'EVIDENCE_SCORE' : null;
-  const streakExplanation = candleStreak.status === 'ACTIVE'
+  const signalSource = candleStreak.status === 'REVERSAL'
+    ? 'GREEN_RUN_RED_REVERSAL'
+    : candleStreak.side ? 'CANDLE_STREAK_SELECTOR'
+      : scoreSide ? 'EVIDENCE_SCORE' : null;
+  const streakExplanation = candleStreak.status === 'REVERSAL'
+    ? `${candleStreak.precedingGreenCount} consecutive green 15-minute closes were followed by the first red close; the reversal selector chooses DOWN.`
+    : candleStreak.status === 'ACTIVE'
     ? `${candleStreak.count} consecutive closed 15-minute candles were ${candleStreak.direction.toLowerCase()}; the streak selector chooses ${candleStreak.side}.`
     : candleStreak.direction === 'UNAVAILABLE'
       ? 'Not enough closed 15-minute candles to evaluate the streak selector.'
@@ -260,11 +284,13 @@ function analyze15mWindow({ candles, windowStart, feedUpdatedAt, now = Date.now(
     ...trends,
     {
       timeframe: 'Candle streak selector',
-      direction: candleStreak.status === 'ACTIVE' ? candleStreak.side : 'INACTIVE',
+      direction: ['ACTIVE', 'REVERSAL'].includes(candleStreak.status)
+        ? candleStreak.side : 'INACTIVE',
       points: 0,
       explanation: streakExplanation,
       status: candleStreak.status,
       consecutiveCandles: candleStreak.count,
+      precedingGreenCandles: candleStreak.precedingGreenCount || 0,
     },
     {
       timeframe: 'Mean reversion',
@@ -297,9 +323,11 @@ function analyze15mWindow({ candles, windowStart, feedUpdatedAt, now = Date.now(
     score,
     threshold: SCORE_THRESHOLD,
     reason: side
-      ? candleStreak.side
-        ? `${side} selected by the ${candleStreak.count}-candle ${candleStreak.direction.toLowerCase()} streak selector; the existing evidence score was ${score > 0 ? '+' : ''}${score}.`
-        : `${side} selected from a ${score > 0 ? '+' : ''}${score}-point candle evidence score.`
+      ? candleStreak.status === 'REVERSAL'
+        ? `DOWN selected by the first red close after ${candleStreak.precedingGreenCount} consecutive green 15-minute candles; the existing evidence score was ${score > 0 ? '+' : ''}${score}.`
+        : candleStreak.side
+          ? `${side} selected by the ${candleStreak.count}-candle ${candleStreak.direction.toLowerCase()} streak selector; the existing evidence score was ${score > 0 ? '+' : ''}${score}.`
+          : `${side} selected from a ${score > 0 ? '+' : ''}${score}-point candle evidence score.`
       : `No trade: the evidence score (${score > 0 ? '+' : ''}${score}) did not reach ±${SCORE_THRESHOLD}.`,
     windowStart,
     calculatedAt: now,
