@@ -181,9 +181,9 @@
         <div class="quote-box"><span>Best ask</span><b>${money(quote?.bestAsk)}</b></div>
       </div>
       <div class="metrics">
-        <div class="metric"><span>Ask depth $0.45–$0.55</span><b>${number(position?.askDepth)} shares</b></div>
+        <div class="metric"><span>Ask depth $0.15–$0.85</span><b>${number(position?.askDepth)} shares</b></div>
         <div class="metric"><span>Largest ask level</span><b>${wall ? `${money(wall.price)} · ${number(wall.shares)} sh` : "—"}</b></div>
-        <div class="metric"><span>Buy prints / ratio</span><b>${number(position?.absorbedBuyShares)} sh · ${Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : "—"}</b></div>
+        <div class="metric"><span>Rolling 10s buys / ratio</span><b>${number(position?.absorbedBuyShares)} sh · ${Number.isFinite(ratio) ? `${(ratio * 100).toFixed(1)}%` : "—"}</b></div>
         <div class="metric"><span>Open position</span><b>${number(position?.shares)} shares</b></div>
         <div class="metric"><span>Average cost</span><b>${position?.averageCost == null ? "—" : money(position.averageCost)}</b></div>
         <div class="metric"><span>Floating P&amp;L</span><b class="${pnlClass}">${signedMoney(position?.unrealizedPnl)}</b></div>
@@ -225,10 +225,8 @@
       ? `${decision.status?.replaceAll("_", " ") || "SIGNAL"} · ${decision.side}`
       : (decision.status || "COLLECTING DATA").replaceAll("_", " ");
     document.getElementById("decisionReason").textContent = decision.reason
-      || "The bot checks ask absorption every 10 seconds.";
-    const until = Number(absorption.nextCheckInMs);
-    document.getElementById("nextCheck").textContent = Number.isFinite(until)
-      ? `Next check ${Math.ceil(until / 1000)}s` : "—";
+      || "The bot checks ask absorption on every CLOB tick.";
+    document.getElementById("nextCheck").textContent = "Every tick";
 
     document.getElementById("sides").innerHTML =
       sideCard("UP", data.quotes?.UP, up) + sideCard("DOWN", data.quotes?.DOWN, down);
@@ -256,10 +254,10 @@
     }).join("") : `<div class="empty">Waiting for activity.</div>`;
 
     const rules = [
-      `BTC 5-minute markets only; check both sides every ${strategy.checkIntervalMs / 1000 || 10} seconds.`,
-      `Pivot $${Number(strategy.pivotPrice || 0.5).toFixed(2)}; inspect asks from $${Number(strategy.askBand?.min || 0.45).toFixed(2)} to $${Number(strategy.askBand?.max || 0.55).toFixed(2)}.`,
+      "BTC 5-minute markets only; check both sides on every Polymarket CLOB tick.",
+      `Pivot $${Number(strategy.pivotPrice || 0.5).toFixed(2)}; inspect asks from $${Number(strategy.askBand?.min || 0.15).toFixed(2)} to $${Number(strategy.askBand?.max || 0.85).toFixed(2)}.`,
       strategy.absorptionRule || "A trade requires verified buy-side trade volume, sufficient absorption, fresh books, and a price that holds above the pivot.",
-      `Each qualifying check requests ${strategy.sharesPerCheck || 10} shares on the stronger side. Paper market buys sweep visible asks, allow partial fills, and include modeled fees.`,
+      `Each qualifying CLOB tick requests ${strategy.sharesPerTick || 10} shares on the stronger side. Paper market buys sweep visible asks, allow partial fills, and include modeled fees.`,
       "Take-profit: a fresh best bid at $0.99 closes that side at $1 per share. Stop: an empty bid on a fresh book closes that side at $0.",
       "Any shares still open at the end of a window wait for the original market’s official resolution."
     ];

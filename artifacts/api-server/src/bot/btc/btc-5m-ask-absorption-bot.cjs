@@ -7,17 +7,17 @@ const {
 
 const SIDES = Object.freeze(['UP', 'DOWN']);
 const EPSILON = 1e-8;
-const CHECK_INTERVAL_MS = 10_000;
+const TRADE_FLOW_LOOKBACK_MS = 10_000;
 const PIVOT_PRICE = 0.50;
-const ASK_BAND_MIN = 0.45;
-const ASK_BAND_MAX = 0.55;
+const ASK_BAND_MIN = 0.15;
+const ASK_BAND_MAX = 0.85;
 const MIN_ABSORBED_SHARES = 10;
 const MIN_ABSORPTION_RATIO = 0.10;
 const SIDE_DOMINANCE_RATIO = 1.25;
 
 const CONFIG = Object.freeze({
   ...BASE_CONFIG,
-  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-10s-tp099-sl000-v1',
+  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-tick-band015-085-flow10s-tp099-sl000-v2',
   WINDOW_MS: 5 * 60 * 1000,
   BASE_ENTRY_SHARES: 10,
   RUNG_PRICES: Object.freeze([]),
@@ -60,7 +60,7 @@ function emptyAbsorptionSide(side) {
     absorptionRatio: 0,
     priceConfirmed: false,
     qualifies: false,
-    reason: 'Waiting for the next complete 10-second check.',
+    reason: 'Waiting for the next Polymarket CLOB tick.',
   };
 }
 
@@ -72,6 +72,8 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     });
     this.lastCheckIndex = 0;
     this.lastCheckAt = null;
+    this.marketTickSequence = 0;
+    this.lastProcessedTickSequence = 0;
     this.tradeTape = [];
     this.lastDecision = null;
     this.absorptionSides = {
@@ -106,6 +108,8 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     this.lastCheckIndex = Math.max(0, Number(saved.lastCheckIndex) || 0);
     this.lastCheckAt = Number.isFinite(Number(saved.lastCheckAt))
       ? Number(saved.lastCheckAt) : currentStart;
+    this.marketTickSequence = 0;
+    this.lastProcessedTickSequence = 0;
     this.lastDecision = saved.lastDecision || null;
     this.absorptionSides = {
       UP: { ...emptyAbsorptionSide('UP'), ...(saved.sides?.UP || {}) },
@@ -131,12 +135,14 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
   async resetWindow(start) {
     this.lastCheckIndex = 0;
     this.lastCheckAt = start;
+    this.marketTickSequence = 0;
+    this.lastProcessedTickSequence = 0;
     this.tradeTape = [];
     this.lastDecision = {
       status: 'WAITING',
       side: null,
       at: start,
-      reason: 'Collecting the first 10 seconds of order-book and trade data.',
+      reason: 'Waiting for fresh Polymarket CLOB ticks.',
     };
     this.absorptionSides = {
       UP: emptyAbsorptionSide('UP'),
@@ -156,6 +162,9 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       : event;
     const type = event.event_type || event.eventType || event.type;
 
+    if (this.market && ['book', 'price_change', 'best_bid_ask', 'last_trade_price'].includes(type)) {
+      this.marketTickSequence += 1;
+    }
     if (type === 'last_trade_price' && this.market) {
       const side = sideForToken(
         this.market,
@@ -229,7 +238,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     }
 
     const sideState = this.sideStates[side];
-    sideState.stopped = false; // A later 10-second signal may re-enter this side.
+    sideState.stopped = false; // A later qualifying CLOB tick may re-enter this side.
     sideState.stopReason = reason;
     sideState.stoppedAt = now;
     this.log(
@@ -274,9 +283,8 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
   }
 
   evaluateAbsorption(now, intervalIndex) {
-    const startAt = this.lastCheckAt ?? this.windowStart;
     const intervalTrades = this.tradeTape.filter(trade =>
-      trade.at > startAt && trade.at <= now);
+      trade.at >= now - TRADE_FLOW_LOOKBACK_MS && trade.at <= now);
     const bothBooksReady = SIDES.every(side =>
       this.hasExecutableAskBook(side, now) && this.bookIsFresh(side, now));
 
@@ -304,7 +312,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       const reason = !bothBooksReady
         ? 'Waiting for fresh, executable UP and DOWN books.'
         : buyTradeShares < MIN_ABSORBED_SHARES
-          ? `Only ${round(buyTradeShares, 2)} buy shares traded near the pivot; ${MIN_ABSORBED_SHARES} are required.`
+          ? `Only ${round(buyTradeShares, 2)} buy shares traded in the rolling 10-second window; ${MIN_ABSORBED_SHARES} are required.`
           : absorptionRatio < MIN_ABSORPTION_RATIO
             ? `Absorption was ${(absorptionRatio * 100).toFixed(1)}% of visible ask depth; ${(MIN_ABSORPTION_RATIO * 100).toFixed(0)}% is required.`
             : !priceConfirmed
@@ -337,7 +345,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     let reason = 'Neither side met the ask-absorption and pivot-price checks.';
     if (candidates.length === 1) {
       [selected] = candidates;
-      reason = `${selected.side} had confirmed buy-side ask absorption near $0.50.`;
+      reason = `${selected.side} had confirmed buy-side ask absorption across $0.15–$0.85.`;
     } else if (candidates.length > 1) {
       const [strongest, next] = candidates;
       if (strongest.absorptionRatio >= next.absorptionRatio * SIDE_DOMINANCE_RATIO) {
@@ -364,7 +372,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       trade = this.recordMarketBuy(
         selected.side,
         this.config.BASE_ENTRY_SHARES,
-        'ASK_ABSORPTION_10S',
+        'ASK_ABSORPTION_TICK',
         now,
         {
           checkIndex: intervalIndex,
@@ -388,21 +396,17 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       }
     }
 
-    this.lastCheckIndex = intervalIndex;
     this.lastCheckAt = now;
-    this.tradeTape = this.tradeTape.filter(trade => trade.at > now - CHECK_INTERVAL_MS);
-    this.log(
-      selected ? 'ASK_ABSORPTION_SIGNAL' : 'ASK_ABSORPTION_CHECK',
-      this.lastDecision.reason,
-      {
+    this.tradeTape = this.tradeTape.filter(trade => trade.at > now - TRADE_FLOW_LOOKBACK_MS);
+    if (trade) {
+      this.log('ASK_ABSORPTION_SIGNAL', this.lastDecision.reason, {
         checkIndex: intervalIndex,
         pivotPrice: PIVOT_PRICE,
         selectedSide: selected?.side || null,
         sides: interval,
-        tradeId: trade?.id || null,
-      },
-    );
-    this.schedulePersist(true);
+        tradeId: trade.id,
+      });
+    }
     return Boolean(trade);
   }
 
@@ -413,9 +417,10 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     let changed = this.processExits(now);
     this.seedBookBaselines(now);
 
-    const intervalIndex = Math.floor((now - this.windowStart) / CHECK_INTERVAL_MS);
-    if (intervalIndex > this.lastCheckIndex) {
-      changed = this.evaluateAbsorption(now, intervalIndex) || changed;
+    if (this.marketTickSequence > this.lastProcessedTickSequence) {
+      this.lastProcessedTickSequence = this.marketTickSequence;
+      this.lastCheckIndex += 1;
+      changed = this.evaluateAbsorption(now, this.lastCheckIndex) || changed;
     }
     return changed;
   }
@@ -446,37 +451,35 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
   snapshot() {
     const state = super.snapshot();
     const now = this.now();
-    const nextCheckAt = this.windowStart == null
-      ? null : this.windowStart + (this.lastCheckIndex + 1) * CHECK_INTERVAL_MS;
     state.strategy = {
       version: this.config.STRATEGY_VERSION,
       timeframe: '5m',
       symbol: 'BTC 5-minute Up or Down',
       executionMode: 'PAPER ONLY',
-      checkIntervalMs: CHECK_INTERVAL_MS,
+      checkMode: 'EVERY_CLOB_TICK',
+      tradeFlowLookbackMs: TRADE_FLOW_LOOKBACK_MS,
       pivotPrice: PIVOT_PRICE,
       askBand: { min: ASK_BAND_MIN, max: ASK_BAND_MAX },
-      sharesPerCheck: this.config.BASE_ENTRY_SHARES,
+      sharesPerTick: this.config.BASE_ENTRY_SHARES,
       entryOrderType: 'TAKER MARKET BUY (PAPER SIMULATION)',
-      entryPolicy: 'At each completed 10-second check, buy 10 shares on the side with clearly stronger ask absorption around the $0.50 pivot.',
-      absorptionRule: 'Count Polymarket BUY-side trade prints between $0.45 and $0.55; require at least 10 traded shares, at least 10% of starting visible ask depth, and a best ask that holds or rises at or above $0.50. If both sides qualify, the stronger ratio must be at least 1.25× the other.',
+      entryPolicy: 'On every qualifying Polymarket CLOB tick, buy 10 shares on the side with clearly stronger ask absorption around the $0.50 pivot.',
+      absorptionRule: 'On every CLOB tick, count recent Polymarket BUY-side trade prints from the rolling last 10 seconds and visible ask depth from $0.15 to $0.85; require at least 10 traded shares, at least 10% of starting visible ask depth, and a best ask that holds or rises from the $0.50 pivot through $0.85. If both sides qualify, the stronger ratio must be at least 1.25× the other.',
       fillRule: 'Paper taker buys sweep fresh visible asks, allow partial fills, and include modeled taker fees.',
       takeProfitBid: this.config.TAKE_PROFIT_BID,
       takeProfitPayoutPerShare: this.config.TAKE_PROFIT_PAYOUT_PER_SHARE,
       stopLossPrice: 0,
       stopLossRule: 'If a fresh book has no bid on a side with open shares, close all those shares at $0 per share.',
-      reentryPolicy: 'A later qualifying 10-second check can buy that side again after a take-profit or stop-loss exit.',
+      reentryPolicy: 'Every later qualifying CLOB tick can buy that side again after a take-profit or stop-loss exit.',
       exitPolicy: 'At best bid $0.99, close all current shares on that side for $1 per share; with no bid in a fresh book, close at $0. Unclosed shares wait for official resolution at their original market end.',
       resolutionSource: 'Official resolution of each original Polymarket market.',
     };
     state.absorption = {
-      checkIntervalMs: CHECK_INTERVAL_MS,
+      checkMode: 'EVERY_CLOB_TICK',
+      tradeFlowLookbackMs: TRADE_FLOW_LOOKBACK_MS,
       pivotPrice: PIVOT_PRICE,
       askBand: { min: ASK_BAND_MIN, max: ASK_BAND_MAX },
       lastCheckAt: this.lastCheckAt,
-      nextCheckAt,
-      nextCheckInMs: nextCheckAt == null
-        ? null : Math.max(0, nextCheckAt - now),
+      ticksChecked: this.lastCheckIndex,
       lastDecision: this.lastDecision,
       sides: this.absorptionSides,
     };
@@ -491,7 +494,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
 module.exports = {
   Btc5mAskAbsorptionBot,
   CONFIG,
-  CHECK_INTERVAL_MS,
+  TRADE_FLOW_LOOKBACK_MS,
   PIVOT_PRICE,
   ASK_BAND_MIN,
   ASK_BAND_MAX,

@@ -17,8 +17,8 @@ test("the public root dashboard runs the 5-minute ask-absorption paper strategy"
   assert.match(html, /BTC Ask Absorption/);
   assert.match(html, /5-minute paper bot/);
   assert.match(html, /Absorption/);
-  assert.match(html, /\$0\.45–\$0\.55/);
-  assert.match(html, /10 seconds/);
+  assert.match(html, /\$0\.15–\$0\.85/);
+  assert.match(html, /every CLOB tick/i);
   assert.match(html, /best bid at \$0\.99 closes that side at \$1 per share/i);
   assert.match(html, /empty bid on a fresh book closes that side at \$0/i);
   assert.match(html, /official resolution/i);

@@ -53,8 +53,13 @@ function fixture() {
       updatedAt: now,
       sourceTimestamp: now,
     };
-    bot.books.set(tokenId, book);
-    bot.updateQuoteFromBook(side, tokenId, book, now);
+    bot.handleMarketMessage({
+      event_type: "book",
+      asset_id: tokenId,
+      asks: book.asks.map(({ price, size }) => ({ price, size })),
+      bids: book.bids.map(({ price, size }) => ({ price, size })),
+      timestamp: String(now),
+    });
   }
 
   function seedBooks() {
@@ -78,38 +83,59 @@ function fixture() {
   return { bot, market, now: () => now, setNow, setBook, seedBooks, trade };
 }
 
-test("uses five-minute windows and makes no entry before the first 10-second check", () => {
+test("can enter on the first qualifying CLOB tick without a 10-second wait", () => {
   const context = fixture();
   context.seedBooks();
-  context.setNow(START + 9_999);
-  context.setBook("UP");
-  context.setBook("DOWN");
-  context.trade("UP");
-  context.bot.evaluate(context.now());
+  context.setNow(START + 2_000);
+  context.trade("UP", { shares: 20 });
 
-  assert.equal(context.bot.trades.length, 0);
+  assert.equal(context.bot.trades.length, 1);
   assert.equal(context.bot.snapshot().strategy.timeframe, "5m");
-  assert.equal(context.bot.snapshot().strategy.sharesPerCheck, 10);
+  assert.equal(context.bot.snapshot().strategy.sharesPerTick, 10);
+  assert.equal(context.bot.snapshot().strategy.checkMode, "EVERY_CLOB_TICK");
 });
 
 test("buys 10 shares on the side with verified ask absorption and price confirmation", () => {
   const context = fixture();
   context.seedBooks();
 
-  context.setNow(START + 9_500);
-  context.trade("UP", { shares: 20 });
-  context.setNow(START + 10_000);
+  context.setNow(START + 9_000);
   context.setBook("UP", { asks: [{ price: 0.51, size: 80 }], bids: [{ price: 0.50, size: 100 }] });
   context.setBook("DOWN", { asks: [{ price: 0.50, size: 100 }], bids: [{ price: 0.49, size: 100 }] });
-  context.bot.evaluate(context.now());
+  context.setNow(START + 9_500);
+  context.trade("UP", { shares: 20 });
 
   assert.equal(context.bot.trades.length, 1);
   assert.equal(context.bot.trades[0].side, "UP");
   assert.equal(context.bot.trades[0].requestedShares, 10);
   assert.equal(context.bot.trades[0].shares, 10);
   assert.equal(context.bot.trades[0].entryOrderType, "MARKET");
-  assert.equal(context.bot.trades[0].entryReason, "ASK_ABSORPTION_10S");
+  assert.equal(context.bot.trades[0].entryReason, "ASK_ABSORPTION_TICK");
   assert.equal(context.bot.snapshot().absorption.lastDecision.status, "BUY_FILLED");
+});
+
+test("measures ask depth across $0.15-$0.85 and allows confirmation through $0.85", () => {
+  const context = fixture();
+  context.setBook("UP", {
+    asks: [
+      { price: 0.14, size: 50 },
+      { price: 0.15, size: 10 },
+      { price: 0.50, size: 20 },
+      { price: 0.85, size: 30 },
+      { price: 0.86, size: 40 },
+    ],
+    bids: [{ price: 0.49, size: 100 }],
+  });
+  context.setBook("DOWN");
+  assert.equal(context.bot.askDepthInBand("UP").depth, 60);
+
+  context.setBook("UP", { asks: [{ price: 0.80, size: 40 }], bids: [{ price: 0.79, size: 100 }] });
+  context.trade("UP", { price: 0.80, shares: 20 });
+
+  assert.equal(context.bot.trades.length, 1);
+  assert.equal(context.bot.trades[0].side, "UP");
+  assert.equal(context.bot.snapshot().strategy.askBand.min, 0.15);
+  assert.equal(context.bot.snapshot().strategy.askBand.max, 0.85);
 });
 
 test("book-depth disappearance without buy-side trade prints is not treated as absorption", () => {
@@ -124,38 +150,48 @@ test("book-depth disappearance without buy-side trade prints is not treated as a
   assert.equal(context.bot.snapshot().absorption.lastDecision.status, "NO_SIGNAL");
 });
 
-test("similar qualifying absorption on both sides does not trigger an arbitrary side", () => {
+test("rolling absorption on both sides does not switch to an ambiguous second side", () => {
   const context = fixture();
   context.seedBooks();
   context.setNow(START + 9_500);
+  context.setBook("UP");
+  context.setBook("DOWN");
   context.trade("UP", { shares: 20 });
   context.trade("DOWN", { shares: 20 });
-  context.setNow(START + 10_000);
-  context.setBook("UP", { asks: [{ price: 0.51, size: 80 }], bids: [{ price: 0.50, size: 100 }] });
-  context.setBook("DOWN", { asks: [{ price: 0.51, size: 80 }], bids: [{ price: 0.50, size: 100 }] });
-  context.bot.evaluate(context.now());
 
-  assert.equal(context.bot.trades.length, 0);
+  assert.equal(context.bot.trades.length, 1);
+  assert.equal(context.bot.trades[0].side, "UP");
   assert.match(context.bot.snapshot().absorption.lastDecision.reason, /similar absorption/i);
 });
 
-test("a later independent 10-second check can add another 10 shares", () => {
+test("each qualifying book tick can place another 10-share buy from rolling trade flow", () => {
   const context = fixture();
   context.seedBooks();
   context.setNow(START + 9_500);
-  context.trade("UP", { shares: 20 });
-  context.setNow(START + 10_000);
-  context.setBook("UP", { asks: [{ price: 0.51, size: 80 }], bids: [{ price: 0.50, size: 100 }] });
+  context.setBook("UP");
   context.setBook("DOWN");
-  context.bot.evaluate(context.now());
+  context.trade("UP", { shares: 20 });
   assert.equal(context.bot.trades.length, 1);
 
-  context.setNow(START + 19_500);
-  context.trade("UP", { price: 0.51, shares: 20 });
-  context.setNow(START + 20_000);
-  context.setBook("UP", { asks: [{ price: 0.52, size: 80 }], bids: [{ price: 0.51, size: 100 }] });
+  context.setNow(START + 9_600);
+  context.setBook("UP");
+  assert.equal(context.bot.trades.length, 2);
+  assert.deepEqual(context.bot.trades.map(trade => trade.requestedShares), [10, 10]);
+});
+
+test("each later qualifying CLOB tick can add another 10 shares", () => {
+  const context = fixture();
+  context.seedBooks();
+  context.setNow(START + 9_500);
+  context.setBook("UP");
   context.setBook("DOWN");
-  context.bot.evaluate(context.now());
+  context.trade("UP", { shares: 20 });
+  assert.equal(context.bot.trades.length, 1);
+
+  context.setNow(START + 20_001);
+  context.setBook("UP", { asks: [{ price: 0.51, size: 80 }], bids: [{ price: 0.50, size: 100 }] });
+  context.setBook("DOWN");
+  context.trade("UP", { price: 0.51, shares: 20 });
 
   assert.equal(context.bot.trades.length, 2);
   assert.deepEqual(context.bot.trades.map(trade => trade.requestedShares), [10, 10]);
