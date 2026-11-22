@@ -93,6 +93,7 @@ test("can enter on the first qualifying CLOB tick without a 10-second wait", () 
   assert.equal(context.bot.snapshot().strategy.timeframe, "5m");
   assert.equal(context.bot.snapshot().strategy.sharesPerTick, 10);
   assert.equal(context.bot.snapshot().strategy.checkMode, "EVERY_CLOB_TICK");
+  assert.equal(context.bot.snapshot().strategy.maxSharesPerWindow, 500);
 });
 
 test("buys 10 shares on the side with verified ask absorption and price confirmation", () => {
@@ -262,6 +263,36 @@ test("a second opposite signal repeats the sell-and-carry sizing rule", () => {
   assert.equal(context.bot.openTradesForSide("UP").length, 1);
 });
 
+test("opposite-signal carry sizing never exceeds 500 cumulative shares in a window", () => {
+  const context = fixture();
+  context.seedBooks();
+  context.bot.trades.push({
+    id: "prior-window-cap-entry",
+    side: "UP",
+    marketId: context.market.id,
+    windowStart: START,
+    shares: 470,
+    status: "SETTLED",
+    totalCost: 235,
+    grossCost: 235,
+    fees: 0,
+  });
+  const downPosition = context.bot.recordMarketBuy("DOWN", 20, "TEST_POSITION", context.now());
+  assert.equal(downPosition.shares, 20);
+
+  context.setNow(START + 9_000);
+  context.setBook("UP");
+  context.setBook("DOWN");
+  context.setNow(START + 9_500);
+  context.trade("UP", { shares: 20 });
+
+  const upTrade = context.bot.trades.find(trade => trade.entryReason === "ASK_ABSORPTION_TICK");
+  assert.equal(upTrade.requestedShares, 10);
+  assert.equal(upTrade.oppositeSharesSold, 20);
+  assert.equal(context.bot.sharesBoughtThisWindow(), 500);
+  assert.equal(context.bot.snapshot().strategy.maxSharesPerWindow, 500);
+});
+
 test("a book tick cannot reuse already-consumed trade flow", () => {
   const context = fixture();
   context.seedBooks();
@@ -409,7 +440,7 @@ test("the approved deployment reset seeds one fresh ledger for this strategy ver
   };
   await bot.beforeLoadState();
 
-  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-signal-flip-reset-20261122");
+  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-signal-flip-cap500-reset-20261122");
   assert.equal(resetState.strategyVersion, bot.config.STRATEGY_VERSION);
   assert.equal(resetState.trades.length, 0);
   assert.equal(resetState.cash, bot.config.STARTING_CAPITAL);

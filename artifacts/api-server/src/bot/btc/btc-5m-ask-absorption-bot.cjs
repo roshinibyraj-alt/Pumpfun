@@ -10,6 +10,7 @@ const SIDES = Object.freeze(['UP', 'DOWN']);
 const EPSILON = 1e-8;
 const TRADE_FLOW_LOOKBACK_MS = 10_000;
 const PIVOT_PRICE = 0.50;
+const MAX_SHARES_PER_WINDOW = 500;
 const ASK_BAND_MIN = 0.15;
 const ASK_BAND_MAX = 0.85;
 const MIN_ABSORBED_SHARES = 10;
@@ -18,7 +19,7 @@ const SIDE_DOMINANCE_RATIO = 1.25;
 
 const CONFIG = Object.freeze({
   ...BASE_CONFIG,
-  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-signal-flip-v6',
+  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-signal-flip-cap500-v7',
   WINDOW_MS: 5 * 60 * 1000,
   BASE_ENTRY_SHARES: 10,
   RUNG_PRICES: Object.freeze([]),
@@ -95,7 +96,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       throw new Error('The approved paper history reset requires the durable reset operation.');
     }
     await this.stateStore.resetHistoryOnce(
-      'pumpfun-btc-5m-ask-absorption-signal-flip-reset-20261122',
+      'pumpfun-btc-5m-ask-absorption-signal-flip-cap500-reset-20261122',
       this.emptyHistoryState(),
     );
   }
@@ -475,6 +476,13 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     return changed;
   }
 
+  sharesBoughtThisWindow() {
+    return this.trades
+      .filter(trade => Number(trade.windowStart) === this.windowStart
+        && String(trade.marketId) === String(this.market?.id))
+      .reduce((sum, trade) => sum + Math.max(0, Number(trade.shares) || 0), 0);
+  }
+
   evaluateAbsorption(now, intervalIndex) {
     const intervalTrades = this.tradeTape.filter(trade =>
       trade.tickSequence > this.lastConsumedTradeSequence[trade.side]
@@ -577,35 +585,54 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
         ? this.recordMarketSell(oppositeSide, oppositeShares, now)
         : null;
       const sharesSold = sell?.shares || 0;
-      const requestedShares = this.config.BASE_ENTRY_SHARES + sharesSold;
-      trade = this.recordMarketBuy(
-        selected.side,
-        requestedShares,
-        'ASK_ABSORPTION_TICK',
-        now,
-        {
-          checkIndex: intervalIndex,
-          pivotPrice: PIVOT_PRICE,
-          baseShares: this.config.BASE_ENTRY_SHARES,
-          oppositeSideSold: oppositeSide,
-          oppositeSharesSold: round(sharesSold, 8),
-          requestedSharesFromFlip: requestedShares,
-          absorptionShares: selected.buyTradeShares,
-          absorptionRatio: selected.absorptionRatio,
-          askDepthBefore: selected.previousAskDepth,
-          askDepthAfter: selected.askDepth,
-        },
-      );
+      const windowSharesBefore = this.sharesBoughtThisWindow();
+      const windowCapacity = Math.max(0, MAX_SHARES_PER_WINDOW - windowSharesBefore);
+      const requestedShares = Math.min(this.config.BASE_ENTRY_SHARES + sharesSold, windowCapacity);
+      this.lastDecision.oppositeSide = oppositeSide;
+      this.lastDecision.oppositeSharesSold = round(sharesSold, 8);
+      this.lastDecision.requestedShares = round(requestedShares, 8);
+      this.lastDecision.windowSharesBefore = round(windowSharesBefore, 8);
+      this.lastDecision.windowShareCapacity = round(windowCapacity, 8);
+      if (requestedShares > EPSILON) {
+        trade = this.recordMarketBuy(
+          selected.side,
+          requestedShares,
+          'ASK_ABSORPTION_TICK',
+          now,
+          {
+            checkIndex: intervalIndex,
+            pivotPrice: PIVOT_PRICE,
+            baseShares: this.config.BASE_ENTRY_SHARES,
+            oppositeSideSold: oppositeSide,
+            oppositeSharesSold: round(sharesSold, 8),
+            requestedSharesFromFlip: requestedShares,
+            absorptionShares: selected.buyTradeShares,
+            absorptionRatio: selected.absorptionRatio,
+            askDepthBefore: selected.previousAskDepth,
+            askDepthAfter: selected.askDepth,
+          },
+        );
+      }
       if (trade) {
         this.lastDecision.tradeId = trade.id;
         this.lastDecision.filledShares = trade.shares;
         this.lastDecision.entryPrice = trade.entryPrice;
-        this.lastDecision.oppositeSide = oppositeSide;
-        this.lastDecision.oppositeSharesSold = round(sharesSold, 8);
-        this.lastDecision.requestedShares = requestedShares;
         this.lastDecision.status = trade.shares + EPSILON >= this.config.BASE_ENTRY_SHARES
           ? 'BUY_FILLED' : 'BUY_PARTIAL';
-        this.lastDecision.reason += ` Sold ${round(sharesSold, 4)} ${oppositeSide} shares; bought ${round(trade.shares, 4)} of ${requestedShares} ${selected.side} shares including the 10-share base.`;
+        this.lastDecision.reason += ` Sold ${round(sharesSold, 4)} ${oppositeSide} shares; bought ${round(trade.shares, 4)} of ${round(requestedShares, 4)} ${selected.side} shares including the base.`;
+      } else if (requestedShares <= EPSILON) {
+        this.lastDecision.status = 'WINDOW_SHARE_CAP_REACHED';
+        this.lastDecision.filledShares = 0;
+        this.lastDecision.reason += ` Sold ${round(sharesSold, 4)} ${oppositeSide} shares; no buy was placed because the ${MAX_SHARES_PER_WINDOW}-share window cap is reached.`;
+        this.log(
+          'WINDOW_SHARE_CAP_REACHED',
+          `No new buy was placed; this window already reached ${MAX_SHARES_PER_WINDOW} cumulative shares.`,
+          {
+            side: selected.side,
+            sharesBoughtThisWindow: round(windowSharesBefore, 8),
+            maxSharesPerWindow: MAX_SHARES_PER_WINDOW,
+          },
+        );
       } else {
         this.lastDecision.status = 'BUY_SKIPPED';
         this.lastDecision.reason += ' The visible asks or remaining cash could not fill an order.';
@@ -623,7 +650,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
         tradeId: trade.id,
       });
     }
-    return Boolean(trade);
+    return Boolean(trade || selected);
   }
 
   evaluate(now = this.now()) {
@@ -677,10 +704,12 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       pivotPrice: PIVOT_PRICE,
       askBand: { min: ASK_BAND_MIN, max: ASK_BAND_MAX },
       sharesPerTick: this.config.BASE_ENTRY_SHARES,
+      maxSharesPerWindow: MAX_SHARES_PER_WINDOW,
       entryOrderType: 'TAKER MARKET BUY (PAPER SIMULATION)',
       entryPolicy: `On every qualifying Polymarket CLOB tick, sell any available shares on the opposite side, then buy ${this.config.BASE_ENTRY_SHARES} base shares plus the shares actually sold on the signalled side at any valid best-ask price.`,
       absorptionRule: `On every CLOB tick, count fresh, not-yet-used Polymarket BUY-side trade prints from the rolling last 10 seconds and visible ask depth from $${ASK_BAND_MIN.toFixed(2)} to $${ASK_BAND_MAX.toFixed(2)}; each print contributes to at most one buy. Require at least ${MIN_ABSORBED_SHARES} traded shares, at least ${(MIN_ABSORPTION_RATIO * 100).toFixed(0)}% of starting visible ask depth, and an ask that holds or rises from the previous check. The $${PIVOT_PRICE.toFixed(2)} pivot is informational only; there is no entry-price cap. If both sides qualify, the stronger ratio must be at least ${SIDE_DOMINANCE_RATIO.toFixed(2)}× the other.`,
       flipPolicy: `A qualifying UP signal market-sells open DOWN shares; a qualifying DOWN signal market-sells open UP shares. The new buy requests ${this.config.BASE_ENTRY_SHARES} base shares plus the shares actually sold.`,
+      windowShareCapPolicy: `No more than ${MAX_SHARES_PER_WINDOW} total filled buy shares per 5-minute market window. Selling shares does not replenish the cap.`,
       fillRule: 'Paper taker buys sweep fresh visible asks and flip sells sweep fresh visible bids; both allow partial fills and include modeled taker fees.',
       takeProfitBid: this.config.TAKE_PROFIT_BID,
       takeProfitPayoutPerShare: this.config.TAKE_PROFIT_PAYOUT_PER_SHARE,
@@ -694,6 +723,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       checkMode: 'EVERY_CLOB_TICK',
       tradeFlowLookbackMs: TRADE_FLOW_LOOKBACK_MS,
       pivotPrice: PIVOT_PRICE,
+      maxSharesPerWindow: MAX_SHARES_PER_WINDOW,
       askBand: { min: ASK_BAND_MIN, max: ASK_BAND_MAX },
       lastCheckAt: this.lastCheckAt,
       ticksChecked: this.lastCheckIndex,
@@ -713,6 +743,7 @@ module.exports = {
   CONFIG,
   TRADE_FLOW_LOOKBACK_MS,
   PIVOT_PRICE,
+  MAX_SHARES_PER_WINDOW,
   ASK_BAND_MIN,
   ASK_BAND_MAX,
   MIN_ABSORBED_SHARES,

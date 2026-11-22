@@ -259,6 +259,7 @@
       strategy.absorptionRule || "A trade requires fresh buy-side trade volume and sufficient ask absorption; any valid best-ask price is allowed.",
       strategy.flipPolicy || `On each qualifying signal, sell the opposite side and buy the 10-share base plus the shares sold.`,
       `Each qualifying CLOB tick requests ${strategy.sharesPerTick || 10} shares plus any flipped shares. Paper buys sweep visible asks and flip sells sweep visible bids; partial fills and modeled taker fees apply.`,
+      strategy.windowShareCapPolicy || "Hard cap: no more than 500 cumulative buy shares per 5-minute window; selling does not restore capacity.",
       "Take-profit: a fresh best bid at $0.99 closes that side at $1 per share. Stop: an empty bid on a fresh book closes that side at $0.",
       "Any shares still open at the end of a window wait for the original market’s official resolution."
     ];
