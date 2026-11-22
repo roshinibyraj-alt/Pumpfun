@@ -181,17 +181,85 @@ test("book-depth disappearance without buy-side trade prints is not treated as a
   assert.equal(context.bot.snapshot().absorption.lastDecision.status, "NO_SIGNAL");
 });
 
-test("fresh qualifying ticks can buy both sides independently", () => {
+test("an opposite signal sells the old side and buys base plus shares sold", () => {
   const context = fixture();
   context.seedBooks();
-  context.setNow(START + 9_500);
+  context.setNow(START + 2_000);
+  context.trade("UP", { shares: 20 });
+  context.market.raw.feesEnabled = true;
+
+  context.setNow(START + 9_000);
   context.setBook("UP");
   context.setBook("DOWN");
-  context.trade("UP", { shares: 20 });
+  context.setNow(START + 9_500);
   context.trade("DOWN", { shares: 20 });
 
   assert.equal(context.bot.trades.length, 2);
-  assert.deepEqual(context.bot.trades.map(trade => trade.side), ["UP", "DOWN"]);
+  const [upTrade, downTrade] = context.bot.trades;
+  assert.equal(upTrade.side, "UP");
+  assert.equal(upTrade.status, "SETTLED");
+  assert.equal(upTrade.exitReason, "OPPOSITE_SIGNAL");
+  assert.equal(upTrade.settlementSource, "INTRAWINDOW_OPPOSITE_SIGNAL");
+  assert.equal(upTrade.exitPrice, 0.49);
+  assert.ok(upTrade.exitFees > 0);
+  assert.equal(downTrade.side, "DOWN");
+  assert.equal(downTrade.requestedShares, 20);
+  assert.equal(downTrade.baseShares, 10);
+  assert.equal(downTrade.oppositeSharesSold, 10);
+  assert.equal(downTrade.status, "OPEN");
+});
+
+test("a partial opposite-side sale sizes the new buy from shares actually sold", () => {
+  const context = fixture();
+  context.seedBooks();
+  context.setNow(START + 2_000);
+  context.trade("UP", { shares: 20 });
+
+  context.setNow(START + 9_000);
+  context.setBook("UP", {
+    asks: [{ price: 0.50, size: 100 }],
+    bids: [{ price: 0.49, size: 4 }],
+  });
+  context.setBook("DOWN");
+  context.setNow(START + 9_500);
+  context.trade("DOWN", { shares: 20 });
+
+  const openUp = context.bot.openTradesForSide("UP")
+    .reduce((sum, trade) => sum + trade.shares, 0);
+  const openDown = context.bot.openTradesForSide("DOWN")
+    .reduce((sum, trade) => sum + trade.shares, 0);
+  const downTrade = context.bot.trades.find(trade => trade.side === "DOWN");
+  assert.equal(openUp, 6);
+  assert.equal(openDown, 14);
+  assert.equal(downTrade.requestedShares, 14);
+  assert.equal(downTrade.oppositeSharesSold, 4);
+  assert.equal(context.bot.trades.find(trade => trade.side === "UP").shares, 4);
+});
+
+test("a second opposite signal repeats the sell-and-carry sizing rule", () => {
+  const context = fixture();
+  context.seedBooks();
+  context.setNow(START + 2_000);
+  context.trade("UP", { shares: 20 });
+
+  context.setNow(START + 9_000);
+  context.setBook("UP");
+  context.setBook("DOWN");
+  context.setNow(START + 9_500);
+  context.trade("DOWN", { shares: 20 });
+
+  context.setNow(START + 20_000);
+  context.setBook("UP");
+  context.setBook("DOWN");
+  context.setNow(START + 20_500);
+  context.trade("UP", { shares: 20 });
+
+  const upTrade = context.bot.trades.filter(trade => trade.side === "UP").at(-1);
+  assert.equal(upTrade.requestedShares, 30);
+  assert.equal(upTrade.baseShares, 10);
+  assert.equal(upTrade.oppositeSharesSold, 20);
+  assert.equal(context.bot.openTradesForSide("DOWN").length, 0);
+  assert.equal(context.bot.openTradesForSide("UP").length, 1);
 });
 
 test("a book tick cannot reuse already-consumed trade flow", () => {
@@ -341,7 +409,7 @@ test("the approved deployment reset seeds one fresh ledger for this strategy ver
   };
   await bot.beforeLoadState();
 
-  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-any-price-reset-20261122");
+  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-signal-flip-reset-20261122");
   assert.equal(resetState.strategyVersion, bot.config.STRATEGY_VERSION);
   assert.equal(resetState.trades.length, 0);
   assert.equal(resetState.cash, bot.config.STARTING_CAPITAL);

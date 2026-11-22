@@ -4,6 +4,7 @@ const {
   BtcDoubleRungBot,
   DEFAULT_CONFIG: BASE_CONFIG,
 } = require('./double-rung-bot.cjs');
+const { feeParameters, takerFeeAt } = require('./paper-trading.js');
 
 const SIDES = Object.freeze(['UP', 'DOWN']);
 const EPSILON = 1e-8;
@@ -17,7 +18,7 @@ const SIDE_DOMINANCE_RATIO = 1.25;
 
 const CONFIG = Object.freeze({
   ...BASE_CONFIG,
-  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-any-price-v5',
+  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-signal-flip-v6',
   WINDOW_MS: 5 * 60 * 1000,
   BASE_ENTRY_SHARES: 10,
   RUNG_PRICES: Object.freeze([]),
@@ -94,7 +95,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       throw new Error('The approved paper history reset requires the durable reset operation.');
     }
     await this.stateStore.resetHistoryOnce(
-      'pumpfun-btc-5m-ask-absorption-any-price-reset-20261122',
+      'pumpfun-btc-5m-ask-absorption-signal-flip-reset-20261122',
       this.emptyHistoryState(),
     );
   }
@@ -272,6 +273,185 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     return true;
   }
 
+  hasExecutableBidBook(side, now = this.now()) {
+    if (!this.quoteIsFresh(side, now) || !this.bookIsFresh(side, now)) return false;
+    const quoteBid = Number(this.quotes[side]?.bestBid);
+    const tokenId = String(this.market?.tokens?.[side] || '');
+    const bestBookBid = this.books.get(tokenId)?.bids?.[0]?.price;
+    return Number.isFinite(quoteBid) && Number.isFinite(Number(bestBookBid))
+      && Math.abs(Number(bestBookBid) - quoteBid) < EPSILON;
+  }
+
+  sweepBids(side, requestedShares, now) {
+    if (!this.hasExecutableBidBook(side, now)) return null;
+    const tokenId = String(this.market.tokens[side]);
+    const levels = this.books.get(tokenId)?.bids;
+    if (!Array.isArray(levels) || !levels.length
+      || Math.abs(levels[0].price - Number(this.quotes[side].bestBid)) >= EPSILON) return null;
+
+    const fees = feeParameters(this.market);
+    let remaining = requestedShares;
+    let grossProceeds = 0;
+    let feeTotal = 0;
+    const fills = [];
+    for (const level of levels) {
+      if (remaining <= EPSILON) break;
+      const sizeAvailable = Math.max(0, Number(level.availableSize) || 0);
+      if (sizeAvailable <= EPSILON) continue;
+      const shares = Math.min(remaining, sizeAvailable);
+      const gross = shares * level.price;
+      const fee = takerFeeAt(level.price, shares, fees);
+      fills.push({ price: level.price, shares, grossProceeds: gross, fee });
+      grossProceeds += gross;
+      feeTotal += fee;
+      remaining -= shares;
+      level.availableSize -= shares;
+    }
+    const filledShares = requestedShares - remaining;
+    if (filledShares <= EPSILON) return null;
+    return {
+      requestedShares,
+      shares: filledShares,
+      remainingShares: Math.max(0, remaining),
+      grossProceeds,
+      fees: feeTotal,
+      netProceeds: grossProceeds - feeTotal,
+      averagePrice: grossProceeds / filledShares,
+      complete: remaining <= EPSILON,
+      fills,
+    };
+  }
+
+  recordMarketSell(side, requestedShares, now) {
+    const openTrades = this.openTradesForSide(side);
+    const availableShares = openTrades.reduce((sum, trade) => sum + Number(trade.shares || 0), 0);
+    const request = Math.min(Number(requestedShares) || 0, availableShares);
+    if (request <= EPSILON) return null;
+
+    const fill = this.sweepBids(side, request, now);
+    if (!fill) return null;
+
+    let remainingToAllocate = fill.shares;
+    let sidePnl = 0;
+    let closedShares = 0;
+    const tradeIds = [];
+    const residualTrades = [];
+    const exitBid = Number(this.quotes[side].bestBid);
+
+    for (const trade of openTrades) {
+      if (remainingToAllocate <= EPSILON) break;
+      const originalShares = Number(trade.shares) || 0;
+      if (originalShares <= EPSILON) continue;
+
+      const closedTradeShares = Math.min(originalShares, remainingToAllocate);
+      const closeRatio = closedTradeShares / originalShares;
+      const fillRatio = closedTradeShares / fill.shares;
+      const allocatedCost = Number(trade.totalCost) * closeRatio;
+      const allocatedGrossCost = Number(trade.grossCost) * closeRatio;
+      const allocatedEntryFees = Number(trade.fees) * closeRatio;
+      const allocatedGrossProceeds = fill.grossProceeds * fillRatio;
+      const allocatedExitFees = fill.fees * fillRatio;
+      const allocatedNetProceeds = allocatedGrossProceeds - allocatedExitFees;
+
+      if (closedTradeShares + EPSILON < originalShares) {
+        const remainderRatio = 1 - closeRatio;
+        residualTrades.push({
+          ...trade,
+          id: `misprice-trade-${++this.tradeSequence}`,
+          parentTradeId: trade.id,
+          shares: round(originalShares - closedTradeShares, 8),
+          requestedShares: round(originalShares - closedTradeShares, 8),
+          totalCost: round(Number(trade.totalCost) - allocatedCost, 8),
+          grossCost: round(Number(trade.grossCost) - allocatedGrossCost, 8),
+          fees: round(Number(trade.fees) - allocatedEntryFees, 8),
+          fills: (trade.fills || []).map(item => ({
+            ...item,
+            shares: round(Number(item.shares) * remainderRatio, 8),
+            cost: round(Number(item.cost) * remainderRatio, 8),
+            fee: round(Number(item.fee) * remainderRatio, 8),
+          })),
+          status: 'OPEN',
+          settlementStatus: 'OPEN',
+          settlementSource: null,
+          exitReason: null,
+          exitPrice: null,
+          exitTriggerBid: null,
+          exitFees: 0,
+          proceeds: null,
+          realizedPnl: null,
+          outcome: null,
+          markPrice: null,
+          markValue: null,
+          unrealizedPnl: null,
+          markFresh: false,
+          markAt: null,
+          settledAt: null,
+          closedAt: null,
+        });
+        trade.shares = round(closedTradeShares, 8);
+        trade.totalCost = round(allocatedCost, 8);
+        trade.grossCost = round(allocatedGrossCost, 8);
+        trade.fees = round(allocatedEntryFees, 8);
+        trade.fills = (trade.fills || []).map(item => ({
+          ...item,
+          shares: round(Number(item.shares) * closeRatio, 8),
+          cost: round(Number(item.cost) * closeRatio, 8),
+          fee: round(Number(item.fee) * closeRatio, 8),
+        }));
+      }
+
+      trade.status = 'SETTLED';
+      trade.settlementStatus = 'SETTLED';
+      trade.settlementSource = 'INTRAWINDOW_OPPOSITE_SIGNAL';
+      trade.exitReason = 'OPPOSITE_SIGNAL';
+      trade.exitPrice = round(fill.averagePrice, 8);
+      trade.exitTriggerBid = exitBid;
+      trade.exitFees = round(allocatedExitFees, 8);
+      trade.proceeds = round(allocatedNetProceeds, 8);
+      trade.realizedPnl = round(allocatedNetProceeds - allocatedCost, 8);
+      trade.outcome = trade.realizedPnl >= 0 ? 'WIN' : 'LOSS';
+      trade.settledAt = now;
+      trade.closedAt = now;
+
+      sidePnl += trade.realizedPnl;
+      closedShares += closedTradeShares;
+      remainingToAllocate -= closedTradeShares;
+      tradeIds.push(trade.id);
+    }
+
+    this.trades.push(...residualTrades);
+    this.cash = round(this.cash + fill.netProceeds, 8);
+    this.realizedPnl = round(this.realizedPnl + sidePnl, 8);
+    this.sideStates[side].stopped = false;
+    this.sideStates[side].stopReason = 'OPPOSITE_SIGNAL';
+    this.sideStates[side].stoppedAt = now;
+    this.log(
+      'MARKET_SELL_FLIP',
+      `${side} opposite-signal sell filled ${round(closedShares, 4)} of ${round(request, 4)} shares at an average $${fill.averagePrice.toFixed(4)} bid; net proceeds after $${fill.fees.toFixed(4)} taker fees were $${fill.netProceeds.toFixed(4)}.`,
+      {
+        side,
+        requestedShares: request,
+        filledShares: round(closedShares, 8),
+        remainingShares: round(Math.max(0, request - closedShares), 8),
+        averagePrice: round(fill.averagePrice, 8),
+        grossProceeds: round(fill.grossProceeds, 8),
+        exitFees: round(fill.fees, 8),
+        netProceeds: round(fill.netProceeds, 8),
+        realizedPnl: round(sidePnl, 8),
+        tradeIds,
+      },
+    );
+    this.schedulePersist(true);
+    return {
+      shares: round(closedShares, 8),
+      requestedShares: round(request, 8),
+      averagePrice: round(fill.averagePrice, 8),
+      fees: round(fill.fees, 8),
+      netProceeds: round(fill.netProceeds, 8),
+      complete: fill.complete,
+    };
+  }
+
   processExits(now) {
     if (!this.market || now >= this.windowEnd) return false;
     let changed = false;
@@ -357,10 +537,10 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     const candidates = Object.values(interval).filter(side => side.qualifies)
       .sort((left, right) => right.absorptionRatio - left.absorptionRatio);
     let selected = null;
-    let reason = 'Neither side met the ask-absorption and pivot-price checks.';
+    let reason = 'Neither side met the ask-absorption and ask-momentum checks.';
     if (candidates.length === 1) {
       [selected] = candidates;
-      reason = `${selected.side} had confirmed buy-side ask absorption across $0.15–$0.85.`;
+       reason = `${selected.side} had confirmed buy-side ask absorption.`;
     } else if (candidates.length > 1) {
       const [strongest, next] = candidates;
       if (strongest.absorptionRatio >= next.absorptionRatio * SIDE_DOMINANCE_RATIO) {
@@ -390,14 +570,26 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
           .filter(item => item.side === selected.side)
           .map(item => item.tickSequence),
       );
+      const oppositeSide = selected.side === 'UP' ? 'DOWN' : 'UP';
+      const oppositeShares = this.openTradesForSide(oppositeSide)
+        .reduce((sum, openTrade) => sum + Number(openTrade.shares || 0), 0);
+      const sell = oppositeShares > EPSILON
+        ? this.recordMarketSell(oppositeSide, oppositeShares, now)
+        : null;
+      const sharesSold = sell?.shares || 0;
+      const requestedShares = this.config.BASE_ENTRY_SHARES + sharesSold;
       trade = this.recordMarketBuy(
         selected.side,
-        this.config.BASE_ENTRY_SHARES,
+        requestedShares,
         'ASK_ABSORPTION_TICK',
         now,
         {
           checkIndex: intervalIndex,
           pivotPrice: PIVOT_PRICE,
+          baseShares: this.config.BASE_ENTRY_SHARES,
+          oppositeSideSold: oppositeSide,
+          oppositeSharesSold: round(sharesSold, 8),
+          requestedSharesFromFlip: requestedShares,
           absorptionShares: selected.buyTradeShares,
           absorptionRatio: selected.absorptionRatio,
           askDepthBefore: selected.previousAskDepth,
@@ -408,9 +600,12 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
         this.lastDecision.tradeId = trade.id;
         this.lastDecision.filledShares = trade.shares;
         this.lastDecision.entryPrice = trade.entryPrice;
+        this.lastDecision.oppositeSide = oppositeSide;
+        this.lastDecision.oppositeSharesSold = round(sharesSold, 8);
+        this.lastDecision.requestedShares = requestedShares;
         this.lastDecision.status = trade.shares + EPSILON >= this.config.BASE_ENTRY_SHARES
           ? 'BUY_FILLED' : 'BUY_PARTIAL';
-        this.lastDecision.reason += ` Paper buy filled ${round(trade.shares, 4)} of ${this.config.BASE_ENTRY_SHARES} shares.`;
+        this.lastDecision.reason += ` Sold ${round(sharesSold, 4)} ${oppositeSide} shares; bought ${round(trade.shares, 4)} of ${requestedShares} ${selected.side} shares including the 10-share base.`;
       } else {
         this.lastDecision.status = 'BUY_SKIPPED';
         this.lastDecision.reason += ' The visible asks or remaining cash could not fill an order.';
@@ -483,14 +678,15 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       askBand: { min: ASK_BAND_MIN, max: ASK_BAND_MAX },
       sharesPerTick: this.config.BASE_ENTRY_SHARES,
       entryOrderType: 'TAKER MARKET BUY (PAPER SIMULATION)',
-      entryPolicy: 'On every qualifying Polymarket CLOB tick, buy 10 shares on the side with clearly stronger ask absorption at any valid best-ask price.',
+      entryPolicy: `On every qualifying Polymarket CLOB tick, sell any available shares on the opposite side, then buy ${this.config.BASE_ENTRY_SHARES} base shares plus the shares actually sold on the signalled side at any valid best-ask price.`,
       absorptionRule: `On every CLOB tick, count fresh, not-yet-used Polymarket BUY-side trade prints from the rolling last 10 seconds and visible ask depth from $${ASK_BAND_MIN.toFixed(2)} to $${ASK_BAND_MAX.toFixed(2)}; each print contributes to at most one buy. Require at least ${MIN_ABSORBED_SHARES} traded shares, at least ${(MIN_ABSORPTION_RATIO * 100).toFixed(0)}% of starting visible ask depth, and an ask that holds or rises from the previous check. The $${PIVOT_PRICE.toFixed(2)} pivot is informational only; there is no entry-price cap. If both sides qualify, the stronger ratio must be at least ${SIDE_DOMINANCE_RATIO.toFixed(2)}× the other.`,
-      fillRule: 'Paper taker buys sweep fresh visible asks, allow partial fills, and include modeled taker fees.',
+      flipPolicy: `A qualifying UP signal market-sells open DOWN shares; a qualifying DOWN signal market-sells open UP shares. The new buy requests ${this.config.BASE_ENTRY_SHARES} base shares plus the shares actually sold.`,
+      fillRule: 'Paper taker buys sweep fresh visible asks and flip sells sweep fresh visible bids; both allow partial fills and include modeled taker fees.',
       takeProfitBid: this.config.TAKE_PROFIT_BID,
       takeProfitPayoutPerShare: this.config.TAKE_PROFIT_PAYOUT_PER_SHARE,
       stopLossPrice: 0,
       stopLossRule: 'If a fresh book has no bid on a side with open shares, close all those shares at $0 per share.',
-      reentryPolicy: 'Every later qualifying CLOB tick can buy that side again after a take-profit or stop-loss exit.',
+      reentryPolicy: 'Every later qualifying CLOB tick can trigger another flip or base-size buy.',
       exitPolicy: 'At best bid $0.99, close all current shares on that side for $1 per share; with no bid in a fresh book, close at $0. Unclosed shares wait for official resolution at their original market end.',
       resolutionSource: 'Official resolution of each original Polymarket market.',
     };
