@@ -713,19 +713,27 @@ class LiveCrossPairBot {
       else if (!this.tradingEnabled) gateReason = 'LIVE_TRADING_DISABLED';
       else if (!this.liveAccount.accountReady) gateReason = 'ACCOUNT_NOT_READY';
 
-      const signature = JSON.stringify({
-        fresh: quote.fresh,
-        qualifies,
-        entered: state.entered,
-        gateReason,
-      });
       const key = `${pair.id}:${this.windowStart}`;
-      const previous = this.lastPairAudit.get(key);
-      if (previous?.signature === signature
-        && now - previous.at < PAIR_AUDIT_INTERVAL_MS) continue;
-      this.lastPairAudit.set(key, { signature, at: now });
+      const previous = this.lastPairAudit.get(key) || {};
+      const sampleDue = previous.lastSampleAt == null
+        || now - previous.lastSampleAt >= PAIR_AUDIT_INTERVAL_MS;
+      const candidateEdge = qualifies && previous.lastObservedCandidate !== true
+        && now - (Number(previous.lastCandidateEventAt) || 0) >= PAIR_AUDIT_INTERVAL_MS;
+      if (!sampleDue && !candidateEdge) {
+        this.lastPairAudit.set(key, {
+          ...previous,
+          lastObservedCandidate: qualifies,
+        });
+        continue;
+      }
+      this.lastPairAudit.set(key, {
+        lastObservedCandidate: qualifies,
+        lastSampleAt: sampleDue ? now : previous.lastSampleAt,
+        lastCandidateEventAt: candidateEdge ? now : previous.lastCandidateEventAt,
+      });
 
       this.emitAudit('PAIR_EVALUATION', {
+        auditKind: candidateEdge ? 'QUALIFICATION_EDGE' : 'PERIODIC_SAMPLE',
         pairId: pair.id,
         pairLabel: pair.label,
         windowStart: this.windowStart,

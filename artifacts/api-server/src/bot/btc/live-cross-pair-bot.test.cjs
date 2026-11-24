@@ -192,6 +192,16 @@ test('audit stream records entry eligibility transitions without order or accoun
   });
   setNow(start + 5_500);
   bot.auditPairEvaluations(start + 5_500);
+  assert.equal(auditRecords.filter(record => record.type === 'PAIR_EVALUATION').length, 4);
+
+  setBook(bot, 'BTC', 'UP', {
+    bid: 0.44, ask: 0.45, at: start + 10_000,
+  });
+  setBook(bot, 'ETH', 'DOWN', {
+    bid: 0.39, ask: 0.40, at: start + 10_000,
+  });
+  setNow(start + 10_000);
+  bot.auditPairEvaluations(start + 10_000);
   const last = auditRecords.filter(record => record.type === 'PAIR_EVALUATION')
     .findLast(record => record.pairId === 'btc-up-eth-down');
   assert.equal(last.askSum, 0.85);
