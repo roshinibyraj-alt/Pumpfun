@@ -10,6 +10,7 @@ function makeBot({ traderOverrides = {}, now = 1_800_000_000_000 } = {}) {
   let currentTime = now;
   const saved = [];
   const calls = [];
+  const auditRecords = [];
   const balances = new Map();
   const exchangeOrders = new Map();
   let orderNumber = 0;
@@ -85,6 +86,7 @@ function makeBot({ traderOverrides = {}, now = 1_800_000_000_000 } = {}) {
     trader,
     tradingEnabled: true,
     marketData,
+    auditLogger: record => auditRecords.push(record),
     now: () => currentTime,
     orderTimeoutMs: 500,
     orderPollMs: 100,
@@ -135,6 +137,7 @@ function makeBot({ traderOverrides = {}, now = 1_800_000_000_000 } = {}) {
     calls,
     balances,
     saved,
+    auditRecords,
     setNow(value) { currentTime = value; },
   };
 }
@@ -149,6 +152,53 @@ function setBook(bot, asset, side, { bid, ask, bidSize = 100, askSize = 100, at 
     sourceTimestamp: at,
   });
 }
+
+test('audit stream records entry eligibility transitions without order or account secrets', () => {
+  const { bot, calls, auditRecords, setNow } = makeBot();
+  const start = bot.windowStart;
+  setBook(bot, 'BTC', 'UP', { bid: 0.29, ask: 0.30, at: start });
+  setBook(bot, 'ETH', 'DOWN', { bid: 0.39, ask: 0.40, at: start });
+  setBook(bot, 'ETH', 'UP', { bid: 0.49, ask: 0.50, at: start });
+  setBook(bot, 'BTC', 'DOWN', { bid: 0.49, ask: 0.50, at: start });
+  bot.liveAccount.accountReady = false;
+
+  bot.auditPairEvaluations(start);
+  const evaluations = auditRecords.filter(record => record.type === 'PAIR_EVALUATION');
+  const qualified = evaluations.find(record => record.pairId === 'btc-up-eth-down');
+  assert.equal(qualified.askSum, 0.7);
+  assert.equal(qualified.entryConditionMet, true);
+  assert.equal(qualified.entryEligible, false);
+  assert.equal(qualified.gateReason, 'ACCOUNT_NOT_READY');
+  assert.equal(qualified.legs[0].marketId, `btc-${start}`);
+  assert.equal(JSON.stringify(auditRecords).includes(`btc-up-${start}`), false);
+  assert.equal(JSON.stringify(auditRecords).includes('tokenId'), false);
+  assert.equal(JSON.stringify(auditRecords).includes('exchange-'), false);
+  assert.equal(JSON.stringify(auditRecords).includes('collateral'), false);
+  assert.equal(calls.length, 0);
+
+  setNow(start + 1_000);
+  bot.auditPairEvaluations(start + 1_000);
+  assert.equal(auditRecords.filter(record => record.type === 'PAIR_EVALUATION').length, 2);
+
+  setNow(start + 5_000);
+  bot.auditPairEvaluations(start + 5_000);
+  assert.equal(auditRecords.filter(record => record.type === 'PAIR_EVALUATION').length, 4);
+
+  setBook(bot, 'BTC', 'UP', {
+    bid: 0.44, ask: 0.45, at: start + 5_500,
+  });
+  setBook(bot, 'ETH', 'DOWN', {
+    bid: 0.39, ask: 0.40, at: start + 5_500,
+  });
+  setNow(start + 5_500);
+  bot.auditPairEvaluations(start + 5_500);
+  const last = auditRecords.filter(record => record.type === 'PAIR_EVALUATION')
+    .findLast(record => record.pairId === 'btc-up-eth-down');
+  assert.equal(last.askSum, 0.85);
+  assert.equal(last.entryConditionMet, false);
+  assert.equal(last.gateReason, 'ASK_SUM_NOT_BELOW_0_80');
+  assert.equal(calls.length, 0);
+});
 
 test('startup keeps health and market monitoring responsive while account authentication is pending', async () => {
   const neverAuthenticates = new Promise(() => {});
@@ -166,7 +216,7 @@ test('startup keeps health and market monitoring responsive while account authen
 });
 
 test('enters the qualifying mixed pair only, sizes the buy from fresh asks, and stores actual fills', async () => {
-  const { bot, calls, saved } = makeBot();
+  const { bot, calls, saved, auditRecords } = makeBot();
   const now = 1_800_000_000_000;
   setBook(bot, 'BTC', 'UP', { bid: 0.29, ask: 0.30, at: now });
   setBook(bot, 'ETH', 'DOWN', { bid: 0.38, ask: 0.40, at: now });
@@ -187,6 +237,11 @@ test('enters the qualifying mixed pair only, sizes the buy from fresh asks, and 
   assert.deepEqual(bot.positions.map(position => position.shares), [7, 7]);
   assert.equal(bot.pairState(bot._test?.PAIRS?.[0] || { id: 'btc-up-eth-down' }).entered, true);
   assert.ok(saved.length > 0);
+  const results = auditRecords.filter(record => record.type === 'ORDER_RESULT');
+  assert.equal(results.length, 2);
+  assert.ok(results.every(record => record.matchedShares === 7));
+  assert.ok(results.every(record => !Object.hasOwn(record, 'orderId')));
+  assert.ok(results.every(record => !Object.hasOwn(record, 'tokenId')));
 });
 
 test('the $1.22 pair signal submits independent share-sized sells for both current tokens', async () => {
@@ -328,7 +383,7 @@ test('partial and missing leg fills are recorded from the exchange instead of in
 });
 
 test('an ended market is checked for resolution immediately, not one full window later', async () => {
-  const { bot } = makeBot();
+  const { bot, auditRecords } = makeBot();
   const now = 1_800_000_000_000;
   bot.marketData.getMarket = async () => ({
     outcomes: ['Up', 'Down'],
@@ -354,4 +409,9 @@ test('an ended market is checked for resolution immediately, not one full window
   assert.equal(bot.positions[0].status, 'RESOLVED_WIN');
   assert.equal(bot.positions[0].resolutionPayoutEstimate, 7);
   assert.equal(bot.positions[0].realizedPnlEstimate, 4.9);
+  assert.ok(auditRecords.some(record => record.type === 'RESOLUTION_CHECK'
+    && record.conditionId === 'resolved-condition' && record.status === 'RESOLVED'));
+  assert.ok(auditRecords.some(record => record.type === 'RESOLUTION_POSITION_RESULT'
+    && record.result === 'WIN' && record.payoutEstimate === 7
+    && record.pnlBasis.includes('not confirmed collateral redemption')));
 });

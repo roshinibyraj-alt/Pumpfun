@@ -13,6 +13,7 @@ const SHARES_PER_LEG = 7;
 const MAX_QUOTE_AGE_MS = 2_000;
 const MAX_QUOTE_SKEW_MS = 1_000;
 const RESOLUTION_POLL_MS = 5_000;
+const PAIR_AUDIT_INTERVAL_MS = 5_000;
 const LOOP_MS = 500;
 const MIN_BUY_NOTIONAL_USD = 1;
 const EPSILON = 1e-8;
@@ -149,6 +150,7 @@ class LiveCrossPairBot {
     trader,
     tradingEnabled = false,
     marketData = marketDataDefault,
+    auditLogger = null,
     now = Date.now,
     orderTimeoutMs = 1_500,
     orderPollMs = 250,
@@ -159,6 +161,7 @@ class LiveCrossPairBot {
     this.trader = trader || null;
     this.tradingEnabled = tradingEnabled === true;
     this.marketData = marketData;
+    this.auditLogger = typeof auditLogger === 'function' ? auditLogger : null;
     this.now = now;
     this.orderTimeoutMs = Math.max(500, Number(orderTimeoutMs) || 1_500);
     this.orderPollMs = Math.max(100, Number(orderPollMs) || 250);
@@ -216,6 +219,7 @@ class LiveCrossPairBot {
     this.orders = [];
     this.events = [];
     this.windowPairs = new Map();
+    this.lastPairAudit = new Map();
     this.activeOrderTokens = new Set();
     this.lastSellAttemptAt = new Map();
     this.unmanagedLegacy = {
@@ -251,6 +255,12 @@ class LiveCrossPairBot {
     this.running = true;
     this.status = 'SEARCHING_MARKETS';
     this.statusReason = 'Connecting account and loading BTC/ETH markets.';
+    this.emitAudit('BOT_STARTED', {
+      strategyId: STRATEGY_ID,
+      tradingEnabled: this.tradingEnabled,
+      windowStart: this.windowStart,
+      earliestTradableWindowStart: this.earliestTradableWindowStart,
+    });
     this.timer = setInterval(() => { void this.tick(); }, LOOP_MS);
     this.timer.unref?.();
     if (this.trader) void this.authenticateAccount(Number(this.now()));
@@ -369,6 +379,7 @@ class LiveCrossPairBot {
       this.updateOpenMarks(now);
       void this.refreshAccount(false);
       await this.checkOpenPositionExits(now);
+      this.auditPairEvaluations(now);
       await this.checkEntries(now);
       await this.resolveDue(now);
 
@@ -405,6 +416,8 @@ class LiveCrossPairBot {
 
   async advanceWindow(start, now) {
     const previousStart = this.windowStart;
+    const previousOpenPositions = previousStart == null ? 0 : this.positions.filter(position =>
+      position.windowStart === previousStart && position.status === 'OPEN').length;
     if (previousStart != null) {
       for (const position of this.positions) {
         if (position.windowStart === previousStart && position.status === 'OPEN') {
@@ -430,6 +443,13 @@ class LiveCrossPairBot {
       `${pair.id}:${start}`,
       { pairId: pair.id, windowStart: start, entered: false, status: 'ARMED', reason: 'Waiting for fresh books.' },
     ]));
+    this.lastPairAudit.clear();
+    this.emitAudit('WINDOW_STARTED', {
+      windowStart: start,
+      windowEnd: start + WINDOW_MS,
+      previousWindowStart: previousStart,
+      previousOpenPositions,
+    });
     await this.persist();
   }
 
@@ -660,6 +680,85 @@ class LiveCrossPairBot {
     };
   }
 
+  emitAudit(type, fields = {}) {
+    if (!this.auditLogger) return;
+    const record = {
+      source: 'btc-eth-live-cross-pair',
+      type,
+      at: Number(this.now()),
+      ...fields,
+    };
+    try {
+      this.auditLogger(record);
+    } catch {
+      // Audit output must never block or alter live trading decisions.
+    }
+  }
+
+  auditPairEvaluations(now) {
+    if (this.windowStart == null || this.windowEnd == null) return;
+    const orderReady = this.storageHealthy && this.tradingEnabled
+      && this.liveAccount.accountReady;
+    for (const pair of PAIRS) {
+      const quote = this.pairQuote(pair, now);
+      const state = this.pairState(pair);
+      const qualifies = quote.fresh && quote.askSum < ENTRY_ASK_SUM;
+      let gateReason = 'ENTRY_QUALIFIED';
+      if (now >= this.windowEnd) gateReason = 'WINDOW_ENDED';
+      else if (this.windowStart < this.earliestTradableWindowStart) gateReason = 'WINDOW_NOT_TRADABLE';
+      else if (state.entered) gateReason = 'PAIR_ALREADY_ENTERED';
+      else if (!quote.fresh) gateReason = 'WAITING_FOR_FRESH_ALIGNED_QUOTES';
+      else if (!qualifies) gateReason = 'ASK_SUM_NOT_BELOW_0_80';
+      else if (!this.storageHealthy) gateReason = 'LEDGER_NOT_READY';
+      else if (!this.tradingEnabled) gateReason = 'LIVE_TRADING_DISABLED';
+      else if (!this.liveAccount.accountReady) gateReason = 'ACCOUNT_NOT_READY';
+
+      const signature = JSON.stringify({
+        fresh: quote.fresh,
+        qualifies,
+        entered: state.entered,
+        gateReason,
+      });
+      const key = `${pair.id}:${this.windowStart}`;
+      const previous = this.lastPairAudit.get(key);
+      if (previous?.signature === signature
+        && now - previous.at < PAIR_AUDIT_INTERVAL_MS) continue;
+      this.lastPairAudit.set(key, { signature, at: now });
+
+      this.emitAudit('PAIR_EVALUATION', {
+        pairId: pair.id,
+        pairLabel: pair.label,
+        windowStart: this.windowStart,
+        windowEnd: this.windowEnd,
+        marketAligned: quote.marketsAligned,
+        quotesFresh: quote.fresh,
+        quoteSkewMs: quote.quoteSkewMs,
+        askSum: quote.askSum,
+        entryThreshold: ENTRY_ASK_SUM,
+        entryConditionMet: qualifies,
+        entryEligible: qualifies && !state.entered && orderReady
+          && now < this.windowEnd
+          && this.windowStart >= this.earliestTradableWindowStart,
+        pairAlreadyEntered: state.entered,
+        gateReason,
+        legs: quote.legs.map(leg => ({
+          asset: leg.asset,
+          side: leg.side,
+          marketId: leg.marketId,
+          marketSlug: leg.marketSlug,
+          marketStart: leg.start,
+          marketEnd: leg.end,
+          bestBid: leg.bestBid == null ? null : round(leg.bestBid, 4),
+          bestAsk: leg.bestAsk == null ? null : round(leg.bestAsk, 4),
+          quoteAt: leg.updatedAt,
+          quoteAgeMs: Number.isFinite(Number(leg.updatedAt))
+            ? Math.max(0, now - Number(leg.updatedAt))
+            : null,
+        })),
+      });
+    }
+  }
+
   async checkEntries(now) {
     if (!this.storageHealthy || !this.tradingEnabled || !this.liveAccount.accountReady
       || now >= this.windowEnd || this.windowStart < this.earliestTradableWindowStart) return;
@@ -787,21 +886,40 @@ class LiveCrossPairBot {
       askSum: quote.askSum,
       legs: cycle.legs.map(leg => ({ asset: leg.asset, side: leg.side, filledShares: leg.filledShares, status: leg.status })),
     });
+    this.emitAudit('PAIR_ENTRY_RESULT', {
+      pairId: pair.id,
+      pairLabel: pair.label,
+      cycleId: cycle.id,
+      windowStart: cycle.windowStart,
+      windowEnd: cycle.windowEnd,
+      askSum: quote.askSum,
+      status: cycle.status,
+      legs: cycle.legs.map(leg => ({
+        asset: leg.asset,
+        side: leg.side,
+        status: leg.status,
+        requestedShares: round(leg.requestedShares, 6),
+        matchedShares: round(leg.filledShares, 6),
+      })),
+    });
   }
 
   async submitOrder(order) {
     if (!this.trader || !this.tradingEnabled || !this.liveAccount.accountReady) {
       order.status = 'NOT_SUBMITTED';
       order.error = 'Live account is not ready.';
+      this.emitAudit('ORDER_NOT_SUBMITTED', this.auditOrderFields(order));
       return order;
     }
     const lock = `${order.tokenId}:${order.action}`;
     if (this.activeOrderTokens.has(lock)) {
       order.status = 'BLOCKED_DUPLICATE';
       order.error = 'Another live order is active for this outcome token.';
+      this.emitAudit('ORDER_NOT_SUBMITTED', this.auditOrderFields(order));
       return order;
     }
     this.activeOrderTokens.add(lock);
+    this.emitAudit('ORDER_SUBMISSION_STARTED', this.auditOrderFields(order));
     await this.persist();
     try {
       const isSell = order.action.startsWith('SELL');
@@ -817,6 +935,7 @@ class LiveCrossPairBot {
       await this.persist();
       await this.pollOrder(order);
       this.applyOrderFill(order);
+      this.emitAudit('ORDER_RESULT', this.auditOrderFields(order));
       return order;
     } catch (error) {
       order.error = String(error?.message || error).slice(0, 220);
@@ -825,6 +944,7 @@ class LiveCrossPairBot {
       order.retryPolicy = order.action.startsWith('SELL')
         ? 'RECHECK_SELLABLE_BALANCE_BEFORE_ANY_RETRY'
         : 'DO_NOT_RETRY_THIS_PAIR_WINDOW';
+      this.emitAudit('ORDER_UNCERTAIN', this.auditOrderFields(order));
       await this.persist();
       await this.log(order.action.startsWith('SELL') ? 'SELL_ORDER_UNCERTAIN' : 'BUY_ORDER_UNCERTAIN',
         `${order.action} result is ${order.status}; the record is retained and no blind duplicate order will be sent.`,
@@ -834,6 +954,30 @@ class LiveCrossPairBot {
       this.activeOrderTokens.delete(lock);
       await this.persist();
     }
+  }
+
+  auditOrderFields(order) {
+    return {
+      localOrderRef: order.localId,
+      cycleId: order.cycleId,
+      pairId: order.pairId,
+      windowStart: order.windowStart,
+      windowEnd: order.windowEnd,
+      action: order.action,
+      exitReason: order.exitReason || null,
+      asset: order.asset,
+      side: order.side,
+      status: order.status,
+      requestedShares: round(order.requestedShares, 6),
+      requestedUsd: order.amountUsd == null ? null : round(order.amountUsd, 4),
+      matchedShares: round(order.matchedShares, 6),
+      minimumPrice: order.limitPrice == null ? null : round(order.limitPrice, 4),
+      bookPriceEstimate: order.averagePriceEstimate == null
+        ? null : round(order.averagePriceEstimate, 6),
+      fillPriceBasis: order.fillPriceBasis || 'not_available',
+      submittedAt: order.submittedAt,
+      updatedAt: order.updatedAt || Number(this.now()),
+    };
   }
 
   async pollOrder(order) {
@@ -975,6 +1119,13 @@ class LiveCrossPairBot {
         cycle.reverseExitTriggeredAt = now;
         cycle.reverseExitAskSum = pairQuote.askSum;
         cycle.reverseExitStatus = 'SELLING';
+        this.emitAudit('PAIR_INVERSE_EXIT_TRIGGERED', {
+          pairId: pair.id,
+          cycleId: cycle.id,
+          windowStart: cycle.windowStart,
+          askSum: pairQuote.askSum,
+          threshold: INVERSE_EXIT_ASK_SUM,
+        });
         await this.log('PAIR_INVERSE_EXIT_TRIGGERED',
           `${pair.label} combined asks reached $${pairQuote.askSum.toFixed(4)}; selling its remaining exchange-confirmed shares.`,
           { pairId: pair.id, cycleId: cycle.id, askSum: pairQuote.askSum });
@@ -1092,10 +1243,20 @@ class LiveCrossPairBot {
       try {
         const result = await this.marketData.getMarket(conditionId);
         const winner = winningOutcome(result);
+        const relatedPositions = waiting.filter(item => item.conditionId === conditionId);
+        this.emitAudit('RESOLUTION_CHECK', {
+          conditionId,
+          windowStart: relatedPositions[0]?.windowStart ?? null,
+          marketSlug: relatedPositions[0]?.marketSlug ?? null,
+          status: winner ? 'RESOLVED' : 'PENDING',
+          winner,
+          positionsChecked: relatedPositions.length,
+        });
         if (!winner) continue;
-        for (const position of waiting.filter(item => item.conditionId === conditionId)) {
+        for (const position of relatedPositions) {
+          const sharesAtResolution = Number(position.shares) || 0;
           const won = winner.toUpperCase() === position.side;
-          const payout = won ? Number(position.shares) : 0;
+          const payout = won ? sharesAtResolution : 0;
           position.status = won ? 'RESOLVED_WIN' : 'RESOLVED_LOSS';
           position.resolvedAt = now;
           position.winner = winner;
@@ -1107,6 +1268,23 @@ class LiveCrossPairBot {
             - (Number(position.entryFeesEstimate) || 0),
             6,
           );
+          this.emitAudit('RESOLUTION_POSITION_RESULT', {
+            positionId: position.id,
+            cycleId: position.cycleId,
+            pairId: position.pairId,
+            asset: position.asset,
+            side: position.side,
+            marketId: position.marketId,
+            marketSlug: position.marketSlug,
+            windowStart: position.windowStart,
+            windowEnd: position.windowEnd,
+            winner,
+            result: won ? 'WIN' : 'LOSS',
+            sharesAtResolution: round(sharesAtResolution, 6),
+            payoutEstimate: round(payout, 6),
+            realizedPnlEstimate: round(position.realizedPnlEstimate, 6),
+            pnlBasis: 'book-based price estimate; not confirmed collateral redemption',
+          });
           resolutionChanged = true;
         }
         await this.log('MARKET_RESOLVED', `Official market result: ${winner}. Live collateral changes only when Polymarket credits or redeems the tokens.`, {
@@ -1115,6 +1293,11 @@ class LiveCrossPairBot {
         });
       } catch (error) {
         this.error = String(error?.message || error).slice(0, 180);
+        this.emitAudit('RESOLUTION_LOOKUP_ERROR', {
+          conditionId,
+          windowStart: waiting.find(item => item.conditionId === conditionId)?.windowStart ?? null,
+          errorName: String(error?.name || 'Error').slice(0, 48),
+        });
       }
     }
     for (const cycle of this.cycles) {

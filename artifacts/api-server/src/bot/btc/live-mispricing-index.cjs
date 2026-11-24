@@ -72,6 +72,7 @@ async function main() {
     trader,
     tradingEnabled,
     marketData,
+    auditLogger: record => console.log(`LIVE_AUDIT ${JSON.stringify(record)}`),
   });
   const server = createLiveMispricingServer({
     bot,
