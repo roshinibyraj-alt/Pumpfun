@@ -385,10 +385,16 @@ test('partial and missing leg fills are recorded from the exchange instead of in
 test('an ended market is checked for resolution immediately, not one full window later', async () => {
   const { bot, auditRecords } = makeBot();
   const now = 1_800_000_000_000;
-  bot.marketData.getMarket = async () => ({
-    outcomes: ['Up', 'Down'],
-    outcomePrices: ['1', '0'],
-  });
+  const marketLookups = [];
+  bot.marketData.getMarket = async marketId => {
+    marketLookups.push(marketId);
+    return {
+      id: marketId,
+      conditionId: 'resolved-condition',
+      outcomes: ['Up', 'Down'],
+      outcomePrices: ['1', '0'],
+    };
+  };
   bot.positions = [{
     id: 'pending-leg',
     pairId: 'btc-up-eth-down',
@@ -396,6 +402,7 @@ test('an ended market is checked for resolution immediately, not one full window
     pairLabel: 'BTC UP + ETH DOWN',
     asset: 'BTC',
     side: 'UP',
+    marketId: '7279144',
     conditionId: 'resolved-condition',
     status: 'PENDING_RESOLUTION',
     shares: 7,
@@ -409,8 +416,10 @@ test('an ended market is checked for resolution immediately, not one full window
   assert.equal(bot.positions[0].status, 'RESOLVED_WIN');
   assert.equal(bot.positions[0].resolutionPayoutEstimate, 7);
   assert.equal(bot.positions[0].realizedPnlEstimate, 4.9);
+  assert.deepEqual(marketLookups, ['7279144']);
   assert.ok(auditRecords.some(record => record.type === 'RESOLUTION_CHECK'
-    && record.conditionId === 'resolved-condition' && record.status === 'RESOLVED'));
+    && record.marketId === '7279144' && record.conditionId === 'resolved-condition'
+    && record.status === 'RESOLVED'));
   assert.ok(auditRecords.some(record => record.type === 'RESOLUTION_POSITION_RESULT'
     && record.result === 'WIN' && record.payoutEstimate === 7
     && record.pnlBasis.includes('not confirmed collateral redemption')));

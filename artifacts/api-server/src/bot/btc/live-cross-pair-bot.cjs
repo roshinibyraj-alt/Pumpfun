@@ -1238,13 +1238,17 @@ class LiveCrossPairBot {
     if (!waiting.length || now - this.lastResolutionPollAt < RESOLUTION_POLL_MS) return;
     this.lastResolutionPollAt = now;
     let resolutionChanged = false;
-    const conditionIds = [...new Set(waiting.map(position => position.conditionId).filter(Boolean))];
-    for (const conditionId of conditionIds) {
+    const marketIds = [...new Set(waiting.map(position =>
+      position.marketId || position.conditionId).filter(Boolean))];
+    for (const marketId of marketIds) {
+      const relatedPositions = waiting.filter(position =>
+        (position.marketId || position.conditionId) === marketId);
+      const conditionId = relatedPositions[0]?.conditionId || null;
       try {
-        const result = await this.marketData.getMarket(conditionId);
+        const result = await this.marketData.getMarket(marketId);
         const winner = winningOutcome(result);
-        const relatedPositions = waiting.filter(item => item.conditionId === conditionId);
         this.emitAudit('RESOLUTION_CHECK', {
+          marketId,
           conditionId,
           windowStart: relatedPositions[0]?.windowStart ?? null,
           marketSlug: relatedPositions[0]?.marketSlug ?? null,
@@ -1294,8 +1298,9 @@ class LiveCrossPairBot {
       } catch (error) {
         this.error = String(error?.message || error).slice(0, 180);
         this.emitAudit('RESOLUTION_LOOKUP_ERROR', {
+          marketId,
           conditionId,
-          windowStart: waiting.find(item => item.conditionId === conditionId)?.windowStart ?? null,
+          windowStart: relatedPositions[0]?.windowStart ?? null,
           errorName: String(error?.name || 'Error').slice(0, 48),
         });
       }
