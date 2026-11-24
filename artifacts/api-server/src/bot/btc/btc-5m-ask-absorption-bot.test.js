@@ -115,7 +115,7 @@ test("buys 10 shares on the side with verified ask absorption and price confirma
   assert.equal(context.bot.snapshot().absorption.lastDecision.status, "BUY_FILLED");
 });
 
-test("measures ask depth across $0.15-$0.85 without limiting the entry price", () => {
+test("measures ask depth across $0.15-$0.85 while gating entries to $0.40-$0.60", () => {
   const context = fixture();
   context.setBook("UP", {
     asks: [
@@ -133,12 +133,11 @@ test("measures ask depth across $0.15-$0.85 without limiting the entry price", (
   context.setBook("UP", { asks: [{ price: 0.75, size: 40 }], bids: [{ price: 0.74, size: 100 }] });
   context.trade("UP", { price: 0.75, shares: 20 });
 
-  assert.equal(context.bot.trades.length, 1);
-  assert.equal(context.bot.trades[0].side, "UP");
-  assert.equal(context.bot.trades[0].entryPrice, 0.75);
+  assert.equal(context.bot.trades.length, 0);
+  assert.match(context.bot.snapshot().absorption.lastDecision.sides.UP.reason, /outside the \$0\.40–\$0\.60 entry band/);
   assert.equal(context.bot.snapshot().strategy.askBand.min, 0.15);
   assert.equal(context.bot.snapshot().strategy.askBand.max, 0.85);
-  assert.equal("maxEntryBestAsk" in context.bot.snapshot().strategy, false);
+  assert.deepEqual(context.bot.snapshot().strategy.entryBestAskBand, { min: 0.40, max: 0.60 });
 });
 
 test("allows a qualifying entry below the $0.50 pivot", () => {
@@ -156,18 +155,35 @@ test("allows a qualifying entry below the $0.50 pivot", () => {
   assert.equal(context.bot.trades[0].entryPrice, 0.49);
 });
 
-test("allows a qualifying entry above the former $0.55 ask gate", () => {
-  const context = fixture();
-  context.seedBooks();
-  context.bot.absorptionSides.UP.previousBestAsk = 0.74;
-  context.setNow(START + 9_000);
-  context.setBook("UP", { asks: [{ price: 0.76, size: 80 }], bids: [{ price: 0.75, size: 100 }] });
-  context.setBook("DOWN");
-  context.setNow(START + 9_500);
-  context.trade("UP", { price: 0.76, shares: 20 });
+test("accepts both inclusive edges of the $0.40-$0.60 entry band", () => {
+  for (const price of [0.40, 0.60]) {
+    const context = fixture();
+    context.seedBooks();
+    context.bot.absorptionSides.UP.previousBestAsk = price - 0.01;
+    context.setNow(START + 9_000);
+    context.setBook("UP", { asks: [{ price, size: 80 }], bids: [{ price: price - 0.01, size: 100 }] });
+    context.setBook("DOWN");
+    context.setNow(START + 9_500);
+    context.trade("UP", { price, shares: 20 });
 
-  assert.equal(context.bot.trades.length, 1);
-  assert.equal(context.bot.trades[0].entryPrice, 0.76);
+    assert.equal(context.bot.trades.length, 1, `expected entry at $${price}`);
+    assert.equal(context.bot.trades[0].entryPrice, price);
+  }
+});
+
+test("rejects best asks just outside the $0.40-$0.60 entry band", () => {
+  for (const price of [0.39, 0.61]) {
+    const context = fixture();
+    context.seedBooks();
+    context.bot.absorptionSides.UP.previousBestAsk = price - 0.01;
+    context.setNow(START + 9_000);
+    context.setBook("UP", { asks: [{ price, size: 80 }], bids: [{ price: price - 0.01, size: 100 }] });
+    context.setBook("DOWN");
+    context.setNow(START + 9_500);
+    context.trade("UP", { price, shares: 20 });
+
+    assert.equal(context.bot.trades.length, 0, `unexpected entry at $${price}`);
+  }
 });
 
 test("book-depth disappearance without buy-side trade prints is not treated as absorption", () => {
@@ -182,7 +198,7 @@ test("book-depth disappearance without buy-side trade prints is not treated as a
   assert.equal(context.bot.snapshot().absorption.lastDecision.status, "NO_SIGNAL");
 });
 
-test("an opposite signal sells the old side and buys base plus shares sold", () => {
+test("a flip waits for a second consecutive qualifying tick, then sells and buys base plus shares sold", () => {
   const context = fixture();
   context.seedBooks();
   context.setNow(START + 2_000);
@@ -193,6 +209,16 @@ test("an opposite signal sells the old side and buys base plus shares sold", () 
   context.setBook("UP");
   context.setBook("DOWN");
   context.setNow(START + 9_500);
+  context.trade("DOWN", { shares: 20 });
+
+  assert.equal(context.bot.trades.length, 1);
+  assert.equal(context.bot.trades[0].status, "OPEN");
+  assert.equal(context.bot.snapshot().absorption.lastDecision.status, "FLIP_CONFIRMATION_PENDING");
+  assert.equal(context.bot.snapshot().absorption.lastDecision.flipConfirmation.observedTicks, 1);
+  context.bot.evaluate(context.now());
+  assert.equal(context.bot.trades.length, 1, "re-evaluating the same feed tick must not confirm a flip");
+
+  context.setNow(START + 9_600);
   context.trade("DOWN", { shares: 20 });
 
   assert.equal(context.bot.trades.length, 2);
@@ -210,6 +236,49 @@ test("an opposite signal sells the old side and buys base plus shares sold", () 
   assert.equal(downTrade.status, "OPEN");
 });
 
+test("an out-of-band opposite signal cannot flip or sell the current position", () => {
+  const context = fixture();
+  context.seedBooks();
+  context.setNow(START + 2_000);
+  context.trade("UP", { shares: 20 });
+
+  context.setNow(START + 9_000);
+  context.setBook("UP");
+  context.setBook("DOWN", { asks: [{ price: 0.61, size: 100 }], bids: [{ price: 0.60, size: 100 }] });
+  context.setNow(START + 9_500);
+  context.trade("DOWN", { price: 0.61, shares: 20 });
+
+  assert.equal(context.bot.trades.length, 1);
+  assert.equal(context.bot.trades[0].side, "UP");
+  assert.equal(context.bot.trades[0].status, "OPEN");
+  assert.equal(context.bot.snapshot().absorption.lastDecision.sides.DOWN.entryPriceEligible, false);
+});
+
+test("a nonqualifying tick resets consecutive flip confirmation", () => {
+  const context = fixture();
+  context.seedBooks();
+  context.setNow(START + 2_000);
+  context.trade("UP", { shares: 20 });
+
+  context.setNow(START + 9_000);
+  context.setBook("UP");
+  context.setBook("DOWN");
+  context.setNow(START + 9_500);
+  context.trade("DOWN", { shares: 20 });
+  assert.equal(context.bot.snapshot().absorption.lastDecision.status, "FLIP_CONFIRMATION_PENDING");
+
+  context.setNow(START + 9_600);
+  context.trade("UP", { shares: 20 });
+  assert.equal(context.bot.snapshot().absorption.lastDecision.status, "NO_SIGNAL");
+
+  context.setNow(START + 9_700);
+  context.trade("DOWN", { shares: 20 });
+  assert.equal(context.bot.trades.length, 1);
+  assert.equal(context.bot.trades[0].status, "OPEN");
+  assert.equal(context.bot.snapshot().absorption.lastDecision.status, "FLIP_CONFIRMATION_PENDING");
+  assert.equal(context.bot.snapshot().absorption.lastDecision.flipConfirmation.observedTicks, 1);
+});
+
 test("a partial opposite-side sale sizes the new buy from shares actually sold", () => {
   const context = fixture();
   context.seedBooks();
@@ -223,6 +292,8 @@ test("a partial opposite-side sale sizes the new buy from shares actually sold",
   });
   context.setBook("DOWN");
   context.setNow(START + 9_500);
+  context.trade("DOWN", { shares: 20 });
+  context.setNow(START + 9_600);
   context.trade("DOWN", { shares: 20 });
 
   const openUp = context.bot.openTradesForSide("UP")
@@ -249,10 +320,15 @@ test("a second opposite signal repeats the sell-and-carry sizing rule", () => {
   context.setNow(START + 9_500);
   context.trade("DOWN", { shares: 20 });
 
+  context.setNow(START + 9_600);
+  context.trade("DOWN", { shares: 20 });
+
   context.setNow(START + 20_000);
   context.setBook("UP");
   context.setBook("DOWN");
   context.setNow(START + 20_500);
+  context.trade("UP", { shares: 20 });
+  context.setNow(START + 20_600);
   context.trade("UP", { shares: 20 });
 
   const upTrade = context.bot.trades.filter(trade => trade.side === "UP").at(-1);
@@ -284,6 +360,8 @@ test("opposite-signal carry sizing never exceeds 500 cumulative shares in a wind
   context.setBook("UP");
   context.setBook("DOWN");
   context.setNow(START + 9_500);
+  context.trade("UP", { shares: 20 });
+  context.setNow(START + 9_600);
   context.trade("UP", { shares: 20 });
 
   const upTrade = context.bot.trades.find(trade => trade.entryReason === "ASK_ABSORPTION_TICK");
@@ -427,21 +505,16 @@ test("the new strategy ignores any leftover environment history-reset request", 
   assert.equal(bot.shouldApplyEnvironmentHistoryReset(), false);
 });
 
-test("the approved deployment reset seeds one fresh ledger for this strategy version", async () => {
+test("a strategy deployment preserves the existing paper ledger", async () => {
   const { bot } = fixture();
-  let savedRequestId = null;
-  let resetState = null;
+  let resetCalled = false;
   bot.stateStore = {
-    async resetHistoryOnce(requestId, state) {
-      savedRequestId = requestId;
-      resetState = state;
-      return true;
+    async resetHistoryOnce() {
+      resetCalled = true;
     },
   };
   await bot.beforeLoadState();
 
-  assert.equal(savedRequestId, "pumpfun-btc-5m-ask-absorption-signal-flip-cap500-reset-20261122");
-  assert.equal(resetState.strategyVersion, bot.config.STRATEGY_VERSION);
-  assert.equal(resetState.trades.length, 0);
-  assert.equal(resetState.cash, bot.config.STARTING_CAPITAL);
+  assert.equal(resetCalled, false);
+  assert.equal(bot.config.STRATEGY_VERSION, "btc-5m-clob-ask-absorption-band040-060-flip-confirm2-cap500-v8");
 });

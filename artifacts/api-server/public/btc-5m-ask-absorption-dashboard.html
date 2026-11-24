@@ -255,9 +255,9 @@
 
     const rules = [
       "BTC 5-minute markets only; check both sides on every Polymarket CLOB tick.",
-      `The $${Number(strategy.pivotPrice || 0.5).toFixed(2)} UP/DOWN pivot is informational only; there is no entry-price cap. Ask depth is measured from $${Number(strategy.askBand?.min || 0.15).toFixed(2)} to $${Number(strategy.askBand?.max || 0.85).toFixed(2)}.`,
-      strategy.absorptionRule || "A trade requires fresh buy-side trade volume and sufficient ask absorption; any valid best-ask price is allowed.",
-      strategy.flipPolicy || `On each qualifying signal, sell the opposite side and buy the 10-share base plus the shares sold.`,
+      `Only enter when the signalled side's best ask is between $${Number(strategy.entryBestAskBand?.min || 0.40).toFixed(2)} and $${Number(strategy.entryBestAskBand?.max || 0.60).toFixed(2)}, inclusive. The $${Number(strategy.pivotPrice || 0.5).toFixed(2)} pivot is informational; ask depth is measured separately from $${Number(strategy.askBand?.min || 0.15).toFixed(2)} to $${Number(strategy.askBand?.max || 0.85).toFixed(2)}.`,
+      strategy.absorptionRule || "A trade requires fresh buy-side volume, sufficient ask absorption, and a best ask inside the $0.40-$0.60 entry band.",
+      strategy.flipPolicy || "A flip needs the opposite signal on two consecutive qualifying CLOB ticks before selling and rebuying.",
       `Each qualifying CLOB tick requests ${strategy.sharesPerTick || 10} shares plus any flipped shares. Paper buys sweep visible asks and flip sells sweep visible bids; partial fills and modeled taker fees apply.`,
       strategy.windowShareCapPolicy || "Hard cap: no more than 500 cumulative buy shares per 5-minute window; selling does not restore capacity.",
       "Take-profit: a fresh best bid at $0.99 closes that side at $1 per share. Stop: an empty bid on a fresh book closes that side at $0.",

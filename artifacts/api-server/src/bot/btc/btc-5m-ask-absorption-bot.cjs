@@ -13,13 +13,16 @@ const PIVOT_PRICE = 0.50;
 const MAX_SHARES_PER_WINDOW = 500;
 const ASK_BAND_MIN = 0.15;
 const ASK_BAND_MAX = 0.85;
+const ENTRY_BEST_ASK_MIN = 0.40;
+const ENTRY_BEST_ASK_MAX = 0.60;
+const FLIP_CONFIRMATION_TICKS = 2;
 const MIN_ABSORBED_SHARES = 10;
 const MIN_ABSORPTION_RATIO = 0.10;
 const SIDE_DOMINANCE_RATIO = 1.25;
 
 const CONFIG = Object.freeze({
   ...BASE_CONFIG,
-  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-signal-flip-cap500-v7',
+  STRATEGY_VERSION: 'btc-5m-clob-ask-absorption-band040-060-flip-confirm2-cap500-v8',
   WINDOW_MS: 5 * 60 * 1000,
   BASE_ENTRY_SHARES: 10,
   RUNG_PRICES: Object.freeze([]),
@@ -79,6 +82,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     this.lastConsumedTradeSequence = { UP: 0, DOWN: 0 };
     this.tradeTape = [];
     this.lastDecision = null;
+    this.pendingFlipConfirmation = null;
     this.absorptionSides = {
       UP: emptyAbsorptionSide('UP'),
       DOWN: emptyAbsorptionSide('DOWN'),
@@ -92,17 +96,13 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
   }
 
   async beforeLoadState() {
-    if (typeof this.stateStore?.resetHistoryOnce !== 'function') {
-      throw new Error('The approved paper history reset requires the durable reset operation.');
-    }
-    await this.stateStore.resetHistoryOnce(
-      'pumpfun-btc-5m-ask-absorption-signal-flip-cap500-reset-20261122',
-      this.emptyHistoryState(),
-    );
+    // The one-time reset for this strategy was already applied. Future code
+    // deployments must restore the existing ledger, not clear it again.
   }
 
   restoreState(state) {
     super.restoreState(state);
+    this.pendingFlipConfirmation = null;
     const currentStart = Math.floor(this.now() / this.config.WINDOW_MS) * this.config.WINDOW_MS;
     if (state.strategyVersion !== this.config.STRATEGY_VERSION
       || Number(state.windowStart) !== currentStart) return;
@@ -147,6 +147,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
     this.lastProcessedTickSequence = 0;
     this.lastConsumedTradeSequence = { UP: 0, DOWN: 0 };
     this.tradeTape = [];
+    this.pendingFlipConfirmation = null;
     this.lastDecision = {
       status: 'WAITING',
       side: null,
@@ -504,11 +505,15 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
         .reduce((sum, trade) => sum + trade.shares, 0);
       const absorptionRatio = buyTradeShares / Math.max(previousDepth, MIN_ABSORBED_SHARES);
       const currentAsk = Number(quote.bestAsk);
+      const entryPriceEligible = Number.isFinite(currentAsk)
+        && currentAsk >= ENTRY_BEST_ASK_MIN - EPSILON
+        && currentAsk <= ENTRY_BEST_ASK_MAX + EPSILON;
       const priceConfirmed = Number.isFinite(currentAsk)
         && (!Number.isFinite(previousAsk) || currentAsk >= previousAsk - EPSILON);
       const qualifies = bothBooksReady
         && buyTradeShares >= MIN_ABSORBED_SHARES
         && absorptionRatio >= MIN_ABSORPTION_RATIO
+        && entryPriceEligible
         && priceConfirmed;
       const reason = !bothBooksReady
         ? 'Waiting for fresh, executable UP and DOWN books.'
@@ -516,11 +521,11 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
           ? `Only ${round(buyTradeShares, 2)} buy shares traded in the rolling 10-second window; ${MIN_ABSORBED_SHARES} are required.`
           : absorptionRatio < MIN_ABSORPTION_RATIO
             ? `Absorption was ${(absorptionRatio * 100).toFixed(1)}% of visible ask depth; ${(MIN_ABSORPTION_RATIO * 100).toFixed(0)}% is required.`
-            : !Number.isFinite(currentAsk)
-              ? 'Waiting for a valid current best ask.'
+            : !entryPriceEligible
+              ? `Best ask $${Number.isFinite(currentAsk) ? currentAsk.toFixed(2) : '—'} is outside the $${ENTRY_BEST_ASK_MIN.toFixed(2)}–$${ENTRY_BEST_ASK_MAX.toFixed(2)} entry band.`
               : !priceConfirmed
                 ? 'The best ask has not held or risen from the previous check.'
-                : 'Ask-side buy trades met the absorption and ask-momentum checks.';
+                : 'Ask-side buy trades met the absorption, entry-price, and ask-momentum checks.';
       interval[side] = {
         side,
         askDepth: depth,
@@ -531,6 +536,7 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
         buyTradeShares: round(buyTradeShares, 4),
         depthReductionShares: round(Math.max(0, previousDepth - depth), 4),
         absorptionRatio: round(absorptionRatio, 6),
+        entryPriceEligible,
         priceConfirmed,
         qualifies,
         reason,
@@ -572,71 +578,114 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
 
     let trade = null;
     if (selected) {
-      this.lastConsumedTradeSequence[selected.side] = Math.max(
-        this.lastConsumedTradeSequence[selected.side],
-        ...intervalTrades
-          .filter(item => item.side === selected.side)
-          .map(item => item.tickSequence),
-      );
       const oppositeSide = selected.side === 'UP' ? 'DOWN' : 'UP';
       const oppositeShares = this.openTradesForSide(oppositeSide)
         .reduce((sum, openTrade) => sum + Number(openTrade.shares || 0), 0);
-      const sell = oppositeShares > EPSILON
-        ? this.recordMarketSell(oppositeSide, oppositeShares, now)
-        : null;
-      const sharesSold = sell?.shares || 0;
-      const windowSharesBefore = this.sharesBoughtThisWindow();
-      const windowCapacity = Math.max(0, MAX_SHARES_PER_WINDOW - windowSharesBefore);
-      const requestedShares = Math.min(this.config.BASE_ENTRY_SHARES + sharesSold, windowCapacity);
-      this.lastDecision.oppositeSide = oppositeSide;
-      this.lastDecision.oppositeSharesSold = round(sharesSold, 8);
-      this.lastDecision.requestedShares = round(requestedShares, 8);
-      this.lastDecision.windowSharesBefore = round(windowSharesBefore, 8);
-      this.lastDecision.windowShareCapacity = round(windowCapacity, 8);
-      if (requestedShares > EPSILON) {
-        trade = this.recordMarketBuy(
-          selected.side,
-          requestedShares,
-          'ASK_ABSORPTION_TICK',
-          now,
-          {
-            checkIndex: intervalIndex,
-            pivotPrice: PIVOT_PRICE,
-            baseShares: this.config.BASE_ENTRY_SHARES,
-            oppositeSideSold: oppositeSide,
-            oppositeSharesSold: round(sharesSold, 8),
-            requestedSharesFromFlip: requestedShares,
-            absorptionShares: selected.buyTradeShares,
-            absorptionRatio: selected.absorptionRatio,
-            askDepthBefore: selected.previousAskDepth,
-            askDepthAfter: selected.askDepth,
-          },
-        );
-      }
-      if (trade) {
-        this.lastDecision.tradeId = trade.id;
-        this.lastDecision.filledShares = trade.shares;
-        this.lastDecision.entryPrice = trade.entryPrice;
-        this.lastDecision.status = trade.shares + EPSILON >= this.config.BASE_ENTRY_SHARES
-          ? 'BUY_FILLED' : 'BUY_PARTIAL';
-        this.lastDecision.reason += ` Sold ${round(sharesSold, 4)} ${oppositeSide} shares; bought ${round(trade.shares, 4)} of ${round(requestedShares, 4)} ${selected.side} shares including the base.`;
-      } else if (requestedShares <= EPSILON) {
-        this.lastDecision.status = 'WINDOW_SHARE_CAP_REACHED';
-        this.lastDecision.filledShares = 0;
-        this.lastDecision.reason += ` Sold ${round(sharesSold, 4)} ${oppositeSide} shares; no buy was placed because the ${MAX_SHARES_PER_WINDOW}-share window cap is reached.`;
+      const previousFlip = this.pendingFlipConfirmation;
+      const flipConfirmed = oppositeShares <= EPSILON || (
+        previousFlip?.side === selected.side
+        && Number(previousFlip.windowStart) === Number(this.windowStart)
+        && Number(previousFlip.tickSequence) < Number(this.marketTickSequence)
+      );
+
+      if (oppositeShares > EPSILON && !flipConfirmed) {
+        this.pendingFlipConfirmation = {
+          side: selected.side,
+          windowStart: this.windowStart,
+          tickSequence: this.marketTickSequence,
+        };
+        this.lastDecision.status = 'FLIP_CONFIRMATION_PENDING';
+        this.lastDecision.flipConfirmation = {
+          side: selected.side,
+          observedTicks: 1,
+          requiredTicks: FLIP_CONFIRMATION_TICKS,
+        };
+        this.lastDecision.reason += ` Flip needs the same qualifying signal on ${FLIP_CONFIRMATION_TICKS} consecutive CLOB ticks; this is tick 1 of ${FLIP_CONFIRMATION_TICKS}.`;
         this.log(
-          'WINDOW_SHARE_CAP_REACHED',
-          `No new buy was placed; this window already reached ${MAX_SHARES_PER_WINDOW} cumulative shares.`,
+          'FLIP_CONFIRMATION_PENDING',
+          `${selected.side} flip signal is waiting for one more consecutive qualifying CLOB tick.`,
           {
             side: selected.side,
-            sharesBoughtThisWindow: round(windowSharesBefore, 8),
-            maxSharesPerWindow: MAX_SHARES_PER_WINDOW,
+            observedTicks: 1,
+            requiredTicks: FLIP_CONFIRMATION_TICKS,
+            bestAsk: selected.currentBestAsk,
           },
         );
       } else {
-        this.lastDecision.status = 'BUY_SKIPPED';
-        this.lastDecision.reason += ' The visible asks or remaining cash could not fill an order.';
+        this.pendingFlipConfirmation = null;
+        this.lastConsumedTradeSequence[selected.side] = Math.max(
+          this.lastConsumedTradeSequence[selected.side],
+          ...intervalTrades
+            .filter(item => item.side === selected.side)
+            .map(item => item.tickSequence),
+        );
+        const sell = oppositeShares > EPSILON
+          ? this.recordMarketSell(oppositeSide, oppositeShares, now)
+          : null;
+        const sharesSold = sell?.shares || 0;
+        const windowSharesBefore = this.sharesBoughtThisWindow();
+        const windowCapacity = Math.max(0, MAX_SHARES_PER_WINDOW - windowSharesBefore);
+        const requestedShares = Math.min(this.config.BASE_ENTRY_SHARES + sharesSold, windowCapacity);
+        this.lastDecision.oppositeSide = oppositeSide;
+        this.lastDecision.oppositeSharesSold = round(sharesSold, 8);
+        this.lastDecision.requestedShares = round(requestedShares, 8);
+        this.lastDecision.windowSharesBefore = round(windowSharesBefore, 8);
+        this.lastDecision.windowShareCapacity = round(windowCapacity, 8);
+        if (oppositeShares > EPSILON) {
+          this.lastDecision.flipConfirmation = {
+            side: selected.side,
+            observedTicks: FLIP_CONFIRMATION_TICKS,
+            requiredTicks: FLIP_CONFIRMATION_TICKS,
+            confirmed: true,
+          };
+        }
+        if (requestedShares > EPSILON) {
+          trade = this.recordMarketBuy(
+            selected.side,
+            requestedShares,
+            'ASK_ABSORPTION_TICK',
+            now,
+            {
+              checkIndex: intervalIndex,
+              pivotPrice: PIVOT_PRICE,
+              baseShares: this.config.BASE_ENTRY_SHARES,
+              oppositeSideSold: oppositeSide,
+              oppositeSharesSold: round(sharesSold, 8),
+              requestedSharesFromFlip: requestedShares,
+              absorptionShares: selected.buyTradeShares,
+              absorptionRatio: selected.absorptionRatio,
+              askDepthBefore: selected.previousAskDepth,
+              askDepthAfter: selected.askDepth,
+            },
+          );
+        }
+        if (trade) {
+          this.lastDecision.tradeId = trade.id;
+          this.lastDecision.filledShares = trade.shares;
+          this.lastDecision.entryPrice = trade.entryPrice;
+          this.lastDecision.status = trade.shares + EPSILON >= this.config.BASE_ENTRY_SHARES
+            ? 'BUY_FILLED' : 'BUY_PARTIAL';
+          this.lastDecision.reason += ` Sold ${round(sharesSold, 4)} ${oppositeSide} shares; bought ${round(trade.shares, 4)} of ${round(requestedShares, 4)} ${selected.side} shares including the base.`;
+        } else if (requestedShares <= EPSILON) {
+          this.lastDecision.status = 'WINDOW_SHARE_CAP_REACHED';
+          this.lastDecision.filledShares = 0;
+          this.lastDecision.reason += ` Sold ${round(sharesSold, 4)} ${oppositeSide} shares; no buy was placed because the ${MAX_SHARES_PER_WINDOW}-share window cap is reached.`;
+          this.log(
+            'WINDOW_SHARE_CAP_REACHED',
+            `No new buy was placed; this window already reached ${MAX_SHARES_PER_WINDOW} cumulative shares.`,
+            {
+              side: selected.side,
+              sharesBoughtThisWindow: round(windowSharesBefore, 8),
+              maxSharesPerWindow: MAX_SHARES_PER_WINDOW,
+            },
+          );
+        } else {
+          this.lastDecision.status = 'BUY_SKIPPED';
+          this.lastDecision.reason += ' The visible asks or remaining cash could not fill an order.';
+        }
       }
+    } else {
+      this.pendingFlipConfirmation = null;
     }
 
     this.lastCheckAt = now;
@@ -702,20 +751,22 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       checkMode: 'EVERY_CLOB_TICK',
       tradeFlowLookbackMs: TRADE_FLOW_LOOKBACK_MS,
       pivotPrice: PIVOT_PRICE,
+      entryBestAskBand: { min: ENTRY_BEST_ASK_MIN, max: ENTRY_BEST_ASK_MAX },
+      flipConfirmationTicks: FLIP_CONFIRMATION_TICKS,
       askBand: { min: ASK_BAND_MIN, max: ASK_BAND_MAX },
       sharesPerTick: this.config.BASE_ENTRY_SHARES,
       maxSharesPerWindow: MAX_SHARES_PER_WINDOW,
       entryOrderType: 'TAKER MARKET BUY (PAPER SIMULATION)',
-      entryPolicy: `On every qualifying Polymarket CLOB tick, sell any available shares on the opposite side, then buy ${this.config.BASE_ENTRY_SHARES} base shares plus the shares actually sold on the signalled side at any valid best-ask price.`,
-      absorptionRule: `On every CLOB tick, count fresh, not-yet-used Polymarket BUY-side trade prints from the rolling last 10 seconds and visible ask depth from $${ASK_BAND_MIN.toFixed(2)} to $${ASK_BAND_MAX.toFixed(2)}; each print contributes to at most one buy. Require at least ${MIN_ABSORBED_SHARES} traded shares, at least ${(MIN_ABSORPTION_RATIO * 100).toFixed(0)}% of starting visible ask depth, and an ask that holds or rises from the previous check. The $${PIVOT_PRICE.toFixed(2)} pivot is informational only; there is no entry-price cap. If both sides qualify, the stronger ratio must be at least ${SIDE_DOMINANCE_RATIO.toFixed(2)}× the other.`,
-      flipPolicy: `A qualifying UP signal market-sells open DOWN shares; a qualifying DOWN signal market-sells open UP shares. The new buy requests ${this.config.BASE_ENTRY_SHARES} base shares plus the shares actually sold.`,
+      entryPolicy: `Only enter when the signalled side's best ask is between $${ENTRY_BEST_ASK_MIN.toFixed(2)} and $${ENTRY_BEST_ASK_MAX.toFixed(2)}, inclusive. A flip requires the opposite signal to qualify on ${FLIP_CONFIRMATION_TICKS} consecutive CLOB ticks; the new buy requests ${this.config.BASE_ENTRY_SHARES} base shares plus the shares actually sold.`,
+      absorptionRule: `On every CLOB tick, count fresh, not-yet-used Polymarket BUY-side trade prints from the rolling last 10 seconds and visible ask depth from $${ASK_BAND_MIN.toFixed(2)} to $${ASK_BAND_MAX.toFixed(2)}; each print contributes to at most one buy. Require at least ${MIN_ABSORBED_SHARES} traded shares, at least ${(MIN_ABSORPTION_RATIO * 100).toFixed(0)}% of starting visible ask depth, a best ask in the $${ENTRY_BEST_ASK_MIN.toFixed(2)}–$${ENTRY_BEST_ASK_MAX.toFixed(2)} entry band, and an ask that holds or rises from the previous check. The $${PIVOT_PRICE.toFixed(2)} pivot remains informational only. If both sides qualify, the stronger ratio must be at least ${SIDE_DOMINANCE_RATIO.toFixed(2)}× the other.`,
+      flipPolicy: `A qualifying opposite signal must appear on ${FLIP_CONFIRMATION_TICKS} consecutive distinct CLOB ticks before the bot sells the held side and buys the new side. The new buy requests ${this.config.BASE_ENTRY_SHARES} base shares plus the shares actually sold.`,
       windowShareCapPolicy: `No more than ${MAX_SHARES_PER_WINDOW} total filled buy shares per 5-minute market window. Selling shares does not replenish the cap.`,
       fillRule: 'Paper taker buys sweep fresh visible asks and flip sells sweep fresh visible bids; both allow partial fills and include modeled taker fees.',
       takeProfitBid: this.config.TAKE_PROFIT_BID,
       takeProfitPayoutPerShare: this.config.TAKE_PROFIT_PAYOUT_PER_SHARE,
       stopLossPrice: 0,
       stopLossRule: 'If a fresh book has no bid on a side with open shares, close all those shares at $0 per share.',
-      reentryPolicy: 'Every later qualifying CLOB tick can trigger another flip or base-size buy.',
+      reentryPolicy: `Every later qualifying CLOB tick can add another base-size buy while holding the same side; flips require ${FLIP_CONFIRMATION_TICKS} consecutive qualifying CLOB ticks.`,
       exitPolicy: 'At best bid $0.99, close all current shares on that side for $1 per share; with no bid in a fresh book, close at $0. Unclosed shares wait for official resolution at their original market end.',
       resolutionSource: 'Official resolution of each original Polymarket market.',
     };
@@ -723,6 +774,11 @@ class Btc5mAskAbsorptionBot extends BtcDoubleRungBot {
       checkMode: 'EVERY_CLOB_TICK',
       tradeFlowLookbackMs: TRADE_FLOW_LOOKBACK_MS,
       pivotPrice: PIVOT_PRICE,
+      entryBestAskBand: { min: ENTRY_BEST_ASK_MIN, max: ENTRY_BEST_ASK_MAX },
+      flipConfirmationTicks: FLIP_CONFIRMATION_TICKS,
+      pendingFlipConfirmation: this.pendingFlipConfirmation
+        ? { side: this.pendingFlipConfirmation.side, observedTicks: 1, requiredTicks: FLIP_CONFIRMATION_TICKS }
+        : null,
       maxSharesPerWindow: MAX_SHARES_PER_WINDOW,
       askBand: { min: ASK_BAND_MIN, max: ASK_BAND_MAX },
       lastCheckAt: this.lastCheckAt,
