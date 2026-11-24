@@ -2,9 +2,10 @@
 
 const { Pool } = require('pg');
 const LivePolymarketTrader = require('./live-polymarket-trader.cjs');
-const { LiveBtcMispricingBot } = require('./live-mispricing-bot.cjs');
+const { LiveCrossPairBot, LIVE_BOT_KEY } = require('./live-cross-pair-bot.cjs');
 const { LiveMispricingStateStore } = require('./live-mispricing-state-store.cjs');
 const { createLiveMispricingServer } = require('./live-mispricing-server.cjs');
+const marketData = require('./wick-market-data.js');
 
 function classifyAuthError(value) {
   const message = String(value || '').toLowerCase();
@@ -63,11 +64,14 @@ async function main() {
   const privateKey = process.env.PRIVATE_KEY || '';
   const tradingEnabled = String(process.env.LIVE_TRADING || '').toLowerCase() === 'true';
   const trader = privateKey ? new LivePolymarketTrader(privateKey) : null;
-  const store = new LiveMispricingStateStore(pool);
-  const bot = new LiveBtcMispricingBot({
+  const store = new LiveMispricingStateStore(pool, {
+    botKey: LIVE_BOT_KEY,
+  });
+  const bot = new LiveCrossPairBot({
     stateStore: store,
     trader,
     tradingEnabled,
+    marketData,
   });
   const server = createLiveMispricingServer({
     bot,
@@ -92,7 +96,7 @@ async function main() {
       : Array.isArray(state.liveOrders)
         ? state.liveOrders.filter(order => uncertainStatuses.has(order.status)).length
         : 0;
-    console.log(`BTC live mispricing bot status: ${state.status}`);
+    console.log(`BTC/ETH live mixed-pair bot status: ${state.status}`);
     console.log(
       `Polymarket account auth=${Boolean(state.account?.authenticated)} `
       + `keyConfigured=${Boolean(privateKey)} `
@@ -107,26 +111,20 @@ async function main() {
       + `positionsRetryAfterMs=${Number.isFinite(Number(state.account?.positionsRetryAfterMs)) ? Number(state.account.positionsRetryAfterMs) : 'NONE'} `
       + `balanceStatus=${safeLogTag(state.account?.balanceStatus || 'UNKNOWN')} `
       + `collateralSnapshot=${collateralAvailable} `
-      + `ordersEnabled=${Boolean(state.tradingEnabled && !state.liveHalted)} `
-      + `halted=${Boolean(state.liveHalted)} `
-      + `haltReasonClass=${classifyHaltReason(state.liveHaltReason)} `
+      + `ordersEnabled=${Boolean(state.tradingEnabled && state.account?.accountReady)} `
       + `unresolvedOrders=${unresolvedOrderCount} `
-      + `missingOrderIds=${Number(state.haltRecovery?.missingOrderIdCount) || 0} `
-      + `haltRecoveryBlockers=${state.haltRecovery?.blockers?.map(safeLogTag).join(',') || 'NONE'} `
-      + `snapshotClosure=${Object.entries(state.haltRecovery?.orderClosureStatusCounts || {}).map(([status, count]) => `${safeLogTag(status)}:${Number(count)}`).join(',') || 'NONE'} `
-      + `orderErrors=${Object.entries(state.haltRecovery?.unresolvedErrorClassCounts || {}).map(([status, count]) => `${safeLogTag(status)}:${Number(count)}`).join(',') || 'NONE'} `
       + `exchangeOpenOrders=${Array.isArray(state.account?.orders) ? state.account.orders.length : 'UNKNOWN'} `
       + `persistence=${String(state.persistence?.status || 'UNKNOWN')}`,
     );
   } catch (error) {
-    console.error(`BTC live mispricing startup failed: ${String(error?.message || error).slice(0, 240)}`);
+    console.error(`BTC/ETH live mixed-pair startup failed: ${String(error?.message || error).slice(0, 240)}`);
   }
 
   let shuttingDown = false;
   const shutdown = async signal => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`Stopping BTC live mispricing service (${signal}).`);
+    console.log(`Stopping BTC/ETH live mixed-pair service (${signal}).`);
     server.close();
     await bot.stop().catch(() => {});
     await pool.end().catch(() => {});

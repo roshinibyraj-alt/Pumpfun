@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BTC Live Mispricing Bot</title>
+  <title>BTC / ETH Live Mixed-Pair Bot</title>
   <style>
     :root {
       color-scheme: dark;
@@ -108,6 +108,23 @@
     }
     .market-card.up { border-top: 2px solid var(--green); }
     .market-card.down { border-top: 2px solid var(--red); }
+    .pair-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .pair-card {
+      min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: 15px;
+      background: linear-gradient(145deg, rgba(16, 34, 54, .94), rgba(7, 19, 32, .86));
+    }
+    .pair-card.active { border-color: rgba(70, 214, 154, .48); box-shadow: inset 0 0 0 1px rgba(70, 214, 154, .08); }
+    .pair-card.waiting { border-color: rgba(255, 198, 109, .32); }
+    .pair-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .pair-head strong { font-size: 13px; }
+    .pair-total { margin: 16px 0 10px; color: var(--cyan); font-size: 27px; font-weight: 850; letter-spacing: -.04em; }
+    .pair-legs { display: grid; gap: 8px; }
+    .pair-leg { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px; border-radius: 10px; background: rgba(4, 12, 23, .55); }
+    .pair-leg span { color: var(--muted); font-size: 11px; }
+    .pair-leg strong { font-size: 13px; }
+    .pair-note { min-height: 32px; margin: 11px 0 0; color: var(--muted); font-size: 10px; line-height: 1.45; }
+    .pnl-positive { color: var(--green) !important; }
+    .pnl-negative { color: var(--red) !important; }
     .market-title { display: flex; justify-content: space-between; align-items: center; font-weight: 800; font-size: 13px; }
     .market-title small { color: var(--muted); font-size: 10px; font-weight: 600; }
     .quote-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
@@ -154,7 +171,7 @@
       .metrics { gap: 8px; }
       .metric { padding: 13px; }
       .hero-card, .model-card, .panel { padding: 16px; }
-      .market-cards { grid-template-columns: 1fr; }
+      .market-cards, .pair-cards { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -164,8 +181,8 @@
       <div class="brand">
         <div class="brand-mark">₿</div>
         <div>
-          <h1>BTC Live Mispricing</h1>
-          <p>Binance signal · Polymarket 5-minute windows</p>
+          <h1>BTC / ETH Mixed Pairs</h1>
+          <p>Real orders · Polymarket 5-minute markets</p>
         </div>
       </div>
       <div class="top-actions">
@@ -187,8 +204,8 @@
     <div id="app-view" hidden>
       <section class="hero">
         <div class="hero-card">
-          <div class="eyebrow">Live strategy · BTC / USDC</div>
-          <h2 class="hero-title">Binance model meets<br>Polymarket order books</h2>
+          <div class="eyebrow">Live strategy · BTC + ETH</div>
+          <h2 class="hero-title">Two mixed pairs<br>managed independently</h2>
           <p class="hero-sub" id="status-reason">Waiting for bot status…</p>
           <div class="status-row">
             <span id="mode-pill" class="pill warning">READ ONLY</span>
@@ -199,21 +216,21 @@
         <div class="hero-card model-card">
           <div class="section-head">
             <div>
-              <h2>Model probabilities</h2>
-              <p>Estimated from BTC price, time left, and recent volatility</p>
+              <h2>Live trading status</h2>
+              <p>Fresh Polymarket books · account-confirmed orders</p>
             </div>
-            <div class="signal" id="signal-reason">No signal yet</div>
+            <div class="signal" id="signal-reason">Waiting for market data…</div>
           </div>
           <div class="prob-row">
             <div class="prob up">
-              <div class="prob-label"><span>UP</span><span id="up-edge">— edge</span></div>
-              <div class="prob-value" id="prob-up">—</div>
-              <div class="track"><span id="bar-up" style="width:0%"></span></div>
+              <div class="prob-label"><span>POLYMARKET FEED</span><span id="feed-status">—</span></div>
+              <div class="prob-value" id="feed-age">—</div>
+              <div class="track"><span id="bar-up" style="width:100%"></span></div>
             </div>
             <div class="prob down">
-              <div class="prob-label"><span>DOWN</span><span id="down-edge">— edge</span></div>
-              <div class="prob-value" id="prob-down">—</div>
-              <div class="track"><span id="bar-down" style="width:0%"></span></div>
+              <div class="prob-label"><span>WINDOW TIME LEFT</span><span id="window-pill-small">—</span></div>
+              <div class="prob-value" id="time-left">—</div>
+              <div class="track"><span id="bar-down" style="width:100%"></span></div>
             </div>
           </div>
         </div>
@@ -222,88 +239,53 @@
       <section class="metrics">
         <div class="metric cyan"><div class="metric-label">USDC collateral</div><div class="metric-value" id="collateral">—</div><div class="metric-note">Actual Polymarket balance</div></div>
         <div class="metric green"><div class="metric-label">Account equity</div><div class="metric-value" id="equity">—</div><div class="metric-note" id="equity-note">Collateral + marked positions</div></div>
-        <div class="metric"><div class="metric-label">Open position value</div><div class="metric-value" id="position-value">—</div><div class="metric-note" id="position-count">Loading open positions</div></div>
-        <div class="metric violet"><div class="metric-label">Next order size</div><div class="metric-value" id="next-size">5 shares</div><div class="metric-note" id="size-rule">+1 after a loss · −1.5 after a win · floor 5</div></div>
+        <div class="metric"><div class="metric-label">Open bot exposure</div><div class="metric-value" id="position-value">—</div><div class="metric-note" id="position-count">Bot-managed positions</div></div>
+        <div class="metric violet"><div class="metric-label">Floating P&amp;L estimate</div><div class="metric-value" id="floating-pnl">—</div><div class="metric-note">Based on the current best bids</div></div>
       </section>
 
       <section class="grid">
         <article class="panel">
           <div class="section-head">
-            <div><h2>Current Polymarket window</h2><p id="market-title">Loading BTC market…</p></div>
-            <div class="badge"><i class="dot good"></i><span id="time-left">—</span></div>
+            <div><h2>Current Polymarket window</h2><p id="market-title">Loading BTC and ETH markets…</p></div>
+            <div class="badge"><i class="dot good"></i><span id="time-left-badge">—</span></div>
           </div>
-          <div class="market-cards">
-            <div class="market-card up">
-              <div class="market-title">UP <small id="up-prob-small">Model —</small></div>
-              <div class="quote-grid">
-                <div class="quote"><span>Best bid</span><strong id="up-bid">—</strong></div>
-                <div class="quote"><span>Best ask</span><strong id="up-ask">—</strong></div>
-              </div>
-              <div class="market-meta"><span id="up-depth">Depth —</span><span id="up-edge-detail">Edge —</span></div>
-            </div>
-            <div class="market-card down">
-              <div class="market-title">DOWN <small id="down-prob-small">Model —</small></div>
-              <div class="quote-grid">
-                <div class="quote"><span>Best bid</span><strong id="down-bid">—</strong></div>
-                <div class="quote"><span>Best ask</span><strong id="down-ask">—</strong></div>
-              </div>
-              <div class="market-meta"><span id="down-depth">Depth —</span><span id="down-edge-detail">Edge —</span></div>
-            </div>
-          </div>
+          <div id="pair-cards" class="pair-cards"></div>
         </article>
         <article class="panel">
-          <div class="section-head"><div><h2>Bot order history</h2><p>FAK buys use a USD stake; flip sells use confirmed filled shares</p></div></div>
-          <div class="table-wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Side</th><th>Stake / requested shares</th><th>Filled shares</th><th>Price cap / floor</th><th>Status</th></tr></thead><tbody id="bot-orders"></tbody></table></div>
+          <div class="section-head"><div><h2>Open / held bot positions</h2><p>Actual fills · live best-bid mark · pending resolution</p></div></div>
+          <div id="open-position-cards" class="detail-list"></div>
         </article>
       </section>
 
-      <section class="grid">
-        <article class="panel">
-          <div class="section-head"><div><h2>Strategy & live status</h2><p>Actual execution, not paper fills</p></div></div>
-          <div class="detail-list">
-            <div class="detail"><span>Binance BTC price</span><strong id="btc-price">—</strong></div>
-            <div class="detail"><span>Window open price</span><strong id="open-price">—</strong></div>
-            <div class="detail"><span>Volatility lookback</span><strong id="volatility">3 closed candles</strong></div>
-            <div class="detail"><span>Signal evaluation</span><strong id="signal-priority">—</strong></div>
-            <div class="detail"><span>Minimum entry edge</span><strong id="edge-rules">$0.05 per share</strong></div>
-            <div class="detail"><span>Order execution & exits</span><strong id="execution-rule">FAK market buy · $0.99 cap · qualified flips</strong></div>
-            <div class="detail"><span>Current bot position</span><strong id="bot-position">None</strong></div>
-            <div class="detail"><span>Open exchange orders</span><strong id="open-orders">—</strong></div>
-            <div class="detail"><span>Last account update</span><strong id="account-time">—</strong></div>
-            <div class="detail"><span>Last refresh</span><strong id="refresh-time">—</strong></div>
-          </div>
-        </article>
-        <article class="panel">
-          <div class="section-head"><div><h2>Current live position</h2><p>Bot’s open position in this window</p></div></div>
-          <div class="detail-list">
-            <div class="detail"><span>Side / market</span><strong id="position-side">None</strong></div>
-            <div class="detail"><span>Filled shares</span><strong id="position-shares">—</strong></div>
-            <div class="detail"><span>Average entry estimate</span><strong id="position-entry">—</strong></div>
-            <div class="detail"><span>Conservative unrealized P&amp;L</span><strong id="position-pnl">—</strong></div>
-            <div class="detail"><span>Settled wins / losses</span><strong id="win-loss">0 / 0</strong></div>
-          </div>
-          <p class="footnote">Bot P&amp;L uses conservative order-book price estimates. The transaction table below reports actual account activity.</p>
-        </article>
+      <section class="panel">
+        <div class="section-head"><div><h2>Bot order history</h2><p>Taker buys target about 7 shares per leg; exchange fills may differ</p></div></div>
+        <div class="table-wrap"><table><thead><tr><th>Time</th><th>Pair</th><th>Action</th><th>Asset / side</th><th>Requested</th><th>Filled shares</th><th>Price guard</th><th>Status</th></tr></thead><tbody id="bot-orders"></tbody></table></div>
       </section>
 
       <section class="panel">
         <div class="section-head">
           <div>
-            <h2>Position results</h2>
-            <p>Resolved outcomes and early exits; order statuses remain unchanged</p>
+            <h2>Closed and resolved legs</h2>
+            <p>Real sell fills and official market outcomes</p>
           </div>
         </div>
         <div class="table-wrap"><table>
-          <thead><tr><th>Result time</th><th>Market / window</th><th>Side</th><th>Result</th><th>Bot-estimated realized P&amp;L</th></tr></thead>
+          <thead><tr><th>Result time</th><th>Pair</th><th>Asset / side</th><th>Shares</th><th>Result</th><th>Estimated P&amp;L</th></tr></thead>
           <tbody id="position-results"></tbody>
         </table></div>
-        <p class="footnote">Resolved wins and losses follow the original market result. P&amp;L is a conservative bot estimate; account transactions show actual executions.</p>
+        <p class="footnote">Resolution results are estimates until Polymarket credits or redeems the tokens.</p>
       </section>
 
       <section class="panel">
         <div class="section-head"><div><h2>Recent account transactions</h2><p>Polymarket’s trade activity for the linked account</p></div></div>
         <div class="table-wrap"><table><thead><tr><th>Time</th><th>Market</th><th>Side</th><th>Outcome</th><th>Price</th><th>Shares</th><th>USDC</th><th>Transaction</th></tr></thead><tbody id="transactions"></tbody></table></div>
         <p class="footnote">This feed may include transactions from other activity on the same Polymarket account. It is not limited to orders submitted by this bot.</p>
+      </section>
+
+      <section class="panel">
+        <div class="section-head"><div><h2>Strategy rules</h2><p>Current live behavior</p></div></div>
+        <div class="detail-list" id="strategy-details"></div>
+        <p class="footnote" id="legacy-note"></p>
       </section>
     </div>
   </main>
@@ -342,6 +324,145 @@
       await refresh();
     }
     function render(state) {
+      {
+        const account = state.account || {};
+        const strategy = state.strategy || {};
+        const websocket = state.websocket || {};
+        const connected = account.accountReady === true && websocket.status === 'CONNECTED';
+        const seconds = state.window?.secondsRemaining;
+        const open = state.heldPositions || state.openPositions || [];
+
+        $('status-label').textContent = state.status || 'CONNECTING';
+        $('status-dot').className = `dot ${state.status === 'ERROR' || account.status === 'AUTH_ERROR'
+          ? 'bad' : connected ? 'good' : ''}`;
+        $('status-reason').textContent = state.statusReason || 'Waiting for bot status…';
+        $('mode-pill').textContent = state.tradingEnabled ? 'REAL ORDERS ENABLED' : 'READ ONLY';
+        $('mode-pill').className = `pill ${state.tradingEnabled ? '' : 'warning'}`;
+        $('account-pill').textContent = account.accountReady
+          ? 'ACCOUNT CONNECTED'
+          : (account.status || 'ACCOUNT UNAVAILABLE');
+        $('account-pill').className = `pill ${account.accountReady ? '' : 'warning'}`;
+        $('window-pill').textContent = state.window?.start
+          ? `5m · ${dateText(state.window.start)}` : 'Waiting for market';
+        $('window-pill-small').textContent = state.window?.start ? dateText(state.window.start) : '—';
+        $('signal-reason').textContent = connected
+          ? 'Watching both mixed pairs independently. Entries require combined asks below $0.80.'
+          : state.statusReason || 'Waiting for fresh CLOB data.';
+        $('feed-status').textContent = websocket.status || 'WAITING';
+        $('feed-age').textContent = websocket.lastMessageAt
+          ? `${Math.max(0, (Date.now() - Number(websocket.lastMessageAt)) / 1000).toFixed(1)}s ago`
+          : 'No ticks yet';
+        $('bar-up').style.background = connected ? 'var(--green)' : 'var(--amber)';
+        $('bar-down').style.background = connected ? 'var(--green)' : 'var(--amber)';
+        $('time-left').textContent = numeric(seconds) ? `${Math.ceil(Number(seconds))}s` : '—';
+        $('time-left-badge').textContent = numeric(seconds) ? `${Math.ceil(Number(seconds))}s remaining` : '—';
+
+        $('collateral').textContent = money(account.collateral);
+        $('equity').textContent = money(account.equity);
+        $('position-value').textContent = money(state.totals?.exposureEstimate);
+        $('position-count').textContent = `${Number(state.totals?.openPositionCount || 0)} open bot legs`;
+        const floating = state.totals?.floatingPnlEstimate;
+        $('floating-pnl').textContent = money(floating);
+        $('floating-pnl').className = `metric-value ${numeric(floating)
+          ? Number(floating) >= 0 ? 'pnl-positive' : 'pnl-negative' : ''}`;
+
+        const markets = state.markets || [];
+        $('market-title').textContent = markets.map(market =>
+          `${market.asset}: ${market.title || market.marketSlug || 'loading'}`).join(' · ')
+          || 'Waiting for BTC and ETH market metadata';
+        $('pair-cards').innerHTML = (state.pairs || []).map(pair => {
+          const pairPositions = pair.openPositions || [];
+          const pending = pairPositions.length > 0
+            && pairPositions.every(position => position.status === 'PENDING_RESOLUTION');
+          const stateLabel = pending ? 'HELD TO RESOLUTION'
+            : pairPositions.length ? 'POSITION OPEN'
+            : pair.status === 'ENTRY_SUBMITTED' ? 'ORDER SENT'
+              : pair.status === 'NO_FILL' ? 'NO FILL'
+                : pair.fresh && Number(pair.askSum) < 0.8 ? 'TRIGGERED'
+                  : pair.fresh ? 'WATCHING' : 'WAITING FOR BOOKS';
+          const cardClass = pairPositions.length ? 'pair-card active'
+            : pair.fresh ? 'pair-card waiting' : 'pair-card';
+          const legs = (pair.legs || []).map(leg => {
+            const position = pairPositions.find(item => item.asset === leg.asset && item.side === leg.side);
+            return `<div class="pair-leg">
+              <span>${safe(leg.asset)} ${safe(leg.side)}<br><small>Bid ${cents(leg.bestBid)} · Ask ${cents(leg.bestAsk)}</small></span>
+              <strong>${position ? `${shares(position.shares)} sh` : `Ask ${cents(leg.bestAsk)}`}</strong>
+            </div>`;
+          }).join('');
+          return `<article class="${cardClass}">
+            <div class="pair-head"><strong>${safe(pair.label)}</strong><span class="tag ${pairPositions.length ? 'buy' : ''}">${safe(stateLabel)}</span></div>
+            <div class="pair-total">${money(pair.askSum)}</div>
+            <div class="pair-legs">${legs}</div>
+            <p class="pair-note">${safe(pair.reason || (pair.fresh ? 'Waiting for asks below $0.80.' : 'Waiting for both fresh books.'))}</p>
+          </article>`;
+        }).join('') || '<div class="empty">Current pair quotes are loading.</div>';
+
+        $('open-position-cards').innerHTML = open.length ? open.map(position => {
+          const pnl = Number(position.unrealizedPnlEstimate);
+          const pnlClass = numeric(position.unrealizedPnlEstimate)
+            ? pnl >= 0 ? 'pnl-positive' : 'pnl-negative' : '';
+          return `<div class="detail">
+            <span>${safe(position.asset)} ${safe(position.side)} · ${safe(position.pairLabel)}<br>
+              <small>${shares(position.shares)} shares · entry ${cents(position.entryPrice)} · bid ${cents(position.markBid)} · ${safe(position.status)}</small></span>
+            <strong class="${pnlClass}">${money(position.unrealizedPnlEstimate)}<br><small>${safe(position.markStatus || 'MARKING')}</small></strong>
+          </div>`;
+        }).join('') : '<div class="empty">No open bot positions.</div>';
+
+        const orderRows = (state.liveOrders || []).slice(0, 40).map(order => `<tr>
+          <td>${safe(dateText(order.submittedAt))}</td>
+          <td>${safe(order.pairLabel || order.pairId || '—')}</td>
+          <td><span class="tag ${String(order.action || '').startsWith('SELL') ? 'sell' : 'buy'}">${safe(order.action)}</span></td>
+          <td>${safe(order.asset)} ${safe(order.side)}</td>
+          <td>${order.amountUsd != null ? `${money(order.amountUsd)} USD` : `${shares(order.requestedShares)} shares`}</td>
+          <td>${shares(order.matchedShares)}</td>
+          <td>${cents(order.limitPrice)}</td>
+          <td>${safe(order.status)}</td></tr>`);
+        $('bot-orders').innerHTML = rowsOrEmpty(orderRows, 8, 'No bot orders recorded yet.');
+
+        const transactions = (account.transactions || []).slice(0, 40).map(item => `<tr>
+          <td>${safe(dateText(item.timestamp))}</td><td title="${safe(item.slug || '')}">${safe(item.market || item.slug || 'Polymarket')}</td>
+          <td><span class="tag ${String(item.side).toUpperCase() === 'SELL' ? 'sell' : 'buy'}">${safe(item.side || item.type)}</span></td>
+          <td>${safe(item.outcome || '—')}</td><td>${cents(item.price)}</td>
+          <td>${shares(item.shares)}</td><td>${money(item.amount)}</td>
+          <td>${item.transactionHash ? `${safe(String(item.transactionHash).slice(0, 10))}…` : '—'}</td></tr>`);
+        $('transactions').innerHTML = rowsOrEmpty(transactions, 8, 'No recent account transactions returned.');
+
+        const closedPositions = (state.positions || [])
+          .filter(position => !['OPEN', 'PENDING_RESOLUTION'].includes(position.status))
+          .slice(0, 100)
+          .map(position => {
+            const status = position.status || '—';
+            const badge = ['RESOLVED_WIN', 'TAKE_PROFIT'].includes(status) ? 'buy'
+              : status === 'RESOLVED_LOSS' ? 'sell' : '';
+            const pnl = Number(position.realizedPnlEstimate);
+            return `<tr>
+              <td>${safe(dateText(position.resolvedAt || position.closedAt))}</td>
+              <td>${safe(position.pairLabel || position.pairId || '—')}</td>
+              <td>${safe(position.asset)} ${safe(position.side)}</td>
+              <td>${shares(position.initialShares)}</td>
+              <td><span class="tag ${badge}">${safe(status)}</span></td>
+              <td class="${numeric(position.realizedPnlEstimate)
+                ? pnl >= 0 ? 'pnl-positive' : 'pnl-negative' : ''}">${money(position.realizedPnlEstimate)}</td>
+            </tr>`;
+          });
+        $('position-results').innerHTML = rowsOrEmpty(closedPositions, 6, 'No closed or resolved legs yet.');
+
+        const detailRows = [
+          ['Entry rule', strategy.entry],
+          ['Sizing', strategy.sizing],
+          ['Inverse-pair exit', strategy.inverseExit],
+          ['Take profit', strategy.takeProfit],
+          ['Empty-bid handling', strategy.stopLoss],
+          ['Window settlement', strategy.settlement],
+          ['Freshness checks', strategy.quoteRequirements],
+          ['Execution', strategy.execution],
+        ].filter(([, value]) => value);
+        $('strategy-details').innerHTML = detailRows.map(([label, value]) =>
+          `<div class="detail"><span>${safe(label)}</span><strong>${safe(value)}</strong></div>`).join('');
+        $('legacy-note').textContent = state.legacy?.note || '';
+      }
+      return;
+
       const account = state.account || {};
       const model = state.model || {};
       const quotes = state.quotes || {};

@@ -3,11 +3,16 @@
 const LIVE_BOT_KEY = 'btc-5m-live-mispricing';
 
 class LiveMispricingStateStore {
-  constructor(pool) {
+  constructor(pool, { botKey = LIVE_BOT_KEY } = {}) {
     if (!pool || typeof pool.query !== 'function') {
       throw new Error('A PostgreSQL pool is required for the live bot ledger.');
     }
+    const normalizedBotKey = String(botKey || '').trim();
+    if (!/^[a-z0-9][a-z0-9._:-]{2,100}$/i.test(normalizedBotKey)) {
+      throw new Error('A valid live bot ledger key is required.');
+    }
     this.pool = pool;
+    this.botKey = normalizedBotKey;
     this.durable = true;
   }
 
@@ -71,7 +76,7 @@ class LiveMispricingStateStore {
   async loadState() {
     const result = await this.pool.query(
       'SELECT state FROM btc_5m_live_mispricing_state WHERE bot_key = $1',
-      [LIVE_BOT_KEY],
+      [this.botKey],
     );
     const value = result.rows[0]?.state ?? null;
     return typeof value === 'string' ? JSON.parse(value) : value;
@@ -84,7 +89,7 @@ class LiveMispricingStateStore {
        ON CONFLICT (bot_key) DO UPDATE SET
          state = EXCLUDED.state,
          updated_at = EXCLUDED.updated_at`,
-      [LIVE_BOT_KEY, JSON.stringify(state), Date.now()],
+      [this.botKey, JSON.stringify(state), Date.now()],
     );
   }
 
@@ -104,7 +109,7 @@ class LiveMispricingStateStore {
          VALUES ($1, $2, $3)
          ON CONFLICT (bot_key, request_id) DO NOTHING
          RETURNING request_id`,
-        [LIVE_BOT_KEY, normalizedRequestId, Date.now()],
+        [this.botKey, normalizedRequestId, Date.now()],
       );
       if (!claim.rows?.length) {
         await client.query('COMMIT');
@@ -113,7 +118,7 @@ class LiveMispricingStateStore {
 
       await client.query(
         'DELETE FROM btc_5m_live_mispricing_state WHERE bot_key = $1',
-        [LIVE_BOT_KEY],
+        [this.botKey],
       );
       await client.query('COMMIT');
       return true;
