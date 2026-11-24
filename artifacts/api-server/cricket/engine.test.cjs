@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { CricketEngine, parseMarketUrl, fee } = require('./engine.cjs');
-const { metadata, loadMatch } = require('./markets.cjs');
+const { metadata, cryptoWindowFromSlug, nextCryptoWindowSlug, loadMatch } = require('./markets.cjs');
 function fixture() {
   let now = 100000;
   const engine = new CricketEngine(undefined, () => now);
@@ -136,5 +136,29 @@ test('event URL loads every supported submarket with IDs and delay', async () =>
     const match = await loadMatch('https://polymarket.com/event/crint-aus-gbr');
     assert.equal(match.markets.length, 2); assert.equal(match.markets[0].outcomes[1].id, 'one-b');
     assert.equal(match.markets[0].secondsDelay, 1); assert.equal(match.markets[0].feeRate, .05);
+  } finally { global.fetch = original; }
+});
+test('crypto 5-minute slugs identify the window and advance to the next live interval', () => {
+  const window = cryptoWindowFromSlug('btc-updown-5m-1795521300');
+  assert.deepEqual(window, { symbol: 'BTC', startTimestamp: 1795521300, intervalSeconds: 300 });
+  const match = { cryptoWindow: window };
+  assert.equal(nextCryptoWindowSlug(match, 1795521300 * 1000 + 299999), null);
+  assert.equal(nextCryptoWindowSlug(match, 1795521600 * 1000), 'btc-updown-5m-1795521600');
+  assert.equal(nextCryptoWindowSlug(match, 1795522020 * 1000), 'btc-updown-5m-1795521900');
+  assert.equal(cryptoWindowFromSlug('btc-updown-15m-1795521300'), null);
+  assert.equal(cryptoWindowFromSlug('btc-updown-5m-1795521301'), null);
+});
+test('crypto five-minute event loads Up and Down token IDs and auto-roll metadata', async () => {
+  const original = global.fetch;
+  global.fetch = async () => ({ ok: true, json: async () => [{ id: 'btc-window', slug: 'btc-updown-5m-1795521300',
+    title: 'Bitcoin Up or Down - 5 minutes', tags: [{ slug: 'crypto' }],
+    markets: [{ id: 'btc-market', enableOrderBook: true, clobTokenIds: '["btc-up","btc-down"]',
+      outcomes: '["Up","Down"]', question: 'Bitcoin Up or Down', secondsDelay: 1, feesEnabled: false,
+      acceptingOrders: true }] }] });
+  try {
+    const match = await loadMatch('https://polymarket.com/event/btc-updown-5m-1795521300');
+    assert.equal(match.kind, 'crypto');
+    assert.deepEqual(match.cryptoWindow, { symbol: 'BTC', startTimestamp: 1795521300, intervalSeconds: 300 });
+    assert.deepEqual(match.markets[0].outcomes.map(x => x.id), ['btc-up', 'btc-down']);
   } finally { global.fetch = original; }
 });

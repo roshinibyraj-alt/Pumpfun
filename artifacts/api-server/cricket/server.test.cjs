@@ -2,9 +2,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { start } = require('./server.cjs');
-function memoryStore() {
+const { CricketEngine } = require('./engine.cjs');
+function memoryStore(initial) {
   return { status: 'TEST_MEMORY', error: null, writes: [], chain: Promise.resolve(),
-    async open() {}, async save(data) { this.writes.push(JSON.parse(JSON.stringify(data))); }, async close() {} };
+    async open() { return initial; }, async save(data) { this.writes.push(JSON.parse(JSON.stringify(data))); }, async close() {} };
 }
 test('HTTP serves new dashboard, rejects unsafe loads, queues buys and persists history', async () => {
   const storage = memoryStore();
@@ -47,4 +48,32 @@ test('persistence failures prevent accepting further paper orders', async () => 
       headers: { 'Content-Type': 'application/json' }, body: '{}' });
     assert.equal(res.status, 503); assert.equal((await fetch(base + '/api/healthz')).status, 503);
   } finally { storage.error = null; await runtime.close(); }
+});
+test('expired crypto window automatically loads the next five-minute event without deleting history', async () => {
+  const previous = new CricketEngine().data;
+  previous.matches.push({ id: 'old-btc', kind: 'crypto', slug: 'btc-updown-5m-1795521300',
+    cryptoWindow: { symbol: 'BTC', startTimestamp: 1795521300, intervalSeconds: 300 }, closed: true,
+    markets: [{ id: 'old-market', closed: true, settled: true, outcomes: [] }] });
+  const loaded = [];
+  const storage = memoryStore(previous);
+  const runtime = await start({ port: 0, seed: false, storage, now: () => 1795521600 * 1000,
+    connectFeeds: false, refreshBooksOnAdd: false,
+    loadMatchFn: async url => {
+      loaded.push(url);
+      return { id: 'next-btc', kind: 'crypto', slug: 'btc-updown-5m-1795521600', title: 'Bitcoin Up or Down',
+        cryptoWindow: { symbol: 'BTC', startTimestamp: 1795521600, intervalSeconds: 300 }, closed: false,
+        markets: [{ id: 'next-market', question: 'Bitcoin Up or Down', closed: false, settled: false,
+          acceptingOrders: true, secondsDelay: 1, feeRate: 0, feeExponent: 1, feeKnown: true,
+          minOrderSize: 5, tickSize: .01,
+          outcomes: [{ id: 'next-up', name: 'Up', shares: 0, costBasis: 0, liquidationValue: 0 },
+            { id: 'next-down', name: 'Down', shares: 0, costBasis: 0, liquidationValue: 0 }] }] };
+    } });
+  try {
+    await runtime.ensureNextCryptoWindows();
+    assert.deepEqual(loaded, ['https://polymarket.com/event/btc-updown-5m-1795521600']);
+    assert.equal(runtime.engine.data.matches.length, 2);
+    assert.equal(runtime.engine.data.matches[0].slug, 'btc-updown-5m-1795521600');
+    assert.equal(runtime.engine.data.matches[1].slug, 'btc-updown-5m-1795521300');
+    assert.equal(storage.writes.at(-1).matches.length, 2);
+  } finally { await runtime.close(); }
 });

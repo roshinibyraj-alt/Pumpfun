@@ -4,18 +4,36 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { CricketEngine } = require('./engine.cjs');
-const { json, array, metadata, loadMatch } = require('./markets.cjs');
+const { json, array, metadata, loadMatch, nextCryptoWindowSlug } = require('./markets.cjs');
 const { Store } = require('./store.cjs');
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const EXAMPLE = 'https://polymarket.com/sports/crint/crint-aus-gbr-2026-11-24';
-async function start({ port = Number(process.env.PORT || 8080), seed = true, storage = new Store() } = {}) {
+async function start({ port = Number(process.env.PORT || 8080), seed = true, storage = new Store(), now = () => Date.now(),
+  loadMatchFn = loadMatch, connectFeeds = true, refreshBooksOnAdd = true } = {}) {
   const store = storage;
-  const engine = new CricketEngine(await store.open());
+  const engine = new CricketEngine(await store.open(), now);
   const clients = new Set(), refreshing = new Map();
   const feed = { status: 'CONNECTING', lastMessageAt: null };
   let socket, reconnect, stopping = false, dirty = false, metadataBusy = false, adding = false, resetting = false;
+  let rolling = false;
+  const rollRetryAt = new Map();
   let persistenceQueued = false;
-  function state() { return { ...engine.snapshot(), feed, persistence: { status: store.status, error: store.error } }; }
+  function state() {
+    const latestBySymbol = new Map();
+    for (const match of engine.data.matches) {
+      if (!match.cryptoWindow) continue;
+      const symbol = match.cryptoWindow.symbol;
+      const previous = latestBySymbol.get(symbol);
+      if (!previous || previous.cryptoWindow.startTimestamp < match.cryptoWindow.startTimestamp) latestBySymbol.set(symbol, match);
+    }
+    const cryptoAutoRoll = [...latestBySymbol.values()].map(match => ({
+      symbol: match.cryptoWindow.symbol, slug: match.slug,
+      nextSlug: nextCryptoWindowSlug(match, now()),
+      windowEndsAt: (match.cryptoWindow.startTimestamp + match.cryptoWindow.intervalSeconds) * 1000,
+    }));
+    return { ...engine.snapshot(), feed: { ...feed, cryptoAutoRoll },
+      persistence: { status: store.status, error: store.error } };
+  }
   function persist() { dirty = false; return store.save(engine.data); }
   function publish() {
     const message = `data: ${JSON.stringify(state())}\n\n`;
@@ -49,6 +67,7 @@ async function start({ port = Number(process.env.PORT || 8080), seed = true, sto
   const outcomeIds = () => engine.data.matches.flatMap(m => m.markets.filter(k => !k.closed).flatMap(k => k.outcomes.map(o => o.id)));
   function connect() {
     if (stopping) return;
+    if (!connectFeeds) { feed.status = 'TEST_FEED_DISABLED'; return; }
     clearTimeout(reconnect);
     if (socket) { socket.onclose = null; socket.close(); }
     const ids = outcomeIds();
@@ -79,17 +98,55 @@ async function start({ port = Number(process.env.PORT || 8080), seed = true, sto
     refreshing.set(id, job);
     return job;
   }
-  async function add(url) {
+  async function add(url, { automatic = false } = {}) {
     if (resetting) throw new Error('A reset is in progress. Please retry shortly.');
-    if (engine.data.matches.length >= 20) throw new Error('Twenty matches are already loaded.');
-    const match = await loadMatch(url);
+    if (engine.data.matches.length >= 20 && !automatic) throw new Error('Twenty matches are already loaded.');
+    const match = await loadMatchFn(url);
     if (resetting) throw new Error('Match loading stopped because the paper session was reset.');
     const old = engine.data.matches.find(m => m.id === match.id);
     if (old) return old;
+    if (automatic) {
+      // Settled windows are safe to remove from the market cards; their order and
+      // settlement rows remain in the permanent paper history.
+      while (engine.data.matches.length >= 20) {
+        const settledIndex = engine.data.matches.findIndex(m => m.closed && m.markets.every(k => k.settled));
+        if (settledIndex < 0) break;
+        engine.data.matches.splice(settledIndex, 1);
+      }
+      if (engine.data.matches.length >= 100) throw new Error('Auto-roll paused: 100 unresolved markets are already loaded.');
+    }
     engine.data.matches.unshift(match);
     await persist(); connect();
-    await Promise.allSettled(match.markets.flatMap(m => m.outcomes.map(o => refreshBook(o.id))));
+    if (refreshBooksOnAdd) await Promise.allSettled(match.markets.flatMap(m => m.outcomes.map(o => refreshBook(o.id))));
     publish(); return match;
+  }
+  async function ensureNextCryptoWindows() {
+    if (rolling || resetting || stopping) return;
+    rolling = true;
+    try {
+      const latestBySymbol = new Map();
+      for (const match of engine.data.matches) {
+        if (!match.cryptoWindow) continue;
+        const symbol = match.cryptoWindow.symbol;
+        const previous = latestBySymbol.get(symbol);
+        if (!previous || previous.cryptoWindow.startTimestamp < match.cryptoWindow.startTimestamp)
+          latestBySymbol.set(symbol, match);
+      }
+      for (const match of latestBySymbol.values()) {
+        const slug = nextCryptoWindowSlug(match, now());
+        if (!slug || engine.data.matches.some(m => m.slug === slug)) continue;
+        const symbol = match.cryptoWindow.symbol;
+        if (now() < (rollRetryAt.get(symbol) || 0)) continue;
+        rollRetryAt.set(symbol, now() + 5000);
+        try {
+          await add(`https://polymarket.com/event/${slug}`, { automatic: true });
+          rollRetryAt.delete(symbol);
+          console.log(`Auto-loaded next ${symbol} 5-minute market: ${slug}`);
+        } catch (error) {
+          console.warn(`Could not auto-load next ${symbol} 5-minute market; retrying shortly: ${error.message}`);
+        }
+      }
+    } finally { rolling = false; }
   }
   async function refreshMetadata() {
     if (metadataBusy) return;
@@ -180,7 +237,7 @@ async function start({ port = Number(process.env.PORT || 8080), seed = true, sto
   else { connect(); refreshMetadata().catch(() => {}); }
   const ticks = setInterval(() => {
     for (const order of engine.data.orders.filter(o => o.status === 'PENDING')) {
-      if (Date.now() >= order.eligibleAt) {
+      if (now() >= order.eligibleAt) {
         execute(order.outcomeId);
         if (order.status === 'PENDING') refreshBook(order.outcomeId).catch(() => {});
       }
@@ -193,6 +250,7 @@ async function start({ port = Number(process.env.PORT || 8080), seed = true, sto
   }, 200);
   const bookPoll = setInterval(() => { for (const id of outcomeIds()) refreshBook(id).catch(() => {}); }, 3000);
   const metadataPoll = setInterval(() => refreshMetadata().catch(() => {}), 10000);
+  const cryptoRollPoll = setInterval(() => ensureNextCryptoWindows().catch(() => {}), 1000);
   const heartbeat = setInterval(() => {
     if (socket?.readyState === WebSocket.OPEN) {
       if (feed.lastMessageAt && Date.now() - feed.lastMessageAt > 30000) { connect(); return; }
@@ -202,12 +260,12 @@ async function start({ port = Number(process.env.PORT || 8080), seed = true, sto
   }, 10000);
   async function close() {
     stopping = true; clearTimeout(reconnect);
-    [ticks, bookPoll, metadataPoll, heartbeat].forEach(clearInterval);
+    [ticks, bookPoll, metadataPoll, cryptoRollPoll, heartbeat].forEach(clearInterval);
     socket?.close(); clients.forEach(c => c.end());
     await persist(); await store.close();
     server.close();
   }
-  return { server, engine, close, state, add, refreshBook };
+  return { server, engine, close, state, add, refreshBook, ensureNextCryptoWindows };
 }
 if (require.main === module) start().then(runtime => {
   console.log('Cricket manual paper dashboard listening; live order execution is absent.');

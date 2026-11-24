@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Over the Wire — Cricket Paper Console</title>
+<title>Over the Wire — Paper Market Console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,800&family=Spline+Sans+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
@@ -80,7 +80,7 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid rgba(29,26,58,.2);
 <div class="wrap">
 <header>
   <h1>Over the<br><span>Wire.</span></h1>
-  <div class="pills"><span class="pill" id="pMode">PAPER_ONLY</span><span class="pill" id="pFeed">feed —</span><span class="pill" id="pPersist">store —</span><span class="pill" id="pConn">connecting</span></div>
+  <div class="pills"><span class="pill" id="pMode">PAPER_ONLY</span><span class="pill" id="pRoll">crypto 5m auto-roll —</span><span class="pill" id="pFeed">feed —</span><span class="pill" id="pPersist">store —</span><span class="pill" id="pConn">connecting</span></div>
 </header>
 <section class="stats">
   <div class="stat"><small>Paper cash</small><b id="sCash">—</b></div>
@@ -93,8 +93,8 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid rgba(29,26,58,.2);
   <button type="button" id="resetBtn" class="sell">Reset session · clear markets and history</button>
 </section>
 <form class="load" id="loadForm">
-  <input type="url" id="url" required placeholder="Paste Polymarket cricket match URL" value="https://polymarket.com/event/" aria-label="Polymarket match URL">
-  <button type="submit" id="loadBtn">Load match</button>
+  <input type="url" id="url" required placeholder="Paste cricket URL or crypto 5m URL (e.g. btc-updown-5m-…)" aria-label="Polymarket cricket or crypto market URL">
+  <button type="submit" id="loadBtn">Load market</button>
 </form>
 <div class="ctrl"><label for="slip" style="align-self:center;font-family:var(--mono);font-size:12px">Slippage (cents, max 20)</label><input id="slip" type="number" min="0" max="20" step="1" value="3" style="width:80px"></div>
 <div class="msg" id="msg" role="status" aria-live="polite"></div>
@@ -104,7 +104,7 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid rgba(29,26,58,.2);
 <div class="hist"><table><thead><tr><th>Time</th><th>Team</th><th>Side</th><th>Status</th><th>Shares</th><th>Avg</th><th>Fees</th><th>P&amp;L</th></tr></thead><tbody id="hist"></tbody></table></div>
 <section class="notes">
   <h3>How this console fills</h3>
-  <p>Every order waits the market's configured Polymarket matching delay; the countdown shows eligibility, not a fill. Buys use live asks and sells use live bids, with your slippage cap. Thin books can produce partial or unfilled results. Taker fees are modeled from the market's schedule; no rebates are assumed. You judge events from your radio; there is no ABC integration. No automatic trading or early exits: sell manually, or remaining shares receive the official resolved payout. Feed data is public; no real orders are sent. Public depth cannot guarantee real execution or reproduce other traders' races.</p>
+  <p>Cricket events and Polymarket crypto Up/Down 5-minute windows are supported. Loading a crypto 5-minute URL automatically loads the next window when it starts; expired windows remain for official resolution and history. Every order waits the market's configured Polymarket matching delay; the countdown shows eligibility, not a fill. Buys use live asks and sells use live bids, with your slippage cap. Thin books can produce partial or unfilled results. Taker fees are modeled from the market's schedule; no rebates are assumed. No real orders are sent.</p>
 </section>
 </div>
 <script>
@@ -136,7 +136,12 @@ function render(){
   $('sCash').textContent=usd(s.cash);$('sEq').textContent=usd(s.equity);pnl($('sReal'),s.realizedPnl);
   $('sFees').textContent=usd(s.totalFees);$('sInit').textContent=usd(s.initialCapital);
   $('pMode').textContent=s.mode||'PAPER_ONLY';
-  const f=s.feed||{};$('pFeed').textContent='feed '+(f.status||'—');$('pFeed').className='pill '+(['CONNECTED','connected','open'].includes(f.status)?'ok':'warn');
+   const f=s.feed||{};$('pFeed').textContent='feed '+(f.status||'—');$('pFeed').className='pill '+(['CONNECTED','connected','open'].includes(f.status)?'ok':'warn');
+   const auto=(f.cryptoAutoRoll||[]).filter(x=>x.nextSlug!==null);
+   const windows=f.cryptoAutoRoll||[];
+   if(!windows.length){$('pRoll').textContent='crypto 5m auto-roll —';$('pRoll').className='pill'}
+   else if(auto.length){$('pRoll').textContent=auto.map(x=>`${x.symbol} next loading`).join(' · ');$('pRoll').className='pill warn'}
+   else{$('pRoll').textContent=windows.map(x=>`${x.symbol} 5m · next ${Math.max(0,Math.ceil((x.windowEndsAt-Date.now())/1000))}s`).join(' · ');$('pRoll').className='pill ok'}
   const p=s.persistence||{};$('pPersist').textContent='store '+(p.status||'—')+(p.error?': '+p.error:'');$('pPersist').className='pill '+(p.error?'bad':'ok');
   // tabs
   const tabs=$('tabs');tabs.replaceChildren();
@@ -144,12 +149,12 @@ function render(){
     b.onclick=()=>{selected.has(m.id)?selected.delete(m.id):selected.add(m.id);render()};tabs.append(b)});
   const pendBy={};(s.orders||[]).forEach(o=>{if(o.status==='PENDING')pendBy[o.id]=o});
   const main=$('matches');main.replaceChildren();
-  if(!s.matches.length){const e=el('div','empty');e.append(el('b',null,'No matches on the wire.'),el('div','meta','Paste a Polymarket cricket match URL above to load every market and outcome.'));main.append(e)}
+  if(!s.matches.length){const e=el('div','empty');e.append(el('b',null,'No markets loaded.'),el('div','meta','Paste a cricket event URL or a crypto Up/Down five-minute URL above.'));main.append(e)}
   s.matches.forEach(m=>{
     const held=m.markets.some(mk=>mk.outcomes.some(o=>o.shares>0));
     if(!selected.has(m.id)&&!held)return;
     const card=el('section','match');card.append(el('h2',null,m.title||m.slug));
-    card.append(el('div','meta',(m.closed?'CLOSED · ':'')+(m.slug||'')+(!selected.has(m.id)?' · shown because positions are open':'')));
+    card.append(el('div','meta',(m.closed?'CLOSED · ':'')+(m.kind==='crypto'?`${m.cryptoWindow?.symbol||'CRYPTO'} · 5M · AUTO-ROLL · `:'')+(m.slug||'')+(!selected.has(m.id)?' · shown because positions are open':'')));
     m.markets.forEach(mk=>{
       const box=el('div','market');box.append(el('h3',null,mk.question));
       box.append(el('div','meta',`delay ${num(mk.secondsDelay)?mk.secondsDelay+'s':'unknown'} · taker fee ${mk.feeKnown?'q × '+mk.feeRate+' × [p(1−p)]^'+mk.feeExponent:'unknown'} · min ${mk.minOrderSize??'—'} shares${mk.closed?' · CLOSED':''}${mk.acceptingOrders?'':' · not accepting'}`));
@@ -200,8 +205,10 @@ async function order(outcomeId,side){if(locks.has(outcomeId))return;locks.add(ou
   catch(e){msg('Order failed: '+e.message,'err')}
   finally{locks.delete(outcomeId);if(state)render()}}
 $('loadForm').onsubmit=async e=>{e.preventDefault();const b=$('loadBtn');b.disabled=true;b.textContent='Loading…';
-  try{apply(await api('/api/matches',{url:$('url').value.trim()}));msg('Match loaded with all markets.','ok')}
-  catch(err){msg('Could not load: '+err.message,'err')}finally{b.disabled=false;b.textContent='Load match'}};
+  try{const result=await api('/api/matches',{url:$('url').value.trim()});apply(result);
+    const slug=$('url').value.match(/\/([^/?#]+)(?:[?#]|$)/)?.[1]||'';
+    msg(/^[a-z0-9]+-updown-5m-\d{10}$/.test(slug)?'Crypto 5-minute market loaded. The next window will load automatically.':'Market loaded with all outcomes.','ok')}
+  catch(err){msg('Could not load: '+err.message,'err')}finally{b.disabled=false;b.textContent='Load market'}};
 $('resetBtn').onclick=async()=>{
   const confirmed=window.confirm('Reset the entire paper session? This permanently removes every loaded match, position and order record, and resets paper capital to $3,000. No real orders are affected.');
   if(!confirmed)return;
