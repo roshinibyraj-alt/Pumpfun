@@ -281,7 +281,7 @@ test('the $1.22 pair signal submits independent share-sized sells for both curre
   assert.ok(legPositions.every(position => position.status === 'CLOSED'));
 });
 
-test('a take-profit signal sells only the leg whose bid reaches $0.99', async () => {
+test('a $0.99 bid does not sell a leg without the first-pair combined exit', async () => {
   const { bot, calls } = makeBot();
   const now = 1_800_000_000_000;
   setBook(bot, 'BTC', 'UP', { bid: 0.30, ask: 0.31, at: now });
@@ -291,14 +291,12 @@ test('a take-profit signal sells only the leg whose bid reaches $0.99', async ()
   await bot.evaluateNow(now);
 
   setBook(bot, 'BTC', 'UP', { bid: 0.99, ask: 0.99, at: now + 1_500 });
+  setBook(bot, 'ETH', 'DOWN', { bid: 0.09, ask: 0.10, at: now + 1_500 });
   await bot.evaluateNow(now + 1_500);
 
   const sells = calls.filter(call => call.side === 'SELL');
-  assert.equal(sells.length, 1);
-  assert.equal(sells[0].tokenId, 'btc-up-1800000000000');
-  assert.equal(sells[0].price, 0.99);
-  assert.equal(sells[0].size, 7);
-  assert.equal(bot.positions.find(position => position.tokenId === sells[0].tokenId).status, 'TAKE_PROFIT');
+  assert.equal(sells.length, 0);
+  assert.ok(bot.positions.every(position => position.status === 'OPEN'));
 });
 
 test('an empty live bid is not falsely recorded as a completed $0 sale', async () => {
@@ -315,8 +313,80 @@ test('an empty live bid is not falsely recorded as a completed $0 sale', async (
   await bot.evaluateNow(now + 1_500);
 
   assert.equal(position.status, 'OPEN');
-  assert.equal(position.stopLossStatus, 'NO_BID_CANNOT_SELL');
+  assert.equal(position.stopLossStatus, undefined);
   assert.equal(calls.filter(call => call.side === 'SELL').length, 0);
+});
+
+for (const firstPairId of ['btc-up-eth-down', 'eth-up-btc-down']) {
+  test(`only the first triggered pair exits, including after restore: ${firstPairId}`, async () => {
+    const { bot } = makeBot();
+    const now = bot.windowStart;
+    const pairs = require('./live-cross-pair-bot.cjs')._test.PAIRS;
+    const first = pairs.find(pair => pair.id === firstPairId);
+    const second = pairs.find(pair => pair.id !== firstPairId);
+    for (const leg of second.legs) {
+      setBook(bot, leg.asset, leg.side, { bid: 0.49, ask: 0.50, at: now });
+    }
+    await bot.evaluateNow(now);
+    assert.equal(bot.cycles.length, 1);
+    assert.equal(bot.cycles[0].pairId, firstPairId);
+    for (const leg of second.legs) {
+      setBook(bot, leg.asset, leg.side, { bid: 0.29, ask: 0.30, at: now + 100 });
+    }
+    await bot.evaluateNow(now + 100);
+    assert.equal(bot.cycles.length, 2);
+    assert.equal(bot.cycles.find(cycle => cycle.pairId === firstPairId).entryOrdinal, 1);
+    assert.equal(bot.cycles.find(cycle => cycle.pairId === second.id).entryOrdinal, 2);
+
+    const restored = makeBot();
+    restored.bot.restoreState(bot.persistentStateSnapshot());
+    const secondCycle = restored.bot.cycles.find(cycle => cycle.pairId === second.id);
+    // Even a persisted legacy sell flag must not authorize selling pair two.
+    secondCycle.reverseExitTriggeredAt = now + 100;
+    for (const leg of second.legs) {
+      setBook(restored.bot, leg.asset, leg.side, { bid: 0.99, ask: 0.99, at: now + 1_500 });
+    }
+    for (const leg of first.legs) {
+      setBook(restored.bot, leg.asset, leg.side, { bid: 0.60, ask: 0.61, at: now + 1_500 });
+    }
+    await restored.bot.evaluateNow(now + 1_500);
+    assert.equal(restored.calls.length, 0, 'exactly $1.22 is not above the exit threshold');
+    setBook(restored.bot, first.legs[0].asset, first.legs[0].side,
+      { bid: 0.61, ask: 0.62, at: now + 1_600 });
+    await restored.bot.evaluateNow(now + 1_600);
+    assert.equal(restored.calls.length, 2);
+    assert.ok(restored.calls.every(call => call.side === 'SELL'
+      && first.legs.some(leg => call.tokenId === restored.bot.marketContexts.get(leg.asset).tokens[leg.side])));
+    assert.ok(restored.bot.positions.filter(position => position.cycleId === secondCycle.id)
+      .every(position => position.status === 'OPEN'));
+
+    // Existing ledgers without ordinals retain their chronological roles.
+    for (const cycle of restored.bot.cycles) delete cycle.entryOrdinal;
+    assert.equal(restored.bot.isFirstTriggeredPair(secondCycle), false);
+    assert.equal(restored.bot.isFirstTriggeredPair(
+      restored.bot.cycles.find(cycle => cycle.pairId === firstPairId)), true);
+    const nextWindow = now + WINDOW_MS;
+    await restored.bot.advanceWindow(nextWindow);
+    restored.bot.earliestTradableWindowStart = nextWindow;
+    await restored.bot.loadCurrentMarkets(nextWindow, nextWindow);
+    // Trigger directly with a fresh preview to verify window-local rank reset.
+    const quote = { askSum: 0.60, legs: second.legs.map(leg => ({
+      ...leg, tokenId: restored.bot.marketContexts.get(leg.asset).tokens[leg.side],
+      asks: [{ price: 0.30, size: 100 }],
+    })) };
+    await restored.bot.enterPair(second, quote, nextWindow);
+    assert.equal(restored.bot.cycles[0].entryOrdinal, 1);
+    assert.equal(restored.bot.isFirstTriggeredPair(restored.bot.cycles[0]), true);
+  });
+}
+
+test('same-tick pair triggers retain first/second roles in older ledgers', async () => {
+  const { bot } = makeBot();
+  await bot.evaluateNow(bot.windowStart);
+  assert.equal(bot.cycles.length, 2);
+  for (const cycle of bot.cycles) delete cycle.entryOrdinal;
+  assert.equal(bot.isFirstTriggeredPair(bot.cycles[1]), true);
+  assert.equal(bot.isFirstTriggeredPair(bot.cycles[0]), false);
 });
 
 test('an uncertain no-ID sell is not blindly duplicated on the next tick', async () => {

@@ -6,7 +6,6 @@ const { feeParameters, takerFeeAt } = require('./paper-trading.js');
 const WINDOW_MS = 5 * 60 * 1000;
 const ENTRY_ASK_SUM = 0.8;
 const INVERSE_EXIT_ASK_SUM = 1.22;
-const TAKE_PROFIT_BID = 0.99;
 const BUY_PRICE_CAP = 0.99;
 const SELL_PRICE_FLOOR = 0.01;
 const SHARES_PER_LEG = 7;
@@ -802,6 +801,7 @@ class LiveCrossPairBot {
       windowStart: this.windowStart,
       windowEnd: this.windowEnd,
       entryAt: now,
+      entryOrdinal: this.cycles.filter(item => item.windowStart === this.windowStart).length + 1,
       entryAskSum: quote.askSum,
       status: 'OPEN',
       reverseExitTriggeredAt: null,
@@ -1116,14 +1116,25 @@ class LiveCrossPairBot {
     order.processedMatchedShares = filled;
   }
 
+  isFirstTriggeredPair(cycle) {
+    if (!cycle) return false;
+    if (Number.isInteger(cycle.entryOrdinal)) return cycle.entryOrdinal === 1;
+    // Older persisted cycles have no ordinal. unshift stores newest first, so
+    // reverse before the stable timestamp sort to recover ties in trigger order.
+    const ordered = this.cycles.filter(item => item.windowStart === cycle.windowStart)
+      .slice().reverse().sort((left, right) => left.entryAt - right.entryAt);
+    return ordered[0]?.id === cycle.id;
+  }
+
   async checkOpenPositionExits(now) {
     for (const cycle of this.cycles) {
-      if (cycle.windowStart !== this.windowStart || cycle.status !== 'OPEN') continue;
+      if (cycle.windowStart !== this.windowStart || cycle.status !== 'OPEN'
+        || !this.isFirstTriggeredPair(cycle)) continue;
       const pair = PAIRS.find(item => item.id === cycle.pairId);
       if (!pair) continue;
       const pairQuote = this.pairQuote(pair, now);
       if (pairQuote.fresh && !cycle.reverseExitTriggeredAt
-        && pairQuote.askSum >= INVERSE_EXIT_ASK_SUM) {
+        && pairQuote.askSum > INVERSE_EXIT_ASK_SUM) {
         cycle.reverseExitTriggeredAt = now;
         cycle.reverseExitAskSum = pairQuote.askSum;
         cycle.reverseExitStatus = 'SELLING';
@@ -1153,28 +1164,14 @@ class LiveCrossPairBot {
           - (Number(position.totalCostEstimate) || 0)
           - (Number(position.entryFeesEstimate) || 0), 6);
 
-      let reason = null;
-      let minPrice = SELL_PRICE_FLOOR;
-      if (quote.bestBid != null && Number(quote.bestBid) >= TAKE_PROFIT_BID) {
-        reason = 'TAKE_PROFIT_099';
-        minPrice = TAKE_PROFIT_BID;
-      } else if (quote.bestBid == null && Array.isArray(quote.bids) && quote.bids.length === 0) {
-        // The demo writes this position down to zero. A live market order cannot
-        // execute into an empty bid book, so retain the shares for resolution.
-        position.stopLossObservedAt ||= now;
-        position.stopLossStatus = 'NO_BID_CANNOT_SELL';
-      }
       const cycle = this.cycles.find(item => item.id === position.cycleId);
-      if (cycle?.reverseExitTriggeredAt) {
-        reason = 'INVERSE_PAIR_ASK_SUM_1.22';
-        minPrice = SELL_PRICE_FLOOR;
-      }
-      if (!reason) continue;
+      // Ignore legacy exit flags on the second pair too: it holds to resolution.
+      if (!this.isFirstTriggeredPair(cycle) || !cycle.reverseExitTriggeredAt) continue;
       const lock = `${position.tokenId}:SELL`;
       const lastAttemptAt = Number(this.lastSellAttemptAt.get(position.tokenId)) || 0;
       if (this.activeOrderTokens.has(lock) || now - lastAttemptAt < 1_000) continue;
       this.lastSellAttemptAt.set(position.tokenId, now);
-      await this.sellPosition(position, reason, minPrice);
+      await this.sellPosition(position, 'INVERSE_PAIR_ASK_SUM_1.22', SELL_PRICE_FLOOR);
     }
   }
 
@@ -1215,7 +1212,7 @@ class LiveCrossPairBot {
       pairId: position.pairId,
       pairLabel: position.pairLabel,
       positionId: position.id,
-      action: reason === 'TAKE_PROFIT_099' ? 'SELL_TAKE_PROFIT' : 'SELL_PAIR_EXIT',
+      action: 'SELL_PAIR_EXIT',
       exitReason: reason,
       asset: position.asset,
       side: position.side,
@@ -1388,7 +1385,7 @@ class LiveCrossPairBot {
     return {
       id: STRATEGY_ID,
       name: 'BTC/ETH mixed-pair live strategy',
-      version: 'mixed-pairs-080-inverse-122-tp-099-empty-bid-stop-resolution-live-v1',
+      version: 'mixed-pairs-080-first-only-above-122-no-tp-sl-live-v2',
       assets: ['BTC', 'ETH'],
       timeframes: ['5m'],
       activeEntryPairIds: PAIRS.map(pair => pair.id),
@@ -1398,13 +1395,15 @@ class LiveCrossPairBot {
       orderType: 'FAK TAKER',
       buyPriceCap: BUY_PRICE_CAP,
       minimumBuyNotionalUsd: MIN_BUY_NOTIONAL_USD,
-      inverseExitAskSumAtOrAbove: INVERSE_EXIT_ASK_SUM,
-      takeProfitBid: TAKE_PROFIT_BID,
+      inverseExitAskSumAbove: INVERSE_EXIT_ASK_SUM,
+      inverseExitFirstTriggeredPairOnly: true,
+      takeProfitBid: null,
+      stopLossPrice: null,
       entry: 'BTC UP + ETH DOWN and ETH UP + BTC DOWN are evaluated independently. One entry per pair per 5-minute window when that pair’s fresh combined best asks are below $0.80.',
       sizing: 'Target 7 shares on each leg. Taker buys use a USD FAK amount calculated from fresh visible asks; exchange-confirmed share fills can vary. Legs below the $1 minimum notional are skipped, never upsized.',
-      inverseExit: 'When a pair’s own combined asks reach $1.22, independently submit FAK sells for the exchange-confirmed remaining shares in each leg.',
-      takeProfit: 'When a leg’s best bid reaches $0.99, submit a FAK sell with a $0.99 minimum price; record actual matched shares and estimated proceeds.',
-      stopLoss: 'A fresh empty bid book is the paper strategy’s $0 stop. Live orders cannot execute into an empty book, so retain the shares for official resolution.',
+      inverseExit: 'Only the first pair triggered in each window can sell when its own combined asks rise strictly above $1.22. The second pair holds to official resolution.',
+      takeProfit: 'Disabled. No individual-leg take-profit sales, including at $0.99.',
+      stopLoss: 'Disabled. No stop-loss sales or synthetic $0 exits; unsold shares hold to official resolution.',
       settlement: 'At the exact 5-minute market end, retain unsold tokens and poll the corresponding official market result every 5 seconds. Resolution is an estimate until Polymarket credits or redeems the tokens.',
       quoteRequirements: `CLOB quotes no older than ${MAX_QUOTE_AGE_MS}ms and pair leg timestamps within ${MAX_QUOTE_SKEW_MS}ms.`,
       execution: 'LIVE TAKER FAK; account-confirmed order IDs and matched quantities only. No real-money test order is generated outside strategy triggers.',
@@ -1502,7 +1501,6 @@ module.exports = {
     LIVE_BOT_KEY,
     ENTRY_ASK_SUM,
     INVERSE_EXIT_ASK_SUM,
-    TAKE_PROFIT_BID,
     BUY_PRICE_CAP,
     SELL_PRICE_FLOOR,
     SHARES_PER_LEG,
