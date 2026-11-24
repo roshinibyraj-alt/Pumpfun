@@ -28,6 +28,7 @@ node_modules
 !.vscode/extensions.json
 
 # misc
+/.local/cricket-paper-ledger.json*
 /.sass-cache
 /connect.lock
 /coverage

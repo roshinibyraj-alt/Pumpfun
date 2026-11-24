@@ -2,13 +2,10 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "PORT=4173 BASE_PATH=/ pnpm run build"
+    "buildCommand": "node --check artifacts/api-server/cricket/server.cjs && node --test artifacts/api-server/cricket/*.test.cjs"
   },
   "deploy": {
     "startCommand": "pnpm start",
-    "preDeployCommand": [
-      "pnpm --filter @workspace/api-server run prepare:btc-history"
-    ],
     "healthcheckPath": "/api/healthz",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
