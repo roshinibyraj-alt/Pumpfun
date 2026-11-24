@@ -17,6 +17,8 @@ test('HTTP serves new dashboard, rejects unsafe loads, queues buys and persists 
     const html = await (await fetch(base)).text();
     assert.match(html, /BUY 100/); assert.match(html, /SELL ALL/);
     assert.match(html, /PAPER ONLY/); assert.match(html, /\/api\/matches/);
+    assert.match(html, /window-clock/); assert.match(html, /cryptoWindowExpired/);
+    assert.match(html, /Expired window hidden/);
     assert.equal((await (await fetch(base + '/api/healthz')).json()).mode, 'PAPER_ONLY');
     assert.equal((await post('/api/matches', { url: 'https://example.com/event/aaa' })).status, 400);
     assert.equal((await post('/api/orders', {}, { Origin: 'https://evil.example' })).status, 403);

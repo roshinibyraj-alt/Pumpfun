@@ -42,8 +42,12 @@ button:disabled{opacity:.38;cursor:not-allowed;box-shadow:none}
 .tab{background:var(--card);color:var(--ink);white-space:nowrap;font-size:13px;padding:8px 12px}
 .tab[aria-pressed=true]{background:var(--ink);color:var(--sun)}
 .match{border:3px solid var(--line);border-radius:18px;background:var(--card);padding:12px;margin-bottom:16px}
+.match-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
 .match h2{margin:0 0 4px;font-size:22px;line-height:1.05}
+.window-clock{flex:none;border:2px solid var(--line);border-radius:999px;padding:5px 9px;background:var(--sun);font:600 13px var(--mono);white-space:nowrap}
+.window-clock.ended{background:#ffd0d8;color:var(--loss)}
 .meta{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.settlement-note{font-family:var(--mono);font-size:12px;color:var(--muted);padding:8px 2px}
 .market{margin-top:14px;border-top:2px dashed var(--line);padding-top:10px}
 .market h3{margin:0 0 6px;font-size:16px}
 .teams{display:grid;grid-template-columns:1fr;gap:10px}
@@ -130,6 +134,12 @@ async function api(path,body){
 }
 function apply(s){if(!s||!Array.isArray(s.matches))return;state=s;
   s.matches.forEach(m=>{if(!known.has(m.id)){known.add(m.id);selected.add(m.id)}});render()}
+function cryptoWindowEnd(m){return m.cryptoWindow?((m.cryptoWindow.startTimestamp+m.cryptoWindow.intervalSeconds)*1000):null}
+function cryptoWindowExpired(m,now=Date.now()){const end=cryptoWindowEnd(m);return end!==null&&end<=now}
+function countdownText(end){
+  const seconds=Math.max(0,Math.ceil((end-Date.now())/1000));
+  return `${String(Math.floor(seconds/60)).padStart(2,'0')}:${String(seconds%60).padStart(2,'0')} left`;
+}
 function render(){
   if(pointerHeld||!state)return;
   const s=state;
@@ -143,17 +153,33 @@ function render(){
    else if(auto.length){$('pRoll').textContent=auto.map(x=>`${x.symbol} next loading`).join(' · ');$('pRoll').className='pill warn'}
    else{$('pRoll').textContent=windows.map(x=>`${x.symbol} 5m · next ${Math.max(0,Math.ceil((x.windowEndsAt-Date.now())/1000))}s`).join(' · ');$('pRoll').className='pill ok'}
   const p=s.persistence||{};$('pPersist').textContent='store '+(p.status||'—')+(p.error?': '+p.error:'');$('pPersist').className='pill '+(p.error?'bad':'ok');
+  const visibleMatches=s.matches.filter(m=>!cryptoWindowExpired(m));
+  const expiredHoldings=s.matches.filter(cryptoWindowExpired).flatMap(m=>m.markets
+    .filter(mk=>!mk.settled).flatMap(mk=>mk.outcomes.filter(o=>o.shares>0)
+      .map(o=>({title:m.title||m.slug,market:mk.question,outcome:o.name,shares:o.shares}))));
   // tabs
   const tabs=$('tabs');tabs.replaceChildren();
-  s.matches.forEach(m=>{const b=el('button','tab',m.title||m.slug);b.type='button';b.setAttribute('aria-pressed',selected.has(m.id));
+  visibleMatches.forEach(m=>{const b=el('button','tab',m.title||m.slug);b.type='button';b.setAttribute('aria-pressed',selected.has(m.id));
     b.onclick=()=>{selected.has(m.id)?selected.delete(m.id):selected.add(m.id);render()};tabs.append(b)});
   const pendBy={};(s.orders||[]).forEach(o=>{if(o.status==='PENDING')pendBy[o.id]=o});
   const main=$('matches');main.replaceChildren();
-  if(!s.matches.length){const e=el('div','empty');e.append(el('b',null,'No markets loaded.'),el('div','meta','Paste a cricket event URL or a crypto Up/Down five-minute URL above.'));main.append(e)}
-  s.matches.forEach(m=>{
+  if(!visibleMatches.length){
+    const e=el('div','empty');
+    if(s.matches.length)e.append(el('b',null,'Waiting for the next five-minute window.'));
+    else e.append(el('b',null,'No markets loaded.'),el('div','meta','Paste a cricket event URL or a crypto Up/Down five-minute URL above.'));
+    main.append(e)
+  }
+  if(expiredHoldings.length){
+    const note=el('div','settlement-note',`Expired window hidden · ${expiredHoldings.reduce((n,x)=>n+x.shares,0).toFixed(2)} shares still tracked for official resolution.`);
+    main.append(note)
+  }
+  visibleMatches.forEach(m=>{
     const held=m.markets.some(mk=>mk.outcomes.some(o=>o.shares>0));
     if(!selected.has(m.id)&&!held)return;
-    const card=el('section','match');card.append(el('h2',null,m.title||m.slug));
+    const card=el('section','match');const head=el('div','match-head');head.append(el('h2',null,m.title||m.slug));
+    const end=cryptoWindowEnd(m);
+    if(end!==null){const clock=el('span','window-clock',countdownText(end));clock.dataset.windowEndsAt=String(end);head.append(clock)}
+    card.append(head);
     card.append(el('div','meta',(m.closed?'CLOSED · ':'')+(m.kind==='crypto'?`${m.cryptoWindow?.symbol||'CRYPTO'} · 5M · AUTO-ROLL · `:'')+(m.slug||'')+(!selected.has(m.id)?' · shown because positions are open':'')));
     m.markets.forEach(mk=>{
       const box=el('div','market');box.append(el('h3',null,mk.question));
@@ -195,10 +221,19 @@ function render(){
     tr.append(el('td',null,new Date(o.submittedAt).toLocaleTimeString()),team,el('td',null,o.side),st,
       el('td',null,sh(o.filledShares)+'/'+sh(o.requestedShares)),el('td',null,cents(o.averagePrice)),el('td',null,usd(o.fees)),r);hb.append(tr)});
 }
-function tick(){document.querySelectorAll('.cd').forEach(c=>{const at=Number(c.dataset.at);
+function tick(){let expired=false;document.querySelectorAll('.window-clock').forEach(c=>{
+  const end=Number(c.dataset.windowEndsAt);
+  if(!Number.isFinite(end))return;
+  if(end<=Date.now()){
+    c.textContent='EXPIRED';c.classList.add('ended');expired=true;
+  }else c.textContent=countdownText(end)
+});
+document.querySelectorAll('.cd').forEach(c=>{const at=Number(c.dataset.at);
   if(!isFinite(at)){c.textContent='awaiting server';return}const s=(at-Date.now())/1000;
-  c.textContent=s>0?`matching delay ${s.toFixed(1)}s left`:'delay elapsed · awaiting simulated result'})}
-setInterval(tick,200);
+  c.textContent=s>0?`matching delay ${s.toFixed(1)}s left`:'delay elapsed · awaiting simulated result'});
+ return expired;
+}
+ setInterval(()=>{if(tick()&&state)render()},1000);
 async function order(outcomeId,side){if(locks.has(outcomeId))return;locks.add(outcomeId);render();
   try{const r=await api('/api/orders',{outcomeId,side,requestId:crypto.randomUUID(),slippageCents:slip()});
     msg(`${side} submitted — ${r.order?r.order.status:'queued'}. Waiting on delay, not filled yet.`,'ok');if(r.state)apply(r.state)}
