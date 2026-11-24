@@ -28,6 +28,11 @@ class CricketEngine {
       o.status = 'INTERRUPTED'; o.reason = 'Paper order interrupted by restart; no fill assumed.'; o.completedAt = this.now();
     }
   }
+  reset() {
+    this.data = { version: VERSION, initialCapital: 3000, cash: 3000, totalFees: 0,
+      realizedPnl: 0, matches: [], orders: [] };
+    this.books.clear();
+  }
   locate(id) {
     for (const match of this.data.matches) for (const market of match.markets) {
       const outcome = market.outcomes.find(x => x.id === id);

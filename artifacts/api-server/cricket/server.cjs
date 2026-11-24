@@ -13,7 +13,7 @@ async function start({ port = Number(process.env.PORT || 8080), seed = true, sto
   const engine = new CricketEngine(await store.open());
   const clients = new Set(), refreshing = new Map();
   const feed = { status: 'CONNECTING', lastMessageAt: null };
-  let socket, reconnect, stopping = false, dirty = false, metadataBusy = false, adding = false;
+  let socket, reconnect, stopping = false, dirty = false, metadataBusy = false, adding = false, resetting = false;
   let persistenceQueued = false;
   function state() { return { ...engine.snapshot(), feed, persistence: { status: store.status, error: store.error } }; }
   function persist() { dirty = false; return store.save(engine.data); }
@@ -80,8 +80,10 @@ async function start({ port = Number(process.env.PORT || 8080), seed = true, sto
     return job;
   }
   async function add(url) {
+    if (resetting) throw new Error('A reset is in progress. Please retry shortly.');
     if (engine.data.matches.length >= 20) throw new Error('Twenty matches are already loaded.');
     const match = await loadMatch(url);
+    if (resetting) throw new Error('Match loading stopped because the paper session was reset.');
     const old = engine.data.matches.find(m => m.id === match.id);
     if (old) return old;
     engine.data.matches.unshift(match);
@@ -143,14 +145,27 @@ async function start({ port = Number(process.env.PORT || 8080), seed = true, sto
         if (store.error) return reply(res, 503, { error: store.error });
         const input = await body(req);
         if (pathname === '/api/matches') {
-          if (adding) return reply(res, 409, { error: 'A match is already loading. Please wait.' });
+          if (adding || resetting) return reply(res, 409, { error: 'A match is already loading or the session is resetting. Please wait.' });
           adding = true;
           try { await add(input.url); return reply(res, 200, state()); } finally { adding = false; }
         }
         if (pathname === '/api/orders') {
+          if (resetting) return reply(res, 409, { error: 'The paper session is resetting. Please retry shortly.' });
           const order = engine.submit(input);
           await persist(); publish();
           return reply(res, 202, { order, state: state() });
+        }
+        if (pathname === '/api/reset') {
+          if (adding || resetting) return reply(res, 409, { error: 'Wait for match loading or the current reset to finish.' });
+          resetting = true;
+          try {
+            await store.chain.catch(() => {});
+            engine.reset();
+            await persist();
+            connect();
+            publish();
+            return reply(res, 200, state());
+          } finally { resetting = false; }
         }
       }
       reply(res, 404, { error: 'Not found.' });

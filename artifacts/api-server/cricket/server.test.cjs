@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { start } = require('./server.cjs');
 function memoryStore() {
-  return { status: 'TEST_MEMORY', error: null, writes: [],
+  return { status: 'TEST_MEMORY', error: null, writes: [], chain: Promise.resolve(),
     async open() {}, async save(data) { this.writes.push(JSON.parse(JSON.stringify(data))); }, async close() {} };
 }
 test('HTTP serves new dashboard, rejects unsafe loads, queues buys and persists history', async () => {
@@ -31,6 +31,10 @@ test('HTTP serves new dashboard, rejects unsafe loads, queues buys and persists 
     const duplicate = await (await post('/api/orders', request)).json();
     assert.equal(duplicate.order.id, accepted.order.id); assert.equal(duplicate.state.orders.length, 1);
     assert.equal(storage.writes.at(-1).orders.length, 1);
+    const reset = await (await post('/api/reset', {})).json();
+    assert.equal(reset.mode, 'PAPER_ONLY'); assert.equal(reset.cash, 3000);
+    assert.equal(reset.equity, 3000); assert.equal(reset.matches.length, 0);
+    assert.equal(reset.orders.length, 0); assert.equal(storage.writes.at(-1).orders.length, 0);
     assert.equal((await (await fetch(base + '/api/state')).json()).mode, 'PAPER_ONLY');
   } finally { await runtime.close(); }
 });

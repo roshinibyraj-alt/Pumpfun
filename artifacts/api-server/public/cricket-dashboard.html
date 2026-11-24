@@ -89,6 +89,9 @@ th,td{text-align:left;padding:6px 4px;border-bottom:1px solid rgba(29,26,58,.2);
   <div class="stat"><small>Fees paid</small><b id="sFees">—</b></div>
   <div class="stat"><small>Start capital</small><b id="sInit">—</b></div>
 </section>
+<section class="ctrl" style="justify-content:flex-end">
+  <button type="button" id="resetBtn" class="sell">Reset session · clear markets and history</button>
+</section>
 <form class="load" id="loadForm">
   <input type="url" id="url" required placeholder="Paste Polymarket cricket match URL" value="https://polymarket.com/event/" aria-label="Polymarket match URL">
   <button type="submit" id="loadBtn">Load match</button>
@@ -199,6 +202,14 @@ async function order(outcomeId,side){if(locks.has(outcomeId))return;locks.add(ou
 $('loadForm').onsubmit=async e=>{e.preventDefault();const b=$('loadBtn');b.disabled=true;b.textContent='Loading…';
   try{apply(await api('/api/matches',{url:$('url').value.trim()}));msg('Match loaded with all markets.','ok')}
   catch(err){msg('Could not load: '+err.message,'err')}finally{b.disabled=false;b.textContent='Load match'}};
+$('resetBtn').onclick=async()=>{
+  const confirmed=window.confirm('Reset the entire paper session? This permanently removes every loaded match, position and order record, and resets paper capital to $3,000. No real orders are affected.');
+  if(!confirmed)return;
+  const button=$('resetBtn');button.disabled=true;
+  try{apply(await api('/api/reset',{}));msg('Paper session cleared. Capital is back to $3,000.','ok')}
+  catch(err){msg('Could not reset: '+err.message,'err')}
+  finally{button.disabled=false}
+};
 $('slip').oninput=()=>state&&render();
 function startPoll(){if(poll)return;poll=setInterval(()=>api('/api/state').then(apply).catch(()=>{}),3000)}
 function stopPoll(){clearInterval(poll);poll=null}

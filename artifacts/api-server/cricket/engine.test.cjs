@@ -111,6 +111,15 @@ test('restart restores holdings and interrupts pending requests without replay',
   assert.equal(restored.data.orders[0].status, 'INTERRUPTED');
   assert.equal(restored.snapshot().matches[0].markets[0].outcomes[0].quoteFresh, false);
 });
+test('explicit reset clears every match, position, fee and order and restores starting capital', () => {
+  const f = fixture(), buy = f.submit(); f.advance(); f.book(); f.engine.execute(buy);
+  f.engine.data.realizedPnl = 12; f.engine.data.totalFees = 4;
+  f.engine.reset(); const s = f.engine.snapshot();
+  assert.equal(s.cash, 3000); assert.equal(s.equity, 3000); assert.equal(s.initialCapital, 3000);
+  assert.equal(s.realizedPnl, 0); assert.equal(s.totalFees, 0);
+  assert.deepEqual(s.matches, []); assert.deepEqual(s.orders, []);
+  assert.equal(f.engine.books.size, 0);
+});
 test('missing fee schedule is unknown rather than fee-free', () => {
   assert.equal(metadata({ feesEnabled: true }).feeKnown, false);
   assert.equal(metadata({ feesEnabled: false }).feeKnown, true);
