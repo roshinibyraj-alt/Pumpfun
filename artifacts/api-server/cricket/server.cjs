@@ -4,7 +4,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { CricketEngine } = require('./engine.cjs');
-const { json, array, metadata, loadMatch, nextCryptoWindowSlug } = require('./markets.cjs');
+const { json, array, executionMetadata, loadMatch, nextCryptoWindowSlug } = require('./markets.cjs');
 const { Store } = require('./store.cjs');
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
 const EXAMPLE = 'https://polymarket.com/sports/crint/crint-aus-gbr-2026-11-24';
@@ -159,7 +159,7 @@ async function start({ port = Number(process.env.PORT || 8080), seed = true, sto
             // Reject changed IDs/outcome ordering instead of paying the wrong team.
             const ids = array(raw.clobTokenIds);
             if (ids.length !== market.outcomes.length || ids.some((id, i) => String(id) !== market.outcomes[i].id)) continue;
-            Object.assign(market, metadata(raw));
+            Object.assign(market, await executionMetadata(raw, { crypto: match.kind === 'crypto' }));
             const payouts = array(raw.outcomePrices).map(Number);
             if (raw.closed === true && raw.umaResolutionStatus === 'resolved') {
               if (engine.settle(market, payouts)) dirty = true;

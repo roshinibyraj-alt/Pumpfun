@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { CricketEngine, parseMarketUrl, fee } = require('./engine.cjs');
-const { metadata, cryptoWindowFromSlug, nextCryptoWindowSlug, loadMatch } = require('./markets.cjs');
+const { metadata, executionMetadata, cryptoWindowFromSlug, nextCryptoWindowSlug, loadMatch } = require('./markets.cjs');
 function fixture() {
   let now = 100000;
   const engine = new CricketEngine(undefined, () => now);
@@ -32,6 +32,15 @@ test('buy waits full exchange delay AND a post-delay snapshot', () => {
   assert.equal(o.status, 'FILLED'); assert.equal(o.filledShares, 100);
   assert.equal(f.market.outcomes[0].costBasis, 51.25);
   assert.equal(f.engine.data.cash, 2948.75);
+});
+test('zero-second market delay is valid and fills on a fresh eligible snapshot', () => {
+  const f = fixture();
+  f.market.secondsDelay = 0;
+  const order = f.submit();
+  f.book();
+  assert.equal(f.engine.execute(order), true);
+  assert.equal(order.status, 'FILLED');
+  assert.equal(order.filledShares, 100);
 });
 test('fills at changed execution prices, not tap-time asks', () => {
   const f = fixture(), o = f.submit(); f.advance();
@@ -126,6 +135,19 @@ test('missing fee schedule is unknown rather than fee-free', () => {
   assert.equal(metadata({ feesEnabled: false }).feeRate, 0);
   assert.equal(metadata({}).secondsDelay, null);
 });
+test('crypto execution delay falls back to the matching CLOB market metadata, including zero', async () => {
+  const original = global.fetch;
+  global.fetch = async url => {
+    assert.equal(url, 'https://clob.polymarket.com/markets/0xcondition');
+    return { ok: true, json: async () => ({ condition_id: '0xcondition', seconds_delay: 0 }) };
+  };
+  try {
+    const result = await executionMetadata({ conditionId: '0xcondition', secondsDelay: null }, { crypto: true });
+    assert.equal(result.secondsDelay, 0);
+    assert.equal(result.secondsDelaySource, 'CLOB');
+    assert.equal(metadata({ secondsDelay: 0 }).secondsDelaySource, 'Gamma');
+  } finally { global.fetch = original; }
+});
 test('event URL loads every supported submarket with IDs and delay', async () => {
   const original = global.fetch;
   global.fetch = async () => ({ ok: true, json: async () => [{ id: 'event', slug: 'crint-aus-gbr', title: 'Australia vs England',
@@ -150,15 +172,19 @@ test('crypto 5-minute slugs identify the window and advance to the next live int
 });
 test('crypto five-minute event loads Up and Down token IDs and auto-roll metadata', async () => {
   const original = global.fetch;
-  global.fetch = async () => ({ ok: true, json: async () => [{ id: 'btc-window', slug: 'btc-updown-5m-1795521300',
-    title: 'Bitcoin Up or Down - 5 minutes', tags: [{ slug: 'crypto' }],
-    markets: [{ id: 'btc-market', enableOrderBook: true, clobTokenIds: '["btc-up","btc-down"]',
-      outcomes: '["Up","Down"]', question: 'Bitcoin Up or Down', secondsDelay: 1, feesEnabled: false,
-      acceptingOrders: true }] }] });
+  global.fetch = async url => url.includes('clob.polymarket.com')
+    ? ({ ok: true, json: async () => ({ condition_id: 'btc-condition', seconds_delay: 0 }) })
+    : ({ ok: true, json: async () => [{ id: 'btc-window', slug: 'btc-updown-5m-1795521300',
+      title: 'Bitcoin Up or Down - 5 minutes', tags: [{ slug: 'crypto' }],
+      markets: [{ id: 'btc-market', conditionId: 'btc-condition', enableOrderBook: true,
+        clobTokenIds: '["btc-up","btc-down"]', outcomes: '["Up","Down"]', question: 'Bitcoin Up or Down',
+        secondsDelay: null, feesEnabled: false, acceptingOrders: true }] }] });
   try {
     const match = await loadMatch('https://polymarket.com/event/btc-updown-5m-1795521300');
     assert.equal(match.kind, 'crypto');
     assert.deepEqual(match.cryptoWindow, { symbol: 'BTC', startTimestamp: 1795521300, intervalSeconds: 300 });
     assert.deepEqual(match.markets[0].outcomes.map(x => x.id), ['btc-up', 'btc-down']);
+    assert.equal(match.markets[0].secondsDelay, 0);
+    assert.equal(match.markets[0].secondsDelaySource, 'CLOB');
   } finally { global.fetch = original; }
 });

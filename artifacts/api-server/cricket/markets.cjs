@@ -26,9 +26,11 @@ function metadata(raw) {
   const disabled = raw.feesEnabled === false;
   const rate = disabled ? 0 : Number(schedule?.rate);
   const exponent = disabled ? 1 : Number(schedule?.exponent);
+  const secondsDelay = raw.secondsDelay === null || raw.secondsDelay === undefined ? null : Number(raw.secondsDelay);
   return {
     closed: !!raw.closed, acceptingOrders: raw.acceptingOrders === true,
-    secondsDelay: raw.secondsDelay === null || raw.secondsDelay === undefined ? null : Number(raw.secondsDelay),
+    secondsDelay: Number.isFinite(secondsDelay) && secondsDelay >= 0 ? secondsDelay : null,
+    secondsDelaySource: Number.isFinite(secondsDelay) && secondsDelay >= 0 ? 'Gamma' : null,
     feeRate: Number.isFinite(rate) && rate >= 0 ? rate : 0,
     feeExponent: Number.isFinite(exponent) && exponent > 0 ? exponent : 1,
     feeKnown: disabled || (Number.isFinite(rate) && rate >= 0 && Number.isFinite(exponent) && exponent > 0),
@@ -36,6 +38,20 @@ function metadata(raw) {
     tickSize: Number(raw.orderPriceMinTickSize) > 0 ? Number(raw.orderPriceMinTickSize) : 0.01,
     resolutionStatus: raw.umaResolutionStatus || null,
   };
+}
+async function executionMetadata(raw, { crypto = false } = {}) {
+  const result = metadata(raw);
+  if (result.secondsDelay !== null || !crypto || !raw.conditionId) return result;
+  try {
+    const clob = await json(`https://clob.polymarket.com/markets/${encodeURIComponent(raw.conditionId)}`);
+    if (String(clob.condition_id || '').toLowerCase() !== String(raw.conditionId).toLowerCase()) return result;
+    const delay = Number(clob.seconds_delay);
+    if (Number.isFinite(delay) && delay >= 0) {
+      result.secondsDelay = delay;
+      result.secondsDelaySource = 'CLOB';
+    }
+  } catch { /* Unknown delay remains null, which keeps paper orders safely blocked. */ }
+  return result;
 }
 async function loadMatch(url) {
   const slug = parseMarketUrl(url);
@@ -62,7 +78,7 @@ async function loadMatch(url) {
     // This service uses the CTF CLOB feed. Never misroute V2 position IDs as token IDs.
     if (raw.version && !['v1', 'ctf'].includes(raw.version)) throw new Error('This match uses an unsupported exchange version.');
     markets.push({ id: String(raw.id), conditionId: raw.conditionId, slug: raw.slug, question: raw.question,
-      ...metadata(raw), outcomes: ids.map((id, i) => ({ id: String(id), name: names[i],
+      ...await executionMetadata(raw, { crypto: !!cryptoWindow }), outcomes: ids.map((id, i) => ({ id: String(id), name: names[i],
         shares: 0, costBasis: 0, liquidationValue: 0 })) });
   }
   if (!markets.length) throw new Error('This event has no supported outcome order books.');
@@ -71,4 +87,4 @@ async function loadMatch(url) {
     ...(cryptoWindow ? { cryptoWindow } : {}), slug: event.slug, title: event.title,
     url: `https://polymarket.com/event/${event.slug}`, closed: !!event.closed, markets };
 }
-module.exports = { json, array, metadata, cryptoWindowFromSlug, nextCryptoWindowSlug, loadMatch };
+module.exports = { json, array, metadata, executionMetadata, cryptoWindowFromSlug, nextCryptoWindowSlug, loadMatch };

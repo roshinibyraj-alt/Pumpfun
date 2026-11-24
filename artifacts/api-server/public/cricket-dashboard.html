@@ -157,7 +157,7 @@ function render(){
     card.append(el('div','meta',(m.closed?'CLOSED · ':'')+(m.kind==='crypto'?`${m.cryptoWindow?.symbol||'CRYPTO'} · 5M · AUTO-ROLL · `:'')+(m.slug||'')+(!selected.has(m.id)?' · shown because positions are open':'')));
     m.markets.forEach(mk=>{
       const box=el('div','market');box.append(el('h3',null,mk.question));
-      box.append(el('div','meta',`delay ${num(mk.secondsDelay)?mk.secondsDelay+'s':'unknown'} · taker fee ${mk.feeKnown?'q × '+mk.feeRate+' × [p(1−p)]^'+mk.feeExponent:'unknown'} · min ${mk.minOrderSize??'—'} shares${mk.closed?' · CLOSED':''}${mk.acceptingOrders?'':' · not accepting'}`));
+       box.append(el('div','meta',`delay ${num(mk.secondsDelay)?mk.secondsDelay+'s'+(mk.secondsDelaySource?' ('+mk.secondsDelaySource+')':''):'unknown'} · taker fee ${mk.feeKnown?'q × '+mk.feeRate+' × [p(1−p)]^'+mk.feeExponent:'unknown'} · min ${mk.minOrderSize??'—'} shares${mk.closed?' · CLOSED':''}${mk.acceptingOrders?'':' · not accepting'}`));
       const g=el('div','teams');
       mk.outcomes.forEach(o=>{
         const t=el('div','team'+(o.quoteFresh?'':' stale'));t.append(el('h4',null,o.name));
