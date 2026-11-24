@@ -201,6 +201,9 @@ class LiveCrossPairBot {
     this.earliestTradableWindowStart = null;
     this.lastMarketLookupAt = 0;
     this.lastAccountRefreshAt = 0;
+    this.accountRefreshInFlight = false;
+    this.accountAuthInFlight = false;
+    this.nextAuthRetryAt = 0;
     this.lastResolutionPollAt = 0;
     this.timer = null;
     this.tickInProgress = false;
@@ -246,26 +249,38 @@ class LiveCrossPairBot {
       ? currentWindowStart
       : currentWindowStart + WINDOW_MS;
     this.running = true;
-
-    if (this.trader) {
-      try {
-        await this.trader.authenticate();
-        this.liveAccount.authenticated = true;
-        this.liveAccount.status = 'READY';
-        await this.refreshAccount(true);
-      } catch (error) {
-        this.liveAccount.authenticated = false;
-        this.liveAccount.accountReady = false;
-        this.liveAccount.status = 'AUTH_ERROR';
-        this.liveAccount.error = String(error?.message || error).slice(0, 180);
-        this.log('ACCOUNT_AUTH_ERROR', 'Polymarket account authentication failed; live orders remain paused.');
-      }
-    }
-
-    await this.tick();
+    this.status = 'SEARCHING_MARKETS';
+    this.statusReason = 'Connecting account and loading BTC/ETH markets.';
     this.timer = setInterval(() => { void this.tick(); }, LOOP_MS);
     this.timer.unref?.();
+    if (this.trader) void this.authenticateAccount(Number(this.now()));
+    void this.tick();
     return this.snapshot();
+  }
+
+  async authenticateAccount(now = Number(this.now())) {
+    if (!this.trader || this.liveAccount.authenticated || this.accountAuthInFlight
+      || now < this.nextAuthRetryAt) return;
+    this.accountAuthInFlight = true;
+    try {
+      await this.trader.authenticate();
+      this.liveAccount.authenticated = true;
+      this.liveAccount.accountReady = false;
+      this.liveAccount.status = 'READY';
+      this.liveAccount.error = null;
+      this.nextAuthRetryAt = 0;
+      void this.refreshAccount(true);
+    } catch (error) {
+      this.liveAccount.authenticated = false;
+      this.liveAccount.accountReady = false;
+      this.liveAccount.status = 'AUTH_ERROR';
+      this.liveAccount.error = String(error?.message || error).slice(0, 180);
+      this.nextAuthRetryAt = now + 10_000;
+      await this.log('ACCOUNT_AUTH_ERROR',
+        'Polymarket authentication failed; live orders stay paused while the bot continues market monitoring.');
+    } finally {
+      this.accountAuthInFlight = false;
+    }
   }
 
   async stop() {
@@ -342,6 +357,9 @@ class LiveCrossPairBot {
       const currentStart = Math.floor(now / WINDOW_MS) * WINDOW_MS;
       if (this.windowStart !== currentStart) {
         await this.advanceWindow(currentStart, now);
+      }
+      if (this.trader && !this.liveAccount.authenticated && now >= this.nextAuthRetryAt) {
+        void this.authenticateAccount(now);
       }
       if (now - this.lastMarketLookupAt >= 5_000 || !this.marketContexts.size) {
         this.lastMarketLookupAt = now;
@@ -1113,10 +1131,11 @@ class LiveCrossPairBot {
   }
 
   async refreshAccount(force) {
-    if (!this.trader || !this.liveAccount.authenticated) return;
+    if (!this.trader || !this.liveAccount.authenticated || this.accountRefreshInFlight) return;
     const now = Number(this.now());
     if (!force && now - this.lastAccountRefreshAt < this.accountRefreshMs) return;
     this.lastAccountRefreshAt = now;
+    this.accountRefreshInFlight = true;
     try {
       const snapshot = await this.trader.getTradingSnapshot();
       this.liveAccount = {
@@ -1135,6 +1154,8 @@ class LiveCrossPairBot {
       this.liveAccount.error = String(error?.message || error).slice(0, 180);
       this.liveAccount.accountReady = false;
       this.liveAccount.status = 'STALE';
+    } finally {
+      this.accountRefreshInFlight = false;
     }
   }
 

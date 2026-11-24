@@ -150,6 +150,21 @@ function setBook(bot, asset, side, { bid, ask, bidSize = 100, askSize = 100, at 
   });
 }
 
+test('startup keeps health and market monitoring responsive while account authentication is pending', async () => {
+  const neverAuthenticates = new Promise(() => {});
+  const { bot } = makeBot({
+    traderOverrides: { authenticate: () => neverAuthenticates },
+  });
+  bot.liveAccount = { authenticated: false, accountReady: false, status: 'CONNECTING' };
+
+  const started = await bot.start();
+  assert.equal(started.status, 'SEARCHING_MARKETS');
+  assert.equal(bot.running, true);
+  assert.equal(bot.accountAuthInFlight, true);
+  assert.equal(bot.liveAccount.accountReady, false);
+  await bot.stop();
+});
+
 test('enters the qualifying mixed pair only, sizes the buy from fresh asks, and stores actual fills', async () => {
   const { bot, calls, saved } = makeBot();
   const now = 1_800_000_000_000;
