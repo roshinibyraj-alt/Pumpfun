@@ -2,7 +2,7 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "node --check artifacts/api-server/cricket/server.cjs && node --test artifacts/api-server/cricket/*.test.cjs"
+    "buildCommand": "node --check freqai-bot/index.js && node --check freqai-bot/freqai-open-entry-bot.js && node --test freqai-bot/test/*.test.js && python3 -m py_compile freqai-bot/freqai/strategies/FreqAIWindowStrategy.py"
   },
   "deploy": {
     "startCommand": "pnpm start",
