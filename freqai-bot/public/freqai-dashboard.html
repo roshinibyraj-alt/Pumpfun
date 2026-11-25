@@ -15,9 +15,10 @@
     .window-head{display:flex;align-items:start;justify-content:space-between;gap:10px}.window-head h2{margin:0;font-size:21px}.clock{font:850 27px var(--mono);color:var(--yellow);white-space:nowrap}.window-meta{font-size:12px;color:var(--muted);margin-top:4px}.quotes{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:13px}.quote{padding:12px;border:1px solid var(--line);background:#09162b;border-radius:14px}.quote.up{border-left:4px solid var(--green)}.quote.down{border-left:4px solid var(--red)}.quote-head{display:flex;justify-content:space-between;align-items:center;font-weight:900;letter-spacing:.06em}.quote-prices{display:flex;justify-content:space-between;gap:6px;margin-top:8px}.quote-prices div{font-size:11px;color:var(--muted)}.quote-prices b{display:block;font:800 23px var(--mono);color:var(--text)}
     .position{display:grid;grid-template-columns:1fr auto;gap:8px;background:#0a1730;border:1px solid var(--line);border-radius:15px;padding:13px;margin-top:12px}.position h3{margin:0 0 4px;font-size:16px}.position .details{font-size:12px;color:var(--muted)}.position .value{text-align:right;font:850 21px var(--mono)}.position .value small{display:block;color:var(--muted);font:750 10px var(--sans);text-transform:uppercase}.sideTag{display:inline-block;border-radius:7px;padding:3px 7px;font-size:11px;font-weight:900}.sideTag.UP{background:#12644f;color:#adffe2}.sideTag.DOWN{background:#6a2d47;color:#ffd0dc}
     .list{display:grid;gap:8px}.row{background:#0a1730;border-radius:14px;padding:11px;border-left:4px solid var(--line);display:grid;grid-template-columns:1fr auto;gap:5px 8px}.row.win{border-color:var(--green)}.row.loss{border-color:var(--red)}.row.pending{border-color:var(--blue)}.row-title{font-weight:850}.row-detail{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.row-pnl{grid-column:2;grid-row:1/3;align-self:center;text-align:right;font:800 18px var(--mono)}.empty{border:1px dashed #385070;border-radius:14px;padding:14px;text-align:center;color:var(--muted);font-size:13px}
+    .shadow-grid{display:grid;grid-template-columns:1fr;gap:9px}.shadow-card{background:#0a1730;border:1px solid var(--line);border-radius:15px;padding:13px}.shadow-card h3{font-size:15px;margin:0}.shadow-card .shadow-total{font:850 25px var(--mono);margin:7px 0 5px}.shadow-card .shadow-small{font-size:12px;color:var(--muted);line-height:1.5}.shadow-card.tier55{border-top:3px solid #62a8ff}.shadow-card.tier60{border-top:3px solid #b18cff}.shadow-card.tier65{border-top:3px solid #ffc36b}
     .events{display:grid;gap:0}.event{padding:9px 0;border-bottom:1px solid #233653}.event:last-child{border:0}.event time{color:var(--muted);font:700 11px var(--mono)}.event b{display:block;font-size:11px;color:var(--blue);text-transform:uppercase;letter-spacing:.07em}.event p{margin:2px 0 0;overflow-wrap:anywhere}
     .strategy{margin-top:24px;background:linear-gradient(135deg,#162846,#252044);border:1px solid #485181;border-radius:20px;padding:16px}.strategy h2{margin:0 0 8px;font-size:21px}.strategy p{color:#d5dff1;margin:7px 0;font-size:13px}.footer{text-align:center;color:var(--muted);font-size:11px;margin-top:16px}
-    @media(min-width:700px){.wrap{padding:24px 20px 50px}.stats{grid-template-columns:repeat(4,1fr)}.two{grid-template-columns:1.1fr .9fr}.model{padding:20px}.quotes{gap:12px}.panel{padding:18px}}
+    @media(min-width:700px){.wrap{padding:24px 20px 50px}.stats{grid-template-columns:repeat(4,1fr)}.two{grid-template-columns:1.1fr .9fr}.shadow-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.model{padding:20px}.quotes{gap:12px}.panel{padding:18px}}
   </style>
 </head>
 <body>
@@ -44,8 +45,14 @@
       <div class="prob down"><span>DOWN PROBABILITY</span><strong id="pDown">—</strong></div>
     </div>
     <div class="bar"><i id="probBar" style="width:50%"></i></div>
-    <div class="model-note" id="modelDecision">At each window open, use the latest score from the just-closed 1-minute candle. One 50-share entry requires at least 51%.</div>
+    <div class="model-note" id="modelDecision">At window open, use the latest completed-minute score. Shadow tiers also evaluate fresh scores during the window.</div>
     <div class="model-note" id="entryRule">No flips, recovery sizing, take-profit, or stop-loss. Open shares go to official resolution.</div>
+  </section>
+  <div class="section-title"><h2>Shadow performance</h2><span>Independent hypothetical P&amp;L</span></div>
+  <section class="panel">
+    <div class="shadow-grid" id="shadowTiers"><div class="empty">Waiting for shadow statistics.</div></div>
+    <p class="model-note">Each tier takes one 50-share shadow entry at its first qualifying current-window score. A score above 65% qualifies all three tiers. These entries do not change the main paper balance. Scores refresh on completed one-minute candles.</p>
+    <div class="list" id="shadowEntries"><div class="empty">No shadow entries yet.</div></div>
   </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
   <section class="panel">
@@ -69,11 +76,11 @@
   </section>
   <section class="strategy">
     <div class="label">Strategy details</div>
-    <h2>BTC FreqAI opening-score entries</h2>
-    <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Each sample is labeled with the direction of the next 5-minute BTC window, so the latest score from the just-closed minute is aimed at the window that is opening. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
+    <h2>BTC FreqAI opening-score entries and shadow tiers</h2>
+    <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Each completed minute is labeled with the 5-minute window containing its close, so the model score remains aligned with the active window as new one-minute candles close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
     <p>At each 5-minute window open, the bot captures the latest model score from the 1-minute candle that closed at that boundary. UP is selected when its score is at least 51%; otherwise DOWN must be at least 51%. If neither qualifies, or the opening score is not ready within five seconds, the window is skipped.</p>
-    <p>The captured side can make one 50-share paper buy for the window. The chosen score and side stay fixed for that window: there are no flips, same-side additions, recovery sizing, take-profit, or stop-loss.</p>
-    <p>Buys sweep the visible asks up to $1.00 and include modeled taker fees; partial fills are recorded. Open shares are held for official resolution. Freqtrade is prediction-only in dry mode; no live orders are sent.</p>
+    <p>Three separate shadow ledgers can enter the current window at any fresh score strictly above 55%, 60%, or 65%. Each threshold enters once per window, on its first qualifying score, using the selected side. Shadow fills use the same 50-share visible-ask sweep and modeled taker fees, but do not reserve main-account cash.</p>
+    <p>The main strategy still makes at most one opening 50-share paper buy per window. Neither main nor shadow positions flip or use take-profit/stop-loss; open shares are held for official resolution. Freqtrade is prediction-only in dry mode; no live orders are sent.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
   </section>
   <div class="footer">Paper simulation only · no live orders · Binance is the prediction data source</div>
@@ -100,6 +107,12 @@
     const outcome=pending?'Pending resolution':p.status==='CLOSED_FLIP'?'FLIP EXIT':p.status==='RESOLVED_WIN'?'WIN':p.status==='RESOLVED_LOSS'?'LOSS':p.status;
     return `<div class="row ${pending?'pending':Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':''}"><div class="row-title">${esc(p.asset)} <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${outcome}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.originalShares||p.shares)} shares · in ${px(p.entryPrice)} · cost ${money(p.totalCost)}${pending?'':` · out ${px(p.exitPrice)} · ${time(p.exitAt)}`}</div><div class="row-pnl ${pending?'':cls(p.realizedPnl)}">${val}</div></div>`;
   }
+  function shadowEntryRow(p){
+    const closed=p.status==='RESOLVED_WIN'||p.status==='RESOLVED_LOSS';
+    const pnl=closed?p.realizedPnl:p.status==='OPEN'?p.unrealizedPnl:null;
+    const state=closed?(p.status==='RESOLVED_WIN'?'WIN':'LOSS'):p.status==='PENDING_RESOLUTION'?'PENDING RESOLUTION':p.status;
+    return `<div class="row ${closed?Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':'':p.status==='OPEN'?'pending':''}"><div class="row-title">&gt;${Number(p.thresholdPct)}% <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${state}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.shares)} shares · ${px(p.entryPrice)} avg · ${money(p.fees)} fees · score ${(Number(p.selectedProbability)*100).toFixed(1)}%</div><div class="row-pnl ${cls(pnl)}">${signed(pnl)}</div></div>`;
+  }
   function render(s){
     const a=s.account||{}, f=s.freqai||{}, market=(s.markets||[]).find(m=>m.asset==='BTC'&&m.timeframe==='5m');
     $('equity').textContent=money(a.equity);
@@ -123,6 +136,11 @@
     $('modelDecision').textContent=opening
       ? `${opening.side||'No trade'} at window open · ${num(opening.pUp)?`UP ${(opening.pUp*100).toFixed(1)}% / DOWN ${(opening.pDown*100).toFixed(1)}%`:'opening score unavailable'} · ${esc(opening.reason||'')}`
       : d?`Latest entry: ${d.side} at ${time(d.at)} · ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. No further entries this window.`:'At each window open: one 50-share buy only when a side is at least 51%. No flips.';
+    $('entryRule').textContent='Main entry stays at 51% at window open. Shadow tiers can enter once each when a fresh current-window score first rises above their threshold.';
+    const tiers=s.shadowTiers||[];
+    $('shadowTiers').innerHTML=tiers.map(t=>`<article class="shadow-card tier${Number(t.thresholdPct)}"><h3>Score &gt; ${Number(t.thresholdPct)}%</h3><div class="shadow-total ${cls(t.totalPnl)}">${signed(t.totalPnl)}</div><div class="shadow-small">Total P&amp;L · realized ${signed(t.realizedPnl)} · floating ${signed(t.openPnl)}<br>Entries ${Number(t.entries||0)} · resolved ${Number(t.resolved||0)} · W/L ${Number(t.wins||0)}/${Number(t.losses||0)}<br>Open ${Number(t.openPositions||0)} · pending ${Number(t.pendingResolution||0)} · fees ${money(t.fees)}</div></article>`).join('')||'<div class="empty">Waiting for shadow statistics.</div>';
+    const shadowEntries=s.shadowEntries||[];
+    $('shadowEntries').innerHTML=shadowEntries.length?shadowEntries.slice(0,12).map(shadowEntryRow).join(''):'<div class="empty">No shadow entries yet.</div>';
     if(market){
       $('windowTitle').textContent=market.marketStatus||'—';$('windowMeta').textContent=`${time(market.start)} – ${time(market.end)} · ${esc(market.marketStatus||'')}`;$('clock').textContent=countdown(market.secondsRemaining);
       $('quotes').innerHTML=['UP','DOWN'].map(side=>{const q=market.sideStates?.[side]||{};return `<div class="quote ${side.toLowerCase()}"><div class="quote-head"><span>${side}</span><span class="muted">${q.fresh?'LIVE':'STALE'}</span></div><div class="quote-prices"><div>BEST BID<b>${px(q.bestBid)}</b></div><div>BEST ASK<b>${px(q.bestAsk)}</b></div><div>MID<b>${px(q.mid)}</b></div></div></div>`}).join('');

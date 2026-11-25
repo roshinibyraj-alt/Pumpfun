@@ -52,7 +52,7 @@
   ],
   "freqai": {
     "enabled": true,
-    "identifier": "pumpfun-btc-5m-opening-score-v1",
+    "identifier": "pumpfun-btc-5m-opening-score-v2",
     "purge_old_models": 2,
     "train_period_days": 14,
     "backtest_period_days": 1,

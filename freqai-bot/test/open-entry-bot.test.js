@@ -11,7 +11,7 @@ function fixture({ up = 0.51, down = 0.49, scoreDelay = 0 } = {}) {
     candleStart: start - 60_000,
     candleCloseAt: start,
     writtenAt: start + scoreDelay,
-    windowStart: start - 300_000,
+    windowStart: start,
     pUp: up,
     pDown: down,
     model: 'LightGBMClassifier',
@@ -156,5 +156,91 @@ test('records actual partial visible-ask depth and modeled fees', () => {
   assert.equal(f.bot.orders[0].filledShares, 20);
   assert.equal(f.bot.positions[0].shares, 20);
   assert.ok(f.bot.orders[0].fees > 0);
+});
+
+test('opens each qualifying shadow tier at its first qualifying score during a window', () => {
+  const f = fixture({ up: 0.56, down: 0.44 });
+  const startingCash = f.bot.cash;
+  f.setNow(f.start + 30_000);
+  f.setPrediction({
+    candleStart: f.start - 60_000,
+    candleCloseAt: f.start,
+    writtenAt: f.start + 500,
+    windowStart: f.start,
+    pUp: 0.56,
+    pDown: 0.44,
+  });
+  f.check('UP');
+  assert.deepEqual(f.bot.shadowEntries.map((entry) => entry.thresholdPct), [55]);
+  assert.equal(f.bot.orders.length, 0);
+  assert.equal(f.bot.positions.length, 0);
+  assert.equal(f.bot.cash, startingCash);
+
+  f.setNow(f.start + 61_000);
+  f.setPrediction({
+    candleStart: f.start,
+    candleCloseAt: f.start + 60_000,
+    writtenAt: f.start + 60_500,
+    windowStart: f.start,
+    pUp: 0.61,
+    pDown: 0.39,
+  });
+  f.check('UP');
+  f.setNow(f.start + 121_000);
+  f.setPrediction({
+    candleStart: f.start + 60_000,
+    candleCloseAt: f.start + 120_000,
+    writtenAt: f.start + 120_500,
+    windowStart: f.start,
+    pUp: 0.66,
+    pDown: 0.34,
+  });
+  f.check('UP');
+
+  assert.deepEqual(
+    f.bot.shadowEntries.map((entry) => entry.thresholdPct).sort((a, b) => a - b),
+    [55, 60, 65],
+  );
+  assert.equal(f.bot.shadowEntries.every((entry) => entry.shares === 50), true);
+  assert.equal(f.bot.shadowEntries.length, 3);
+  const tiers = f.bot.snapshot().shadowTiers;
+  assert.deepEqual(tiers.map((tier) => tier.entries), [1, 1, 1]);
+  assert.ok(tiers.every((tier) => tier.totalPnl < 0));
+});
+
+test('requires scores strictly above each shadow threshold', () => {
+  const f = fixture({ up: 0.55, down: 0.45 });
+  f.setNow(f.start + 30_000);
+  f.setPrediction({
+    candleStart: f.start - 60_000,
+    candleCloseAt: f.start,
+    writtenAt: f.start + 500,
+    windowStart: f.start,
+    pUp: 0.55,
+    pDown: 0.45,
+  });
+  f.check('UP');
+  assert.equal(f.bot.shadowEntries.length, 0);
+});
+
+test('settles shadow P&L independently at official resolution', () => {
+  const f = fixture({ up: 0.66, down: 0.34 });
+  f.setNow(f.start + 1_000);
+  f.setPrediction({
+    candleStart: f.start - 60_000,
+    candleCloseAt: f.start,
+    writtenAt: f.start + 500,
+    windowStart: f.start,
+    pUp: 0.66,
+    pDown: 0.34,
+  });
+  f.check('UP');
+  f.bot.expireMarket(f.record, f.start + 300_000);
+  assert.ok(f.bot.shadowEntries.every((entry) => entry.status === 'PENDING_RESOLUTION'));
+  f.bot.settleMarket('test-market', 'UP', f.start + 302_000);
+  assert.ok(f.bot.shadowEntries.every((entry) => entry.status === 'RESOLVED_WIN'));
+  const tiers = f.bot.snapshot().shadowTiers;
+  assert.ok(tiers.every((tier) => tier.wins === 1 && tier.resolved === 1));
+  assert.ok(tiers.every((tier) => tier.realizedPnl > 0));
 });
 

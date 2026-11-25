@@ -1,6 +1,7 @@
 'use strict';
 
 const DipBounceBot = require('./dip-bounce-bot');
+const config = require('./config');
 const { feeRateFor, isFresh } = require('./freqai-open-entry-utils');
 
 const OPEN_SCORE_GRACE_MS = 5000;
@@ -8,21 +9,23 @@ const SHARES_PER_WINDOW = 50;
 const MIN_PROBABILITY = 0.51;
 const MAX_BUY_PRICE = 1;
 const SIDES = ['UP', 'DOWN'];
+const SHADOW_THRESHOLDS = [55, 60, 65];
 
 const STRATEGY = Object.freeze({
-  id: 'pumpfun-btc-5m-freqai-open-score-paper-v1',
+  id: 'pumpfun-btc-5m-freqai-open-score-paper-v2',
   name: 'BTC 5-minute FreqAI opening-score bot',
-  version: '1',
+  version: '2',
   execution: 'Paper-only taker sweep. Freqtrade/FreqAI runs dry for Binance spot data and never places orders.',
   market: 'BTC Up/Down 5-minute market only.',
   features: 'Binance 1-minute OHLCV return, candle shape, relative volume, volatility and minute-in-window features.',
-  target: 'For each 1-minute sample, classify whether the next BTC 5-minute window closes above or below its first-minute open.',
-  prediction: 'At each window open, use the latest score from the just-closed 1-minute candle. Buy only if UP or DOWN probability is at least 51%.',
+  target: 'For each completed 1-minute candle, classify the direction of the BTC 5-minute window containing its close.',
+  prediction: 'At each window open, use the latest score from the just-closed 1-minute candle for the new window. Buy only if UP or DOWN probability is at least 51%. Shadow tiers also evaluate fresh current-window scores.',
   entry: 'One 50-share entry per 5-minute window, with no fixed post-open delay. The opening score is captured once and does not change the entry side.',
   fill: 'Sweep fresh visible Polymarket asks up to $1.00; record depth-weighted fills and modeled taker fees. Partial fills are recorded.',
   exit: 'No flips, take-profit, or stop-loss. Hold filled shares to official market resolution.',
   sizing: 'Fixed 50-share request per window; no recovery sizing or carry-over.',
   cadence: 'At most one buy per window. If the opening score is unavailable or neither side reaches 51%, skip that window.',
+  shadow: 'Separate 50-share shadow ledgers trigger once per tier per window when a fresh current-window score is strictly above 55%, 60%, or 65%.',
 });
 
 function freshPredictionAtOpen(prediction, windowStart, now) {
@@ -33,6 +36,7 @@ function freshPredictionAtOpen(prediction, windowStart, now) {
   return Number.isFinite(candleStart)
     && Number.isFinite(candleCloseAt)
     && Number.isFinite(writtenAt)
+    && Number(prediction.windowStart) === windowStart
     && candleStart < windowStart
     && candleCloseAt >= windowStart - 1000
     && candleCloseAt <= windowStart + 1000
@@ -40,6 +44,40 @@ function freshPredictionAtOpen(prediction, windowStart, now) {
     && writtenAt <= windowStart + OPEN_SCORE_GRACE_MS
     && now >= windowStart
     && now <= windowStart + OPEN_SCORE_GRACE_MS;
+}
+
+function currentWindowPrediction(prediction, market, now) {
+  if (!prediction || !market) return false;
+  const start = Number(market.start);
+  const end = Number(market.end);
+  const closeAt = Number(prediction.candleCloseAt);
+  const writtenAt = Number(prediction.writtenAt);
+  return Number(prediction.windowStart) === start
+    && Number.isFinite(closeAt)
+    && Number.isFinite(writtenAt)
+    && closeAt >= start - 1000
+    && closeAt <= now + 1000
+    && now - closeAt <= 70_000
+    && writtenAt >= closeAt - 10_000
+    && writtenAt <= now + 5000
+    && now < end;
+}
+
+function normalizedScores(prediction) {
+  const up = Number(prediction?.pUp);
+  const down = Number(prediction?.pDown);
+  if (!Number.isFinite(up) || !Number.isFinite(down) || up < 0 || down < 0 || up + down <= 0) return null;
+  const total = up + down;
+  const pUp = up / total;
+  const pDown = down / total;
+  const side = pUp >= pDown ? 'UP' : 'DOWN';
+  return { pUp, pDown, side, probability: side === 'UP' ? pUp : pDown };
+}
+
+function emptyShadowTotals() {
+  return Object.fromEntries(SHADOW_THRESHOLDS.map((thresholdPct) => [thresholdPct, {
+    entries: 0, resolved: 0, wins: 0, losses: 0, fees: 0, realizedPnl: 0,
+  }]));
 }
 
 class FreqAIOpenEntryBot extends DipBounceBot {
@@ -53,11 +91,62 @@ class FreqAIOpenEntryBot extends DipBounceBot {
     this.modelStatus = 'WAITING_FOR_MODEL';
     this.lastDecision = null;
     this.openingDecisions = new Map();
+    this.shadowEntries = [];
+    this.shadowTotals = emptyShadowTotals();
+    this.shadowSequence = 0;
     this.statusReason = 'Waiting for the latest 1-minute FreqAI score and BTC 5-minute market.';
   }
 
   restoreLedger(ledger) {
     super.restoreLedger(ledger);
+    const savedShadowEntries = ledger?.snapshot?.shadowEntries;
+    this.shadowEntries = Array.isArray(savedShadowEntries)
+      ? savedShadowEntries.filter((entry) => SHADOW_THRESHOLDS.includes(Number(entry.thresholdPct)))
+        .map((entry) => ({ ...entry, fills: Array.isArray(entry.fills) ? entry.fills.map((fill) => ({ ...fill })) : [] }))
+      : [];
+    const savedShadowTotals = ledger?.snapshot?.shadowTotals;
+    if (savedShadowTotals && typeof savedShadowTotals === 'object') {
+      for (const thresholdPct of SHADOW_THRESHOLDS) {
+        const saved = savedShadowTotals[thresholdPct] || {};
+        this.shadowTotals[thresholdPct] = {
+          entries: Math.max(0, Number(saved.entries) || 0),
+          resolved: Math.max(0, Number(saved.resolved) || 0),
+          wins: Math.max(0, Number(saved.wins) || 0),
+          losses: Math.max(0, Number(saved.losses) || 0),
+          fees: Number(saved.fees) || 0,
+          realizedPnl: Number(saved.realizedPnl) || 0,
+        };
+      }
+    } else {
+      this.shadowTotals = emptyShadowTotals();
+      for (const entry of this.shadowEntries) {
+        const totals = this.shadowTotals[Number(entry.thresholdPct)];
+        totals.entries += 1;
+        totals.fees += Number(entry.fees) || 0;
+        if (entry.status === 'RESOLVED_WIN' || entry.status === 'RESOLVED_LOSS') {
+          totals.resolved += 1;
+          totals.realizedPnl += Number(entry.realizedPnl) || 0;
+          if (entry.status === 'RESOLVED_WIN') totals.wins += 1;
+          else totals.losses += 1;
+        }
+      }
+    }
+    this.shadowSequence = this.shadowEntries.reduce((max, entry) => {
+      const suffix = Number(String(entry.id || '').split('-').at(-1));
+      return Number.isFinite(suffix) ? Math.max(max, suffix) : max;
+    }, 0);
+    for (const entry of this.shadowEntries) {
+      if (entry.status === 'OPEN' && Number(entry.windowEnd) <= this.now()) {
+        entry.status = 'PENDING_RESOLUTION';
+        entry.pendingResolutionAt = this.now();
+      }
+      if (entry.status === 'OPEN') {
+        entry.markBid = null;
+        entry.unrealizedPnl = null;
+      } else if (entry.status === 'PENDING_RESOLUTION') {
+        entry.unrealizedPnl = null;
+      }
+    }
     for (const position of this.positions) {
       if (position.status === 'OPEN' || position.status === 'PENDING_RESOLUTION') {
         position.realizedPnl = null;
@@ -67,9 +156,33 @@ class FreqAIOpenEntryBot extends DipBounceBot {
     this.scheduleLedgerSave();
   }
 
+  exportLedger() {
+    const ledger = super.exportLedger();
+    ledger.snapshot.shadowEntries = this.shadowEntries.map((entry) => ({
+      ...entry,
+      fills: (entry.fills || []).map((fill) => ({ ...fill })),
+    }));
+    ledger.snapshot.shadowTotals = Object.fromEntries(
+      Object.entries(this.shadowTotals).map(([threshold, totals]) => [threshold, { ...totals }]),
+    );
+    return ledger;
+  }
+
   setMarketDataHelpers({ binanceFeed, freqaiWorker } = {}) {
     if (binanceFeed) this.binanceFeed = binanceFeed;
     if (freqaiWorker) this.freqaiWorker = freqaiWorker;
+  }
+
+  async tick(now = this.now()) {
+    if (this.tickInFlight || !this.running) return;
+    await super.tick(now);
+    if (this.status === 'ERROR') return;
+    const record = this.records.get('BTC:5m');
+    if (!record?.market || record.marketStatus !== 'OPEN') return;
+    for (const side of SIDES) {
+      const quote = record.quotes[side];
+      this.processShadowEntries(record, side, quote, quote?.sequence || this.marketUpdateSequence);
+    }
   }
 
   openingDecision(record, now) {
@@ -136,6 +249,112 @@ class FreqAIOpenEntryBot extends DipBounceBot {
   }
 
   processSide(record, side, quote, sequence) {
+    this.processShadowEntries(record, side, quote, sequence);
+    this.processMainSide(record, side, quote, sequence);
+  }
+
+  processShadowEntries(record, side, quote, sequence) {
+    const market = record.market;
+    const now = this.now();
+    if (!market || record.marketStatus !== 'OPEN'
+      || now < Number(market.start) || now >= Number(market.end)) return;
+
+    const worker = this.freqaiWorker?.snapshot?.() || {};
+    const prediction = worker.lastPrediction;
+    if (!currentWindowPrediction(prediction, market, now)) return;
+    const scores = normalizedScores(prediction);
+    if (!scores || scores.side !== side) return;
+    if (!isFresh(quote, now) || !Array.isArray(quote.asks) || !quote.asks.length) return;
+
+    const marketId = String(market.id || market.slug);
+    const windowStart = Number(market.start);
+    const feeRate = feeRateFor(market);
+    if (feeRate == null) return;
+
+    for (const thresholdPct of SHADOW_THRESHOLDS) {
+      if (scores.probability <= thresholdPct / 100) continue;
+      const alreadyEntered = this.shadowEntries.some((entry) => entry.marketId === marketId
+        && Number(entry.windowStart) === windowStart
+        && Number(entry.thresholdPct) === thresholdPct);
+      if (alreadyEntered) continue;
+
+      let remaining = SHARES_PER_WINDOW;
+      let cost = 0;
+      let fees = 0;
+      const fills = [];
+      for (const level of [...quote.asks].sort((a, b) => Number(a.price) - Number(b.price))) {
+        const price = Number(level.price);
+        const available = Number(level.size);
+        if (!Number.isFinite(price) || price <= 0 || price > MAX_BUY_PRICE
+          || !Number.isFinite(available) || available <= 0) continue;
+        const filled = Math.min(remaining, available);
+        const fee = filled * feeRate * price * (1 - price);
+        fills.push({ price, shares: filled, fee });
+        cost += price * filled;
+        fees += fee;
+        remaining -= filled;
+        if (remaining <= 1e-8) break;
+      }
+      const filledShares = SHARES_PER_WINDOW - remaining;
+      if (filledShares <= 1e-8) continue;
+
+      const bestBid = Number.isFinite(Number(quote.bestBid)) ? Number(quote.bestBid) : null;
+      const entry = {
+        id: `shadow-${thresholdPct}-${++this.shadowSequence}`,
+        thresholdPct,
+        marketId,
+        marketSlug: market.slug || null,
+        marketTitle: market.title || null,
+        tokenId: String(market.tokens?.[side] || ''),
+        asset: 'BTC',
+        timeframe: '5m',
+        side,
+        windowStart,
+        windowEnd: Number(market.end),
+        entryAt: now,
+        entryPrice: cost / filledShares,
+        requestedShares: SHARES_PER_WINDOW,
+        shares: filledShares,
+        originalShares: filledShares,
+        totalCost: cost,
+        fees,
+        fills,
+        modelProbabilityUp: scores.pUp,
+        modelProbabilityDown: scores.pDown,
+        selectedProbability: scores.probability,
+        modelCandleStart: Number(prediction.candleStart),
+        model: prediction.model || 'LightGBMClassifier',
+        placedSequence: sequence,
+        status: 'OPEN',
+        markBid: bestBid,
+        markUpdatedAt: quote.updatedAt,
+        markStatus: bestBid == null ? 'WAITING_FOR_MARK' : 'LIVE',
+        unrealizedPnl: bestBid == null ? null : bestBid * filledShares - cost - fees,
+        realizedPnl: null,
+        exitPrice: null,
+        exitPayout: null,
+        exitReason: null,
+        fillRule: 'Independent shadow sweep of visible asks up to $1.00; no paper cash is reserved.',
+      };
+      this.shadowEntries.unshift(entry);
+      const totals = this.shadowTotals[thresholdPct];
+      totals.entries += 1;
+      totals.fees += fees;
+      this.log(
+        `Shadow >${thresholdPct}% chose BTC ${side} at ${(scores.probability * 100).toFixed(1)}%; filled ${filledShares.toFixed(2)} / 50 shares at $${entry.entryPrice.toFixed(3)} average.`,
+        { asset: 'BTC', timeframe: '5m', side, type: `SHADOW_${thresholdPct}`, now },
+      );
+      this.scheduleLedgerSave();
+    }
+    while (this.shadowEntries.length > 10_000) {
+      const oldestResolved = this.shadowEntries.findLastIndex((entry) =>
+        entry.status === 'RESOLVED_WIN' || entry.status === 'RESOLVED_LOSS');
+      if (oldestResolved < 0) break;
+      this.shadowEntries.splice(oldestResolved, 1);
+    }
+  }
+
+  processMainSide(record, side, quote, sequence) {
     const market = record.market;
     const now = this.now();
     if (!market || record.marketStatus !== 'OPEN'
@@ -309,14 +528,132 @@ class FreqAIOpenEntryBot extends DipBounceBot {
 
   checkStopLosses() {}
 
+  expireMarket(record, now) {
+    super.expireMarket(record, now);
+    const market = record.market;
+    if (!market) return;
+    const marketId = String(market.id || market.slug);
+    for (const entry of this.shadowEntries) {
+      if (entry.marketId !== marketId || entry.status !== 'OPEN') continue;
+      entry.status = 'PENDING_RESOLUTION';
+      entry.pendingResolutionAt = now;
+      entry.markStatus = entry.markBid == null ? 'PENDING_RESOLUTION' : 'LAST_MARK_PENDING_RESOLUTION';
+      entry.unrealizedPnl = null;
+    }
+    this.scheduleLedgerSave();
+  }
+
+  async checkResolutions(now) {
+    await super.checkResolutions(now);
+    const pending = new Map();
+    for (const entry of this.shadowEntries) {
+      if (entry.status === 'PENDING_RESOLUTION' && entry.marketId && !pending.has(entry.marketId)) {
+        pending.set(entry.marketId, entry);
+      }
+    }
+    await Promise.all([...pending.entries()].map(async ([marketId, sample]) => {
+      if (this.resolutionInFlight.has(marketId)) return;
+      const lastAttempt = this.resolutionAttempts.get(marketId) || 0;
+      if (now - lastAttempt < config.DIP_BOUNCE_RESOLUTION_POLL_MS) return;
+      this.resolutionAttempts.set(marketId, now);
+      this.resolutionInFlight.add(marketId);
+      try {
+        const market = await this.marketData.getMarket(marketId);
+        const winner = this.marketData.resolvedWinner(market);
+        if (winner) this.settleMarket(marketId, winner, now);
+      } catch (error) {
+        sample.resolutionError = error?.message || 'Shadow resolution check failed.';
+      } finally {
+        this.resolutionInFlight.delete(marketId);
+      }
+    }));
+  }
+
+  settleMarket(marketId, winner, now) {
+    super.settleMarket(marketId, winner, now);
+    for (const entry of this.shadowEntries) {
+      if (entry.marketId !== marketId || entry.status !== 'PENDING_RESOLUTION') continue;
+      const won = entry.side === winner;
+      const payout = won ? entry.shares : 0;
+      entry.status = won ? 'RESOLVED_WIN' : 'RESOLVED_LOSS';
+      entry.resolvedAt = now;
+      entry.resolutionWinner = winner;
+      entry.exitPrice = won ? 1 : 0;
+      entry.exitPayout = won ? 1 : 0;
+      entry.exitReason = 'OFFICIAL_RESOLUTION';
+      entry.realizedPnl = payout - entry.totalCost - entry.fees;
+      const totals = this.shadowTotals[Number(entry.thresholdPct)];
+      totals.resolved += 1;
+      totals.realizedPnl += entry.realizedPnl;
+      if (won) totals.wins += 1;
+      else totals.losses += 1;
+      entry.markStatus = 'CLOSED';
+      entry.unrealizedPnl = null;
+      this.log(
+        `Shadow >${entry.thresholdPct}% ${entry.side} resolved ${won ? 'WIN' : 'LOSS'}; net P&L ${entry.realizedPnl >= 0 ? '+' : ''}$${entry.realizedPnl.toFixed(2)}.`,
+        { asset: 'BTC', timeframe: '5m', side: entry.side, type: `SHADOW_${entry.thresholdPct}_RESOLUTION`, outcome: won ? 'good' : 'bad', now },
+      );
+    }
+    this.scheduleLedgerSave();
+  }
+
   updateSizingAfterClose(position) {
     position.sizingApplied = true;
+  }
+
+  shadowPerformance(now) {
+    const grouped = SHADOW_THRESHOLDS.map((thresholdPct) => {
+      const entries = this.shadowEntries.filter((entry) => Number(entry.thresholdPct) === thresholdPct);
+      for (const entry of entries) {
+        if (entry.status !== 'OPEN') continue;
+        const record = [...this.records.values()].find((candidate) =>
+          String(candidate.market?.id || candidate.market?.slug || '') === entry.marketId);
+        const quote = record?.quotes?.[entry.side];
+        if (quote?.bestBid != null && isFresh(quote, now)) {
+          entry.markBid = Number(quote.bestBid);
+          entry.markUpdatedAt = quote.updatedAt;
+          entry.markStatus = 'LIVE';
+          entry.unrealizedPnl = entry.markBid * entry.shares - entry.totalCost - entry.fees;
+        } else {
+          entry.markBid = null;
+          entry.markUpdatedAt = quote?.updatedAt || null;
+          entry.markStatus = 'STALE';
+          entry.unrealizedPnl = null;
+        }
+      }
+      const open = entries.filter((entry) => entry.status === 'OPEN');
+      const pending = entries.filter((entry) => entry.status === 'PENDING_RESOLUTION');
+      const totals = this.shadowTotals[thresholdPct];
+      const realizedPnl = Number(totals.realizedPnl) || 0;
+      const unmarkedOpen = open.some((entry) => entry.unrealizedPnl == null
+        || !Number.isFinite(Number(entry.unrealizedPnl)));
+      const openPnl = unmarkedOpen ? null
+        : open.reduce((sum, entry) => sum + (Number(entry.unrealizedPnl) || 0), 0);
+      const totalPnl = openPnl == null ? null : realizedPnl + openPnl;
+      return {
+        thresholdPct,
+        label: `>${thresholdPct}%`,
+        entries: Number(totals.entries) || 0,
+        resolved: Number(totals.resolved) || 0,
+        openPositions: open.length,
+        pendingResolution: pending.length,
+        wins: Number(totals.wins) || 0,
+        losses: Number(totals.losses) || 0,
+        fees: Number(totals.fees) || 0,
+        realizedPnl,
+        openPnl,
+        totalPnl,
+        recentEntries: entries.slice(0, 12).map((entry) => ({ ...entry })),
+      };
+    });
+    return grouped;
   }
 
   snapshot() {
     const state = super.snapshot();
     const worker = this.freqaiWorker?.snapshot?.() || {};
     const prediction = worker.lastPrediction || null;
+    const shadowTiers = this.shadowPerformance(Number(state.now) || this.now());
     const currentMarket = state.markets?.find((market) => market.asset === 'BTC'
       && market.timeframe === '5m' && market.marketStatus === 'OPEN');
     const openDecision = currentMarket
@@ -343,9 +680,13 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       openingDecision: openDecision || null,
       model: 'Freqtrade FreqAI LightGBMClassifier',
       input: 'Binance 1-minute OHLCV only; no Polymarket order-book pressure features.',
-      resolutionLabel: 'Direction of the next BTC 5-minute window at its official close, predicted from the preceding minute data.',
+      resolutionLabel: 'Direction of the 5-minute window containing the completed minute candle close.',
       warmupFallback: 'Disabled. The bot uses the latest model score from the just-closed 1-minute candle at window open.',
     };
+    state.shadowTiers = shadowTiers;
+    state.shadowEntries = shadowTiers.flatMap((tier) => tier.recentEntries)
+      .sort((a, b) => Number(b.entryAt) - Number(a.entryAt))
+      .slice(0, 24);
     state.currentDecision = this.lastDecision;
     return state;
   }
@@ -354,6 +695,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
 FreqAIOpenEntryBot.STRATEGY = STRATEGY;
 FreqAIOpenEntryBot._test = {
   STRATEGY, OPEN_SCORE_GRACE_MS, SHARES_PER_WINDOW, MIN_PROBABILITY,
-  MAX_BUY_PRICE, freshPredictionAtOpen,
+  SHADOW_THRESHOLDS, MAX_BUY_PRICE, freshPredictionAtOpen,
+  currentWindowPrediction, normalizedScores,
 };
 module.exports = FreqAIOpenEntryBot;

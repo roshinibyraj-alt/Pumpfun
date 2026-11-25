@@ -66,7 +66,7 @@ class FreqAIWindowStrategy(IStrategy):
     def set_freqai_targets(
         self, dataframe: DataFrame, metadata: dict, **kwargs
     ) -> DataFrame:
-        """Label each minute with the next 5m window's final direction."""
+        """Label a completed minute with the 5m window containing its close."""
         dates = pd.to_datetime(dataframe["date"], utc=True)
         window_ids = dates.dt.floor("5min")
         grouped = dataframe.assign(_window_id=window_ids).groupby("_window_id", sort=True)
@@ -80,9 +80,8 @@ class FreqAIWindowStrategy(IStrategy):
         complete = windows["candle_count"].eq(5)
         directions.loc[complete & windows["window_close"].gt(windows["window_open"])] = "UP"
         directions.loc[complete & windows["window_close"].lt(windows["window_open"])] = "DOWN"
-        # A row from the current window is labeled with the next window's outcome.
-        next_window_direction = directions.shift(-1)
-        dataframe["&-window-direction"] = window_ids.map(next_window_direction)
+        candle_close_window = (dates + pd.Timedelta(minutes=1)).dt.floor("5min")
+        dataframe["&-window-direction"] = candle_close_window.map(directions)
         return dataframe
 
     def populate_indicators(
@@ -138,7 +137,7 @@ class FreqAIWindowStrategy(IStrategy):
             "pDown": p_down if do_predict else None,
             "candleStart": candle_start,
             "candleCloseAt": candle_close_at,
-            "windowStart": candle_start // 300_000 * 300_000,
+            "windowStart": candle_close_at // 300_000 * 300_000,
             "writtenAt": int(datetime.now(timezone.utc).timestamp() * 1000),
         }
         path = Path(prediction_path)
