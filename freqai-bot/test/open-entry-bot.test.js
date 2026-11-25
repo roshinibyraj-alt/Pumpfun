@@ -68,6 +68,14 @@ test('takes one 50-share UP entry at exactly 51% using the latest boundary score
   const f = fixture();
   f.check('UP');
   f.check('DOWN');
+  assert.equal(f.bot.orders.length, 0, 'no entry during the first 45 seconds');
+
+  f.setNow(f.start + 44_999);
+  f.check('UP');
+  assert.equal(f.bot.orders.length, 0, 'the delay is still active at 44.999 seconds');
+
+  f.setNow(f.start + 45_000);
+  f.check('UP');
   assert.equal(f.bot.orders.length, 1);
   assert.equal(f.bot.orders[0].side, 'UP');
   assert.equal(f.bot.orders[0].requestedShares, 50);
@@ -79,6 +87,8 @@ test('takes one 50-share UP entry at exactly 51% using the latest boundary score
 test('takes the higher-probability DOWN side when it clears 51%', () => {
   const f = fixture({ up: 0.48, down: 0.52 });
   f.check('UP');
+  f.setNow(f.start + 45_000);
+  f.check('UP');
   f.check('DOWN');
   assert.equal(f.bot.orders.length, 1);
   assert.equal(f.bot.orders[0].side, 'DOWN');
@@ -86,6 +96,8 @@ test('takes the higher-probability DOWN side when it clears 51%', () => {
 
 test('skips the window when neither side reaches 51%', () => {
   const f = fixture({ up: 0.505, down: 0.495 });
+  f.check('UP');
+  f.setNow(f.start + 45_000);
   f.check('UP');
   f.check('DOWN');
   assert.equal(f.bot.orders.length, 0);
@@ -95,6 +107,8 @@ test('skips the window when neither side reaches 51%', () => {
 
 test('locks the opening score and never flips or adds on later model changes', () => {
   const f = fixture();
+  f.check('UP');
+  f.setNow(f.start + 45_000);
   f.check('UP');
   const cashAfterEntry = f.bot.cash;
   f.setPrediction({
@@ -119,8 +133,13 @@ test('waits up to five seconds for the boundary score, then skips rather than en
   f.setNow(f.start + 2_000);
   f.setPrediction(null);
   f.check('UP');
-  assert.equal(f.record.sideStates.UP.orderStatus, 'WAITING_FOR_OPENING_SCORE');
+  assert.equal(f.record.sideStates.UP.orderStatus, 'WAITING_FOR_45_SECOND_DELAY');
+
   f.setNow(f.start + 6_000);
+  f.check('UP');
+  assert.equal(f.record.sideStates.UP.orderStatus, 'WAITING_FOR_45_SECOND_DELAY');
+
+  f.setNow(f.start + 45_000);
   f.check('UP');
   assert.equal(f.record.sideStates.UP.orderStatus, 'NO_ENTRY_SCORE');
   f.setPrediction({
@@ -145,12 +164,16 @@ test('does not use a probability produced from a minute inside the new window', 
     pDown: 0.1,
   });
   f.check('UP');
+  f.setNow(f.start + 45_000);
+  f.check('UP');
   assert.equal(f.bot.orders.length, 0);
 });
 
 test('records actual partial visible-ask depth and modeled fees', () => {
   const f = fixture();
   f.quotes.UP.asks = [{ price: 0.4, size: 20 }];
+  f.check('UP');
+  f.setNow(f.start + 45_000);
   f.check('UP');
   assert.equal(f.bot.orders[0].status, 'PARTIALLY_FILLED');
   assert.equal(f.bot.orders[0].filledShares, 20);
@@ -171,10 +194,15 @@ test('opens each qualifying shadow tier at its first qualifying score during a w
     pDown: 0.44,
   });
   f.check('UP');
-  assert.deepEqual(f.bot.shadowEntries.map((entry) => entry.thresholdPct), [55]);
+  assert.deepEqual(f.bot.shadowEntries.map((entry) => entry.thresholdPct), []);
   assert.equal(f.bot.orders.length, 0);
   assert.equal(f.bot.positions.length, 0);
   assert.equal(f.bot.cash, startingCash);
+
+  f.setNow(f.start + 45_000);
+  f.check('UP');
+  assert.deepEqual(f.bot.shadowEntries.map((entry) => entry.thresholdPct), [55]);
+  assert.equal(f.bot.orders.length, 0);
 
   f.setNow(f.start + 61_000);
   f.setPrediction({
@@ -210,7 +238,7 @@ test('opens each qualifying shadow tier at its first qualifying score during a w
 
 test('requires scores strictly above each shadow threshold', () => {
   const f = fixture({ up: 0.55, down: 0.45 });
-  f.setNow(f.start + 30_000);
+  f.setNow(f.start + 45_000);
   f.setPrediction({
     candleStart: f.start - 60_000,
     candleCloseAt: f.start,
@@ -225,7 +253,7 @@ test('requires scores strictly above each shadow threshold', () => {
 
 test('settles shadow P&L independently at official resolution', () => {
   const f = fixture({ up: 0.66, down: 0.34 });
-  f.setNow(f.start + 1_000);
+  f.setNow(f.start + 45_000);
   f.setPrediction({
     candleStart: f.start - 60_000,
     candleCloseAt: f.start,

@@ -5,6 +5,7 @@ const config = require('./config');
 const { feeRateFor, isFresh } = require('./freqai-open-entry-utils');
 
 const OPEN_SCORE_GRACE_MS = 5000;
+const ENTRY_DELAY_MS = 45_000;
 const SHARES_PER_WINDOW = 50;
 const MIN_PROBABILITY = 0.51;
 const MAX_BUY_PRICE = 1;
@@ -20,12 +21,12 @@ const STRATEGY = Object.freeze({
   features: 'Binance 1-minute OHLCV return, candle shape, relative volume, volatility and minute-in-window features.',
   target: 'For each completed 1-minute candle, classify the direction of the BTC 5-minute window containing its close.',
   prediction: 'At each window open, use the latest score from the just-closed 1-minute candle for the new window. Buy only if UP or DOWN probability is at least 51%. Shadow tiers also evaluate fresh current-window scores.',
-  entry: 'One 50-share entry per 5-minute window, with no fixed post-open delay. The opening score is captured once and does not change the entry side.',
+  entry: 'Wait 45 seconds after each 5-minute window opens before accepting the opening score or placing a trade. Then allow one 50-share entry using the captured opening score.',
   fill: 'Sweep fresh visible Polymarket asks up to $1.00; record depth-weighted fills and modeled taker fees. Partial fills are recorded.',
   exit: 'No flips, take-profit, or stop-loss. Hold filled shares to official market resolution.',
   sizing: 'Fixed 50-share request per window; no recovery sizing or carry-over.',
-  cadence: 'At most one buy per window. If the opening score is unavailable or neither side reaches 51%, skip that window.',
-  shadow: 'Separate 50-share shadow ledgers trigger once per tier per window when a fresh current-window score is strictly above 55%, 60%, or 65%.',
+  cadence: 'No main or shadow entries during the first 45 seconds of a window. After the delay, allow at most one main buy; skip if the opening score is unavailable or neither side reaches 51%.',
+  shadow: 'After the 45-second window delay, separate 50-share shadow ledgers trigger once per tier per window when a fresh current-window score is strictly above 55%, 60%, or 65%.',
 });
 
 function freshPredictionAtOpen(prediction, windowStart, now) {
@@ -91,6 +92,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
     this.modelStatus = 'WAITING_FOR_MODEL';
     this.lastDecision = null;
     this.openingDecisions = new Map();
+    this.openingPredictionCandidates = new Map();
     this.shadowEntries = [];
     this.shadowTotals = emptyShadowTotals();
     this.shadowSequence = 0;
@@ -192,19 +194,39 @@ class FreqAIOpenEntryBot extends DipBounceBot {
     const marketKey = `${market.id || market.slug}:${windowStart}`;
     if (this.openingDecisions.has(marketKey)) return this.openingDecisions.get(marketKey);
     if (now < windowStart) return { waiting: true, reason: 'Waiting for window open.' };
-    if (now > windowStart + OPEN_SCORE_GRACE_MS) {
+
+    const modelState = this.freqaiWorker?.snapshot?.() || {};
+    const livePrediction = modelState.lastPrediction;
+    if (!this.openingPredictionCandidates.has(marketKey)
+      && freshPredictionAtOpen(livePrediction, windowStart, now)) {
+      this.openingPredictionCandidates.set(marketKey, {
+        pUp: Number(livePrediction.pUp),
+        pDown: Number(livePrediction.pDown),
+        candleStart: Number(livePrediction.candleStart),
+        model: livePrediction.model || 'LightGBMClassifier',
+      });
+    }
+
+    const delayRemainingMs = windowStart + ENTRY_DELAY_MS - now;
+    if (delayRemainingMs > 0) {
+      this.modelStatus = modelState.status || 'WAITING';
+      const candidateReady = this.openingPredictionCandidates.has(marketKey);
+      return {
+        waiting: true,
+        stage: 'ENTRY_DELAY',
+        delayRemainingSeconds: Math.ceil(delayRemainingMs / 1000),
+        reason: `Waiting for the 45-second entry delay; the opening score ${candidateReady ? 'is captured' : 'has not arrived yet'}.`,
+      };
+    }
+
+    const prediction = this.openingPredictionCandidates.get(marketKey);
+    if (!prediction) {
       const skipped = {
-        side: null, source: 'FREQAI', windowStart, reason: 'The opening score was not available within five seconds; no entry this window.',
+        side: null, source: 'FREQAI', windowStart,
+        reason: 'The opening score was not available within five seconds; no entry this window.',
       };
       this.openingDecisions.set(marketKey, skipped);
       return skipped;
-    }
-
-    const modelState = this.freqaiWorker?.snapshot?.() || {};
-    const prediction = modelState.lastPrediction;
-    if (!freshPredictionAtOpen(prediction, windowStart, now)) {
-      this.modelStatus = modelState.status || 'WAITING';
-      return { waiting: true, reason: 'Waiting briefly for the latest score from the just-closed 1-minute candle.' };
     }
 
     const pUp = Number(prediction.pUp);
@@ -241,6 +263,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       const oldStart = Number(oldKey.slice(oldKey.lastIndexOf(':') + 1));
       if (Number.isFinite(oldStart) && oldStart < windowStart - 6 * 60 * 60_000) {
         this.openingDecisions.delete(oldKey);
+        this.openingPredictionCandidates.delete(oldKey);
       }
     }
     this.modelStatus = 'READY';
@@ -257,7 +280,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
     const market = record.market;
     const now = this.now();
     if (!market || record.marketStatus !== 'OPEN'
-      || now < Number(market.start) || now >= Number(market.end)) return;
+      || now < Number(market.start) + ENTRY_DELAY_MS || now >= Number(market.end)) return;
 
     const worker = this.freqaiWorker?.snapshot?.() || {};
     const prediction = worker.lastPrediction;
@@ -373,7 +396,9 @@ class FreqAIOpenEntryBot extends DipBounceBot {
 
     const decision = this.openingDecision(record, now);
     if (decision.waiting) {
-      state.orderStatus = 'WAITING_FOR_OPENING_SCORE';
+      state.orderStatus = decision.stage === 'ENTRY_DELAY'
+        ? 'WAITING_FOR_45_SECOND_DELAY'
+        : 'WAITING_FOR_OPENING_SCORE';
       state.reason = decision.reason;
       this.modelStatus = this.freqaiWorker?.snapshot?.().status || this.modelStatus;
       return;
