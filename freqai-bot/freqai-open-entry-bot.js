@@ -26,7 +26,7 @@ const STRATEGY = Object.freeze({
   exit: 'No flips, take-profit, or stop-loss. Hold filled shares to official market resolution.',
   sizing: 'Fixed 50-share request per window; no recovery sizing or carry-over.',
   cadence: 'No main or shadow entries during the first 45 seconds of a window. After the delay, allow at most one main buy; skip if the opening score is unavailable or neither side reaches 51%.',
-  shadow: 'After the 45-second window delay, separate 50-share shadow ledgers trigger once per tier per window when a fresh current-window score is strictly above 55%, 60%, or 65%.',
+  shadow: 'After the 45-second delay, scores strictly above 55%, 60%, or 65% latch independent shadow signals. Each waits for its side ask strictly below $0.55, $0.60, or $0.65 respectively. Only an opposite qualifying score replaces the signal; lower confidence does not cancel it. Signals expire at window end. One 50-share entry per tier per window; fills cannot cross the tier price cap.',
 });
 
 function freshPredictionAtOpen(prediction, windowStart, now) {
@@ -96,11 +96,20 @@ class FreqAIOpenEntryBot extends DipBounceBot {
     this.shadowEntries = [];
     this.shadowTotals = emptyShadowTotals();
     this.shadowSequence = 0;
+    this.shadowSignals = new Map();
     this.statusReason = 'Waiting for the latest 1-minute FreqAI score and BTC 5-minute market.';
   }
 
   restoreLedger(ledger) {
     super.restoreLedger(ledger);
+    this.shadowSignals = new Map();
+    for (const signal of ledger?.snapshot?.shadowSignals || []) {
+      if (!SHADOW_THRESHOLDS.includes(Number(signal.thresholdPct))
+        || !SIDES.includes(signal.side)
+        || !(Number(signal.windowStart) <= this.now() && Number(signal.windowEnd) > this.now())
+        || !(Number(signal.probability) > Number(signal.thresholdPct) / 100)) continue;
+      this.shadowSignals.set(`${signal.marketId}:${Number(signal.windowStart)}:${Number(signal.thresholdPct)}`, { ...signal });
+    }
     const savedShadowEntries = ledger?.snapshot?.shadowEntries;
     this.shadowEntries = Array.isArray(savedShadowEntries)
       ? savedShadowEntries.filter((entry) => SHADOW_THRESHOLDS.includes(Number(entry.thresholdPct)))
@@ -167,6 +176,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
     ledger.snapshot.shadowTotals = Object.fromEntries(
       Object.entries(this.shadowTotals).map(([threshold, totals]) => [threshold, { ...totals }]),
     );
+    ledger.snapshot.shadowSignals = [...this.shadowSignals.values()].map((signal) => ({ ...signal }));
     return ledger;
   }
 
@@ -284,22 +294,39 @@ class FreqAIOpenEntryBot extends DipBounceBot {
 
     const worker = this.freqaiWorker?.snapshot?.() || {};
     const prediction = worker.lastPrediction;
-    if (!currentWindowPrediction(prediction, market, now)) return;
-    const scores = normalizedScores(prediction);
-    if (!scores || scores.side !== side) return;
-    if (!isFresh(quote, now) || !Array.isArray(quote.asks) || !quote.asks.length) return;
+    const scores = currentWindowPrediction(prediction, market, now)
+      ? normalizedScores(prediction) : null;
 
     const marketId = String(market.id || market.slug);
     const windowStart = Number(market.start);
     const feeRate = feeRateFor(market);
-    if (feeRate == null) return;
+    for (const [key, signal] of this.shadowSignals) {
+      if (Number(signal.windowEnd) <= now) this.shadowSignals.delete(key);
+    }
 
     for (const thresholdPct of SHADOW_THRESHOLDS) {
-      if (scores.probability <= thresholdPct / 100) continue;
       const alreadyEntered = this.shadowEntries.some((entry) => entry.marketId === marketId
         && Number(entry.windowStart) === windowStart
         && Number(entry.thresholdPct) === thresholdPct);
       if (alreadyEntered) continue;
+      const signalKey = `${marketId}:${windowStart}:${thresholdPct}`;
+      const previousSignal = this.shadowSignals.get(signalKey);
+      if (scores && scores.probability > thresholdPct / 100
+        && (!previousSignal || previousSignal.side !== scores.side)) {
+        this.shadowSignals.set(signalKey, {
+          marketId, windowStart, windowEnd: Number(market.end), thresholdPct,
+          side: scores.side, probability: scores.probability,
+          pUp: scores.pUp, pDown: scores.pDown,
+          candleStart: Number(prediction.candleStart),
+          model: prediction.model || 'LightGBMClassifier', signalAt: now,
+        });
+        this.scheduleLedgerSave();
+      }
+      const signal = this.shadowSignals.get(signalKey);
+      const priceCap = thresholdPct / 100;
+      if (!signal || signal.side !== side || feeRate == null
+        || !isFresh(quote, now) || !Array.isArray(quote.asks) || !quote.asks.length
+        || !(Number(quote.bestAsk) > 0 && Number(quote.bestAsk) < priceCap)) continue;
 
       let remaining = SHARES_PER_WINDOW;
       let cost = 0;
@@ -308,7 +335,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       for (const level of [...quote.asks].sort((a, b) => Number(a.price) - Number(b.price))) {
         const price = Number(level.price);
         const available = Number(level.size);
-        if (!Number.isFinite(price) || price <= 0 || price > MAX_BUY_PRICE
+        if (!Number.isFinite(price) || price <= 0 || price >= priceCap
           || !Number.isFinite(available) || available <= 0) continue;
         const filled = Math.min(remaining, available);
         const fee = filled * feeRate * price * (1 - price);
@@ -342,11 +369,13 @@ class FreqAIOpenEntryBot extends DipBounceBot {
         totalCost: cost,
         fees,
         fills,
-        modelProbabilityUp: scores.pUp,
-        modelProbabilityDown: scores.pDown,
-        selectedProbability: scores.probability,
-        modelCandleStart: Number(prediction.candleStart),
-        model: prediction.model || 'LightGBMClassifier',
+        modelProbabilityUp: signal.pUp,
+        modelProbabilityDown: signal.pDown,
+        selectedProbability: signal.probability,
+        modelCandleStart: signal.candleStart,
+        model: signal.model,
+        signalAt: signal.signalAt,
+        entryPriceCap: priceCap,
         placedSequence: sequence,
         status: 'OPEN',
         markBid: bestBid,
@@ -357,14 +386,14 @@ class FreqAIOpenEntryBot extends DipBounceBot {
         exitPrice: null,
         exitPayout: null,
         exitReason: null,
-        fillRule: 'Independent shadow sweep of visible asks up to $1.00; no paper cash is reserved.',
+        fillRule: `Latched shadow signal; sweep fresh visible asks strictly below $${priceCap.toFixed(2)}; no paper cash is reserved.`,
       };
       this.shadowEntries.unshift(entry);
       const totals = this.shadowTotals[thresholdPct];
       totals.entries += 1;
       totals.fees += fees;
       this.log(
-        `Shadow >${thresholdPct}% chose BTC ${side} at ${(scores.probability * 100).toFixed(1)}%; filled ${filledShares.toFixed(2)} / 50 shares at $${entry.entryPrice.toFixed(3)} average.`,
+        `Shadow >${thresholdPct}% latched BTC ${side} at ${(signal.probability * 100).toFixed(1)}%; filled ${filledShares.toFixed(2)} / 50 shares at $${entry.entryPrice.toFixed(3)} average below $${priceCap.toFixed(2)}.`,
         { asset: 'BTC', timeframe: '5m', side, type: `SHADOW_${thresholdPct}`, now },
       );
       this.scheduleLedgerSave();
@@ -655,8 +684,16 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       const openPnl = unmarkedOpen ? null
         : open.reduce((sum, entry) => sum + (Number(entry.unrealizedPnl) || 0), 0);
       const totalPnl = openPnl == null ? null : realizedPnl + openPnl;
+      const signal = [...this.shadowSignals.values()].find((item) =>
+        Number(item.thresholdPct) === thresholdPct && Number(item.windowEnd) > now
+        && Number(item.windowStart) <= now);
+      const enteredCurrentWindow = entries.some((entry) =>
+        Number(entry.windowStart) <= now && Number(entry.windowEnd) > now);
       return {
         thresholdPct,
+        entryPriceCap: thresholdPct / 100,
+        enteredCurrentWindow,
+        waitingSignal: signal && !enteredCurrentWindow ? { ...signal } : null,
         label: `>${thresholdPct}%`,
         entries: Number(totals.entries) || 0,
         resolved: Number(totals.resolved) || 0,

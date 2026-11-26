@@ -40,7 +40,11 @@ async function main() {
     throw new Error(`Paper-history storage is not mounted at ${path.dirname(ledgerStore.filePath)}.`);
   }
   const bot = new Bot({ ledgerStore });
-  const savedLedger = ledgerStore?.load() || PaperLedgerStore.decodeBootstrap(process.env.PAPER_LEDGER_BOOTSTRAP);
+  // Railway limits each variable to 32 KiB. Split a larger, non-secret
+  // one-time paper-history import without discarding any available records.
+  const bootstrap = process.env.PAPER_LEDGER_BOOTSTRAP
+    || [1, 2, 3, 4].map((part) => process.env[`PAPER_LEDGER_BOOTSTRAP_${part}`] || '').join('');
+  const savedLedger = ledgerStore?.load() || PaperLedgerStore.decodeBootstrap(bootstrap);
   await restoreOrResetLedger(bot, savedLedger, Bot.STRATEGY.id);
   const binanceFeed = new BinanceTickFeed();
   const freqaiWorker = new FreqAIWorker();

@@ -15,8 +15,8 @@ function startServer(bot, port) {
       res.end(JSON.stringify({ ok: healthy, mode: 'DEMO', status: state.status, now: state.now }));
       return;
     }
-    if (pathname === '/api/state' || pathname === '/api/strategy/state') {
-      const body = JSON.stringify(bot.snapshot());
+    if (pathname === '/api/state' || pathname === '/api/strategy/state' || pathname === '/api/ledger') {
+      const body = JSON.stringify(pathname === '/api/ledger' ? bot.exportLedger() : bot.snapshot());
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       res.end(body);
       return;

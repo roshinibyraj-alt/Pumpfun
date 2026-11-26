@@ -51,7 +51,7 @@
   <div class="section-title"><h2>Shadow performance</h2><span>Independent hypothetical P&amp;L</span></div>
   <section class="panel">
     <div class="shadow-grid" id="shadowTiers"><div class="empty">Waiting for shadow statistics.</div></div>
-    <p class="model-note">Each tier takes one 50-share shadow entry at its first qualifying current-window score. A score above 65% qualifies all three tiers. These entries do not change the main paper balance. Scores refresh on completed one-minute candles.</p>
+    <p class="model-note">Each tier remembers its qualifying signal and waits for the matching ask cap: &gt;55% below $0.55, &gt;60% below $0.60, &gt;65% below $0.65. Lower confidence does not cancel a signal; an opposite qualifying score replaces it. Signals expire at window end. One 50-share shadow buy per tier per window; no main-account cash is used.</p>
     <div class="list" id="shadowEntries"><div class="empty">No shadow entries yet.</div></div>
   </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
@@ -79,7 +79,7 @@
     <h2>BTC FreqAI opening-score entries and shadow tiers</h2>
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Each completed minute is labeled with the 5-minute window containing its close, so the model score remains aligned with the active window as new one-minute candles close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
     <p>At each 5-minute window open, the bot captures the latest model score from the 1-minute candle that closed at that boundary. UP is selected when its score is at least 51%; otherwise DOWN must be at least 51%. If neither qualifies, or the opening score is not ready within five seconds, the window is skipped.</p>
-    <p>Three separate shadow ledgers can enter the current window at any fresh score strictly above 55%, 60%, or 65%. Each threshold enters once per window, on its first qualifying score, using the selected side. Shadow fills use the same 50-share visible-ask sweep and modeled taker fees, but do not reserve main-account cash.</p>
+    <p>Three separate shadow ledgers latch fresh current-window scores strictly above 55%, 60%, or 65%, then wait for that side's ask strictly below $0.55, $0.60, or $0.65 respectively. Only an opposite qualifying score replaces a waiting signal; falling confidence alone does not cancel it. Signals expire at window end. Each tier buys at most once per window and sweeps only visible asks below its cap, with modeled taker fees.</p>
     <p>The main strategy still makes at most one opening 50-share paper buy per window. Neither main nor shadow positions flip or use take-profit/stop-loss; open shares are held for official resolution. Freqtrade is prediction-only in dry mode; no live orders are sent.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
   </section>
@@ -136,9 +136,9 @@
     $('modelDecision').textContent=opening
       ? `${opening.side||'No trade'} at window open · ${num(opening.pUp)?`UP ${(opening.pUp*100).toFixed(1)}% / DOWN ${(opening.pDown*100).toFixed(1)}%`:'opening score unavailable'} · ${esc(opening.reason||'')}`
       : d?`Latest entry: ${d.side} at ${time(d.at)} · ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. No further entries this window.`:'At each window open: one 50-share buy only when a side is at least 51%. No flips.';
-    $('entryRule').textContent='Main entry stays at 51% at window open. Shadow tiers can enter once each when a fresh current-window score first rises above their threshold.';
+    $('entryRule').textContent='Main entry unchanged: 51% opening score after 45 seconds. Shadows remember a qualifying signal, then wait for their own price cap.';
     const tiers=s.shadowTiers||[];
-    $('shadowTiers').innerHTML=tiers.map(t=>`<article class="shadow-card tier${Number(t.thresholdPct)}"><h3>Score &gt; ${Number(t.thresholdPct)}%</h3><div class="shadow-total ${cls(t.totalPnl)}">${signed(t.totalPnl)}</div><div class="shadow-small">Total P&amp;L · realized ${signed(t.realizedPnl)} · floating ${signed(t.openPnl)}<br>Entries ${Number(t.entries||0)} · resolved ${Number(t.resolved||0)} · W/L ${Number(t.wins||0)}/${Number(t.losses||0)}<br>Open ${Number(t.openPositions||0)} · pending ${Number(t.pendingResolution||0)} · fees ${money(t.fees)}</div></article>`).join('')||'<div class="empty">Waiting for shadow statistics.</div>';
+    $('shadowTiers').innerHTML=tiers.map(t=>`<article class="shadow-card tier${Number(t.thresholdPct)}"><h3>Score &gt; ${Number(t.thresholdPct)}% · ask &lt; ${money(t.entryPriceCap)}</h3><div class="shadow-total ${cls(t.totalPnl)}">${signed(t.totalPnl)}</div><p>${t.enteredCurrentWindow?'Entered this window':t.waitingSignal?`${esc(t.waitingSignal.side)} signal saved · ${(Number(t.waitingSignal.probability)*100).toFixed(1)}% at signal`:'Waiting for a qualifying signal'}</p><div class="shadow-small">Total P&amp;L · realized ${signed(t.realizedPnl)} · floating ${signed(t.openPnl)}<br>Entries ${Number(t.entries||0)} · resolved ${Number(t.resolved||0)} · W/L ${Number(t.wins||0)}/${Number(t.losses||0)}<br>Open ${Number(t.openPositions||0)} · pending ${Number(t.pendingResolution||0)} · fees ${money(t.fees)}</div></article>`).join('')||'<div class="empty">Waiting for shadow statistics.</div>';
     const shadowEntries=s.shadowEntries||[];
     $('shadowEntries').innerHTML=shadowEntries.length?shadowEntries.slice(0,12).map(shadowEntryRow).join(''):'<div class="empty">No shadow entries yet.</div>';
     if(market){
