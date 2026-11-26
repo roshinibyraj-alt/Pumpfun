@@ -286,107 +286,99 @@ function ask(f, side, price, levels = [{ price, size: 1000 }]) {
   Object.assign(f.quotes[side], { bestAsk: price, asks: levels });
 }
 
-test('each shadow requires a price strictly below its own cap', () => {
+test('each shadow enters above its former price cap when confidence qualifies', () => {
   for (const threshold of [55, 60, 65]) {
     const f = shadowFixture(threshold / 100 + 0.001);
-    ask(f, 'UP', threshold / 100);
-    f.check('UP');
-    assert.equal(f.bot.shadowEntries.some(e => e.thresholdPct === threshold), false);
-    ask(f, 'UP', threshold / 100 - 0.001);
     f.check('UP');
     const entry = f.bot.shadowEntries.find(e => e.thresholdPct === threshold);
     assert.ok(entry);
-    assert.ok(entry.fills.every(fill => fill.price < threshold / 100));
+    assert.equal(entry.shares, 50);
+    assert.equal(entry.entryPrice, 0.8);
+    f.check('UP');
+    assert.equal(f.bot.shadowEntries.filter(e => e.thresholdPct === threshold).length, 1);
   }
 });
 
-test('a latched signal survives falling confidence and stale score until its ask qualifies', () => {
+test('a previous qualifying score does not latch after confidence falls', () => {
   const f = shadowFixture();
+  ask(f, 'UP', 0.8, []);
   f.check('UP');
-  assert.equal(f.bot.shadowSignals.size, 3);
   assert.equal(f.bot.shadowEntries.length, 0);
   f.setNow(f.start + 61_000);
   f.setPrediction({ candleStart: f.start, candleCloseAt: f.start + 60_000,
     writtenAt: f.start + 60_500, windowStart: f.start, pUp: 0.48, pDown: 0.52 });
-  f.check('DOWN');
-  f.setNow(f.start + 160_000);
   ask(f, 'UP', 0.54);
   f.check('UP');
-  assert.equal(f.bot.shadowEntries.length, 3);
-  assert.ok(f.bot.shadowEntries.every(e => e.side === 'UP' && e.selectedProbability === 0.7));
-  assert.ok(f.bot.shadowEntries.every(e => e.signalAt === f.start + 45_000));
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries.length, 3);
+  assert.equal(f.bot.shadowEntries.length, 0);
 });
 
-test('an opposite qualifying score replaces only the tiers it qualifies for', () => {
+test('the current qualifying score selects the side without an old waiting signal', () => {
   const f = shadowFixture();
+  ask(f, 'UP', 0.8, []);
   f.check('UP');
   f.setNow(f.start + 61_000);
   f.setPrediction({ candleStart: f.start, candleCloseAt: f.start + 60_000,
     writtenAt: f.start + 60_500, windowStart: f.start, pUp: 0.42, pDown: 0.58 });
-  // Updating any side must process the newest score before testing old latches.
   ask(f, 'UP', 0.5);
   f.check('UP');
-  assert.deepEqual(f.bot.shadowEntries.map(e => e.thresholdPct).sort(), [60, 65]);
-  ask(f, 'DOWN', 0.5);
+  assert.equal(f.bot.shadowEntries.length, 0);
+  ask(f, 'DOWN', 0.8);
   f.check('DOWN');
+  assert.equal(f.bot.shadowEntries.length, 1);
   assert.equal(f.bot.shadowEntries.find(e => e.thresholdPct === 55).side, 'DOWN');
 });
 
-test('shadow sweeps never cross the cap and record only visible partial depth', () => {
+test('shadow sweeps cross the removed price cap using visible depth only', () => {
   const f = shadowFixture(0.56);
   ask(f, 'UP', 0.54, [{ price: 0.54, size: 10 }, { price: 0.55, size: 1000 }]);
   f.check('UP');
   assert.equal(f.bot.shadowEntries.length, 1);
-  assert.equal(f.bot.shadowEntries[0].shares, 10);
-  assert.equal(f.bot.shadowEntries[0].entryPrice, 0.54);
+  assert.equal(f.bot.shadowEntries[0].shares, 50);
+  assert.equal(f.bot.shadowEntries[0].fills.length, 2);
+  assert.ok(Math.abs(f.bot.shadowEntries[0].entryPrice - 0.548) < 1e-9);
 });
 
-test('expired signals cannot trigger a different window', () => {
+test('an old prediction cannot trigger a different window', () => {
   const f = shadowFixture();
-  f.check('UP');
   f.setNow(f.start + 345_000);
   f.record.market = { ...f.record.market, id: 'next-market',
     start: f.start + 300_000, end: f.start + 600_000 };
   ask(f, 'UP', 0.5);
   f.check('UP');
   assert.equal(f.bot.shadowEntries.length, 0);
-  assert.equal(f.bot.shadowSignals.size, 0);
 });
 
-test('stale books cannot fill latched signals', () => {
+test('stale books cannot fill shadow entries', () => {
   const f = shadowFixture();
-  f.check('UP');
   ask(f, 'UP', 0.5);
   f.quotes.UP.updatedAt = f.start;
   f.check('UP');
   assert.equal(f.bot.shadowEntries.length, 0);
 });
 
-test('restart preserves shadow totals and active latches without duplicating buys', () => {
+test('restart preserves all history and totals while ignoring obsolete price-gate latches', () => {
   const f = shadowFixture();
   f.check('UP');
   f.bot.shadowTotals[55] = { entries: 50, resolved: 50, wins: 30,
     losses: 20, fees: 21, realizedPnl: 42 };
   const ledger = f.bot.exportLedger();
-  const next = shadowFixture(0.5);
+  ledger.snapshot.shadowSignals = [{ marketId: 'test-market', windowStart: f.start,
+    windowEnd: f.start + 300_000, thresholdPct: 55, side: 'DOWN', probability: 0.9 }];
+  const next = shadowFixture();
   next.bot.restoreLedger(ledger);
-  assert.equal(next.bot.shadowSignals.size, 3);
+  assert.equal(next.bot.exportLedger().snapshot.shadowSignals, undefined);
   assert.deepEqual(next.bot.shadowTotals[55], f.bot.shadowTotals[55]);
-  ask(next, 'UP', 0.5);
+  const history = bot => bot.shadowEntries.map(({ id, shares, entryPrice, totalCost, fees }) =>
+    ({ id, shares, entryPrice, totalCost, fees }));
+  assert.deepEqual(history(next.bot), history(f.bot));
   next.check('UP');
   assert.equal(next.bot.shadowEntries.length, 3);
   const afterFill = next.bot.exportLedger();
-  const third = shadowFixture(0.5);
+  const third = shadowFixture();
   third.bot.restoreLedger(afterFill);
   ask(third, 'UP', 0.5);
   third.check('UP');
   assert.equal(third.bot.shadowEntries.length, 3);
-  assert.equal(third.bot.shadowTotals[55].entries, 51);
-  const expired = shadowFixture(0.5);
-  expired.setNow(f.start + 400_000);
-  expired.bot.restoreLedger(ledger);
-  assert.equal(expired.bot.shadowSignals.size, 0);
+  assert.equal(third.bot.shadowTotals[55].entries, 50);
 });
 
