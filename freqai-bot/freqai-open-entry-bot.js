@@ -712,7 +712,8 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       marketData: 'BTC spot features from Binance/FreqAI; Polymarket CLOB WebSocket for paper execution, marks and resolution.',
     };
     state.sizingByAsset = {
-      BTC: { baseShares: SHARES_PER_WINDOW, minimumProbability: MIN_PROBABILITY, oneEntryPerWindow: true },
+      BTC: { baseShares: SHARES_PER_WINDOW, currentShares: this.shadowSizing.currentShares,
+        minimumProbability: 0.65, probabilityComparison: 'strictly above', oneEntryPerWindow: true },
     };
     state.freqai = {
       status: worker.status || this.modelStatus,
@@ -724,7 +725,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       model: 'Freqtrade FreqAI LightGBMClassifier',
       input: 'Binance 1-minute OHLCV only; no Polymarket order-book pressure features.',
       resolutionLabel: 'Direction of the 5-minute window containing the completed minute candle close.',
-      warmupFallback: 'Disabled. The bot uses the latest model score from the just-closed 1-minute candle at window open.',
+      warmupFallback: 'Disabled. The 65% strategy requires a fresh current-window model score after the 45-second delay.',
     };
     state.shadowTiers = shadowTiers;
     state.shadowEntries = this.shadowEntries.map(entry => ({ ...entry }))
