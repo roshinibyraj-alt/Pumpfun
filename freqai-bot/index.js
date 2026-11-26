@@ -56,7 +56,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- 65% score only; 50-share floor, +50 per settled loss / -10 per settled win; no flips or live orders.');
+  console.log('MODE: DEMO -- >58% signals; flat 100 shares; resting ask minus $0.10; replace only on opposite >58%; hold fills to resolution.');
 
   let stopping = false;
   const shutdown = async () => {

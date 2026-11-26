@@ -1,471 +1,272 @@
 'use strict';
-
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const Bot = require('../freqai-open-entry-bot');
+const { restoreOrResetLedger } = require('../index');
 
-// Legacy opening-score helper remains testable for archived records, but is
-// not dispatched by the active strategy. Shadow tests use the production path.
-function fixture({ up = 0.51, down = 0.49, scoreDelay = 0, mainTest = true } = {}) {
+function fixture({ capital = 3000 } = {}) {
   const start = 1_800_000_000_000;
-  let now = start + scoreDelay;
+  let now = start + 45_000;
   let prediction = {
-    candleStart: start - 60_000,
-    candleCloseAt: start,
-    writtenAt: start + scoreDelay,
-    windowStart: start,
-    pUp: up,
-    pDown: down,
+    candleStart: start - 60_000, candleCloseAt: start,
+    writtenAt: start, windowStart: start, pUp: 0.7, pDown: 0.3,
     model: 'LightGBMClassifier',
   };
-  const bot = new Bot({
-    now: () => now,
-    marketData: {},
-    initialCapital: 3000,
-    freqaiWorker: { snapshot: () => ({ status: 'READY', lastPrediction: prediction }) },
-  });
+  const bot = new Bot({ now: () => now, marketData: {}, initialCapital: capital,
+    freqaiWorker: { snapshot: () => ({ status: 'READY', lastPrediction: prediction }) } });
   const record = bot.records.get('BTC:5m');
   record.marketStatus = 'OPEN';
   record.market = {
-    id: 'test-market',
-    slug: 'btc-updown-5m-test',
-    title: 'Bitcoin Up or Down · test',
-    start,
-    end: start + 300_000,
-    tokens: { UP: 'up-token', DOWN: 'down-token' },
-    feesEnabled: true,
-    feeSchedule: { rate: 0.05 },
+    id: 'market', slug: 'btc-updown-5m-test', title: 'Test BTC',
+    start, end: start + 300000, tokens: { UP: 'up', DOWN: 'down' },
+    tickSize: 0.01, feesEnabled: true, feeSchedule: { rate: 0.05 },
   };
-  let sequence = 0;
-  const quotes = {
-    UP: {
-      bestBid: 0.49, bestAsk: 0.5, mid: 0.495,
-      bids: [{ price: 0.49, size: 1000 }],
-      asks: [{ price: 0.5, size: 1000 }],
-      updatedAt: now, sequence: ++sequence,
-    },
-    DOWN: {
-      bestBid: 0.49, bestAsk: 0.5, mid: 0.495,
-      bids: [{ price: 0.49, size: 1000 }],
-      asks: [{ price: 0.5, size: 1000 }],
-      updatedAt: now, sequence: ++sequence,
-    },
-  };
-  record.quotes = quotes;
+  for (const side of ['UP', 'DOWN']) {
+    record.quotes[side] = {
+      bestAsk: 0.7, bestBid: 0.69, asks: [{ price: 0.7, size: 1000 }],
+      bids: [{ price: 0.69, size: 1000 }], updatedAt: now, sequence: 1,
+      tokenId: record.market.tokens[side], marketId: 'market', windowStart: start,
+    };
+  }
   return {
-    bot,
-    record,
-    start,
-    quotes,
-    setNow(value) {
-      now = value;
-      for (const quote of Object.values(quotes)) quote.updatedAt = now;
+    bot, record, start,
+    now: () => now,
+    time: value => { now = value; },
+    score: (up, down = 1 - up) => { prediction = {
+      ...prediction, pUp: up, pDown: down, candleStart: now - 60000,
+      candleCloseAt: now, writtenAt: now,
+    }; },
+    book: (side, ask, size = 1000) => {
+      const q = record.quotes[side];
+      Object.assign(q, { bestAsk: ask, bestBid: ask == null ? null : ask - 0.01,
+        asks: ask == null ? [] : [{ price: ask, size }], updatedAt: now, sequence: q.sequence + 1 });
     },
-    setPrediction(value) { prediction = value; },
-    check(side) {
-      if (mainTest) bot.processMainSide(record, side, quotes[side], ++sequence);
-      else bot.processSide(record, side, quotes[side], ++sequence);
-    },
+    check: () => { bot.processSide(record, 'UP', record.quotes.UP, record.quotes.UP.sequence); },
+    advance: ms => { now += ms; },
   };
 }
 
-test('takes one 50-share UP entry at exactly 51% using the latest boundary score', () => {
-  const f = fixture();
-  f.check('UP');
-  f.check('DOWN');
-  assert.equal(f.bot.orders.length, 0, 'no entry during the first 45 seconds');
+function place(f) { f.check(); return f.bot.shadowRestingOrders[0]; }
+function fill(f, side = 'UP', amount = 100) {
+  f.advance(10); f.book(side, 0.59, amount); f.check();
+}
 
-  f.setNow(f.start + 44_999);
-  f.check('UP');
-  assert.equal(f.bot.orders.length, 0, 'the delay is still active at 44.999 seconds');
-
-  f.setNow(f.start + 45_000);
-  f.check('UP');
-  assert.equal(f.bot.orders.length, 1);
-  assert.equal(f.bot.orders[0].side, 'UP');
-  assert.equal(f.bot.orders[0].requestedShares, 50);
-  assert.equal(f.bot.positions[0].shares, 50);
-  assert.equal(f.bot.positions[0].modelProbabilityUp, 0.51);
-  assert.equal(f.record.sideStates.DOWN.orderStatus, 'WINDOW_ENTRY_CONSUMED');
+test('qualifying signal places exactly 100 shares at ask minus 0.10 without immediate execution', () => {
+  const f = fixture(); const o = place(f);
+  assert.equal(o.requestedShares, 100); assert.equal(o.limitPrice, 0.6);
+  assert.equal(o.status, 'RESTING'); assert.equal(f.bot.shadowEntries.length, 0);
+  assert.equal(f.bot.shadowSizing.currentShares, 100);
+  assert.equal(f.bot.snapshot().restingOrderSummary.reservedCash, 60);
+  assert.equal(f.bot.snapshot().shadowAccount.availableCash, 2940);
 });
 
-test('takes the higher-probability DOWN side when it clears 51%', () => {
-  const f = fixture({ up: 0.48, down: 0.52 });
-  f.check('UP');
-  f.setNow(f.start + 45_000);
-  f.check('UP');
-  f.check('DOWN');
-  assert.equal(f.bot.orders.length, 1);
-  assert.equal(f.bot.orders[0].side, 'DOWN');
+test('no orders before 45 seconds or at exactly 58% confidence', () => {
+  const f = fixture(); f.time(f.start + 44999); f.check();
+  assert.equal(f.bot.shadowRestingOrders.length, 0);
+  f.time(f.start + 45000); f.score(0.58, 0.42); f.check();
+  assert.equal(f.bot.shadowRestingOrders.length, 0);
+  f.score(0.5801); f.check(); assert.equal(f.bot.shadowRestingOrders.length, 1);
 });
 
-test('skips the window when neither side reaches 51%', () => {
-  const f = fixture({ up: 0.505, down: 0.495 });
-  f.check('UP');
-  f.setNow(f.start + 45_000);
-  f.check('UP');
-  f.check('DOWN');
-  assert.equal(f.bot.orders.length, 0);
-  assert.equal(f.record.sideStates.UP.orderStatus, 'NO_ENTRY_SCORE');
-  assert.equal(f.record.sideStates.DOWN.orderStatus, 'NO_ENTRY_SCORE');
+test('same-side signals do not reprice even when ask moves or confidence strengthens', () => {
+  const f = fixture(); const o = place(f);
+  f.advance(1000); f.score(0.9); f.book('UP', 0.9); f.check();
+  assert.equal(f.bot.shadowRestingOrders.length, 1); assert.equal(o.limitPrice, 0.6);
 });
 
-test('locks the opening score and never flips or adds on later model changes', () => {
-  const f = fixture();
-  f.check('UP');
-  f.setNow(f.start + 45_000);
-  f.check('UP');
-  const cashAfterEntry = f.bot.cash;
-  f.setPrediction({
-    candleStart: f.start + 60_000,
-    candleCloseAt: f.start + 120_000,
-    writtenAt: f.start + 120_000,
-    windowStart: f.start,
-    pUp: 0.2,
-    pDown: 0.8,
-  });
-  f.setNow(f.start + 120_000);
-  f.check('DOWN');
-  f.check('UP');
-  assert.equal(f.bot.orders.length, 1);
-  assert.equal(f.bot.positions.length, 1);
-  assert.equal(f.bot.positions[0].side, 'UP');
-  assert.equal(f.bot.cash, cashAfterEntry);
+test('confidence falls or opposite 55% does not cancel an existing order', () => {
+  const f = fixture(); const o = place(f);
+  f.advance(1000); f.score(0.45); f.check();
+  assert.equal(o.status, 'RESTING'); assert.equal(f.bot.shadowRestingOrders.length, 1);
 });
 
-test('waits up to five seconds for the boundary score, then skips rather than entering late', () => {
-  const f = fixture({ scoreDelay: 0 });
-  f.setNow(f.start + 2_000);
-  f.setPrediction(null);
-  f.check('UP');
-  assert.equal(f.record.sideStates.UP.orderStatus, 'WAITING_FOR_45_SECOND_DELAY');
-
-  f.setNow(f.start + 6_000);
-  f.check('UP');
-  assert.equal(f.record.sideStates.UP.orderStatus, 'WAITING_FOR_45_SECOND_DELAY');
-
-  f.setNow(f.start + 45_000);
-  f.check('UP');
-  assert.equal(f.record.sideStates.UP.orderStatus, 'NO_ENTRY_SCORE');
-  f.setPrediction({
-    candleStart: f.start - 60_000,
-    candleCloseAt: f.start,
-    writtenAt: f.start + 6_000,
-    pUp: 0.8,
-    pDown: 0.2,
-  });
-  f.check('UP');
-  assert.equal(f.bot.orders.length, 0);
+test('opposite above 58% cancels remainder and places a new fixed opposite 100-share limit', () => {
+  const f = fixture(); const old = place(f);
+  f.advance(1000); f.score(0.3); f.book('DOWN', 0.82); f.check();
+  const next = f.bot.shadowRestingOrders[0];
+  assert.equal(old.status, 'CANCELLED_OPPOSITE_SIGNAL');
+  assert.equal(old.cancelledShares, 100); assert.equal(old.remainingShares, 0);
+  assert.equal(next.side, 'DOWN'); assert.equal(next.limitPrice, 0.72);
+  assert.equal(next.remainingShares, 100); assert.equal(f.bot.shadowEntries.length, 0);
+  assert.equal(f.bot.restingEngine.reserved(), 72);
 });
 
-test('does not use a probability produced from a minute inside the new window', () => {
-  const f = fixture();
-  f.setPrediction({
-    candleStart: f.start,
-    candleCloseAt: f.start + 60_000,
-    writtenAt: f.start + 2_000,
-    windowStart: f.start,
-    pUp: 0.9,
-    pDown: 0.1,
-  });
-  f.check('UP');
-  f.setNow(f.start + 45_000);
-  f.check('UP');
-  assert.equal(f.bot.orders.length, 0);
+test('opposite exactly 58% does not cancel', () => {
+  const f = fixture(); const o = place(f); f.advance(1000); f.score(0.42, 0.58); f.check();
+  assert.equal(o.status, 'RESTING');
 });
 
-test('records actual partial visible-ask depth and modeled fees', () => {
-  const f = fixture();
-  f.quotes.UP.asks = [{ price: 0.4, size: 20 }];
-  f.check('UP');
-  f.setNow(f.start + 45_000);
-  f.check('UP');
-  assert.equal(f.bot.orders[0].status, 'PARTIALLY_FILLED');
-  assert.equal(f.bot.orders[0].filledShares, 20);
-  assert.equal(f.bot.positions[0].shares, 20);
-  assert.ok(f.bot.orders[0].fees > 0);
+test('strictly-through ask depth fills at the fixed maker price without maker fees', () => {
+  const f = fixture(); const o = place(f); fill(f);
+  const entry = f.bot.shadowEntries[0];
+  assert.equal(o.status, 'FILLED'); assert.equal(entry.shares, 100);
+  assert.equal(entry.entryPrice, 0.6); assert.equal(entry.totalCost, 60);
+  assert.equal(entry.fees, 0); assert.equal(entry.fills[0].liquidity, 'MAKER');
+  assert.equal(f.bot.shadowTotals[58].entries, 1);
 });
 
-test('only opens the 65% strategy and does not run lower tiers or opening entries', () => {
-  const f = fixture({ up: 0.56, down: 0.44, mainTest: false });
-  const startingCash = f.bot.cash;
-  f.setNow(f.start + 30_000);
-  f.setPrediction({
-    candleStart: f.start - 60_000,
-    candleCloseAt: f.start,
-    writtenAt: f.start + 500,
-    windowStart: f.start,
-    pUp: 0.56,
-    pDown: 0.44,
-  });
-  f.check('UP');
-  assert.deepEqual(f.bot.shadowEntries.map((entry) => entry.thresholdPct), []);
-  assert.equal(f.bot.orders.length, 0);
-  assert.equal(f.bot.positions.length, 0);
-  assert.equal(f.bot.cash, startingCash);
-
-  f.setNow(f.start + 45_000);
-  f.check('UP');
-  assert.deepEqual(f.bot.shadowEntries.map((entry) => entry.thresholdPct), []);
-  assert.equal(f.bot.orders.length, 0);
-
-  f.setNow(f.start + 61_000);
-  f.setPrediction({
-    candleStart: f.start,
-    candleCloseAt: f.start + 60_000,
-    writtenAt: f.start + 60_500,
-    windowStart: f.start,
-    pUp: 0.61,
-    pDown: 0.39,
-  });
-  f.check('UP');
-  f.setNow(f.start + 121_000);
-  f.setPrediction({
-    candleStart: f.start + 60_000,
-    candleCloseAt: f.start + 120_000,
-    writtenAt: f.start + 120_500,
-    windowStart: f.start,
-    pUp: 0.66,
-    pDown: 0.34,
-  });
-  f.check('UP');
-
-  assert.deepEqual(
-    f.bot.shadowEntries.map((entry) => entry.thresholdPct).sort((a, b) => a - b),
-    [65],
-  );
-  assert.equal(f.bot.shadowEntries.every((entry) => entry.shares === 50), true);
-  assert.equal(f.bot.shadowEntries.length, 1);
-  const tiers = f.bot.snapshot().shadowTiers;
-  assert.deepEqual(tiers.map((tier) => tier.entries), [1]);
-  assert.ok(tiers.every((tier) => tier.totalPnl < 0));
-});
-
-test('requires scores strictly above each shadow threshold', () => {
-  const f = fixture({ up: 0.65, down: 0.35, mainTest: false });
-  f.setNow(f.start + 45_000);
-  f.setPrediction({
-    candleStart: f.start - 60_000,
-    candleCloseAt: f.start,
-    writtenAt: f.start + 500,
-    windowStart: f.start,
-    pUp: 0.65,
-    pDown: 0.35,
-  });
-  f.check('UP');
+test('bid touch or ask equality alone never fills a resting buy', () => {
+  const f = fixture(); place(f);
+  f.advance(10); f.book('UP', 0.6); f.record.quotes.UP.bestBid = 0.59; f.check();
   assert.equal(f.bot.shadowEntries.length, 0);
 });
 
-test('settles shadow P&L independently at official resolution', () => {
-  const f = fixture({ up: 0.66, down: 0.34, mainTest: false });
-  f.setNow(f.start + 45_000);
-  f.setPrediction({
-    candleStart: f.start - 60_000,
-    candleCloseAt: f.start,
-    writtenAt: f.start + 500,
-    windowStart: f.start,
-    pUp: 0.66,
-    pDown: 0.34,
-  });
-  f.check('UP');
-  f.bot.expireMarket(f.record, f.start + 300_000);
-  assert.ok(f.bot.shadowEntries.every((entry) => entry.status === 'PENDING_RESOLUTION'));
-  f.bot.settleMarket('test-market', 'UP', f.start + 302_000);
-  assert.ok(f.bot.shadowEntries.every((entry) => entry.status === 'RESOLVED_WIN'));
-  const tiers = f.bot.snapshot().shadowTiers;
-  assert.ok(tiers.every((tier) => tier.wins === 1 && tier.resolved === 1));
-  assert.ok(tiers.every((tier) => tier.realizedPnl > 0));
+test('partial fill remains open and remainder remains resting', () => {
+  const f = fixture(); const o = place(f); fill(f, 'UP', 40);
+  assert.equal(o.status, 'PARTIAL'); assert.equal(o.remainingShares, 60);
+  assert.equal(f.bot.shadowEntries[0].shares, 40);
+  assert.equal(f.bot.restingEngine.reserved(), 36);
+  assert.equal(f.bot.restingEngine.available(), 2940);
 });
 
-function shadowFixture(up = 0.7) {
-  const f = fixture({ up, down: 1 - up, mainTest: false });
-  f.setNow(f.start + 45_000);
-  for (const quote of Object.values(f.quotes)) {
-    quote.bestAsk = 0.8;
-    quote.asks = [{ price: 0.8, size: 1000 }];
-  }
-  return f;
-}
+test('unchanged depth cannot be reused by ticks or bid-only updates; additional depth fills once', () => {
+  const f = fixture(); const o = place(f); fill(f, 'UP', 40);
+  f.check(); f.advance(10); f.book('UP', 0.59, 40); f.check();
+  assert.equal(o.filledShares, 40);
+  f.advance(10); f.book('UP', 0.59, 60); f.check();
+  assert.equal(o.filledShares, 60);
+  f.advance(10); f.book('UP', null); f.check();
+  f.advance(10); f.book('UP', 0.59, 50); f.check();
+  assert.equal(o.filledShares, 100);
+  assert.equal(f.bot.shadowEntries.length, 1);
+});
 
-function ask(f, side, price, levels = [{ price, size: 1000 }]) {
-  Object.assign(f.quotes[side], { bestAsk: price, asks: levels });
-}
+test('partial fill survives opposite cancellation; replacement still requests 100', () => {
+  const f = fixture(); const o = place(f); fill(f, 'UP', 40);
+  f.advance(10); f.score(0.2); f.book('DOWN', 0.8); f.check();
+  assert.equal(o.status, 'CANCELLED_OPPOSITE_SIGNAL'); assert.equal(o.cancelledShares, 60);
+  assert.equal(f.bot.shadowEntries[0].shares, 40); assert.equal(f.bot.shadowEntries[0].status, 'OPEN');
+  assert.equal(f.bot.shadowRestingOrders[0].requestedShares, 100);
+  f.advance(10); f.book('DOWN', 0.69); f.check();
+  assert.equal(f.bot.shadowEntries.length, 2);
+  assert.ok(f.bot.shadowEntries.every(e => e.status === 'OPEN'));
+});
 
-test('each shadow enters above its former price cap when confidence qualifies', () => {
-  for (const threshold of [65]) {
-    const f = shadowFixture(threshold / 100 + 0.001);
-    f.check('UP');
-    const entry = f.bot.shadowEntries.find(e => e.thresholdPct === threshold);
-    assert.ok(entry);
-    assert.equal(entry.shares, 50);
-    assert.equal(entry.entryPrice, 0.8);
-    f.check('UP');
-    assert.equal(f.bot.shadowEntries.filter(e => e.thresholdPct === threshold).length, 1);
+test('a fully filled order consumes the window; opposite signals never sell held shares', () => {
+  const f = fixture(); place(f); fill(f);
+  f.advance(1000); f.score(0.1); f.book('DOWN', 0.8); f.check();
+  assert.equal(f.bot.shadowRestingOrders.length, 1);
+  assert.equal(f.bot.shadowEntries[0].status, 'OPEN');
+  assert.equal(f.bot.shadowEntries[0].shares, 100);
+});
+
+test('stale quotes and old token IDs cannot fill', () => {
+  const f = fixture(); place(f); f.advance(5000);
+  f.record.quotes.UP.bestAsk = 0.59; f.record.quotes.UP.asks = [{ price: 0.59, size: 1000 }]; f.check();
+  assert.equal(f.bot.shadowEntries.length, 0);
+  f.book('UP', 0.59); f.record.quotes.UP.tokenId = 'previous-window'; f.check();
+  assert.equal(f.bot.shadowEntries.length, 0);
+});
+
+test('existing order may fill after the model score becomes stale; stale score cannot replace it', () => {
+  const f = fixture(); const o = place(f);
+  f.time(f.start + 120000); f.book('UP', 0.59); f.check();
+  assert.equal(o.status, 'FILLED');
+});
+
+test('unfilled orders expire at the exact window boundary and release reserves', () => {
+  const f = fixture(); const o = place(f);
+  f.time(f.start + 300000); f.book('UP', 0.59); f.check();
+  assert.equal(o.status, 'EXPIRED'); assert.equal(f.bot.shadowEntries.length, 0);
+  assert.equal(f.bot.restingEngine.reserved(), 0);
+  assert.equal(f.bot.restingEngine.available(), 3000);
+});
+
+test('expired partial inventory goes to official resolution, not a signal sale', () => {
+  const f = fixture(); const o = place(f); fill(f, 'UP', 40);
+  f.time(f.start + 300000); f.bot.expireMarket(f.record, f.now());
+  assert.equal(o.status, 'EXPIRED');
+  assert.equal(f.bot.shadowEntries[0].status, 'PENDING_RESOLUTION');
+  f.bot.settleMarket('market', 'UP', f.now() + 10000);
+  assert.equal(f.bot.shadowTotals[58].realizedPnl, 16);
+  assert.equal(f.bot.shadowSizing.currentShares, 100);
+});
+
+test('flat sizing remains 100 after a win or loss and duplicate resolutions are ignored', () => {
+  for (const winner of ['UP', 'DOWN']) {
+    const f = fixture(); place(f); fill(f);
+    f.time(f.start + 300000); f.bot.expireMarket(f.record, f.now());
+    f.bot.settleMarket('market', winner, f.now() + 10000);
+    const pnl = f.bot.shadowTotals[58].realizedPnl;
+    assert.equal(pnl, winner === 'UP' ? 40 : -60);
+    f.bot.settleMarket('market', winner, f.now() + 11000);
+    assert.equal(f.bot.shadowTotals[58].realizedPnl, pnl);
+    assert.equal(f.bot.shadowTotals[58].resolved, 1);
+    assert.equal(f.bot.shadowSizing.currentShares, 100);
   }
 });
 
-test('a previous qualifying score does not latch after confidence falls', () => {
-  const f = shadowFixture();
-  ask(f, 'UP', 0.8, []);
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries.length, 0);
-  f.setNow(f.start + 61_000);
-  f.setPrediction({ candleStart: f.start, candleCloseAt: f.start + 60_000,
-    writtenAt: f.start + 60_500, windowStart: f.start, pUp: 0.48, pDown: 0.52 });
-  ask(f, 'UP', 0.54);
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries.length, 0);
-});
-
-test('the current qualifying score selects the side without an old waiting signal', () => {
-  const f = shadowFixture();
-  ask(f, 'UP', 0.8, []);
-  f.check('UP');
-  f.setNow(f.start + 61_000);
-  f.setPrediction({ candleStart: f.start, candleCloseAt: f.start + 60_000,
-    writtenAt: f.start + 60_500, windowStart: f.start, pUp: 0.32, pDown: 0.68 });
-  ask(f, 'UP', 0.5);
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries.length, 0);
-  ask(f, 'DOWN', 0.8);
-  f.check('DOWN');
-  assert.equal(f.bot.shadowEntries.length, 1);
-  assert.equal(f.bot.shadowEntries.find(e => e.thresholdPct === 65).side, 'DOWN');
-});
-
-test('shadow sweeps cross the removed price cap using visible depth only', () => {
-  const f = shadowFixture(0.66);
-  ask(f, 'UP', 0.54, [{ price: 0.54, size: 10 }, { price: 0.55, size: 1000 }]);
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries.length, 1);
-  assert.equal(f.bot.shadowEntries[0].shares, 50);
-  assert.equal(f.bot.shadowEntries[0].fills.length, 2);
-  assert.ok(Math.abs(f.bot.shadowEntries[0].entryPrice - 0.548) < 1e-9);
-});
-
-test('an old prediction cannot trigger a different window', () => {
-  const f = shadowFixture();
-  f.setNow(f.start + 345_000);
-  f.record.market = { ...f.record.market, id: 'next-market',
-    start: f.start + 300_000, end: f.start + 600_000 };
-  ask(f, 'UP', 0.5);
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries.length, 0);
-});
-
-test('stale books cannot fill shadow entries', () => {
-  const f = shadowFixture();
-  ask(f, 'UP', 0.5);
-  f.quotes.UP.updatedAt = f.start;
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries.length, 0);
-});
-
-test('restart preserves all history and totals while ignoring obsolete price-gate latches', () => {
-  const f = shadowFixture();
-  f.check('UP');
-  f.bot.shadowTotals[65] = { entries: 50, resolved: 50, wins: 30,
-    losses: 20, fees: 21, realizedPnl: 42 };
+test('restart preserves fixed price, partial inventory and consumed book liquidity', () => {
+  const f = fixture(); place(f); fill(f, 'UP', 40);
   const ledger = f.bot.exportLedger();
-  ledger.snapshot.shadowSignals = [{ marketId: 'test-market', windowStart: f.start,
-    windowEnd: f.start + 300_000, thresholdPct: 55, side: 'DOWN', probability: 0.9 }];
-  const next = shadowFixture();
-  next.bot.restoreLedger(ledger);
-  assert.equal(next.bot.exportLedger().snapshot.shadowSignals, undefined);
-  assert.deepEqual(next.bot.shadowTotals[65], f.bot.shadowTotals[65]);
-  const history = bot => bot.shadowEntries.map(({ id, shares, entryPrice, totalCost, fees }) =>
-    ({ id, shares, entryPrice, totalCost, fees }));
-  assert.deepEqual(history(next.bot), history(f.bot));
-  next.check('UP');
-  assert.equal(next.bot.shadowEntries.length, 1);
-  const afterFill = next.bot.exportLedger();
-  const third = shadowFixture();
-  third.bot.restoreLedger(afterFill);
-  ask(third, 'UP', 0.5);
-  third.check('UP');
-  assert.equal(third.bot.shadowEntries.length, 1);
-  assert.equal(third.bot.shadowTotals[65].entries, 50);
+  const restored = fixture(); restored.time(f.now() + 10);
+  restored.bot.restoreLedger(ledger); restored.book('UP', 0.59, 40); restored.check();
+  const o = restored.bot.shadowRestingOrders[0];
+  assert.equal(o.limitPrice, 0.6); assert.equal(o.filledShares, 40);
+  assert.equal(o.remainingShares, 60); assert.equal(restored.bot.shadowEntries[0].shares, 40);
 });
 
-test('settled losses add 50, wins subtract 10, duplicate resolutions do not resize', () => {
-  const f = shadowFixture();
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries[0].requestedShares, 50);
-  assert.equal(f.bot.orders.length, 0, 'legacy opening strategy must not enter');
-  f.bot.expireMarket(f.record, f.start + 300_000);
-  assert.equal(f.bot.shadowSizing.currentShares, 50, 'pending outcome does not resize');
-  f.bot.settleMarket('test-market', 'DOWN', f.start + 302_000);
-  assert.equal(f.bot.shadowSizing.currentShares, 100);
-  f.bot.settleMarket('test-market', 'DOWN', f.start + 303_000);
-  assert.equal(f.bot.shadowSizing.currentShares, 100);
-  f.record.market = { ...f.record.market, id: 'next', start: f.start + 300_000, end: f.start + 600_000 };
-  f.record.marketStatus = 'OPEN';
-  f.setNow(f.start + 345_000);
-  f.setPrediction({ candleStart: f.start + 240_000, candleCloseAt: f.start + 300_000,
-    writtenAt: f.start + 300_500, windowStart: f.start + 300_000, pUp: 0.7, pDown: 0.3 });
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries[0].requestedShares, 100);
-  f.bot.expireMarket(f.record, f.start + 600_000);
-  f.bot.settleMarket('next', 'UP', f.start + 602_000);
-  assert.equal(f.bot.shadowSizing.currentShares, 90);
+test('restart after expiry cancels old orders and never applies them to a new window', () => {
+  const f = fixture(); place(f); const ledger = f.bot.exportLedger();
+  const restored = fixture(); restored.time(f.start + 301000);
+  restored.bot.restoreLedger(ledger);
+  assert.equal(restored.bot.shadowRestingOrders[0].status, 'EXPIRED');
+  assert.equal(restored.bot.restingEngine.reserved(), 0);
+  restored.record.market.start += 300000; restored.record.market.end += 300000;
+  restored.book('UP', 0.59); restored.check();
+  assert.equal(restored.bot.shadowEntries.length, 0);
 });
 
-test('win at the floor stays at 50; partial fills change sizing once per result', () => {
-  const f = shadowFixture();
-  ask(f, 'UP', 0.4, [{ price: 0.4, size: 5 }]);
-  f.check('UP');
-  assert.equal(f.bot.shadowEntries[0].shares, 5);
-  f.bot.expireMarket(f.record, f.start + 300_000);
-  f.bot.settleMarket('test-market', 'UP', f.start + 302_000);
-  assert.equal(f.bot.shadowSizing.currentShares, 50);
+test('zero or negative ask-minus-offset is skipped instead of clamped to a fake price', () => {
+  const f = fixture(); f.book('UP', 0.1); f.check();
+  assert.equal(f.bot.shadowRestingOrders.length, 0);
 });
 
-test('sizing persists across restarts; old history is not retroactively resized', () => {
-  const f = shadowFixture();
-  f.check('UP');
-  f.bot.expireMarket(f.record, f.start + 300_000);
-  f.bot.settleMarket('test-market', 'DOWN', f.start + 302_000);
-  const ledger = f.bot.exportLedger();
-  const next = shadowFixture();
-  next.bot.restoreLedger(ledger);
-  assert.equal(next.bot.shadowSizing.currentShares, 100);
-  assert.deepEqual(next.bot.shadowEntries, f.bot.shadowEntries);
-  delete ledger.snapshot.shadowSizing;
-  next.bot.restoreLedger(ledger);
-  assert.equal(next.bot.shadowSizing.currentShares, 50, 'new sizing starts at floor, not replaying historic losses');
-  assert.equal(next.bot.shadowTotals[65].losses, 1);
+test('limits obey market tick precision', () => {
+  const f = fixture(); f.book('UP', 0.725); const o = place(f);
+  assert.equal(o.limitPrice, 0.62);
 });
 
-test('65% totals survive lower-tier removal and chart ends at lifetime settled balance', () => {
-  const f = shadowFixture();
-  f.check('UP');
-  f.bot.expireMarket(f.record, f.start + 300_000);
-  f.bot.settleMarket('test-market', 'UP', f.start + 302_000);
-  f.bot.shadowTotals[65].realizedPnl += 200;
-  const ledger = f.bot.exportLedger();
-  ledger.snapshot.shadowEntries.push({ id: 'old-55', thresholdPct: 55 });
-  ledger.snapshot.shadowTotals[55] = { realizedPnl: 999 };
-  const next = shadowFixture();
-  next.bot.restoreLedger(ledger);
-  const s = next.bot.snapshot();
-  assert.deepEqual(s.shadowTiers.map(t => t.thresholdPct), [65]);
-  assert.equal(s.shadowEntries.length, 1);
-  assert.equal(s.shadowAccount.settledBalance, 3000 + f.bot.shadowTotals[65].realizedPnl);
-  assert.equal(s.shadowSettledCurve.at(-1).equity, s.shadowAccount.settledBalance);
+test('paper capital cannot be overcommitted', () => {
+  const f = fixture({ capital: 50 }); f.check();
+  assert.equal(f.bot.shadowRestingOrders.length, 0);
+  assert.match(f.record.sideStates.UP.reason, /Insufficient/);
 });
 
-test('equity is unknown during pending resolution, not fictitiously flat', () => {
-  const f = shadowFixture();
-  f.check('UP');
-  f.bot.expireMarket(f.record, f.start + 300_000);
-  assert.equal(f.bot.snapshot().shadowAccount.equity, null);
-  assert.equal(f.bot.snapshot().shadowTiers[0].totalPnl, null);
+test('new strategy archives old ledger and resets history, capital and sizing exactly once', async () => {
+  const f = fixture(); let archived = 0, saved;
+  f.bot.ledgerStore = { archive: async () => { archived++; }, save: async v => { saved = v; } };
+  const old = { strategyId: 'pumpfun-btc-5m-freqai-open-score-paper-v2',
+    snapshot: { strategy: { id: 'pumpfun-btc-5m-freqai-open-score-paper-v2' } } };
+  assert.equal(await restoreOrResetLedger(f.bot, old, Bot.STRATEGY.id), 'reset');
+  assert.equal(archived, 1); assert.equal(saved.snapshot.shadowEntries.length, 0);
+  assert.equal(saved.snapshot.shadowSizing.currentShares, 100);
+  assert.equal(saved.snapshot.shadowAccount.initialCapital, 3000);
+  assert.equal(saved.snapshot.shadowAccount.realizedPnl, 0);
+  assert.equal(await restoreOrResetLedger(f.bot, saved, Bot.STRATEGY.id), 'restored');
+  assert.equal(archived, 1);
 });
 
-test('invalid persisted sizing is rejected instead of silently resetting', () => {
-  const f = shadowFixture();
-  const ledger = f.bot.exportLedger();
-  ledger.snapshot.shadowSizing.currentShares = -1;
-  assert.throws(() => f.bot.restoreLedger(ledger), /Invalid saved/);
+test('corrupt saved size or orders fail explicitly', () => {
+  const f = fixture(); const ledger = f.bot.exportLedger();
+  ledger.snapshot.shadowSizing.currentShares = 200;
+  assert.throws(() => f.bot.restoreLedger(ledger), /Invalid saved flat/);
 });
 
+test('production CLOB message path places and fills the new limit, not the archived taker strategy', () => {
+  const f = fixture();
+  f.bot.tokenRefs.set('up', { recordKey: 'BTC:5m', side: 'UP' });
+  const send = (ask, size) => f.bot.handleMarketMessage({
+    event_type: 'book', asset_id: 'up', timestamp: String(f.now()),
+    bids: [{ price: String(ask - 0.01), size: '1000' }],
+    asks: [{ price: String(ask), size: String(size) }],
+  });
+  send(0.7, 1000);
+  assert.equal(f.bot.shadowRestingOrders[0].limitPrice, 0.6);
+  assert.equal(f.bot.shadowEntries.length, 0);
+  f.advance(10); send(0.59, 100);
+  assert.equal(f.bot.shadowEntries[0].shares, 100);
+  assert.equal(f.bot.shadowRestingOrders[0].status, 'FILLED');
+  assert.equal(f.record.sideStates.UP.orderStatus, 'FILLED');
+  assert.equal(f.bot.orders.length, 0, 'archived taker orders never execute');
+});

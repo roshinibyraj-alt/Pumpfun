@@ -3,6 +3,7 @@
 const DipBounceBot = require('./dip-bounce-bot');
 const config = require('./config');
 const { feeRateFor, isFresh } = require('./freqai-open-entry-utils');
+const { FreqAIRestingOrders, SHARES, THRESHOLD_PCT, active: restingActive } = require('./freqai-resting-orders');
 
 const OPEN_SCORE_GRACE_MS = 5000;
 const ENTRY_DELAY_MS = 45_000;
@@ -10,23 +11,23 @@ const SHARES_PER_WINDOW = 50;
 const MIN_PROBABILITY = 0.51;
 const MAX_BUY_PRICE = 1;
 const SIDES = ['UP', 'DOWN'];
-const SHADOW_THRESHOLDS = [65];
+const SHADOW_THRESHOLDS = [THRESHOLD_PCT];
 
 const STRATEGY = Object.freeze({
-  id: 'pumpfun-btc-5m-freqai-open-score-paper-v2',
-  name: 'BTC 5-minute FreqAI 65% paper strategy',
-  version: '2',
-  execution: 'Paper-only taker sweep. Freqtrade/FreqAI runs dry for Binance spot data and never places orders.',
+  id: 'pumpfun-btc-5m-freqai58-resting-minus10-flat100-v1',
+  name: 'BTC 5-minute FreqAI 58% resting limits',
+  version: 'resting-flat100-v1',
+  execution: 'Paper-only resting maker orders; no live orders.',
   market: 'BTC Up/Down 5-minute market only.',
   features: 'Binance 1-minute OHLCV return, candle shape, relative volume, volatility and minute-in-window features.',
   target: 'For each completed 1-minute candle, classify the direction of the BTC 5-minute window containing its close.',
-  prediction: 'Use fresh current-window FreqAI scores. The selected side must have probability strictly above 65%.',
-  entry: 'Wait 45 seconds after window open; then allow one visible-ask sweep at the current share size when a fresh score qualifies.',
-  fill: 'Sweep fresh visible Polymarket asks up to $1.00; record depth-weighted fills and modeled taker fees. Partial fills are recorded.',
+  prediction: 'Use fresh current-window FreqAI scores. The selected side must have probability strictly above 58%.',
+  entry: 'After 45 seconds, confidence strictly above 58% places a 100-share resting buy at that side’s best ask minus $0.10, fixed until fill, expiry or an opposite >58% signal.',
+  fill: 'Paper maker fills require fresh subsequent asks strictly below the fixed limit, backed by displayed depth. Partial fills remain held. Maker fee zero; no assumed rebate income.',
   exit: 'No flips, take-profit, or stop-loss. Hold filled shares to official market resolution.',
-  sizing: 'Start at 50 shares. Add 50 after each settled net loss; subtract 10 after each settled net win, with a 50-share floor. No share cap.',
-  cadence: 'No entries during the first 45 seconds. At most one 65% entry per window; skip if no fresh qualifying score appears.',
-  shadow: 'Only the 65% strategy trades: after 45 seconds, enter once per window when a fresh score is strictly above 65%. Older opening-score trades are archived, not newly entered.',
+  sizing: 'Always 100 shares per new limit order; no progression after wins or losses.',
+  cadence: 'An opposite fresh >58% signal cancels the unfilled remainder and places a fresh 100-share opposite limit. No repricing on same-side signals. All unfilled orders expire at window end.',
+  shadow: 'Only the 58% paper strategy is active. Fully filled orders consume the window; no selling or flipping filled shares.',
 });
 
 function freshPredictionAtOpen(prediction, windowStart, now) {
@@ -96,7 +97,10 @@ class FreqAIOpenEntryBot extends DipBounceBot {
     this.shadowEntries = [];
     this.shadowTotals = emptyShadowTotals();
     this.shadowSequence = 0;
-    this.shadowSizing = { version: 1, currentShares: 50, startedAt: this.now(), lastOutcome: null };
+    this.shadowSizing = { version: 2, currentShares: SHARES, startedAt: this.now(), lastOutcome: null };
+    this.shadowRestingOrders = [];
+    this.shadowOrderSequence = 0;
+    this.restingEngine = new FreqAIRestingOrders(this);
     this.shadowEquityCurve = [];
     this.statusReason = 'Waiting for the latest 1-minute FreqAI score and BTC 5-minute market.';
   }
@@ -105,11 +109,18 @@ class FreqAIOpenEntryBot extends DipBounceBot {
     super.restoreLedger(ledger);
     const savedShadowEntries = ledger?.snapshot?.shadowEntries;
     const sizing = ledger?.snapshot?.shadowSizing;
-    if (sizing && (sizing.version !== 1 || !Number.isSafeInteger(sizing.currentShares)
-      || sizing.currentShares < 50)) throw new Error('Invalid saved 65% share sizing; refusing to reset it silently.');
-    this.shadowSizing = sizing?.version === 1 && Number.isSafeInteger(sizing.currentShares)
-      && sizing.currentShares >= 50
-      ? { ...sizing } : { version: 1, currentShares: 50, startedAt: this.now(), lastOutcome: null };
+    if (sizing && (sizing.version !== 2 || sizing.currentShares !== SHARES)) {
+      throw new Error('Invalid saved flat 100-share sizing.');
+    }
+    this.shadowSizing = sizing ? { ...sizing } : { version: 2, currentShares: SHARES, startedAt: this.now(), lastOutcome: null };
+    this.shadowRestingOrders = (ledger?.snapshot?.shadowRestingOrders || []).map(order => structuredClone(order));
+    for (const order of this.shadowRestingOrders) {
+      if (order.requestedShares !== SHARES || !(order.limitPrice > 0 && order.limitPrice < 1)
+        || !Number.isFinite(order.remainingShares) || order.remainingShares < 0 || order.remainingShares > SHARES) {
+        throw new Error('Invalid saved resting limit order.');
+      }
+    }
+    this.shadowOrderSequence = Number(ledger?.snapshot?.shadowOrderSequence) || this.shadowRestingOrders.length;
     this.shadowEquityCurve = (ledger?.snapshot?.shadowEquityCurve || []).filter(
       p => Number.isFinite(p.at) && Number.isFinite(p.equity),
     ).map(p => ({ ...p }));
@@ -166,6 +177,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       }
     }
     this.updateAccountMetrics(this.now(), true);
+    this.restingEngine.expire(this.now());
     this.scheduleLedgerSave();
   }
 
@@ -179,6 +191,8 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       Object.entries(this.shadowTotals).map(([threshold, totals]) => [threshold, { ...totals }]),
     );
     ledger.snapshot.shadowSizing = { ...this.shadowSizing };
+    ledger.snapshot.shadowRestingOrders = this.shadowRestingOrders.map(order => structuredClone(order));
+    ledger.snapshot.shadowOrderSequence = this.shadowOrderSequence;
     ledger.snapshot.shadowEquityCurve = this.shadowEquityCurve.map(p => ({ ...p }));
     return ledger;
   }
@@ -189,6 +203,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
   }
 
   async tick(now = this.now()) {
+    this.restingEngine.expire(now);
     if (this.tickInFlight || !this.running) return;
     await super.tick(now);
     if (this.status === 'ERROR') return;
@@ -289,6 +304,13 @@ class FreqAIOpenEntryBot extends DipBounceBot {
   }
 
   processShadowEntries(record, side, quote, sequence) {
+    const now = this.now();
+    const prediction = this.freqaiWorker?.snapshot?.()?.lastPrediction;
+    const scores = currentWindowPrediction(prediction, record.market, now) ? normalizedScores(prediction) : null;
+    this.restingEngine.process(record, scores, prediction, now);
+  }
+
+  archivedTakerShadowEntries(record, side, quote, sequence) {
     const market = record.market;
     const now = this.now();
     if (!market || record.marketStatus !== 'OPEN'
@@ -567,6 +589,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
   checkStopLosses() {}
 
   expireMarket(record, now) {
+    this.restingEngine.expire(now);
     super.expireMarket(record, now);
     const market = record.market;
     if (!market) return;
@@ -625,8 +648,7 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       totals.realizedPnl += entry.realizedPnl;
       if (won) totals.wins += 1;
       else totals.losses += 1;
-      if (entry.realizedPnl < 0) this.shadowSizing.currentShares += 50;
-      else if (entry.realizedPnl > 0) this.shadowSizing.currentShares = Math.max(50, this.shadowSizing.currentShares - 10);
+      this.shadowSizing.currentShares = SHARES;
       this.shadowSizing.lastOutcome = entry.realizedPnl < 0 ? 'LOSS' : entry.realizedPnl > 0 ? 'WIN' : 'FLAT';
       this.shadowSizing.lastUpdatedAt = now;
       this.shadowSizing.lastEntryId = entry.id;
@@ -712,8 +734,8 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       marketData: 'BTC spot features from Binance/FreqAI; Polymarket CLOB WebSocket for paper execution, marks and resolution.',
     };
     state.sizingByAsset = {
-      BTC: { baseShares: SHARES_PER_WINDOW, currentShares: this.shadowSizing.currentShares,
-        minimumProbability: 0.65, probabilityComparison: 'strictly above', oneEntryPerWindow: true },
+      BTC: { baseShares: SHARES, currentShares: SHARES,
+        minimumProbability: THRESHOLD_PCT / 100, probabilityComparison: 'strictly above', oneEntryPerWindow: true },
     };
     state.freqai = {
       status: worker.status || this.modelStatus,
@@ -725,13 +747,21 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       model: 'Freqtrade FreqAI LightGBMClassifier',
       input: 'Binance 1-minute OHLCV only; no Polymarket order-book pressure features.',
       resolutionLabel: 'Direction of the 5-minute window containing the completed minute candle close.',
-      warmupFallback: 'Disabled. The 65% strategy requires a fresh current-window model score after the 45-second delay.',
+      warmupFallback: 'Disabled. The 58% strategy requires a fresh current-window model score after the 45-second delay.',
     };
     state.shadowTiers = shadowTiers;
     state.shadowEntries = this.shadowEntries.map(entry => ({ ...entry }))
       .sort((a, b) => Number(b.entryAt) - Number(a.entryAt))
       .slice(0, 300);
     state.shadowSizing = { ...this.shadowSizing };
+    state.shadowRestingOrders = this.shadowRestingOrders.map(order => ({
+      ...order, depthBudget: undefined,
+    })).slice(0, 300);
+    state.restingOrderSummary = {
+      active: this.shadowRestingOrders.filter(restingActive).length,
+      reservedCash: this.restingEngine.reserved(),
+      availableCash: this.restingEngine.available(),
+    };
     const tier = shadowTiers[0];
     if (tier) {
       const unresolved = this.shadowEntries.filter(e => ['OPEN', 'PENDING_RESOLUTION'].includes(e.status));
@@ -743,6 +773,8 @@ class FreqAIOpenEntryBot extends DipBounceBot {
       const equity = marksKnown ? this.initialCapital + tier.realizedPnl + tier.openPnl : null;
       state.shadowAccount = {
         initialCapital: this.initialCapital, cash, equity,
+        reservedCash: this.restingEngine.reserved(),
+        availableCash: this.restingEngine.available(),
         realizedPnl: tier.realizedPnl, unrealizedPnl: marksKnown ? tier.openPnl : null,
         settledBalance: this.initialCapital + tier.realizedPnl,
         totalFees: tier.fees, settledPositions: tier.resolved, openPositions: tier.openPositions,
