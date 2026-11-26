@@ -56,7 +56,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- one fixed 50-share BTC entry from the opening FreqAI score; no flips or live orders.');
+  console.log('MODE: DEMO -- 65% score only; 50-share floor, +50 per settled loss / -10 per settled win; no flips or live orders.');
 
   let stopping = false;
   const shutdown = async () => {
