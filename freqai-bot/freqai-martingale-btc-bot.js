@@ -3,12 +3,12 @@ const TakerBot = require('./freqai-taker-btc-bot');
 const sizing = require('./martingale-sizing');
 const STRATEGY = Object.freeze({
   ...TakerBot.STRATEGY,
-  id: 'pumpfun-freqai58-taker-martingale3-base-between-v1',
-  name: 'BTC FreqAI 58% · capped recovery',
-  version: 'martingale3-base-between-v1',
+  id: 'pumpfun-freqai58-taker-recover-plus10-base50-v1',
+  name: 'BTC FreqAI 58% · recovery +$10',
+  version: 'recover-plus10-base50-v1',
   entry: 'Fresh above-58% current-window signal after 45 seconds; one immediate taker entry per window.',
-  sizing: '100 base; recovery 200, 400, 800. Any eligible win or an 800-share loss resets to 100.',
-  cadence: 'One intervening base-size window after each recovery loss. Unclear results delay recovery only; 100-share base trading continues. Intervening base wins reset recovery; base losses do not create or advance another ladder.',
+  sizing: '50 shares at base. After loss, size the next eligible window to recover cycle losses plus $10 net using actual ask depth and fees. Reset to 50 after the cycle reaches +$10.',
+  cadence: 'Recovery is eligible next window, without a doubling ladder or fixed share cap. Unclear recovery outcomes delay recovery only; 50-share base trading continues and its outcomes count toward the cycle. Insufficient cash or depth skips recovery, never fabricates a full fill.',
   assessment: 'At window end, fresh held-side midpoint >0.98 predicts WIN; <0.02 predicts LOSS. Neutral, missing, crossed or stale marks stay unknown. Continue checking pending books; official settlement can establish the result.',
   accounting: 'Mark guesses control sizing only. Official settlement alone changes realized P&L and releases capital. Each outcome affects sizing once.',
 });
@@ -18,6 +18,7 @@ class MartingaleBTCBot extends TakerBot {
     super(options);
     this.strategyId = STRATEGY.id; this.strategyDefinition = STRATEGY;
     this.recovery = sizing.newState();
+    this.statusReason = 'Waiting for fresh above-58% FreqAI after 45 seconds; 50-share base or loss recovery plus $10.';
     this.nextMarkPollAt = 0; this.recoveryTickInFlight = false;
     this.getOrderBook = options.getOrderBook || (async tokenId => {
       const r = await fetch(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(tokenId)}`,
@@ -134,6 +135,9 @@ class MartingaleBTCBot extends TakerBot {
   exportLedger() {
     const ledger = super.exportLedger();
     ledger.snapshot.recovery = structuredClone(this.recovery);
+    // Parent adapter persists an internal fixed-size sentinel; the public
+    // snapshot separately exposes the actual dynamic recovery size.
+    ledger.snapshot.shadowSizing = { ...this.shadowSizing };
     return ledger;
   }
 
@@ -141,9 +145,8 @@ class MartingaleBTCBot extends TakerBot {
     const s = ledger?.snapshot || ledger;
     for (const e of s?.shadowEntries || []) {
       if (!['BASE', 'RECOVERY'].includes(e.recoveryRole)
-        || !Number.isInteger(e.recoveryStep) || e.recoveryStep < 0 || e.recoveryStep > 3
-        || (e.recoveryRole === 'BASE') !== (e.recoveryStep === 0)
-        || e.requestedShares !== 100 * 2 ** e.recoveryStep
+        || !Number.isSafeInteger(e.requestedShares) || e.requestedShares <= 0
+        || (e.recoveryRole === 'BASE' && e.requestedShares !== 50)
         || !(e.shares > 0 && e.shares <= e.requestedShares)) {
         throw new Error('Invalid saved recovery trade.');
       }
@@ -163,15 +166,16 @@ class MartingaleBTCBot extends TakerBot {
     const current = this.shadowEntries.find(e => e.windowStart === start);
     s.strategy = { ...STRATEGY };
     s.recovery = { ...choice, ...structuredClone(this.recovery),
-      nextRecoveryShares: this.recovery.step ? 100 * 2 ** this.recovery.step : null,
+      nextRecoveryShares: null,
       pendingMarks: this.shadowEntries.filter(e => !e.sizingOutcome && now >= e.windowEnd).length,
       markErrors: this.shadowEntries.filter(e => e.markLookupError && !e.sizingOutcome)
         .slice(0, 3).map(e => ({ entryId: e.id, error: e.markLookupError })),
       currentWindowRole: current?.recoveryRole || choice.role,
-      currentWindowShares: current?.requestedShares || choice.requestedShares };
+      currentWindowShares: current?.requestedShares || (choice.role === 'RECOVERY' ? null : choice.requestedShares),
+      outstandingLoss: Math.max(0, -this.recovery.netPnl), profitTarget: 10 };
     s.shadowSizing = { ...s.shadowSizing, currentShares: s.recovery.currentWindowShares };
     s.sizingByAsset.BTC = { ...s.sizingByAsset.BTC, currentShares: s.recovery.currentWindowShares,
-      maxShares: 800, maxRecoverySteps: 3 };
+      baseShares: 50, maxShares: null, maxRecoverySteps: null };
     return s;
   }
 }

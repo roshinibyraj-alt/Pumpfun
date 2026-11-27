@@ -52,9 +52,9 @@
   <section class="panel" style="margin:12px 0;border-color:var(--yellow)">
     <div class="label">Current sizing · next qualifying buy</div>
     <div id="currentShares" style="font:900 clamp(44px,14vw,72px)/1.15 var(--mono);color:var(--yellow)">—</div>
-    <div class="model-note" id="sizingNote">100 base · recovery 200 / 400 / 800 · maximum three recovery steps</div>
+    <div class="model-note" id="sizingNote">50-share base · recover losses + $10 net · sized from executable asks and fees</div>
     <div id="recoveryState" style="font-weight:800;margin-top:12px">BASE</div>
-    <div class="model-note" id="recoveryDetails">Base trading continues during recovery pauses and unclear results.</div>
+    <div class="model-note" id="recoveryDetails">Recovery is eligible next window; unknown results allow 50-share base trading.</div>
   </section>
   <section class="panel" style="margin-top:12px">
     <div class="section-title"><h2>Taker buy orders</h2><span id="restingCount">0 entries</span></div>
@@ -70,12 +70,12 @@
     </div>
     <div class="bar"><i id="probBar" style="width:50%"></i></div>
     <div class="model-note" id="modelDecision">At window open, use the latest completed-minute score. Shadow tiers also evaluate fresh scores during the window.</div>
-    <div class="model-note" id="entryRule">No flips, recovery sizing, take-profit, or stop-loss. Open shares go to official resolution.</div>
+    <div class="model-note" id="entryRule">No flips, take-profit, or stop-loss. Open shares go to official resolution.</div>
   </section>
   <div class="section-title"><h2>58% performance</h2><span>Official settlement P&amp;L · demo only</span></div>
   <section class="panel">
     <div class="shadow-grid" id="shadowTiers"><div class="empty">Waiting for shadow statistics.</div></div>
-    <p class="model-note">One taker entry per window on a fresh &gt;58% signal after 45 seconds. Base 100 shares; recovery up to 800. Filled shares stay held to resolution; midpoint guesses affect sizing only.</p>
+    <p class="model-note">One taker entry per window on a fresh &gt;58% signal after 45 seconds. Base 50 shares; recovery targets cycle losses plus $10 net. Filled shares stay held to resolution; midpoint guesses affect sizing only.</p>
     <div class="list" id="shadowEntries"><div class="empty">No shadow entries yet.</div></div>
   </section>
   <section class="grid two">
@@ -97,7 +97,7 @@
     <h2>BTC FreqAI · 58% only</h2>
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Each completed minute is labeled with the 5-minute window containing its close, so the model score remains aligned with the active window as new one-minute candles close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
     <p>After 45 seconds, a fresh current-window score strictly above 58% immediately requests the displayed size at available asks. The existing prediction model remains unchanged. No price offset or Binance fallback.</p>
-    <p>Recovery: 100 → 200 → 400 → 800. After a ladder loss, the next full window remains base-sized before another recovery attempt. Unknown results also keep base trading at 100. Intervening base losses do not advance or postpone the existing ladder; a base win resets it. Any eligible win or an 800-share recovery loss resets to 100. No parallel recovery ladders.</p>
+    <p>Base: 50 shares. After a loss, the next eligible window targets all outstanding recovery-cycle losses plus $10 net profit. Size is the smallest whole-share visible-ask sweep whose $1 winning payout covers purchase cost, market fees and that target. Reset to 50 when the cycle reaches +$10. No fixed doubling or three-step ladder. An unclear recovery result allows 50-share base trading; these wins and losses count toward the same cycle. Recovery waits if cash or visible depth cannot fund the full target. Large recovery sizes can exhaust paper capital; profit is not guaranteed.</p>
     <p>Only after the traded window ends, a fresh midpoint strictly above $0.98 predicts a win and strictly below $0.02 predicts a loss. Other marks remain unknown; pending books continue to be checked. Empty, crossed or stale books are not losses. Official settlement can confirm an unclear result. Each trade affects sizing once; mark guesses never create realized profit, release cash or sell shares.</p>
     <p>One executed entry per window. Sweep fresh visible asks from cheapest upward and show the actual average entry. Insufficient depth results in a partial fill, with the unfilled remainder cancelled immediately. Nothing rests or rolls into the next market; opposite signals do not sell or add entries.</p>
     <p>Taker fees are included in cost and P&amp;L: shares × market fee rate × price × (1 − price), calculated for each fill. BTC 5-minute markets default to a 0.05 fee rate. No maker rebates are credited. Paper execution cannot guarantee live fills.</p>
@@ -160,12 +160,12 @@
   }
   function render(s){
     const a=s.shadowAccount||{}, f=s.freqai||{}, market=(s.markets||[]).find(m=>m.asset==='BTC'&&m.timeframe==='5m');
-    $('currentShares').textContent=shares(s.shadowSizing?.currentShares)+' shares';
+    $('currentShares').textContent=s.recovery?.currentWindowShares==null&&s.recovery?.role==='RECOVERY'?'Priced on signal':shares(s.shadowSizing?.currentShares)+' shares';
     const recovery=s.recovery||{};
-    $('sizingNote').textContent=(recovery.currentWindowRole||'BASE')+' size for this window · base 100 · maximum 800 shares';
-    $('recoveryState').textContent=String(recovery.phase||'BASE').replaceAll('_',' ')+' · recovery step '+Number(recovery.step||0)+'/3';
-    $('recoveryDetails').textContent=(recovery.reason||'Base trading at 100 shares.')+
-      (recovery.nextRecoveryShares?' Next recovery '+shares(recovery.nextRecoveryShares)+' shares, eligible from '+time(recovery.eligibleWindowStart)+'.':'')+
+    $('sizingNote').textContent=(recovery.currentWindowRole||'BASE')+' size for this window · base 50 · recovery sized at execution';
+    $('recoveryState').textContent=String(recovery.phase||'BASE').replaceAll('_',' ')+' · outstanding loss '+money(recovery.outstandingLoss||0)+' · cycle target +$10';
+    $('recoveryDetails').textContent=(recovery.reason||'Base trading at 50 shares.')+
+      (recovery.active?' Required winning net profit '+money(Math.max(0,10-Number(recovery.netPnl||0)))+'.':'')+
       ' Unclear marks: '+Number(recovery.pendingMarks||0)+'.'+
       ((recovery.markErrors||[]).length?' Mark lookup unavailable; base trading continues.':'');
     const orders=(s.shadowTakerOrders||[]);
@@ -184,7 +184,7 @@
     const opening=f.openingDecision;
     $('entryRule').textContent=opening
       ? `Window entry decision: ${opening.side||'NO ENTRY'} · ${esc(opening.reason||'')}`
-      : 'No flips, recovery sizing, take-profit, or stop-loss. Open shares go to official resolution.';
+      : 'No flips, take-profit, or stop-loss. Open shares go to official resolution.';
     $('modelStatus').textContent=String(f.status||'WAITING').replace(/_/g,' ');
     $('modelStatus').className='badge '+(f.status==='READY'?'':'warn');
     $('modelNote').textContent=f.lastError?`Model worker: ${f.lastError}`:(p?`Latest score from ${esc(p.model||'FreqAI')} · 1-minute candle ${time(p.candleStart)}`:'FreqAI is training or waiting for a 1-minute score.');

@@ -1,6 +1,6 @@
 'use strict';
 const PreviousBot = require('./freqai-open-entry-bot');
-const { planTakerBuy } = require('./taker-fill');
+const { planTakerBuy, planRecoveryBuy } = require('./taker-fill');
 const { currentWindowPrediction, normalizedScores } = PreviousBot._test;
 const STRATEGY = Object.freeze({
   ...PreviousBot.STRATEGY,
@@ -45,9 +45,14 @@ class FreqAITakerBTCBot extends PreviousBot {
     const marketId = String(m.id || m.slug), windowStart = Number(m.start);
     if (this.shadowEntries.some(e => e.marketId === marketId && e.windowStart === windowStart)) return;
     const sizing = this.entrySizing(record, now);
-    const requestedShares = sizing.requestedShares;
-    const fill = planTakerBuy(record, p.side, now, this.availablePaperCash(), requestedShares);
-    if (!fill) return;
+    const fill = sizing.targetNetProfit > 0
+      ? planRecoveryBuy(record, p.side, now, this.availablePaperCash(), sizing.targetNetProfit)
+      : planTakerBuy(record, p.side, now, this.availablePaperCash(), sizing.requestedShares);
+    if (!fill) {
+      if (sizing.targetNetProfit > 0) this.statusReason = 'Recovery waiting: insufficient fresh executable depth or available cash to recover losses plus $10 after fees.';
+      return;
+    }
+    const requestedShares = fill.requestedShares || sizing.requestedShares;
     const entry = {
       ...fill, id: `shadow-58-${++this.shadowSequence}`, thresholdPct: 58,
       marketId, marketSlug: m.slug, marketTitle: m.title, tokenId: String(m.tokens[p.side]),

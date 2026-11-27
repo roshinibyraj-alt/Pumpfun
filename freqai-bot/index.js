@@ -56,7 +56,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- >58% FreqAI; base 100, recovery 200/400/800 with intervening base windows; mark-based sizing, official-settlement P&L; no live orders.');
+  console.log('MODE: DEMO -- >58% FreqAI; base 50, next-window loss recovery plus $10 using ask depth and fees; mark-based sizing, official-settlement P&L; no live orders.');
 
   let stopping = false;
   const shutdown = async () => {

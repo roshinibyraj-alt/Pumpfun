@@ -1,84 +1,52 @@
 'use strict';
 const WINDOW_MS = 300000;
-const newState = () => ({ version: 1, step: 0, cycleSequence: 0, cycleId: null,
-  originWindowStart: null, latestAttemptWindowStart: null, eligibleWindowStart: 0,
-  awaitingEntryId: null, ignoreThroughWindowStart: -1, lastDecision: null });
+const BASE_SHARES = 50, PROFIT_TARGET = 10;
+const newState = () => ({ version: 2, active: false, netPnl: 0, awaitingEntryId: null,
+  eligibleWindowStart: 0, lastDecision: null });
 
 function validateState(s, entries) {
-  if (!s || s.version !== 1 || !Number.isInteger(s.step) || s.step < 0 || s.step > 3
-    || !Number.isInteger(s.cycleSequence) || s.cycleSequence < 0
-    || !Number.isFinite(s.eligibleWindowStart) || !Number.isFinite(s.ignoreThroughWindowStart)
-    || (s.step > 0 && (!Number.isInteger(s.cycleId) || s.cycleId < 1
-      || s.cycleId > s.cycleSequence || !Number.isFinite(s.originWindowStart)))
-    || (s.step === 0 && (s.cycleId !== null || s.awaitingEntryId !== null))
+  if (!s || s.version !== 2 || typeof s.active !== 'boolean' || !Number.isFinite(s.netPnl)
+    || (!s.active && s.netPnl !== 0) || (s.active && s.netPnl >= PROFIT_TARGET)
+    || !Number.isFinite(s.eligibleWindowStart)
     || (s.awaitingEntryId && !entries.some(e => e.id === s.awaitingEntryId
-      && e.recoveryCycleId === s.cycleId && !e.sizingOutcome))) {
-    throw new Error('Invalid saved martingale state; refusing to silently reset recovery.');
+      && e.recoveryRole === 'RECOVERY' && !e.sizingOutcome))) {
+    throw new Error('Invalid saved recovery state; refusing to silently reset recovery.');
   }
   return structuredClone(s);
 }
-
 function outcomeForMid(mid) {
   if (mid == null || !Number.isFinite(mid) || mid < 0 || mid > 1) return null;
   return mid > .98 ? 'WIN' : mid < .02 ? 'LOSS' : null;
 }
-
 function plan(s, windowStart) {
-  const ready = s.step > 0 && !s.awaitingEntryId && windowStart >= s.eligibleWindowStart;
-  return { requestedShares: ready ? 100 * 2 ** s.step : 100,
-    role: ready ? 'RECOVERY' : 'BASE', step: ready ? s.step : 0, cycleId: s.cycleId,
-    phase: !s.step ? 'BASE' : s.awaitingEntryId ? 'WAITING_RESULT' : ready ? 'RECOVERY_READY' : 'COOLDOWN',
-    reason: !s.step ? 'Base trading at 100 shares.'
-      : s.awaitingEntryId ? 'Recovery result is unclear; base trading continues at 100 shares.'
-      : ready ? `Recovery ${s.step}/3 ready: ${100 * 2 ** s.step} shares.`
-      : 'One intervening window before recovery; base trading continues at 100 shares.' };
+  const ready = s.active && !s.awaitingEntryId && windowStart >= s.eligibleWindowStart;
+  return { requestedShares: BASE_SHARES, role: ready ? 'RECOVERY' : 'BASE',
+    targetNetProfit: ready ? PROFIT_TARGET - s.netPnl : 0,
+    phase: !s.active ? 'BASE' : s.awaitingEntryId ? 'WAITING_RESULT' : 'RECOVERY_READY',
+    reason: !s.active ? 'Base trading at 50 shares.'
+      : s.awaitingEntryId ? 'Recovery result unclear; 50-share base trading continues.'
+      : `Recover $${Math.max(0, -s.netPnl).toFixed(2)} outstanding loss plus the remaining $10 cycle target; size uses actual ask depth and fees.` };
 }
-
 function recordAttempt(s, entry, choice) {
-  Object.assign(entry, { recoveryRole: choice.role, recoveryStep: choice.step,
-    recoveryCycleId: choice.cycleId });
-  if (choice.role === 'RECOVERY') {
-    s.awaitingEntryId = entry.id;
-    s.latestAttemptWindowStart = entry.windowStart;
-  }
+  Object.assign(entry, { recoveryRole: choice.role, recoveryTargetNetProfit: choice.targetNetProfit || 0 });
+  if (choice.role === 'RECOVERY') s.awaitingEntryId = entry.id;
 }
-
 function applyOutcome(s, entry, outcome, source, now) {
   if (entry.sizingOutcome || !['WIN', 'LOSS'].includes(outcome) || now < entry.windowEnd) return false;
-  Object.assign(entry, { sizingOutcome: outcome, sizingSource: source, sizingDecidedAt: now });
-  const staleRecovery = entry.recoveryRole === 'RECOVERY'
-    && (entry.recoveryCycleId !== s.cycleId || s.awaitingEntryId !== entry.id);
-  if (staleRecovery || entry.windowStart <= s.ignoreThroughWindowStart
-    || (s.step > 0 && entry.windowStart < s.originWindowStart)) {
-    entry.sizingEffect = 'OLD_CYCLE_NO_CHANGE'; return true;
-  }
-  const reset = reason => {
-    s.ignoreThroughWindowStart = Math.max(s.ignoreThroughWindowStart,
-      entry.windowStart, s.latestAttemptWindowStart ?? -1);
-    Object.assign(s, { step: 0, cycleId: null, awaitingEntryId: null,
-      originWindowStart: null, latestAttemptWindowStart: null, eligibleWindowStart: 0 });
-    entry.sizingEffect = reason;
-  };
-  if (outcome === 'WIN') reset('WIN_RESET_TO_100');
-  else if (entry.recoveryRole === 'RECOVERY') {
-    if (entry.recoveryStep === 3) reset('MAXIMUM_LOSS_RESET_TO_100');
-    else {
-      s.step = entry.recoveryStep + 1;
-      s.awaitingEntryId = null;
-      s.eligibleWindowStart = entry.windowEnd + WINDOW_MS;
-      entry.sizingEffect = 'ADVANCE_AFTER_ONE_BASE_WINDOW';
-    }
-  } else if (s.step > 0) {
-    // A base loss in the pause never doubles again or starts a parallel chain.
-    entry.sizingEffect = 'INTERVENING_BASE_LOSS_NO_CHANGE';
-  } else {
-    s.cycleId = ++s.cycleSequence; s.step = 1;
-    s.originWindowStart = entry.windowStart;
-    s.latestAttemptWindowStart = entry.windowStart;
-    s.eligibleWindowStart = entry.windowEnd + WINDOW_MS;
-    entry.sizingEffect = 'START_RECOVERY_AFTER_ONE_BASE_WINDOW';
-  }
+  const pnl = (outcome === 'WIN' ? entry.shares : 0) - entry.totalCost - entry.fees;
+  if (!Number.isFinite(pnl)) throw new Error('Cannot size recovery from invalid entry costs.');
+  Object.assign(entry, { sizingOutcome: outcome, sizingSource: source, sizingDecidedAt: now, sizingNetPnl: pnl });
+  if (s.awaitingEntryId === entry.id) s.awaitingEntryId = null;
+  if (s.active || pnl < 0) {
+    s.active = true;
+    s.netPnl += pnl;
+    s.eligibleWindowStart = Math.max(s.eligibleWindowStart, entry.windowEnd);
+    if (s.netPnl >= PROFIT_TARGET - 1e-8) {
+      s.active = false; s.netPnl = 0;
+      entry.sizingEffect = 'RECOVERED_PLUS_10_RESET_TO_50';
+    } else entry.sizingEffect = 'RECOVER_LOSSES_PLUS_10_NEXT_WINDOW';
+  } else entry.sizingEffect = 'BASE_WIN_STAY_50';
   s.lastDecision = { entryId: entry.id, outcome, source, at: now, effect: entry.sizingEffect };
   return true;
 }
-module.exports = { WINDOW_MS, newState, validateState, outcomeForMid, plan, recordAttempt, applyOutcome };
+module.exports = { WINDOW_MS, BASE_SHARES, PROFIT_TARGET, newState, validateState, outcomeForMid, plan, recordAttempt, applyOutcome };
