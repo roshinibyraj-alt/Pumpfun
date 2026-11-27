@@ -33,10 +33,14 @@ function recordAttempt(s, entry, choice) {
 }
 function applyOutcome(s, entry, outcome, source, now) {
   const paperExit = (source === 'PAPER_TP' && outcome === 'WIN')
-    || (source === 'PAPER_SL' && outcome === 'LOSS');
+    || (source === 'PAPER_SL' && outcome === 'LOSS') || source === 'TAKER_SL';
   if (entry.sizingOutcome || !['WIN', 'LOSS'].includes(outcome)
     || now < entry.entryAt || (!paperExit && now < entry.windowEnd)) return false;
-  const pnl = (outcome === 'WIN' ? entry.shares : 0) - entry.totalCost - entry.fees;
+  if (source === 'TAKER_SL' && (!['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(entry.status)
+    || !Number.isFinite(entry.realizedPnl))) return false;
+  const pnl = ['TAKER_SL', 'PAPER_TP', 'OFFICIAL_SETTLEMENT'].includes(source)
+    && Number.isFinite(entry.realizedPnl) ? entry.realizedPnl
+    : (outcome === 'WIN' ? entry.shares : 0) - entry.totalCost - entry.fees;
   if (!Number.isFinite(pnl)) throw new Error('Cannot size recovery from invalid entry costs.');
   Object.assign(entry, { sizingOutcome: outcome, sizingSource: source, sizingDecidedAt: now, sizingNetPnl: pnl });
   if (s.awaitingEntryId === entry.id) s.awaitingEntryId = null;

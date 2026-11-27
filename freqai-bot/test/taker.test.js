@@ -150,6 +150,6 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     const output = elements.get('auditTrail') || elements.get('restingOrders');
     assert.match(output.innerHTML, /100 \/ 100 filled/);
     assert.match(output.innerHTML, /fees \$1\.20/);
-    assert.match(elements.get('modelDecision').textContent, /immediately buys 100/);
+    assert.match(elements.get('modelDecision').textContent, /requests 100 shares/);
   });
 }

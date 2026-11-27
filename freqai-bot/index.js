@@ -59,7 +59,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000, rebound);
 
-  console.log('MODE: DEMO -- >58% FreqAI; base 50, next-window recovery plus $10; best-bid TP >=0.99 pays modeled $1/share, best bid <=0.01 pays modeled $0; official resolution fallback; no live orders.');
+  console.log('MODE: DEMO -- >58% FreqAI; base 50, next-window recovery plus $10; TP >=0.99 pays modeled $1/share; entry-tier SL uses realistic bid depth, latency and fees. Unsold remainder awaits bids or official resolution; no live orders.');
 
   let stopping = false;
   const shutdown = async () => {

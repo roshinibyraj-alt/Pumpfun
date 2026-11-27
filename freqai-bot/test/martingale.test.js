@@ -9,7 +9,7 @@ const { restoreOrResetLedger } = require('../index');
 const W = 300000, START = 1800000000000;
 function fixture(capital = 3000) {
   let now, raw, reply;
-  const bot = new Bot({ initialCapital: capital, now: () => now, marketData: {},
+  const bot = new Bot({ initialCapital: capital, now: () => now, marketData: {}, paperExecutionDelayMs: 0,
     freqaiWorker: { snapshot: () => ({ status: 'READY', lastPrediction: raw }) },
     getOrderBook: async () => reply });
   const r = bot.records.get('BTC:5m');
@@ -17,7 +17,7 @@ function fixture(capital = 3000) {
     for (const side of ['UP','DOWN']) r.quotes[side] = { bestBid:bid,bestAsk:ask,
       mid:bid==null||ask==null?null:(bid+ask)/2, updatedAt:now,
       tokenId:r.market.tokens[side],marketId:r.market.id,windowStart:r.market.start,
-      asks:ask==null?[]:[{price:ask,size:100000}] };
+      asks:ask==null?[]:[{price:ask,size:100000}],bids:bid==null?[]:[{price:bid,size:100000}] };
   }
   function open(n) {
     now=START+n*W+60000; r.marketStatus='OPEN';
@@ -30,7 +30,8 @@ function fixture(capital = 3000) {
   return {bot,r,open,quote,now:()=>now,time:t=>{now=t;},score:p=>{raw.pUp=p;raw.pDown=1-p;raw.candleCloseAt=now;raw.writtenAt=now;},
     reply:b=>{reply=b;},buy:()=>{bot.processSide(r,'UP',r.quotes.UP,1);return bot.shadowEntries[0];},
     end:(outcome='LOSS')=>{now=r.market.end; if(outcome==='LOSS')quote(0,.01);
-      else if(outcome==='WIN')quote(.99,1);else quote(.49,.51);bot.expireMarket(r,now);} };
+      else if(outcome==='WIN')quote(.99,1);else quote(.49,.51);bot.expireMarket(r,now);
+      if(outcome==='LOSS')bot.settleMarket(r.market.id,'DOWN',now);} };
 }
 test('50 base, next-window recovery covers cost and fees plus $10, then reset',()=>{
   const f=fixture(),base=f.buy();assert.equal(base.requestedShares,50);
@@ -80,11 +81,11 @@ test('insufficient cash or depth skips recovery rather than claiming target or p
   const h=fixture();h.r.quotes.UP.asks=[{price:.6,size:20}];
   assert.equal(h.buy().shares,20);assert.equal(h.bot.shadowEntries[0].cancelledShares,30);
 });
-test('paper SL pays once, and a later official result cannot pay or size it twice',()=>{
+test('official loss pays once, and a later conflicting result cannot size it twice',()=>{
   const f=fixture(),e=f.buy();f.end();const saved=structuredClone(f.bot.recovery);
   assert.ok(Math.abs(f.bot.shadowTotals[58].realizedPnl+30.6)<1e-8);
   f.bot.settleMarket('m0','UP',f.now());f.bot.settleMarket('m0','UP',f.now()+1);
-  assert.deepEqual(f.bot.recovery,saved);assert.equal(e.modeledPayout,true);
+  assert.deepEqual(f.bot.recovery,saved);assert.equal(e.modeledPayout,false);
   assert.ok(Math.abs(e.realizedPnl+30.6)<1e-8);
   assert.equal(f.bot.shadowTotals[58].resolved,1);
 });
@@ -143,8 +144,8 @@ test('dashboard renders target and size and keeps equity on top',async()=>{
   assert.equal(elements.get('currentShares').textContent,'Priced on signal');
   assert.match(elements.get('recoveryState').textContent,/outstanding loss \$30.60/);
   assert.match(elements.get('recoveryDetails').textContent,/\$40.60/);
-  assert.match(elements.get('shadowEntries').innerHTML,/PAPER SL/);
-  assert.match(elements.get('shadowEntries').innerHTML,/Modeled payout \$0\.000/);
+  assert.match(elements.get('shadowEntries').innerHTML,/RESOLVED · NET LOSS/);
+  assert.match(elements.get('shadowEntries').innerHTML,/Resolution payout \$0\.000/);
   assert.match(elements.get('entryRule').textContent,/modeled \$1\/share/);
   assert.ok(html.indexOf('id="equityChart"')<html.indexOf('<h2>Current BTC window</h2>'));
 });
