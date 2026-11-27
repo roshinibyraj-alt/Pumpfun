@@ -37,7 +37,9 @@
   <section class="panel" style="margin:12px 0;border-color:var(--yellow)">
     <div class="label">Current sizing · next qualifying buy</div>
     <div id="currentShares" style="font:900 clamp(44px,14vw,72px)/1.15 var(--mono);color:var(--yellow)">—</div>
-    <div class="model-note" id="sizingNote">Flat 100 shares per taker entry · no win/loss progression</div>
+    <div class="model-note" id="sizingNote">100 base · recovery 200 / 400 / 800 · maximum three recovery steps</div>
+    <div id="recoveryState" style="font-weight:800;margin-top:12px">BASE</div>
+    <div class="model-note" id="recoveryDetails">Base trading continues during recovery pauses and unclear results.</div>
   </section>
   <section class="panel" style="margin-top:12px">
     <div class="section-title"><h2>Taker buy orders</h2><span id="restingCount">0 entries</span></div>
@@ -70,10 +72,10 @@
     <div class="model-note" id="modelDecision">At window open, use the latest completed-minute score. Shadow tiers also evaluate fresh scores during the window.</div>
     <div class="model-note" id="entryRule">No flips, recovery sizing, take-profit, or stop-loss. Open shares go to official resolution.</div>
   </section>
-  <div class="section-title"><h2>58% performance</h2><span>Fresh flat-size history · demo only</span></div>
+  <div class="section-title"><h2>58% performance</h2><span>Official settlement P&amp;L · demo only</span></div>
   <section class="panel">
     <div class="shadow-grid" id="shadowTiers"><div class="empty">Waiting for shadow statistics.</div></div>
-    <p class="model-note">Immediately buy 100 shares at available asks on a fresh &gt;58% signal after 45 seconds. One executed entry per window. Filled shares stay held to resolution.</p>
+    <p class="model-note">One taker entry per window on a fresh &gt;58% signal after 45 seconds. Base 100 shares; recovery up to 800. Filled shares stay held to resolution; midpoint guesses affect sizing only.</p>
     <div class="list" id="shadowEntries"><div class="empty">No shadow entries yet.</div></div>
   </section>
   <section class="grid two">
@@ -94,7 +96,9 @@
     <div class="label">Strategy details</div>
     <h2>BTC FreqAI · 58% only</h2>
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Each completed minute is labeled with the 5-minute window containing its close, so the model score remains aligned with the active window as new one-minute candles close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
-    <p>After 45 seconds, a fresh current-window score strictly above 58% immediately requests 100 shares at available asks. The existing prediction model remains unchanged. No price offset or Binance fallback.</p>
+    <p>After 45 seconds, a fresh current-window score strictly above 58% immediately requests the displayed size at available asks. The existing prediction model remains unchanged. No price offset or Binance fallback.</p>
+    <p>Recovery: 100 → 200 → 400 → 800. After a ladder loss, the next full window remains base-sized before another recovery attempt. Unknown results also keep base trading at 100. Intervening base losses do not advance or postpone the existing ladder; a base win resets it. Any eligible win or an 800-share recovery loss resets to 100. No parallel recovery ladders.</p>
+    <p>Only after the traded window ends, a fresh midpoint strictly above $0.98 predicts a win and strictly below $0.02 predicts a loss. Other marks remain unknown; pending books continue to be checked. Empty, crossed or stale books are not losses. Official settlement can confirm an unclear result. Each trade affects sizing once; mark guesses never create realized profit, release cash or sell shares.</p>
     <p>One executed entry per window. Sweep fresh visible asks from cheapest upward and show the actual average entry. Insufficient depth results in a partial fill, with the unfilled remainder cancelled immediately. Nothing rests or rolls into the next market; opposite signals do not sell or add entries.</p>
     <p>Taker fees are included in cost and P&amp;L: shares × market fee rate × price × (1 − price), calculated for each fill. BTC 5-minute markets default to a 0.05 fee rate. No maker rebates are credited. Paper execution cannot guarantee live fills.</p>
     <p>No take-profit, stop-loss or signal selling; hold filled shares to official resolution. No live orders are sent.</p>
@@ -152,16 +156,22 @@
     const closed=p.status==='RESOLVED_WIN'||p.status==='RESOLVED_LOSS';
     const pnl=closed?p.realizedPnl:p.status==='OPEN'?p.unrealizedPnl:null;
     const state=closed?(p.status==='RESOLVED_WIN'?'WIN':'LOSS'):p.status==='PENDING_RESOLUTION'?'PENDING RESOLUTION':p.status;
-    return `<div class="row ${closed?Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':'':p.status==='OPEN'?'pending':''}"><div class="row-title">&gt;${Number(p.thresholdPct)}% <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${state}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.shares)} shares · ${px(p.entryPrice)} avg · ${money(p.fees)} fees · score ${(Number(p.selectedProbability)*100).toFixed(1)}%</div><div class="row-pnl ${cls(pnl)}">${signed(pnl)}</div></div>`;
+    return `<div class="row ${closed?Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':'':p.status==='OPEN'?'pending':''}"><div class="row-title">&gt;${Number(p.thresholdPct)}% <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${state}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.shares)} shares · ${px(p.entryPrice)} avg · ${money(p.fees)} fees · score ${(Number(p.selectedProbability)*100).toFixed(1)}%<br>${esc(p.recoveryRole||'BASE')} ${p.recoveryStep?Number(p.recoveryStep)+'/3':''} · sizing result ${esc(p.sizingOutcome||'UNKNOWN')} · midpoint ${px(p.sizingMidpoint)} · ${esc(p.sizingSource||'awaiting clear end-of-window mark')}${p.sizingDisagreesWithSettlement?' · MARK DISAGREED; P&amp;L USES OFFICIAL RESULT':''}</div><div class="row-pnl ${cls(pnl)}">${signed(pnl)}</div></div>`;
   }
   function render(s){
     const a=s.shadowAccount||{}, f=s.freqai||{}, market=(s.markets||[]).find(m=>m.asset==='BTC'&&m.timeframe==='5m');
     $('currentShares').textContent=shares(s.shadowSizing?.currentShares)+' shares';
-    $('sizingNote').textContent='Flat 100 shares per taker entry · no increases after losses';
+    const recovery=s.recovery||{};
+    $('sizingNote').textContent=(recovery.currentWindowRole||'BASE')+' size for this window · base 100 · maximum 800 shares';
+    $('recoveryState').textContent=String(recovery.phase||'BASE').replaceAll('_',' ')+' · recovery step '+Number(recovery.step||0)+'/3';
+    $('recoveryDetails').textContent=(recovery.reason||'Base trading at 100 shares.')+
+      (recovery.nextRecoveryShares?' Next recovery '+shares(recovery.nextRecoveryShares)+' shares, eligible from '+time(recovery.eligibleWindowStart)+'.':'')+
+      ' Unclear marks: '+Number(recovery.pendingMarks||0)+'.'+
+      ((recovery.markErrors||[]).length?' Mark lookup unavailable; base trading continues.':'');
     const orders=(s.shadowTakerOrders||[]);
     $('restingCount').textContent=orders.length+' entries';
     $('reservedCash').textContent='Available '+money(s.takerOrderSummary?.availableCash)+' · no resting orders';
-    $('restingOrders').innerHTML=orders.length?orders.slice(0,8).map(o=>`<div class="row ${o.status==='FILLED'?'win':'pending'}"><div class="row-title"><span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))}</div><div class="row-detail">Average entry <b>${px(o.entryPrice)}</b> · signal ask ${px(o.signalAsk)} · ${(o.signalProbability*100).toFixed(1)}%<br>${shares(o.filledShares)} / 100 filled · ${shares(o.cancelledShares||0)} cancelled · fees ${money(o.fees)}<br>Executed ${time(o.filledAt)} · window ends ${time(o.windowEnd)}</div></div>`).join(''):'<div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div>';
+    $('restingOrders').innerHTML=orders.length?orders.slice(0,8).map(o=>`<div class="row ${o.status==='FILLED'?'win':'pending'}"><div class="row-title"><span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))} · ${esc(o.recoveryRole||'BASE')}</div><div class="row-detail">Average entry <b>${px(o.entryPrice)}</b> · signal ask ${px(o.signalAsk)} · ${(o.signalProbability*100).toFixed(1)}%<br>${shares(o.filledShares)} / ${shares(o.requestedShares)} filled · ${shares(o.cancelledShares||0)} cancelled · fees ${money(o.fees)}<br>Executed ${time(o.filledAt)} · window ends ${time(o.windowEnd)}<br>Sizing: ${esc(o.sizingOutcome||'UNKNOWN')} · midpoint ${px(o.sizingMidpoint)} · ${esc(o.sizingSource||'awaiting end-of-window mark')}</div></div>`).join(''):'<div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div>';
     drawEquity(s);
     $('equityLabel').textContent=num(a.equity)?'58% strategy · marked paper equity':'58% settled balance · live equity awaits marks / resolution';
     $('equity').textContent=money(a.equity??a.settledBalance);
@@ -185,7 +195,7 @@
     $('modelDecision').textContent=opening
       ? `${opening.side||'No trade'} at window open · ${num(opening.pUp)?`UP ${(opening.pUp*100).toFixed(1)}% / DOWN ${(opening.pDown*100).toFixed(1)}%`:'opening score unavailable'} · ${esc(opening.reason||'')}`
       : d?`Latest entry: ${d.side} at ${time(d.at)} · ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. No further entries this window.`:'At each window open: one 50-share buy only when a side is at least 51%. No flips.';
-    $('modelDecision').textContent='After 45 seconds: >58% immediately buys 100 shares at available asks, including taker fees.';
+    $('modelDecision').textContent='After 45 seconds: >58% immediately buys '+shares(s.shadowSizing?.currentShares||100)+' shares at available asks, including taker fees.';
     $('entryRule').textContent='One executed entry per window. No resting orders, signal selling, TP or SL. Filled shares go to resolution.';
     const tiers=s.shadowTiers||[];
     $('shadowTiers').innerHTML=tiers.map(t=>`<article class="shadow-card tier${Number(t.thresholdPct)}"><h3>Score &gt; ${Number(t.thresholdPct)}%</h3><div class="shadow-total ${cls(t.totalPnl)}">${signed(t.totalPnl)}</div><div class="shadow-small">Total P&amp;L · realized ${signed(t.realizedPnl)} · floating ${signed(t.openPnl)}<br>Entries ${Number(t.entries||0)} · resolved ${Number(t.resolved||0)} · W/L ${Number(t.wins||0)}/${Number(t.losses||0)}<br>Open ${Number(t.openPositions||0)} · pending ${Number(t.pendingResolution||0)} · fees ${money(t.fees)}</div></article>`).join('')||'<div class="empty">Waiting for shadow statistics.</div>';

@@ -1,0 +1,179 @@
+'use strict';
+const TakerBot = require('./freqai-taker-btc-bot');
+const sizing = require('./martingale-sizing');
+const STRATEGY = Object.freeze({
+  ...TakerBot.STRATEGY,
+  id: 'pumpfun-freqai58-taker-martingale3-base-between-v1',
+  name: 'BTC FreqAI 58% · capped recovery',
+  version: 'martingale3-base-between-v1',
+  entry: 'Fresh above-58% current-window signal after 45 seconds; one immediate taker entry per window.',
+  sizing: '100 base; recovery 200, 400, 800. Any eligible win or an 800-share loss resets to 100.',
+  cadence: 'One intervening base-size window after each recovery loss. Unclear results delay recovery only; 100-share base trading continues. Intervening base wins reset recovery; base losses do not create or advance another ladder.',
+  assessment: 'At window end, fresh held-side midpoint >0.98 predicts WIN; <0.02 predicts LOSS. Neutral, missing, crossed or stale marks stay unknown. Continue checking pending books; official settlement can establish the result.',
+  accounting: 'Mark guesses control sizing only. Official settlement alone changes realized P&L and releases capital. Each outcome affects sizing once.',
+});
+
+class MartingaleBTCBot extends TakerBot {
+  constructor(options = {}) {
+    super(options);
+    this.strategyId = STRATEGY.id; this.strategyDefinition = STRATEGY;
+    this.recovery = sizing.newState();
+    this.nextMarkPollAt = 0; this.recoveryTickInFlight = false;
+    this.getOrderBook = options.getOrderBook || (async tokenId => {
+      const r = await fetch(`https://clob.polymarket.com/book?token_id=${encodeURIComponent(tokenId)}`,
+        { signal: AbortSignal.timeout(2500) });
+      if (!r.ok) throw new Error(`CLOB book HTTP ${r.status}`);
+      return r.json();
+    });
+  }
+
+  entrySizing(record) { return sizing.plan(this.recovery, Number(record.market.start)); }
+  onEntryPlaced(entry, choice) { sizing.recordAttempt(this.recovery, entry, choice); }
+
+  decide(entry, outcome, source, now) {
+    if (!sizing.applyOutcome(this.recovery, entry, outcome, source, now)) return;
+    this.log(`${entry.side} sizing ${outcome} (${source}); ${entry.sizingEffect.replaceAll('_', ' ').toLowerCase()}.`, {
+      type: 'SIZING_OUTCOME', asset: 'BTC', timeframe: '5m', side: entry.side, now,
+    });
+    this.scheduleLedgerSave();
+  }
+
+  saveMark(entry, bid, ask, at, now, source) {
+    if (bid == null || ask == null || !Number.isFinite(bid) || !Number.isFinite(ask)
+      || bid < 0 || ask > 1 || bid > ask || !Number.isFinite(at)
+      || at > now + 1000 || now - at > 5000) return;
+    if (entry.sizingMarkAt != null && at < entry.sizingMarkAt) return;
+    entry.sizingMidpoint = (bid + ask) / 2;
+    entry.sizingMarkAt = at; entry.sizingMarkSource = source;
+    if (now >= entry.windowEnd) {
+      this.decide(entry, sizing.outcomeForMid(entry.sizingMidpoint), 'MARK', now);
+    }
+  }
+
+  observeRecordMarks(record, now) {
+    const m = record?.market;
+    if (!m) return;
+    for (const e of this.shadowEntries) {
+      if (e.sizingOutcome || e.marketId !== String(m.id || m.slug)
+        || e.windowStart !== Number(m.start)) continue;
+      const q = record.quotes?.[e.side];
+      if (!q || (q.tokenId && q.tokenId !== e.tokenId)
+        || (q.marketId && q.marketId !== e.marketId)
+        || (q.windowStart != null && Number(q.windowStart) !== e.windowStart)) continue;
+      this.saveMark(e, q.bestBid == null ? null : Number(q.bestBid),
+        q.bestAsk == null ? null : Number(q.bestAsk),
+        q.updatedAt == null ? NaN : Number(q.updatedAt), now, 'CURRENT_WINDOW_CLOB');
+    }
+  }
+
+  processShadowEntries(record, ...args) {
+    this.observeRecordMarks(record, this.now());
+    super.processShadowEntries(record, ...args);
+  }
+
+  expireMarket(record, now) {
+    this.observeRecordMarks(record, now);
+    // A fresh last quote remains usable at the boundary even if the record's
+    // order book is about to be cleared for the next market.
+    for (const e of this.shadowEntries) {
+      if (!e.sizingOutcome && now >= e.windowEnd && e.sizingMarkAt != null
+        && now - e.sizingMarkAt <= 5000) {
+        this.decide(e, sizing.outcomeForMid(e.sizingMidpoint), 'MARK', now);
+      }
+    }
+    super.expireMarket(record, now);
+  }
+
+  async pollUnclearMarks(now) {
+    if (now < this.nextMarkPollAt) return;
+    this.nextMarkPollAt = now + 5000;
+    const pending = this.shadowEntries.filter(e => !e.sizingOutcome && now >= e.windowEnd
+      && ['OPEN', 'PENDING_RESOLUTION'].includes(e.status))
+      .sort((a, b) => (a.id === this.recovery.awaitingEntryId ? -1
+        : b.id === this.recovery.awaitingEntryId ? 1 : (a.markPolledAt || 0) - (b.markPolledAt || 0)));
+    await Promise.all(pending.slice(0, 2).map(async e => {
+      e.markPolledAt = now;
+      try {
+        const book = await this.getOrderBook(e.tokenId);
+        if (book.asset_id && String(book.asset_id) !== e.tokenId) throw new Error('Book token does not match the held position.');
+        const prices = rows => (rows || []).filter(l => Number(l.size) > 0).map(l => Number(l.price))
+          .filter(p => Number.isFinite(p) && p >= 0 && p <= 1);
+        const bids = prices(book.bids), asks = prices(book.asks);
+        let at = Number(book.timestamp);
+        if (at > 0 && at < 1e12) at *= 1000;
+        this.saveMark(e, bids.length ? Math.max(...bids) : null,
+          asks.length ? Math.min(...asks) : null, at, this.now(), 'PENDING_WINDOW_CLOB');
+        e.markLookupError = null;
+      } catch (error) { e.markLookupError = String(error.message || error).slice(0, 200); }
+    }));
+    if (pending.length) this.scheduleLedgerSave();
+  }
+
+  async tick(now = this.now()) {
+    if (!this.running || this.recoveryTickInFlight) return;
+    this.recoveryTickInFlight = true;
+    try {
+      for (const r of this.records.values()) this.observeRecordMarks(r, now);
+      await super.tick(now);
+      await this.pollUnclearMarks(this.now());
+    } finally { this.recoveryTickInFlight = false; }
+  }
+
+  settleMarket(marketId, winner, now) {
+    super.settleMarket(marketId, winner, now);
+    for (const e of this.shadowEntries) {
+      if (e.marketId !== marketId || !['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(e.status)) continue;
+      const official = e.side === winner ? 'WIN' : 'LOSS';
+      e.sizingOfficialOutcome = official;
+      e.sizingDisagreesWithSettlement = !!e.sizingOutcome && e.sizingOutcome !== official;
+      if (!e.sizingOutcome) this.decide(e, official, 'OFFICIAL_SETTLEMENT', now);
+    }
+    this.scheduleLedgerSave();
+  }
+
+  exportLedger() {
+    const ledger = super.exportLedger();
+    ledger.snapshot.recovery = structuredClone(this.recovery);
+    return ledger;
+  }
+
+  restoreLedger(ledger) {
+    const s = ledger?.snapshot || ledger;
+    for (const e of s?.shadowEntries || []) {
+      if (!['BASE', 'RECOVERY'].includes(e.recoveryRole)
+        || !Number.isInteger(e.recoveryStep) || e.recoveryStep < 0 || e.recoveryStep > 3
+        || (e.recoveryRole === 'BASE') !== (e.recoveryStep === 0)
+        || e.requestedShares !== 100 * 2 ** e.recoveryStep
+        || !(e.shares > 0 && e.shares <= e.requestedShares)) {
+        throw new Error('Invalid saved recovery trade.');
+      }
+    }
+    const recovery = sizing.validateState(s?.recovery, s?.shadowEntries || []);
+    super.restoreLedger(ledger);
+    this.recovery = recovery;
+    this.scheduleLedgerSave();
+  }
+
+  snapshot() {
+    const s = super.snapshot(), now = this.now();
+    const m = this.records.get('BTC:5m')?.market;
+    const start = Number(m && now >= m.start && now < m.end
+      ? m.start : Math.floor(now / sizing.WINDOW_MS) * sizing.WINDOW_MS);
+    const choice = sizing.plan(this.recovery, start);
+    const current = this.shadowEntries.find(e => e.windowStart === start);
+    s.strategy = { ...STRATEGY };
+    s.recovery = { ...choice, ...structuredClone(this.recovery),
+      nextRecoveryShares: this.recovery.step ? 100 * 2 ** this.recovery.step : null,
+      pendingMarks: this.shadowEntries.filter(e => !e.sizingOutcome && now >= e.windowEnd).length,
+      markErrors: this.shadowEntries.filter(e => e.markLookupError && !e.sizingOutcome)
+        .slice(0, 3).map(e => ({ entryId: e.id, error: e.markLookupError })),
+      currentWindowRole: current?.recoveryRole || choice.role,
+      currentWindowShares: current?.requestedShares || choice.requestedShares };
+    s.shadowSizing = { ...s.shadowSizing, currentShares: s.recovery.currentWindowShares };
+    s.sizingByAsset.BTC = { ...s.sizingByAsset.BTC, currentShares: s.recovery.currentWindowShares,
+      maxShares: 800, maxRecoverySteps: 3 };
+    return s;
+  }
+}
+MartingaleBTCBot.STRATEGY = STRATEGY;
+module.exports = MartingaleBTCBot;

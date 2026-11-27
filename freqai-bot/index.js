@@ -27,7 +27,7 @@ async function main() {
     return;
   }
 
-  const Bot = require('./freqai-taker-btc-bot');
+  const Bot = require('./freqai-martingale-btc-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
@@ -56,7 +56,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000);
 
-  console.log('MODE: DEMO -- >58% FreqAI after 45 seconds; immediate 100-share taker buys with fees; no flips or live orders.');
+  console.log('MODE: DEMO -- >58% FreqAI; base 100, recovery 200/400/800 with intervening base windows; mark-based sizing, official-settlement P&L; no live orders.');
 
   let stopping = false;
   const shutdown = async () => {

@@ -1,7 +1,8 @@
 'use strict';
 
 // https://docs.polymarket.com/trading/fees — fee amounts rounded to 5 decimals.
-function planTakerBuy(record, side, now, cash) {
+function planTakerBuy(record, side, now, cash, requestedShares = 100) {
+  if (![100, 200, 400, 800].includes(requestedShares)) throw new Error('Invalid requested taker size.');
   const m = record.market, q = record.quotes?.[side];
   if (!m || record.marketStatus !== 'OPEN' || now < Number(m.start) + 45000
     || now >= Number(m.end) || !q || q.updatedAt == null
@@ -12,7 +13,7 @@ function planTakerBuy(record, side, now, cash) {
     || (q.windowStart != null && Number(q.windowStart) !== Number(m.start))) return null;
   const feeRate = m.feesEnabled === false ? 0 : Number(m.feeSchedule?.rate ?? 0.05);
   if (!Number.isFinite(feeRate) || feeRate < 0 || feeRate >= 1) return null;
-  let remaining = 100, cost = 0, fees = 0;
+  let remaining = requestedShares, cost = 0, fees = 0;
   const fills = [];
   for (const level of [...q.asks].sort((a, b) => Number(a.price) - Number(b.price))) {
     const price = Number(level.price), size = Number(level.size);
@@ -24,8 +25,8 @@ function planTakerBuy(record, side, now, cash) {
     if (remaining <= 1e-8) break;
   }
   if (!fills.length || !Number.isFinite(cash) || cost + fees > cash + 1e-8) return null;
-  return { shares: 100 - remaining, totalCost: cost, fees, fills,
-    entryPrice: cost / (100 - remaining), unfilledShares: remaining,
+  return { shares: requestedShares - remaining, totalCost: cost, fees, fills,
+    entryPrice: cost / (requestedShares - remaining), unfilledShares: remaining,
     status: remaining > 1e-8 ? 'PARTIALLY_FILLED' : 'FILLED',
     markBid: q.bestBid == null ? null : Number(q.bestBid), markUpdatedAt: q.updatedAt,
     signalAsk: q.bestAsk, feeRate };

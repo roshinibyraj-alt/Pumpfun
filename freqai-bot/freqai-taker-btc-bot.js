@@ -33,6 +33,9 @@ class FreqAITakerBTCBot extends PreviousBot {
     return this.initialCapital + this.shadowTotals[58].realizedPnl - committed;
   }
 
+  entrySizing() { return { requestedShares: 100 }; }
+  onEntryPlaced() {}
+
   processShadowEntries(record) {
     const now = this.now(), m = record.market;
     const raw = this.freqaiWorker?.snapshot?.()?.lastPrediction;
@@ -41,14 +44,16 @@ class FreqAITakerBTCBot extends PreviousBot {
     if (!p || !(p.probability > 0.58)) return;
     const marketId = String(m.id || m.slug), windowStart = Number(m.start);
     if (this.shadowEntries.some(e => e.marketId === marketId && e.windowStart === windowStart)) return;
-    const fill = planTakerBuy(record, p.side, now, this.availablePaperCash());
+    const sizing = this.entrySizing(record, now);
+    const requestedShares = sizing.requestedShares;
+    const fill = planTakerBuy(record, p.side, now, this.availablePaperCash(), requestedShares);
     if (!fill) return;
     const entry = {
       ...fill, id: `shadow-58-${++this.shadowSequence}`, thresholdPct: 58,
       marketId, marketSlug: m.slug, marketTitle: m.title, tokenId: String(m.tokens[p.side]),
       asset: 'BTC', timeframe: '5m', side: p.side, windowStart, windowEnd: Number(m.end),
       entryAt: now, placedAt: now, filledAt: now, execution: 'TAKER', action: 'BUY_TAKER',
-      orderStatus: fill.status, status: 'OPEN', requestedShares: 100,
+      orderStatus: fill.status, status: 'OPEN', requestedShares,
       originalShares: fill.shares, filledShares: fill.shares, remainingShares: 0,
       cancelledShares: fill.unfilledShares, reservedCash: 0,
       signalProbability: p.probability, signalSource: 'FREQAI',
@@ -60,14 +65,15 @@ class FreqAITakerBTCBot extends PreviousBot {
       fillRule: STRATEGY.fill,
     };
     this.shadowEntries.unshift(entry);
+    this.onEntryPlaced(entry, sizing);
     this.shadowTotals[58].entries += 1;
     this.shadowTotals[58].fees += fill.fees;
     this.lastDecision = { ...p, at: now, source: 'FREQAI', filledShares: fill.shares,
       fillPrice: fill.entryPrice, windowStart };
     record.triggeredSide = p.side;
     Object.assign(record.sideStates[p.side], { entryConsumed: true,
-      orderId: entry.id, orderStatus: fill.status, requestedShares: 100, filledShares: fill.shares,
-      reason: `Immediate taker: ${fill.shares}/100 at $${fill.entryPrice.toFixed(4)}; fees $${fill.fees.toFixed(5)}. No resting remainder.` });
+      orderId: entry.id, orderStatus: fill.status, requestedShares, filledShares: fill.shares,
+      reason: `Immediate taker: ${fill.shares}/${requestedShares} at $${fill.entryPrice.toFixed(4)}; fees $${fill.fees.toFixed(5)}. No resting remainder.` });
     this.log(record.sideStates[p.side].reason, {
       type: 'BUY_TAKER', asset: 'BTC', timeframe: '5m', side: p.side, now,
     });
