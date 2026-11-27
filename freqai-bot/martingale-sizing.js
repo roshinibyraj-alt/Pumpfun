@@ -14,9 +14,9 @@ function validateState(s, entries) {
   }
   return structuredClone(s);
 }
-function outcomeForMid(mid) {
-  if (mid == null || !Number.isFinite(mid) || mid < 0 || mid > 1) return null;
-  return mid > .98 ? 'WIN' : mid < .02 ? 'LOSS' : null;
+function outcomeForBid(bid) {
+  if (bid == null || !Number.isFinite(bid) || bid < 0 || bid > 1) return null;
+  return bid >= .99 ? 'WIN' : bid === 0 ? 'LOSS' : null;
 }
 function plan(s, windowStart) {
   const ready = s.active && !s.awaitingEntryId && windowStart >= s.eligibleWindowStart;
@@ -32,7 +32,10 @@ function recordAttempt(s, entry, choice) {
   if (choice.role === 'RECOVERY') s.awaitingEntryId = entry.id;
 }
 function applyOutcome(s, entry, outcome, source, now) {
-  if (entry.sizingOutcome || !['WIN', 'LOSS'].includes(outcome) || now < entry.windowEnd) return false;
+  const paperExit = (source === 'PAPER_TP' && outcome === 'WIN')
+    || (source === 'PAPER_SL' && outcome === 'LOSS');
+  if (entry.sizingOutcome || !['WIN', 'LOSS'].includes(outcome)
+    || now < entry.entryAt || (!paperExit && now < entry.windowEnd)) return false;
   const pnl = (outcome === 'WIN' ? entry.shares : 0) - entry.totalCost - entry.fees;
   if (!Number.isFinite(pnl)) throw new Error('Cannot size recovery from invalid entry costs.');
   Object.assign(entry, { sizingOutcome: outcome, sizingSource: source, sizingDecidedAt: now, sizingNetPnl: pnl });
@@ -49,4 +52,4 @@ function applyOutcome(s, entry, outcome, source, now) {
   s.lastDecision = { entryId: entry.id, outcome, source, at: now, effect: entry.sizingEffect };
   return true;
 }
-module.exports = { WINDOW_MS, BASE_SHARES, PROFIT_TARGET, newState, validateState, outcomeForMid, plan, recordAttempt, applyOutcome };
+module.exports = { WINDOW_MS, BASE_SHARES, PROFIT_TARGET, newState, validateState, outcomeForBid, plan, recordAttempt, applyOutcome };

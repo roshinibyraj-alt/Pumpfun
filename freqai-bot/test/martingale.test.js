@@ -29,8 +29,8 @@ function fixture(capital = 3000) {
   open(0);
   return {bot,r,open,quote,now:()=>now,time:t=>{now=t;},score:p=>{raw.pUp=p;raw.pDown=1-p;raw.candleCloseAt=now;raw.writtenAt=now;},
     reply:b=>{reply=b;},buy:()=>{bot.processSide(r,'UP',r.quotes.UP,1);return bot.shadowEntries[0];},
-    end:(outcome='LOSS')=>{now=r.market.end; if(outcome==='LOSS')quote(.005,.015);
-      else if(outcome==='WIN')quote(.985,.995);else quote(.49,.51);bot.expireMarket(r,now);} };
+    end:(outcome='LOSS')=>{now=r.market.end; if(outcome==='LOSS')quote(0,.01);
+      else if(outcome==='WIN')quote(.99,1);else quote(.49,.51);bot.expireMarket(r,now);} };
 }
 test('50 base, next-window recovery covers cost and fees plus $10, then reset',()=>{
   const f=fixture(),base=f.buy();assert.equal(base.requestedShares,50);
@@ -80,18 +80,19 @@ test('insufficient cash or depth skips recovery rather than claiming target or p
   const h=fixture();h.r.quotes.UP.asks=[{price:.6,size:20}];
   assert.equal(h.buy().shares,20);assert.equal(h.bot.shadowEntries[0].cancelledShares,30);
 });
-test('mark outcomes only affect sizing, official settlement alone pays and cannot count twice',()=>{
+test('paper SL pays once, and a later official result cannot pay or size it twice',()=>{
   const f=fixture(),e=f.buy();f.end();const saved=structuredClone(f.bot.recovery);
-  assert.equal(f.bot.shadowTotals[58].realizedPnl,0);
+  assert.ok(Math.abs(f.bot.shadowTotals[58].realizedPnl+30.6)<1e-8);
   f.bot.settleMarket('m0','UP',f.now());f.bot.settleMarket('m0','UP',f.now()+1);
-  assert.deepEqual(f.bot.recovery,saved);assert.equal(e.sizingDisagreesWithSettlement,true);
-  assert.ok(Math.abs(e.realizedPnl-19.4)<1e-8);
+  assert.deepEqual(f.bot.recovery,saved);assert.equal(e.modeledPayout,true);
+  assert.ok(Math.abs(e.realizedPnl+30.6)<1e-8);
+  assert.equal(f.bot.shadowTotals[58].resolved,1);
 });
-test('strict midpoint boundaries and quote guards prevent invented outcomes',()=>{
-  for(const x of [null,undefined,NaN,.02,.98,.5,-1,2])assert.equal(sizing.outcomeForMid(x),null);
-  assert.equal(sizing.outcomeForMid(.01),'LOSS');assert.equal(sizing.outcomeForMid(.99),'WIN');
+test('exact best-bid boundaries and quote guards prevent invented outcomes',()=>{
+  for(const x of [null,undefined,NaN,.01,.02,.98,.5,-1,2])assert.equal(sizing.outcomeForBid(x),null);
+  assert.equal(sizing.outcomeForBid(0),'LOSS');assert.equal(sizing.outcomeForBid(.99),'WIN');
   for(const kind of ['missing','crossed','stale','token','market','window']){
-    const f=fixture(),e=f.buy();f.time(f.r.market.end);f.quote(.005,.015);
+    const f=fixture(),e=f.buy();f.time(f.r.market.end);f.quote(0,.01);
     const q=f.r.quotes.UP;
     if(kind==='missing')q.bestBid=null;if(kind==='crossed')q.bestBid=.9;
     if(kind==='stale')q.updatedAt-=5001;if(kind==='token')q.tokenId='other';
@@ -107,7 +108,7 @@ test('restart preserves dynamic recovery, ledger, cash and consumed window',()=>
   assert.equal(g.bot.availablePaperCash(),f.bot.availablePaperCash());
   ledger.snapshot.recovery.netPnl=NaN;assert.throws(()=>fixture().bot.restoreLedger(ledger),/Invalid saved recovery/);
 });
-test('signal threshold, minimum delay and hold-to-resolution stay intact',()=>{
+test('signal threshold, minimum delay and no signal selling stay intact',()=>{
   const f=fixture();f.time(START+44999);f.quote();f.buy();assert.equal(f.bot.shadowEntries.length,0);
   f.time(START+45000);f.quote();f.score(.58);f.buy();assert.equal(f.bot.shadowEntries.length,0);
   f.score(.7);const e=f.buy();f.score(.01);f.buy();f.bot.checkTakeProfits();f.bot.checkStopLosses();
@@ -141,6 +142,9 @@ test('dashboard renders target and size and keeps equity on top',async()=>{
   assert.equal(elements.get('currentShares').textContent,'Priced on signal');
   assert.match(elements.get('recoveryState').textContent,/outstanding loss \$30.60/);
   assert.match(elements.get('recoveryDetails').textContent,/\$40.60/);
+  assert.match(elements.get('shadowEntries').innerHTML,/PAPER SL/);
+  assert.match(elements.get('shadowEntries').innerHTML,/Modeled payout \$0\.000/);
+  assert.match(elements.get('entryRule').textContent,/modeled \$1\/share/);
   assert.ok(html.indexOf('id="equityChart"')<html.indexOf('<h2>Current BTC window</h2>'));
 });
 test('HTTP state exposes base 50 and recovery target',async t=>{

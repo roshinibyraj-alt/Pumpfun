@@ -4,13 +4,15 @@ const sizing = require('./martingale-sizing');
 const STRATEGY = Object.freeze({
   ...TakerBot.STRATEGY,
   id: 'pumpfun-freqai58-taker-recover-plus10-base50-v1',
-  name: 'BTC FreqAI 58% · recovery +$10',
-  version: 'recover-plus10-base50-v1',
+  name: 'BTC FreqAI 58% · recovery +$10 · paper TP/SL',
+  version: 'recover-plus10-base50-paper-exits-v2',
   entry: 'Fresh above-58% current-window signal after 45 seconds; one immediate taker entry per window.',
   sizing: '50 shares at base. After loss, size the next eligible window to recover cycle losses plus $10 net using actual ask depth and fees. Reset to 50 after the cycle reaches +$10.',
   cadence: 'Recovery is eligible next window, without a doubling ladder or fixed share cap. Unclear recovery outcomes delay recovery only; 50-share base trading continues and its outcomes count toward the cycle. Insufficient cash or depth skips recovery, never fabricates a full fill.',
-  assessment: 'At window end, fresh held-side midpoint >0.98 predicts WIN; <0.02 predicts LOSS. Neutral, missing, crossed or stale marks stay unknown. Continue checking pending books; official settlement can establish the result.',
-  accounting: 'Mark guesses control sizing only. Official settlement alone changes realized P&L and releases capital. Each outcome affects sizing once.',
+  assessment: 'Fresh held-side best bid >=$0.99 closes paper TP at a modeled $1/share; an explicit $0.00 bid closes paper SL at $0/share, including intra-window. Missing, crossed or stale quotes never imply zero. Otherwise wait for official resolution.',
+  accounting: 'Paper TP/SL immediately realize the modeled payout, release paper capital and update recovery for the next eligible window, once only. These are not actual sales or guaranteed live payouts. Existing history is preserved; official resolution is the fallback.',
+  takeProfitBid: .99, takeProfitPayoutPerShare: 1, stopLossBid: 0,
+  exitQuote: 'BEST_BID',
 });
 
 class MartingaleBTCBot extends TakerBot {
@@ -39,23 +41,48 @@ class MartingaleBTCBot extends TakerBot {
     this.scheduleLedgerSave();
   }
 
+  closePaper(entry, outcome, now) {
+    if (!['OPEN', 'PENDING_RESOLUTION'].includes(entry.status)
+      || !['WIN', 'LOSS'].includes(outcome)) return;
+    const won = outcome === 'WIN', source = won ? 'PAPER_TP' : 'PAPER_SL';
+    const payout = won ? 1 : 0;
+    Object.assign(entry, {
+      status: won ? 'RESOLVED_WIN' : 'RESOLVED_LOSS',
+      resolvedAt: now, exitAt: now, exitPrice: payout, exitPayout: payout,
+      exitReason: source, settlementSource: source, modeledPayout: true,
+      triggerBid: entry.sizingBid, triggerQuoteAt: entry.sizingMarkAt,
+      realizedPnl: entry.shares * payout - entry.totalCost - entry.fees,
+      markStatus: 'CLOSED_PAPER', unrealizedPnl: null,
+    });
+    const totals = this.shadowTotals[entry.thresholdPct];
+    totals.resolved += 1;
+    totals.realizedPnl += entry.realizedPnl;
+    totals[won ? 'wins' : 'losses'] += 1;
+    this.decide(entry, outcome, source, now);
+    this.log(`${entry.side} ${source}: bid $${entry.triggerBid.toFixed(2)}; modeled payout $${payout.toFixed(2)}/share, net $${entry.realizedPnl.toFixed(2)}. Not a live sale.`, {
+      type: source, asset: 'BTC', timeframe: '5m', side: entry.side, now,
+    });
+    this.scheduleLedgerSave();
+  }
+
   saveMark(entry, bid, ask, at, now, source) {
-    if (bid == null || ask == null || !Number.isFinite(bid) || !Number.isFinite(ask)
-      || bid < 0 || ask > 1 || bid > ask || !Number.isFinite(at)
+    if (!['OPEN', 'PENDING_RESOLUTION'].includes(entry.status)
+      || bid == null || !Number.isFinite(bid) || bid < 0 || bid > 1
+      || (ask != null && (!Number.isFinite(ask) || ask < bid || ask > 1))
+      || !Number.isFinite(at) || at < entry.entryAt || now < entry.entryAt
       || at > now + 1000 || now - at > 5000) return;
     if (entry.sizingMarkAt != null && at < entry.sizingMarkAt) return;
-    entry.sizingMidpoint = (bid + ask) / 2;
+    entry.sizingBid = bid;
+    entry.sizingMidpoint = ask == null ? null : (bid + ask) / 2;
     entry.sizingMarkAt = at; entry.sizingMarkSource = source;
-    if (now >= entry.windowEnd) {
-      this.decide(entry, sizing.outcomeForMid(entry.sizingMidpoint), 'MARK', now);
-    }
+    this.closePaper(entry, sizing.outcomeForBid(bid), now);
   }
 
   observeRecordMarks(record, now) {
     const m = record?.market;
     if (!m) return;
     for (const e of this.shadowEntries) {
-      if (e.sizingOutcome || e.marketId !== String(m.id || m.slug)
+      if (!['OPEN', 'PENDING_RESOLUTION'].includes(e.status) || e.marketId !== String(m.id || m.slug)
         || e.windowStart !== Number(m.start)) continue;
       const q = record.quotes?.[e.side];
       if (!q || (q.tokenId && q.tokenId !== e.tokenId)
@@ -77,9 +104,9 @@ class MartingaleBTCBot extends TakerBot {
     // A fresh last quote remains usable at the boundary even if the record's
     // order book is about to be cleared for the next market.
     for (const e of this.shadowEntries) {
-      if (!e.sizingOutcome && now >= e.windowEnd && e.sizingMarkAt != null
+      if (now >= e.windowEnd && e.sizingMarkAt != null
         && now - e.sizingMarkAt <= 5000) {
-        this.decide(e, sizing.outcomeForMid(e.sizingMidpoint), 'MARK', now);
+        this.closePaper(e, sizing.outcomeForBid(e.sizingBid), now);
       }
     }
     super.expireMarket(record, now);
@@ -88,7 +115,7 @@ class MartingaleBTCBot extends TakerBot {
   async pollUnclearMarks(now) {
     if (now < this.nextMarkPollAt) return;
     this.nextMarkPollAt = now + 5000;
-    const pending = this.shadowEntries.filter(e => !e.sizingOutcome && now >= e.windowEnd
+    const pending = this.shadowEntries.filter(e => now >= e.windowEnd
       && ['OPEN', 'PENDING_RESOLUTION'].includes(e.status))
       .sort((a, b) => (a.id === this.recovery.awaitingEntryId ? -1
         : b.id === this.recovery.awaitingEntryId ? 1 : (a.markPolledAt || 0) - (b.markPolledAt || 0)));
@@ -123,7 +150,8 @@ class MartingaleBTCBot extends TakerBot {
   settleMarket(marketId, winner, now) {
     super.settleMarket(marketId, winner, now);
     for (const e of this.shadowEntries) {
-      if (e.marketId !== marketId || !['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(e.status)) continue;
+      if (e.marketId !== marketId || e.modeledPayout
+        || !['RESOLVED_WIN', 'RESOLVED_LOSS'].includes(e.status)) continue;
       const official = e.side === winner ? 'WIN' : 'LOSS';
       e.sizingOfficialOutcome = official;
       e.sizingDisagreesWithSettlement = !!e.sizingOutcome && e.sizingOutcome !== official;
@@ -165,6 +193,7 @@ class MartingaleBTCBot extends TakerBot {
     const choice = sizing.plan(this.recovery, start);
     const current = this.shadowEntries.find(e => e.windowStart === start);
     s.strategy = { ...STRATEGY };
+    s.shadowAccount.accountingBasis = 'Mixed paper ledger: historical/ fallback official resolutions plus explicitly labeled modeled TP/SL payouts.';
     s.recovery = { ...choice, ...structuredClone(this.recovery),
       nextRecoveryShares: null,
       pendingMarks: this.shadowEntries.filter(e => !e.sizingOutcome && now >= e.windowEnd).length,
