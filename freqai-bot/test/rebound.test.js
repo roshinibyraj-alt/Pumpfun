@@ -138,7 +138,7 @@ test('shadow runtime does not change main ledger/strategy, and its account persi
   const main = { cash: 1234, strategyId: 'existing', trades: [{ id: 'main' }],
     applyBook() {}, marketData: {}, binanceFeed: null };
   const before = JSON.stringify(main), original = main.applyBook;
-  const r = new Runtime(main, { directory: dir });
+  const r = new Runtime(main, { directory: dir, fetchImpl: async () => ({ ok: true, json: async () => [] }) });
   r.worker = { start() {}, stop() {}, snapshot: () => ({ status: 'READY_EXPERIMENTAL' }), score: () => false };
   await r.start(); assert.notEqual(main.applyBook, original);
   assert.equal(JSON.stringify(main), before);
@@ -179,4 +179,20 @@ test('a corrupt shadow ledger is reported and never silently replaced on shutdow
   const main = { applyBook() {}, marketData: {} }, runtime = new Runtime(main, { directory: dir });
   await runtime.start(); assert.equal(runtime.snapshot().status, 'ERROR');
   await runtime.stop(); assert.equal(fs.readFileSync(file, 'utf8'), original);
+});
+test('independent public BTC fallback supplies real forming-candle context when WebSocket is unavailable', async t => {
+  const Runtime = require('../rebound/runtime'), f = fixture();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rebound-spot-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const main = { applyBook() {}, marketData: {}, binanceFeed: null }, scores = [];
+  const r = new Runtime(main, { directory: dir, now: f.now, fetchImpl: async () => ({
+    ok: true, json: async () => [[START, '60000', '60002', '59999', '60001', '2', START + W - 1]] }) });
+  r.worker = { start() {}, stop() {}, snapshot: () => ({}), score(id, context) { scores.push(context); return true; } };
+  await r.start(); await new Promise(resolve => setImmediate(resolve));
+  f.quote(); main.applyBook(f.record, 'UP');
+  f.time(f.now() + 1000); f.quote('UP', .29, .31); main.applyBook(f.record, 'UP');
+  assert.equal(scores.length, 1);
+  assert.equal(scores[0].btcOpen, 60000); assert.equal(scores[0].points.at(-1).btcPrice, 60001);
+  assert.equal(r.snapshot().dataFeed.source, 'BINANCE_PUBLIC_REST_FORMING_CANDLE');
+  await r.stop();
 });

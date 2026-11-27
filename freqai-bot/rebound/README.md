@@ -67,4 +67,9 @@ Separate `rebound-shadow/ledger.json`, `training.json`, `model.json`, and the
 downloaded sample live next to (not inside) the main paper ledger. Atomic saves
 and full-ledger cash reconciliation prevent silent reset or duplicated funding.
 Model process uses one thread; shadow errors do not interrupt the main bot.
+BTC inputs prefer the existing public WebSocket read-only. If it is unavailable,
+the shadow uses its own public Binance forming-5m-candle request every two seconds,
+with a 1.5s response deadline and a five-second freshness limit. This supplies
+the current price and actual candle open, never a substituted completed candle.
+Its source and health are shown on the shadow dashboard. No main-feed changes.
 No private keys, authenticated exchange endpoints, or real orders are used.

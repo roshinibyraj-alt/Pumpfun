@@ -156,7 +156,7 @@ function render(s){
   const entry=num(st.entryMid)?Number(st.entryMid):null,tgt=num(st.targetBid)?Number(st.targetBid):null;
   if(mk){
     set('clock',cd(mk.secondsRemaining));
-    set('mmeta',time(mk.windowStart)+' to '+time(mk.windowEnd)+' · '+(mk.eligible?'<b class="ok">eligible for new signals</b>':'<b class="warn">not eligible</b>'));
+    set('mmeta',time(mk.windowStart)+' to '+time(mk.windowEnd)+' · '+(mk.eligible?'<b class="ok">eligible for new signals</b>':'<b class="warn">not eligible</b>')+(s.dataFeed?' · BTC '+esc(s.dataFeed.status||'WAITING')+' '+px(s.dataFeed.price)+' · '+esc(s.dataFeed.source||s.dataFeed.lastError||'waiting for data'):''));
     set('quotes',['UP','DOWN'].map(k=>{const q=(mk.quotes||{})[k]||{};let z='Waiting for mid at or below entry';
       if(num(q.mid)&&entry!=null&&q.mid<=entry)z='Mid in entry zone';if(num(q.bestBid)&&tgt!=null&&q.bestBid>=tgt)z='Bid at or above target';if(!num(q.mid))z='Mid unknown';
       return `<div class="side ${k}"><div class="t"><span>${k}</span><span class="label">${time(q.updatedAt)}</span></div><div class="r">Bid<b>${px(q.bestBid)}</b></div><div class="r">Ask<b>${px(q.bestAsk)}</b></div><div class="r">Mid<b>${px(q.mid)}</b></div><div class="zone">${z}</div></div>`}).join(''));
