@@ -49,12 +49,15 @@ async function main() {
   const binanceFeed = new BinanceTickFeed();
   const freqaiWorker = new FreqAIWorker();
   bot.setMarketDataHelpers({ binanceFeed, freqaiWorker });
+  const ReboundRuntime = require('./rebound/runtime');
+  const rebound = new ReboundRuntime(bot);
+  await rebound.start();
   freqaiWorker.start();
   void binanceFeed.start().catch((error) => {
     console.error('[binance-feed] Could not start spot feed:', error?.message || error);
   });
   bot.start();
-  const server = startServer(bot, process.env.PORT || 3000);
+  const server = startServer(bot, process.env.PORT || 3000, rebound);
 
   console.log('MODE: DEMO -- >58% FreqAI; base 50, next-window recovery plus $10; best-bid TP >=0.99 pays modeled $1/share, explicit bid 0 pays $0; official resolution fallback; no live orders.');
 
@@ -67,6 +70,7 @@ async function main() {
     binanceFeed.stop();
     const forcedExit = setTimeout(() => process.exit(1), 10_000);
     forcedExit.unref?.();
+    await rebound.stop();
     await bot.flushLedger();
     server.close(() => {
       clearTimeout(forcedExit);

@@ -5,9 +5,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'freqai-dashboard.html'));
-function startServer(bot, port) {
+const REBOUND_HTML = fs.readFileSync(path.join(__dirname, 'public', 'rebound-dashboard.html'));
+function startServer(bot, port, rebound = null) {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
+    if (pathname === '/api/shadow/state') {
+      res.writeHead(rebound ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(rebound ? rebound.snapshot() : { error: 'Independent shadow runtime unavailable' }));
+      return;
+    }
+    if (pathname === '/shadow' || pathname === '/shadow/') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(REBOUND_HTML);
+      return;
+    }
     if (pathname === '/api/healthz') {
       const state = bot.snapshot();
       const healthy = state.status !== 'blocked_or_error' && state.status !== 'ERROR';

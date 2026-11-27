@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#eee9df">
+<title>Rebound Experiment — Separate Paper Lab</title>
+<style>
+:root{--bg:#eee9df;--paper:#f8f5ee;--ink:#1d2a2c;--muted:#66706c;--line:#d3cbbb;--teal:#0f6b67;--rust:#b0452a;--amber:#a86a0c;--plum:#5b3a63;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
+.wrap{max-width:1040px;margin:0 auto;padding:14px 12px 44px}
+a{color:var(--teal);font-weight:800}
+.top{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.back{font-size:13px;text-decoration:none;border:1px solid var(--line);padding:7px 11px;border-radius:999px;background:var(--paper)}
+.badge{font:800 11px var(--mono);letter-spacing:.08em;padding:6px 10px;border-radius:999px;border:1px solid currentColor;text-transform:uppercase;white-space:nowrap}
+.ok{color:var(--teal)}.warn{color:var(--amber)}.bad{color:var(--rust)}
+.banner{margin:14px 0 12px;border:2px solid var(--plum);border-radius:16px;padding:14px;background:#efe6ef}
+.banner .kicker{font:800 11px var(--mono);letter-spacing:.12em;color:var(--plum);text-transform:uppercase}
+.banner h1{margin:4px 0 6px;font-size:clamp(24px,7vw,34px);letter-spacing:-.04em;line-height:1.05}
+.banner p{margin:0;font-size:13px;color:#4a3d4e}
+.label{font:800 10.5px var(--mono);color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:14px;margin-top:12px}
+h2{font-size:19px;margin:0;letter-spacing:-.03em}
+.head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:10px}
+.head span{font-size:12px;color:var(--muted);text-align:right}
+.big{font:850 clamp(34px,11vw,52px)/1.05 var(--mono);letter-spacing:-.05em;margin-top:4px}
+.kv{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin-top:12px}
+.kv div{background:var(--paper);padding:9px 10px}.kv b{display:block;font:750 16px var(--mono);margin-top:2px;overflow-wrap:anywhere}
+.pos{color:var(--teal)}.neg{color:var(--rust)}.unk{color:var(--muted);font-style:italic}
+.sides{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.side{border:1px solid var(--line);border-radius:12px;padding:10px;background:#fbf9f4}
+.side.UP{border-top:4px solid var(--teal)}.side.DOWN{border-top:4px solid var(--rust)}
+.side .t{font:800 13px var(--mono);display:flex;justify-content:space-between}
+.side .r{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-top:5px}.side .r b{font:750 15px var(--mono);color:var(--ink)}
+.zone{font:700 11px var(--mono);margin-top:7px;padding:4px 6px;border-radius:6px;background:#ece6d8}
+.clock{font:850 26px var(--mono);color:var(--amber)}
+.tag{display:inline-block;font:800 10.5px var(--mono);padding:2px 6px;border-radius:5px;color:#fff}.tag.UP{background:var(--teal)}.tag.DOWN{background:var(--rust)}
+.st{font:800 10.5px var(--mono);letter-spacing:.05em;padding:2px 6px;border-radius:5px;border:1px solid currentColor}
+.row{border-left:4px solid var(--line);background:#fbf9f4;border-radius:10px;padding:10px;margin-top:8px;display:grid;grid-template-columns:1fr auto;gap:4px 10px}
+.row.w{border-color:var(--teal)}.row.l{border-color:var(--rust)}.row.p{border-color:var(--amber)}
+.row .d{font-size:12px;color:var(--muted);grid-column:1/-1;overflow-wrap:anywhere}.row .v{font:800 16px var(--mono);text-align:right}
+.empty{border:1px dashed var(--line);border-radius:10px;padding:12px;text-align:center;color:var(--muted);font-size:13px}
+.note{font-size:12px;color:var(--muted);margin-top:8px}
+.warnbox{border:1px solid var(--amber);background:#f6ecd6;border-radius:10px;padding:9px 11px;font-size:12.5px;margin-top:10px}
+.rules{margin:0;padding-left:18px;font-size:13px}.rules li{margin:4px 0}
+.ev{padding:7px 0;border-bottom:1px solid var(--line);font-size:13px}.ev:last-child{border:0}.ev time{font:700 11px var(--mono);color:var(--muted)}.ev b{font:800 10.5px var(--mono);color:var(--plum);margin-left:6px}
+.foot{text-align:center;font-size:11px;color:var(--muted);margin-top:18px}
+@media(min-width:760px){.wrap{padding:24px 20px 50px}.kv{grid-template-columns:repeat(4,1fr)}.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}.cols>.card{margin-top:12px}}
+</style>
+</head>
+<body>
+<main class="wrap">
+<header class="top">
+  <a class="back" href="/">Back to established strategy</a>
+  <span class="badge warn" id="status">CONNECTING</span>
+</header>
+
+<section class="banner">
+  <div class="kicker">Independent experiment · unproven</div>
+  <h1 id="sname">BTC Rebound Model</h1>
+  <p>Separate paper account. The Pumpfun account never funds this experiment, and nothing here changes it. Small public training sample, no pretrained weights; no profitability has been validated. Read-only view.</p>
+</section>
+
+<section class="card">
+  <div class="label">Rebound paper equity · own ledger</div>
+  <div class="big" id="equity">unknown</div>
+  <div id="total" style="font:800 18px var(--mono)">unknown</div>
+  <div class="kv">
+    <div><span class="label">Initial capital</span><b id="init">unknown</b></div>
+    <div><span class="label">Cash</span><b id="cash">unknown</b></div>
+    <div><span class="label">Realized</span><b id="real">unknown</b></div>
+    <div><span class="label">Unrealized</span><b id="unreal">unknown</b></div>
+    <div><span class="label">Fees paid</span><b id="fees">unknown</b></div>
+    <div><span class="label">W / L</span><b id="wl">unknown</b></div>
+    <div><span class="label">Closed trades</span><b id="closedN">unknown</b></div>
+    <div><span class="label">Open / pending</span><b id="openN">unknown</b></div>
+  </div>
+</section>
+
+<section class="card">
+  <div class="head"><h2>Current window</h2><div class="clock" id="clock">unknown</div></div>
+  <div class="note" id="mmeta" style="margin-top:0">Waiting for market.</div>
+  <div class="sides" id="quotes"><div class="empty">Waiting for book.</div></div>
+</section>
+
+<div class="cols">
+<section class="card">
+  <div class="head"><h2>Model readiness</h2><span class="badge warn" id="mstatus">UNKNOWN</span></div>
+  <div class="note" id="mnote" style="margin-top:0">Waiting for model state.</div>
+  <div class="kv" style="grid-template-columns:repeat(2,minmax(0,1fr))" id="metrics"></div>
+  <div class="warnbox" id="mwarn">Metrics describe a small held-out sample and are not evidence of future profit.</div>
+</section>
+<section class="card">
+  <div class="head"><h2>Signals</h2><span id="sigN">0</span></div>
+  <div class="note" style="margin-top:0">Probability = chance this side rebounds from first mid at or below entry to target bid before expiry. It is not P(up).</div>
+  <div id="signals"><div class="empty">No signals yet.</div></div>
+</section>
+</div>
+
+<div class="cols">
+<section class="card">
+  <div class="head"><h2>Open and pending</h2><span id="posN">0</span></div>
+  <div id="positions"><div class="empty">No open positions.</div></div>
+</section>
+<section class="card">
+  <div class="head"><h2>Closed trades</h2><span id="cloN">0</span></div>
+  <div id="closed"><div class="empty">No closed trades yet.</div></div>
+</section>
+</div>
+
+<section class="card">
+  <div class="head"><h2>Strategy rules</h2><span id="rulesTag">fixed parameters</span></div>
+  <p class="note" id="sdesc" style="margin-top:0"></p>
+  <ul class="rules" id="rules"></ul>
+</section>
+
+<section class="card">
+  <div class="head"><h2>Activity</h2><span id="persist">ledger unknown</span></div>
+  <div id="events"><div class="empty">No activity yet.</div></div>
+</section>
+
+<div class="foot">Paper simulation · separate $3,000 ledger · no live orders · <a href="/">Return to main dashboard</a></div>
+</main>
+<script>
+(()=>{
+const $=id=>document.getElementById(id);
+const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num=x=>x!==null&&x!==undefined&&x!==''&&Number.isFinite(Number(x));
+const U='<span class="unk">unknown</span>';
+const money=x=>num(x)?(Number(x)<0?'-$':'$')+Math.abs(Number(x)).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):U;
+const signed=x=>num(x)?(Number(x)>0?'+':'')+money(x):U;
+const px=x=>num(x)?'$'+Number(x).toFixed(3):U;
+const pct=x=>num(x)?(Number(x)*100).toFixed(1)+'%':U;
+const dec=(x,d=3)=>num(x)?Number(x).toFixed(d):U;
+const int=x=>num(x)?Number(x).toLocaleString():U;
+const cls=x=>!num(x)?'':Number(x)>0?'pos':Number(x)<0?'neg':'';
+const dt=x=>{if(x==null||x==='')return null;let n=Number(x);if(Number.isFinite(n)){if(n<1e12)n*=1000;return new Date(n)}const d=new Date(x);return isNaN(d)?null:d};
+const time=x=>{const d=dt(x);return d?d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}):U};
+const stamp=x=>{const d=dt(x);return d?d.toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):U};
+const cd=x=>{if(!num(x))return'unknown';const s=Math.max(0,Math.floor(x));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+const set=(id,html,c)=>{const e=$(id);if(e.innerHTML!==html)e.innerHTML=html;if(c!==undefined)e.className=c};
+const LBL={OPEN:'OPEN',PENDING_RESOLUTION:'PENDING RESOLUTION',CLOSED_TP:'TAKE PROFIT',RESOLVED_WIN:'SETTLED WIN',RESOLVED_LOSS:'SETTLED LOSS'};
+function render(s){
+  const st=s.strategy||{},m=s.model||{},mt=m.metrics||{},a=s.account||{},mk=s.market,tr=s.training||{},ps=s.persistence||{};
+  const stat=String(s.status||'UNKNOWN');
+  set('status',esc(stat.replace(/_/g,' ')),'badge '+(/ERROR|FAIL/i.test(stat)?'bad':/RUN|READY/i.test(stat)?'ok':'warn'));
+  if(st.name)set('sname',esc(st.name));
+  set('equity',money(a.equity),'big '+(num(a.equity)?'':'unk'));
+  const tot=num(a.equity)&&num(a.initialCapital)?a.equity-a.initialCapital:null;
+  set('total',signed(tot)+' <span class="label">vs start</span>');$('total').className=cls(tot);
+  set('init',money(a.initialCapital));set('cash',money(a.cash));
+  set('real',signed(a.realizedPnl),cls(a.realizedPnl));set('unreal',signed(a.unrealizedPnl),cls(a.unrealizedPnl));
+  set('fees',money(a.totalFees));set('wl',(num(a.wins)?int(a.wins):U)+' / '+(num(a.losses)?int(a.losses):U));
+  set('closedN',int(a.closedTrades));set('openN',int(a.openPositions)+' / '+int(a.pendingResolution));
+  const entry=num(st.entryMid)?Number(st.entryMid):null,tgt=num(st.targetBid)?Number(st.targetBid):null;
+  if(mk){
+    set('clock',cd(mk.secondsRemaining));
+    set('mmeta',time(mk.windowStart)+' to '+time(mk.windowEnd)+' · '+(mk.eligible?'<b class="ok">eligible for new signals</b>':'<b class="warn">not eligible</b>'));
+    set('quotes',['UP','DOWN'].map(k=>{const q=(mk.quotes||{})[k]||{};let z='Waiting for mid at or below entry';
+      if(num(q.mid)&&entry!=null&&q.mid<=entry)z='Mid in entry zone';if(num(q.bestBid)&&tgt!=null&&q.bestBid>=tgt)z='Bid at or above target';if(!num(q.mid))z='Mid unknown';
+      return `<div class="side ${k}"><div class="t"><span>${k}</span><span class="label">${time(q.updatedAt)}</span></div><div class="r">Bid<b>${px(q.bestBid)}</b></div><div class="r">Ask<b>${px(q.bestAsk)}</b></div><div class="r">Mid<b>${px(q.mid)}</b></div><div class="zone">${z}</div></div>`}).join(''));
+  }else{set('clock','unknown');set('mmeta','No active market.');set('quotes','<div class="empty">Waiting for book.</div>')}
+  const ms=String(m.status||'UNKNOWN');
+  set('mstatus',esc(ms.replace(/_/g,' ')),'badge '+(/ERROR|FAIL/i.test(ms)?'bad':/READY/i.test(ms)?'ok':'warn'));
+  set('mnote',(m.lastError?'<b class="bad">Error: '+esc(m.lastError)+'</b><br>':'')+'Version '+(m.version!=null?esc(m.version):U)+' · trained '+stamp(m.trainedAt)+' · label '+(mt.labelSource?esc(mt.labelSource):U)+' · split '+(mt.split?esc(mt.split):U));
+  const met=[['Train examples',int(mt.trainExamples)],['Calibration',int(mt.calibrationExamples)],['Test examples',int(mt.testExamples)],['Test signals',int(mt.testSignals)],['Test AUC',dec(mt.testAuc)],['Test precision',pct(mt.testPrecision)],['Test Brier',dec(mt.testBrier,4)],['Baseline Brier',dec(mt.baselineBrier,4)],['Closed examples',int(tr.closedExamples)],['Active examples',int(tr.activeExamples)]];
+  set('metrics',met.map(([k,v])=>`<div><span class="label">${k}</span><b>${v}</b></div>`).join(''));
+  let w='Metrics describe a small held-out sample and are not evidence of future profit.';
+  if(num(mt.testBrier)&&num(mt.baselineBrier))w=(mt.testBrier<mt.baselineBrier?'Test Brier beats the base-rate baseline on this sample only. ':'Test Brier does not beat the base-rate baseline. ')+w;
+  if(mt.experimental!==false)w='Experimental. '+w;
+  set('mwarn',w);
+  const sg=s.signals||[];set('sigN',sg.length+'');
+  set('signals',sg.length?sg.slice(0,10).map(x=>`<div class="row ${/TAKEN|FILL|ENTER/i.test(x.status)?'w':/SKIP|REJ|BLOCK/i.test(x.status)?'l':'p'}"><div><span class="tag ${esc(x.side)}">${esc(x.side)}</span> <span class="st">${esc(x.status||'unknown')}</span></div><div class="v">${pct(x.probability)}</div><div class="d">${time(x.at)} · window ${time(x.windowStart)} · first mid ${px(x.entryMid)}${x.reason?' · '+esc(x.reason):''}</div></div>`).join(''):'<div class="empty">No signals yet. Each side may signal once per window.</div>');
+  const P=s.positions||[],open=P.filter(p=>p.status==='OPEN'||p.status==='PENDING_RESOLUTION'),cl=P.filter(p=>!(p.status==='OPEN'||p.status==='PENDING_RESOLUTION')).sort((x,y)=>(dt(y.exitAt)||0)-(dt(x.exitAt)||0));
+  set('posN',open.length+'');set('cloN',cl.length+'');
+  set('positions',open.length?open.map(p=>`<div class="row p"><div><span class="tag ${esc(p.side)}">${esc(p.side)}</span> <span class="st warn">${LBL[p.status]||esc(p.status)}</span></div><div class="v ${cls(p.unrealizedPnl)}">${signed(p.unrealizedPnl)}</div><div class="d">${int(p.remainingShares)} of ${int(p.shares)} shares left · avg ${px(p.entryPrice)} · cost ${money(p.totalCost)} · entry fees ${money(p.entryFees)}<br>Mark bid ${px(p.markBid)} · sold ${int(p.exitShares)} for ${money(p.exitProceeds)} (fees ${money(p.exitFees)}) · entered ${time(p.entryAt)} · ends ${time(p.windowEnd)}</div></div>`).join(''):'<div class="empty">No open positions.</div>');
+  set('closed',cl.length?cl.slice(0,20).map(p=>`<div class="row ${num(p.realizedPnl)&&p.realizedPnl>0?'w':num(p.realizedPnl)&&p.realizedPnl<0?'l':''}"><div><span class="tag ${esc(p.side)}">${esc(p.side)}</span> <span class="st">${LBL[p.status]||esc(p.status)}</span></div><div class="v ${cls(p.realizedPnl)}">${signed(p.realizedPnl)}</div><div class="d">${time(p.windowStart)} · ${int(p.shares)} sh · in ${px(p.entryPrice)} · out ${px(p.exitPrice)} at ${time(p.exitAt)} · fees ${money((num(p.entryFees)?+p.entryFees:0)+(num(p.exitFees)?+p.exitFees:0))}${p.exitReason?' · '+esc(p.exitReason):''}</div></div>`).join(''):'<div class="empty">No closed trades yet.</div>');
+  set('sdesc',esc(st.description||''));
+  set('rules',[
+    `Trigger: first time a side's midpoint is at or below ${px(st.entryMid)} in a window.`,
+    `Enter only if model probability of rebound is at or above ${num(st.threshold)?pct(st.threshold):U}.`,
+    `Size: flat ${int(st.baseShares)} shares requested, bought by sweeping visible asks; taker fee charged.`,
+    `Take profit: sell only into visible bids at or above ${px(st.targetBid)}; taker exit fee charged.`,
+    'Any unsold remainder goes to official settlement.',
+    'One initial signal per side per window. No recovery sizing, no re-arm, no stop-loss.',
+    `Separate ${money(st.initialCapital)} paper capital. The existing Pumpfun account never funds it.`
+  ].map(t=>'<li>'+t+'</li>').join(''));
+  set('persist',ps.lastError?'<span class="bad">save error: '+esc(ps.lastError)+'</span>':ps.configured?'saved '+time(ps.lastSavedAt):'not persistent');
+  const ev=s.events||[];
+  set('events',ev.length?ev.slice(0,12).map(e=>`<div class="ev"><time>${time(e.at)}</time><b>${esc(e.type||'EVENT')}</b><div>${esc(e.message||'')}</div></div>`).join(''):'<div class="empty">No activity yet.</div>');
+}
+let busy=false;
+async function poll(){if(busy)return;busy=true;
+  try{const r=await fetch('/api/shadow/state',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);render(await r.json())}
+  catch(e){set('status','OFFLINE · retrying','badge bad')}
+  finally{busy=false;setTimeout(poll,2000)}}
+poll();
+})();
+</script>
+</body>
+</html>
