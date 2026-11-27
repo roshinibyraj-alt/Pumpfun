@@ -7,6 +7,7 @@ const STRATEGY = Object.freeze({
   name: 'BTC FreqAI 58% · recovery +$10 · paper TP/SL',
   version: 'recover-plus10-base50-paper-exits-v2',
   entry: 'Fresh above-58% current-window signal after 45 seconds; one immediate taker entry per window.',
+  exit: 'Fresh best bid >=$0.99 triggers modeled $1/share paper TP; explicit bid $0.00 triggers zero-payout paper SL. Otherwise official resolution. No flips or live sales.',
   sizing: '50 shares at base. After loss, size the next eligible window to recover cycle losses plus $10 net using actual ask depth and fees. Reset to 50 after the cycle reaches +$10.',
   cadence: 'Recovery is eligible next window, without a doubling ladder or fixed share cap. Unclear recovery outcomes delay recovery only; 50-share base trading continues and its outcomes count toward the cycle. Insufficient cash or depth skips recovery, never fabricates a full fill.',
   assessment: 'Fresh held-side best bid >=$0.99 closes paper TP at a modeled $1/share; an explicit $0.00 bid closes paper SL at $0/share, including intra-window. Missing, crossed or stale quotes never imply zero. Otherwise wait for official resolution.',
