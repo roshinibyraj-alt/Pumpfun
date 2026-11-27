@@ -28,6 +28,21 @@
     <div class="brand"><div class="logo">P</div><div><strong>Pumpfun</strong><small>BTC 5-minute FreqAI paper bot · demo only</small></div></div>
     <span class="badge warn" id="status">CONNECTING</span>
   </header>
+  <section class="panel equity">
+    <div class="label" id="equityLabel">58% strategy · paper equity</div><div class="money" id="equity">—</div>
+    <div class="pnl" id="totalPnl">—</div>
+    <div class="stats">
+      <div class="stat"><span class="label">Available cash</span><strong id="cash">—</strong></div>
+      <div class="stat"><span class="label">Open P&amp;L</span><strong id="openPnl">—</strong></div>
+      <div class="stat"><span class="label">Win rate</span><strong id="winRate">—</strong></div>
+      <div class="stat"><span class="label">Trades / fees</span><strong id="tradesFees">—</strong></div>
+    </div>
+  </section>
+  <section class="panel" style="margin-top:12px">
+    <h2 style="margin:0">Equity history</h2>
+    <div id="equityChart" aria-live="off"></div>
+    <p class="model-note">Blue: settled balance from retained trades, anchored to preserved lifetime totals. Green: marked equity sampled every 10 seconds since this update, with gaps while marks or resolutions are unavailable. Latest 3,000 live samples shown. Older trade-level history is incomplete.</p>
+  </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
   <section class="panel">
     <div class="window-head"><div><h2>Bitcoin Up or Down · 5m</h2><div class="window-meta" id="windowMeta">Waiting for current market…</div></div><div class="clock" id="clock">—</div></div>
@@ -45,21 +60,6 @@
     <div class="section-title"><h2>Taker buy orders</h2><span id="restingCount">0 entries</span></div>
     <div class="list" id="restingOrders"><div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div></div>
     <div class="model-note" id="reservedCash">Reserved capital $0.00</div>
-  </section>
-  <section class="panel equity">
-    <div class="label" id="equityLabel">58% strategy · paper equity</div><div class="money" id="equity">—</div>
-    <div class="pnl" id="totalPnl">—</div>
-    <div class="stats">
-      <div class="stat"><span class="label">Available cash</span><strong id="cash">—</strong></div>
-      <div class="stat"><span class="label">Open P&amp;L</span><strong id="openPnl">—</strong></div>
-      <div class="stat"><span class="label">Win rate</span><strong id="winRate">—</strong></div>
-      <div class="stat"><span class="label">Trades / fees</span><strong id="tradesFees">—</strong></div>
-    </div>
-  </section>
-  <section class="panel" style="margin-top:12px">
-    <h2 style="margin:0">Equity history</h2>
-    <div id="equityChart" aria-live="off"></div>
-    <p class="model-note">Blue: settled balance from retained trades, anchored to preserved lifetime totals. Green: marked equity sampled every 10 seconds since this update, with gaps while marks or resolutions are unavailable. Latest 3,000 live samples shown. Older trade-level history is incomplete.</p>
   </section>
   <div class="section-title"><h2>Model forecast</h2><span>BTC spot inputs · 1-minute updates</span></div>
   <section class="panel model">

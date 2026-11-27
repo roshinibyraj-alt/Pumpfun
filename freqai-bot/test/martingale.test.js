@@ -251,6 +251,19 @@ test('dashboard shows actual recovery size, role, outcome source and recovery st
   assert.match(html, /strictly below \$0\.02/);
 });
 
+test('mobile dashboard places paper equity and its chart before current window and sizing', () => {
+  const html = fs.readFileSync(path.join(__dirname, '../public/freqai-dashboard.html'), 'utf8');
+  const header = html.indexOf('</header>');
+  const equity = html.indexOf('id="equityLabel"');
+  const chart = html.indexOf('id="equityChart"');
+  const window = html.indexOf('<h2>Current BTC window</h2>');
+  const sizing = html.indexOf('id="currentShares"');
+  assert.ok(header >= 0 && header < equity);
+  assert.ok(equity < chart && chart < window && window < sizing);
+  assert.equal((html.match(/id="equityLabel"/g) || []).length, 1);
+  assert.equal((html.match(/id="equityChart"/g) || []).length, 1);
+});
+
 test('production WebSocket entry path uses the 200-share recovery plan immediately', () => {
   const f = fixture(); f.buy(); f.end(); f.open(2);
   f.bot.tokenRefs.set('up2', { recordKey: 'BTC:5m', side: 'UP' });
