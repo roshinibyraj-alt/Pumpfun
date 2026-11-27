@@ -40,6 +40,7 @@ class ReboundEngine {
       start: m.start, end: m.end, eligible: now - m.start <= 5000,
       openMid: q.mid, low: q.mid, btcOpen: spot?.open || null,
       points: [], maxGap: 0, lastAt: now, depth: { asks: {}, bids: {} } };
+    if (!finite(c.btcOpen) && finite(spot?.open) && spot.open > 0) c.btcOpen = spot.open;
     c.maxGap = Math.max(c.maxGap, now - c.lastAt); c.lastAt = now; c.low = Math.min(c.low, q.mid);
     c.quote = { bestBid: q.bestBid, bestAsk: q.bestAsk, mid: q.mid, updatedAt: q.updatedAt,
       asks: levels(q.asks, false), bids: levels(q.bids, true) };

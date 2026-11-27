@@ -89,6 +89,17 @@ test('late-started windows and mismatched quotes cannot create a signal', () => 
   g.e.observe(g.record, 'UP', { price: 60000, open: 60000, at: g.now() });
   assert.equal(g.e.signals.length, 0);
 });
+test('an opening BTC feed race does not block the whole window after spot data becomes ready', () => {
+  const f = fixture();
+  f.record.quotes.UP = { bestBid: .49, bestAsk: .51, mid: .5, updatedAt: f.now(),
+    tokenId: 'u0', marketId: 'm0', windowStart: START };
+  f.e.observe(f.record, 'UP', null);
+  assert.equal(f.e.contexts[`${START}:UP`].btcOpen, null);
+  f.time(f.now() + 1000); f.quote('UP', .29, .31);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.requests[0].context.btcOpen, 60000);
+  assert.equal(f.e.signals[0].status, 'SCORING');
+});
 test('full ledger survives restart without re-entry, duplicated sales or cash reset', () => {
   const f = fixture(), p = f.buy(); f.quote('UP', .75, .76, 20);
   const saved = f.e.export(), g = fixture(); g.time(f.now()); g.e.restore(saved);
