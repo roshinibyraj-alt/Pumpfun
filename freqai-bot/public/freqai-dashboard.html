@@ -41,7 +41,7 @@
   <section class="panel" style="margin-top:12px">
     <h2 style="margin:0">Equity history</h2>
     <div id="equityChart" aria-live="off"></div>
-    <p class="model-note">Paper accounting: a fresh best bid ≥ $0.99 credits a modeled $1/share TP; an explicit $0.00 bid credits zero. These are not actual sale proceeds. Other positions await official resolution. Blue: closed paper balance; green: floating equity, with gaps for unknown marks. History is preserved.</p>
+    <p class="model-note">Paper accounting: a fresh best bid ≥ $0.99 credits a modeled $1/share TP; a fresh best bid ≤ $0.01 triggers SL with a modeled $0 payout. These are not actual sale proceeds. Other positions await official resolution. Blue: closed paper balance; green: floating equity, with gaps for unknown marks. History is preserved.</p>
   </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
   <section class="panel">
@@ -56,11 +56,6 @@
     <div id="recoveryState" style="font-weight:800;margin-top:12px">BASE</div>
     <div class="model-note" id="recoveryDetails">Recovery is eligible next window; unknown results allow 50-share base trading.</div>
   </section>
-  <section class="panel" style="margin-top:12px">
-    <div class="section-title"><h2>Taker buy orders</h2><span id="restingCount">0 entries</span></div>
-    <div class="list" id="restingOrders"><div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div></div>
-    <div class="model-note" id="reservedCash">Reserved capital $0.00</div>
-  </section>
   <div class="section-title"><h2>Model forecast</h2><span>BTC spot inputs · 1-minute updates</span></div>
   <section class="panel model">
     <div class="model-head"><div><div class="model-name">Freqtrade FreqAI · LightGBM</div><div class="model-note" id="modelNote">Waiting for model startup…</div></div><span class="badge warn" id="modelStatus">WARMING</span></div>
@@ -70,12 +65,12 @@
     </div>
     <div class="bar"><i id="probBar" style="width:50%"></i></div>
     <div class="model-note" id="modelDecision">At window open, use the latest completed-minute score. Shadow tiers also evaluate fresh scores during the window.</div>
-    <div class="model-note" id="entryRule">No flips, take-profit, or stop-loss. Open shares go to official resolution.</div>
+    <div class="model-note" id="entryRule">No flips. Best-bid TP ≥ $0.99 pays modeled $1/share; best-bid SL ≤ $0.01 pays modeled $0. Otherwise official resolution.</div>
   </section>
   <div class="section-title"><h2>58% performance</h2><span>Official settlement P&amp;L · demo only</span></div>
   <section class="panel">
     <div class="shadow-grid" id="shadowTiers"><div class="empty">Waiting for shadow statistics.</div></div>
-    <p class="model-note">One taker entry per window on a fresh &gt;58% signal after 45 seconds. Base 50 shares; recovery targets cycle losses plus $10 net. Best-bid TP ≥ $0.99 credits a modeled $1/share; explicit $0.00 bid credits zero. Otherwise await official resolution.</p>
+    <p class="model-note">One taker entry per window on a fresh &gt;58% signal after 45 seconds. Base 50 shares; recovery targets cycle losses plus $10 net. Best-bid TP ≥ $0.99 credits a modeled $1/share; best bid ≤ $0.01 triggers SL with a modeled $0 payout. Otherwise await official resolution.</p>
     <div class="list" id="shadowEntries"><div class="empty">No shadow entries yet.</div></div>
   </section>
   <section class="grid two">
@@ -98,11 +93,16 @@
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Each completed minute is labeled with the 5-minute window containing its close, so the model score remains aligned with the active window as new one-minute candles close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
     <p>After 45 seconds, a fresh current-window score strictly above 58% immediately requests the displayed size at available asks. The existing prediction model remains unchanged. No price offset or Binance fallback.</p>
     <p>Base: 50 shares. After a loss, the next eligible window targets all outstanding recovery-cycle losses plus $10 net profit. Size is the smallest whole-share visible-ask sweep whose $1 winning payout covers purchase cost, market fees and that target. Reset to 50 when the cycle reaches +$10. No fixed doubling or three-step ladder. An unclear recovery result allows 50-share base trading; these wins and losses count toward the same cycle. Recovery waits if cash or visible depth cannot fund the full target. Large recovery sizes can exhaust paper capital; profit is not guaranteed.</p>
-    <p>TP: the held side’s fresh best bid at or above $0.99 immediately closes the paper position at a modeled $1 per share. SL: an explicit fresh $0.00 bid closes at zero. These paper outcomes update recovery immediately, but any recovery entry must wait until the next eligible window. Missing, crossed, empty or stale books never count as a zero bid. If neither threshold appears, wait for official resolution. Each position is paid and counted once.</p>
+    <p>TP: the held side’s fresh best bid at or above $0.99 immediately closes the paper position at a modeled $1 per share. SL: a fresh best bid at or below $0.01 closes at a modeled $0 payout. These paper outcomes update recovery immediately, but any recovery entry must wait until the next eligible window. Missing, crossed, empty or stale books never count as an SL. If neither threshold appears, wait for official resolution. Each position is paid and counted once.</p>
     <p>One executed entry per window. Sweep fresh visible asks from cheapest upward and show the actual average entry. Insufficient depth results in a partial fill, with the unfilled remainder cancelled immediately. Nothing rests or rolls into the next market; opposite signals do not sell or add entries.</p>
     <p>Taker fees are included in cost and P&amp;L: shares × market fee rate × price × (1 − price), calculated for each fill. BTC 5-minute markets default to a 0.05 fee rate. No maker rebates are credited. Paper execution cannot guarantee live fills.</p>
     <p>Paper TP/SL payouts release simulated capital and appear in realized paper P&amp;L, clearly labeled separately from official resolution. The $1 TP is your requested simulation assumption, not a guaranteed executable sale price. No exit sale fees are charged because these are modeled terminal payouts, not market sales. No signal selling or live orders.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
+  </section>
+  <section class="panel" id="takerBuyOrdersCard" style="margin-top:12px">
+    <div class="section-title"><h2>Taker buy orders</h2><span id="restingCount">0 entries</span></div>
+    <div class="list" id="restingOrders"><div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div></div>
+    <div class="model-note" id="reservedCash">Reserved capital $0.00</div>
   </section>
   <div class="footer"><a href="/shadow" style="color:var(--blue)">Rebound experiment (separate paper account)</a></div>
   <div class="footer">Paper simulation only · no live orders · Binance is the prediction data source</div>
@@ -197,7 +197,7 @@
       ? `${opening.side||'No trade'} at window open · ${num(opening.pUp)?`UP ${(opening.pUp*100).toFixed(1)}% / DOWN ${(opening.pDown*100).toFixed(1)}%`:'opening score unavailable'} · ${esc(opening.reason||'')}`
       : d?`Latest entry: ${d.side} at ${time(d.at)} · ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. No further entries this window.`:'At each window open: one 50-share buy only when a side is at least 51%. No flips.';
     $('modelDecision').textContent='After 45 seconds: >58% immediately buys '+shares(s.shadowSizing?.currentShares||100)+' shares at available asks, including taker fees.';
-    $('entryRule').textContent='One entry per window. Best-bid TP ≥ $0.99 → modeled $1/share; explicit bid $0.00 → zero. Otherwise official resolution. Recovery starts next eligible window; no signal selling.';
+    $('entryRule').textContent='One entry per window. Best-bid TP ≥ $0.99 → modeled $1/share; best-bid SL ≤ $0.01 → modeled $0. Otherwise official resolution. Recovery starts next eligible window; no signal selling.';
     const tiers=s.shadowTiers||[];
     $('shadowTiers').innerHTML=tiers.map(t=>`<article class="shadow-card tier${Number(t.thresholdPct)}"><h3>Score &gt; ${Number(t.thresholdPct)}%</h3><div class="shadow-total ${cls(t.totalPnl)}">${signed(t.totalPnl)}</div><div class="shadow-small">Total P&amp;L · realized ${signed(t.realizedPnl)} · floating ${signed(t.openPnl)}<br>Entries ${Number(t.entries||0)} · resolved ${Number(t.resolved||0)} · W/L ${Number(t.wins||0)}/${Number(t.losses||0)}<br>Open ${Number(t.openPositions||0)} · pending ${Number(t.pendingResolution||0)} · fees ${money(t.fees)}</div></article>`).join('')||'<div class="empty">Waiting for shadow statistics.</div>';
     const shadowEntries=s.shadowEntries||[];

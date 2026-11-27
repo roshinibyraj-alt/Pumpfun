@@ -89,8 +89,9 @@ test('paper SL pays once, and a later official result cannot pay or size it twic
   assert.equal(f.bot.shadowTotals[58].resolved,1);
 });
 test('exact best-bid boundaries and quote guards prevent invented outcomes',()=>{
-  for(const x of [null,undefined,NaN,.01,.02,.98,.5,-1,2])assert.equal(sizing.outcomeForBid(x),null);
-  assert.equal(sizing.outcomeForBid(0),'LOSS');assert.equal(sizing.outcomeForBid(.99),'WIN');
+  for(const x of [null,undefined,NaN,.010001,.02,.98,.5,-1,2])assert.equal(sizing.outcomeForBid(x),null);
+  for(const x of [0,.001,.009,.01])assert.equal(sizing.outcomeForBid(x),'LOSS');
+  assert.equal(sizing.outcomeForBid(.99),'WIN');
   for(const kind of ['missing','crossed','stale','token','market','window']){
     const f=fixture(),e=f.buy();f.time(f.r.market.end);f.quote(0,.01);
     const q=f.r.quotes.UP;

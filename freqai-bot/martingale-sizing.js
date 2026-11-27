@@ -16,7 +16,7 @@ function validateState(s, entries) {
 }
 function outcomeForBid(bid) {
   if (bid == null || !Number.isFinite(bid) || bid < 0 || bid > 1) return null;
-  return bid >= .99 ? 'WIN' : bid === 0 ? 'LOSS' : null;
+  return bid >= .99 ? 'WIN' : bid <= .01 ? 'LOSS' : null;
 }
 function plan(s, windowStart) {
   const ready = s.active && !s.awaitingEntryId && windowStart >= s.eligibleWindowStart;
