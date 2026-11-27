@@ -3,7 +3,7 @@ const TakerBot = require('./freqai-taker-btc-bot');
 const sizing = require('./martingale-sizing');
 const STRATEGY = Object.freeze({
   ...TakerBot.STRATEGY,
-  id: 'pumpfun-freqai58-taker-recover-plus10-base50-v1',
+  id: 'pumpfun-freqai58-taker-recover-plus10-base50-paper-exits-v2',
   name: 'BTC FreqAI 58% · recovery +$10 · paper TP/SL',
   version: 'recover-plus10-base50-paper-exits-v2',
   entry: 'Fresh above-58% current-window signal after 45 seconds; one immediate taker entry per window.',
