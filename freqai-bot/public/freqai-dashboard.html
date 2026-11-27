@@ -37,10 +37,10 @@
   <section class="panel" style="margin:12px 0;border-color:var(--yellow)">
     <div class="label">Current sizing · next qualifying buy</div>
     <div id="currentShares" style="font:900 clamp(44px,14vw,72px)/1.15 var(--mono);color:var(--yellow)">—</div>
-    <div class="model-note" id="sizingNote">Flat 100 shares per limit · no win/loss progression</div>
+    <div class="model-note" id="sizingNote">Flat 100 shares per taker entry · no win/loss progression</div>
   </section>
   <section class="panel" style="margin-top:12px">
-    <div class="section-title"><h2>Resting buy orders</h2><span id="restingCount">0 active</span></div>
+    <div class="section-title"><h2>Taker buy orders</h2><span id="restingCount">0 entries</span></div>
     <div class="list" id="restingOrders"><div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div></div>
     <div class="model-note" id="reservedCash">Reserved capital $0.00</div>
   </section>
@@ -73,7 +73,7 @@
   <div class="section-title"><h2>58% performance</h2><span>Fresh flat-size history · demo only</span></div>
   <section class="panel">
     <div class="shadow-grid" id="shadowTiers"><div class="empty">Waiting for shadow statistics.</div></div>
-    <p class="model-note">100-share limit at signal ask minus $0.10. Same-side signals leave it fixed. Only an opposite &gt;58% signal replaces the unfilled remainder. Filled shares stay held to resolution.</p>
+    <p class="model-note">Immediately buy 100 shares at available asks on a fresh &gt;58% signal after 45 seconds. One executed entry per window. Filled shares stay held to resolution.</p>
     <div class="list" id="shadowEntries"><div class="empty">No shadow entries yet.</div></div>
   </section>
   <section class="grid two">
@@ -94,10 +94,10 @@
     <div class="label">Strategy details</div>
     <h2>BTC FreqAI · 58% only</h2>
     <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Each completed minute is labeled with the 5-minute window containing its close, so the model score remains aligned with the active window as new one-minute candles close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
-    <p>After 45 seconds, a fresh score strictly above 58% places a 100-share limit at the signalled side’s best ask minus $0.10, rounded down to the market tick. Invalid non-positive prices are skipped.</p>
-    <p>The price stays fixed even if confidence falls or the same-side score changes. An opposite fresh score strictly above 58% cancels only the unfilled remainder and places a new opposite 100-share limit. Partial fills remain held. A fully filled order ends new entries for that window.</p>
-    <p>Unfilled orders expire at window end and never roll into the next market. Paper capital is reserved for resting orders. Fresh ask depth strictly through the limit is required for simulated maker fills; equality alone does not fill, and unchanged depth cannot be reused. Queue priority is unknown, so simulated fills are not guaranteed live fills.</p>
-    <p>Maker fees are zero under Polymarket’s published prediction-market rules. Rebates are not credited as guaranteed income. No take-profit, stop-loss or signal selling; hold filled shares to official resolution. No live orders are sent.</p>
+    <p>After 45 seconds, a fresh current-window score strictly above 58% immediately requests 100 shares at available asks. The existing prediction model remains unchanged. No price offset or Binance fallback.</p>
+    <p>One executed entry per window. Sweep fresh visible asks from cheapest upward and show the actual average entry. Insufficient depth results in a partial fill, with the unfilled remainder cancelled immediately. Nothing rests or rolls into the next market; opposite signals do not sell or add entries.</p>
+    <p>Taker fees are included in cost and P&amp;L: shares × market fee rate × price × (1 − price), calculated for each fill. BTC 5-minute markets default to a 0.05 fee rate. No maker rebates are credited. Paper execution cannot guarantee live fills.</p>
+    <p>No take-profit, stop-loss or signal selling; hold filled shares to official resolution. No live orders are sent.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
   </section>
   <div class="footer">Paper simulation only · no live orders · Binance is the prediction data source</div>
@@ -157,12 +157,11 @@
   function render(s){
     const a=s.shadowAccount||{}, f=s.freqai||{}, market=(s.markets||[]).find(m=>m.asset==='BTC'&&m.timeframe==='5m');
     $('currentShares').textContent=shares(s.shadowSizing?.currentShares)+' shares';
-    $('sizingNote').textContent='Flat 100 shares per new limit · no increases after losses';
-    const resting=(s.shadowRestingOrders||[]);
-    const activeOrders=resting.filter(o=>['RESTING','PARTIAL'].includes(o.status));
-    $('restingCount').textContent=activeOrders.length+' active';
-    $('reservedCash').textContent='Reserved '+money(s.restingOrderSummary?.reservedCash)+' · Available '+money(s.restingOrderSummary?.availableCash);
-    $('restingOrders').innerHTML=resting.length?resting.slice(0,8).map(o=>`<div class="row ${o.status==='FILLED'?'win':['RESTING','PARTIAL'].includes(o.status)?'pending':''}"><div class="row-title"><span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))}</div><div class="row-detail">Limit <b>${px(o.limitPrice)}</b> · signal ask ${px(o.signalAsk)} · ${(o.signalProbability*100).toFixed(1)}%<br>${shares(o.filledShares)} / 100 filled · ${shares(o.remainingShares)} resting · placed ${time(o.placedAt)} · expires ${time(o.windowEnd)}</div></div>`).join(''):'<div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div>';
+    $('sizingNote').textContent='Flat 100 shares per taker entry · no increases after losses';
+    const orders=(s.shadowTakerOrders||[]);
+    $('restingCount').textContent=orders.length+' entries';
+    $('reservedCash').textContent='Available '+money(s.takerOrderSummary?.availableCash)+' · no resting orders';
+    $('restingOrders').innerHTML=orders.length?orders.slice(0,8).map(o=>`<div class="row ${o.status==='FILLED'?'win':'pending'}"><div class="row-title"><span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))}</div><div class="row-detail">Average entry <b>${px(o.entryPrice)}</b> · signal ask ${px(o.signalAsk)} · ${(o.signalProbability*100).toFixed(1)}%<br>${shares(o.filledShares)} / 100 filled · ${shares(o.cancelledShares||0)} cancelled · fees ${money(o.fees)}<br>Executed ${time(o.filledAt)} · window ends ${time(o.windowEnd)}</div></div>`).join(''):'<div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div>';
     drawEquity(s);
     $('equityLabel').textContent=num(a.equity)?'58% strategy · marked paper equity':'58% settled balance · live equity awaits marks / resolution';
     $('equity').textContent=money(a.equity??a.settledBalance);
@@ -186,8 +185,8 @@
     $('modelDecision').textContent=opening
       ? `${opening.side||'No trade'} at window open · ${num(opening.pUp)?`UP ${(opening.pUp*100).toFixed(1)}% / DOWN ${(opening.pDown*100).toFixed(1)}%`:'opening score unavailable'} · ${esc(opening.reason||'')}`
       : d?`Latest entry: ${d.side} at ${time(d.at)} · ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. No further entries this window.`:'At each window open: one 50-share buy only when a side is at least 51%. No flips.';
-    $('modelDecision').textContent='After 45 seconds: >58% places 100 shares at ask − $0.10. Only an opposite >58% signal replaces a resting order.';
-    $('entryRule').textContent='No signal selling, TP or SL. Limits stay fixed until fill, opposite >58% signal or window expiry. Filled shares go to resolution.';
+    $('modelDecision').textContent='After 45 seconds: >58% immediately buys 100 shares at available asks, including taker fees.';
+    $('entryRule').textContent='One executed entry per window. No resting orders, signal selling, TP or SL. Filled shares go to resolution.';
     const tiers=s.shadowTiers||[];
     $('shadowTiers').innerHTML=tiers.map(t=>`<article class="shadow-card tier${Number(t.thresholdPct)}"><h3>Score &gt; ${Number(t.thresholdPct)}%</h3><div class="shadow-total ${cls(t.totalPnl)}">${signed(t.totalPnl)}</div><div class="shadow-small">Total P&amp;L · realized ${signed(t.realizedPnl)} · floating ${signed(t.openPnl)}<br>Entries ${Number(t.entries||0)} · resolved ${Number(t.resolved||0)} · W/L ${Number(t.wins||0)}/${Number(t.losses||0)}<br>Open ${Number(t.openPositions||0)} · pending ${Number(t.pendingResolution||0)} · fees ${money(t.fees)}</div></article>`).join('')||'<div class="empty">Waiting for shadow statistics.</div>';
     const shadowEntries=s.shadowEntries||[];
