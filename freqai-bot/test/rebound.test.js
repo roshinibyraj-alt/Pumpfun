@@ -46,6 +46,9 @@ test('TP sells available bids only; unchanged depth cannot be sold twice, replen
   const f = fixture(), p = f.buy();
   f.time(f.now() + 1000); f.quote('UP', .75, .76, 20);
   assert.equal(p.exitShares, 20); assert.equal(p.remainingShares, 30);
+  const partial = f.e.account();
+  assert.ok(partial.realizedPnl > 0, 'The sold portion is realized immediately');
+  assert.ok(Math.abs(partial.equity - 3000 - partial.realizedPnl - partial.unrealizedPnl) < 1e-8);
   const cash = f.e.cash;
   f.time(f.now() + 1000); f.quote('UP', .75, .76, 20);
   assert.equal(f.e.cash, cash); assert.equal(p.remainingShares, 30);

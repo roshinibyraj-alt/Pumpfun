@@ -209,13 +209,15 @@ class ReboundEngine {
     let marked = 0, unknown = false; const pending = this.positions.filter(open);
     for (const p of pending) {
       const c = this.contexts[p.contextId], known = p.status === 'OPEN' && this.fresh(c);
+      const entryTotal = p.totalCost + p.entryFees;
+      p.partialRealizedPnl = p.exitProceeds - p.exitFees - entryTotal * p.exitShares / p.shares;
       p.markBid = known ? c.quote.bestBid : null;
-      p.unrealizedPnl = known ? p.exitProceeds - p.exitFees + p.remainingShares * p.markBid - p.totalCost - p.entryFees : null;
+      p.unrealizedPnl = known ? p.remainingShares * p.markBid - entryTotal * p.remainingShares / p.shares : null;
       if (known) marked += p.remainingShares * p.markBid; else unknown = true;
     }
     const closed = this.positions.filter(p => !open(p));
     return { initialCapital: 3000, cash: this.cash, equity: unknown ? null : this.cash + marked,
-      realizedPnl: closed.reduce((n, p) => n + p.realizedPnl, 0),
+      realizedPnl: closed.reduce((n, p) => n + p.realizedPnl, 0) + pending.reduce((n, p) => n + p.partialRealizedPnl, 0),
       unrealizedPnl: unknown ? null : pending.reduce((n, p) => n + p.unrealizedPnl, 0),
       totalFees: this.positions.reduce((n, p) => n + p.entryFees + p.exitFees, 0),
       wins: closed.filter(p => p.realizedPnl > 0).length, losses: closed.filter(p => p.realizedPnl < 0).length,
