@@ -34,6 +34,12 @@ class ReboundModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             m.fit([{"windowStart": 0, "features": [0] * 15, "y": 1} for _ in range(200)])
 
+    def test_unreachable_calibrated_threshold_is_observation_only(self):
+        payload = {"coef": .058875, "intercept": -1.051367, "metrics": {}}
+        self.assertEqual(m.ready_status(payload), "OBSERVING_LOW_CONFIDENCE")
+        self.assertFalse(m.describe(payload)["metrics"]["thresholdReachable"])
+        self.assertLess(m.describe(payload)["metrics"]["scoreUpperBound"], .4)
+
 
 if __name__ == "__main__":
     unittest.main()

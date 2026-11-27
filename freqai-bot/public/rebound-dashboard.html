@@ -88,6 +88,7 @@ h2{font-size:19px;margin:0;letter-spacing:-.03em}
   <div class="head"><h2>Model readiness</h2><span class="badge warn" id="mstatus">UNKNOWN</span></div>
   <div class="note" id="mnote" style="margin-top:0">Waiting for model state.</div>
   <div class="kv" style="grid-template-columns:repeat(2,minmax(0,1fr))" id="metrics"></div>
+  <p id="entryReady" class="d">Waiting for model readiness.</p>
   <div class="warnbox" id="mwarn">Metrics describe a small held-out sample and are not evidence of future profit.</div>
 </section>
 <section class="card">
@@ -162,6 +163,7 @@ function render(s){
   }else{set('clock','unknown');set('mmeta','No active market.');set('quotes','<div class="empty">Waiting for book.</div>')}
   const ms=String(m.status||'UNKNOWN');
   set('mstatus',esc(ms.replace(/_/g,' ')),'badge '+(/ERROR|FAIL/i.test(ms)?'bad':/READY/i.test(ms)?'ok':'warn'));
+  if(m.entryReadiness)set('entryReady',esc(m.entryReadiness));
   set('mnote',(m.lastError?'<b class="bad">Error: '+esc(m.lastError)+'</b><br>':'')+'Version '+(m.version!=null?esc(m.version):U)+' · trained '+stamp(m.trainedAt)+' · label '+(mt.labelSource?esc(mt.labelSource):U)+' · split '+(mt.split?esc(mt.split):U));
   const met=[['Train examples',int(mt.trainExamples)],['Calibration',int(mt.calibrationExamples)],['Test examples',int(mt.testExamples)],['Test signals',int(mt.testSignals)],['Test AUC',dec(mt.testAuc)],['Test precision',pct(mt.testPrecision)],['Test Brier',dec(mt.testBrier,4)],['Baseline Brier',dec(mt.baselineBrier,4)],['Closed examples',int(tr.closedExamples)],['Active examples',int(tr.activeExamples)]];
   set('metrics',met.map(([k,v])=>`<div><span class="label">${k}</span><b>${v}</b></div>`).join(''));

@@ -34,6 +34,9 @@ Only sample windows reaching within ten seconds of expiry are included. This is
 a disclosed censored proxy, never a claim of full-window ground truth; live
 examples use the stricter observed-through-expiry rule below.
 Retrain every six hours. Missing/failed/stale models do not receive fake scores.
+If calibration makes the entry threshold mathematically unreachable, the
+dashboard explicitly reports OBSERVING LOW CONFIDENCE, continues collecting
+examples, and waits for retraining rather than implying that trades are ready.
 
 ## Trading and labels
 

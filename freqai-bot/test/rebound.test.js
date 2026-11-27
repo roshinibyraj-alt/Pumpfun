@@ -144,6 +144,7 @@ test('HTTP shadow routes and mobile dashboard render actual independent state', 
   assert.equal(state.account.initialCapital, 3000); assert.equal(state.positions.length, 1);
   const html = await (await fetch(url + '/shadow')).text();
   assert.match(html, /\/api\/shadow\/state/);
+  assert.match(html, /id="entryReady"/);
   const elements = new Map(), element = () => ({ innerHTML: '', className: '' });
   const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1];
   vm.runInNewContext(script, { document: { getElementById(id) {

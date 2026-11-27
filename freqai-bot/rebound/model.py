@@ -140,6 +140,25 @@ def predict(payload, vector):
     return 1 / (1 + math.exp(-max(-700, min(700, z))))
 
 
+def describe(payload):
+    description = {k: v for k, v in payload.items() if k != "booster"}
+    # Calibration may compress EVERY possible prediction below entry threshold.
+    # Expose that explicitly, rather than imply that a silent bot is trade-ready.
+    upper_z = abs(payload["coef"]) * math.log(9999) + payload["intercept"]
+    upper = 1 / (1 + math.exp(-max(-700, min(700, upper_z))))
+    description["metrics"] = {**payload["metrics"], "scoreUpperBound": upper,
+                              "thresholdReachable": upper >= .63}
+    description["entryReadiness"] = (
+        "Scores can qualify; actual entries still require fresh prices and liquidity."
+        if upper >= .63 else
+        "Current calibrated model cannot reach the 63% entry threshold. Observation and automatic retraining continue; no forced trades.")
+    return description
+
+
+def ready_status(payload):
+    return "READY_EXPERIMENTAL" if describe(payload)["metrics"]["thresholdReachable"] else "OBSERVING_LOW_CONFIDENCE"
+
+
 def emit(row):
     print(json.dumps(row, allow_nan=False), flush=True)
 
@@ -175,14 +194,12 @@ def main():
             temp = model_path.with_suffix(".tmp")
             temp.write_text(json.dumps(payload, allow_nan=False))
             temp.replace(model_path)
-        emit({"type": "model", "model": {k: v for k, v in payload.items() if k != "booster"},
-              "status": "READY_EXPERIMENTAL"})
+        emit({"type": "model", "model": describe(payload), "status": ready_status(payload)})
     except Exception as error:
-        emit({"type": "status", "status": "READY_EXPERIMENTAL" if payload else "ERROR",
+        emit({"type": "status", "status": ready_status(payload) if payload else "ERROR",
               "lastError": str(error)})
         if payload:
-            emit({"type": "model", "model": {k: v for k, v in payload.items() if k != "booster"},
-                  "status": "READY_EXPERIMENTAL"})
+            emit({"type": "model", "model": describe(payload), "status": ready_status(payload)})
     for line in sys.stdin:
         try:
             message = json.loads(line)
