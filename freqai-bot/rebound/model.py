@@ -5,22 +5,25 @@ import math
 import os
 from pathlib import Path
 import sys
+import threading
 import time
 import urllib.request
 
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import brier_score_loss, roc_auc_score
+sys.path.insert(0, str(Path(__file__).parent))
+from context_history import CandleHistory, LONG_FEATURES
+from learning import fit as fit_pipeline, score as score_pipeline
 
-SCHEMA = "rebound-causal-price-v1"
+SCHEMA = "rebound-context8h-walkforward-v2"
 SAMPLE_URL = ("https://huggingface.co/philippotiger/btc-5min-polymarket-predictor/"
               "resolve/d5a00868813b0caac15ece75bad82e3424cb689d/sample_data/sample.csv")
-FEATURES = ["mid", "secs_norm", "spread", "price_from_open", "dist_from_low",
+BASE_FEATURES = ["mid", "secs_norm", "spread", "price_from_open", "dist_from_low",
             "mom_5s", "mom_30s", "mom_accel", "volatility_30s",
             "up_ratio_5", "up_ratio_10", "streak_dir", "streak_len",
             "btc_abs_delta", "btc_abs_mom_30s"]
+FEATURES = BASE_FEATURES + LONG_FEATURES
+OUTPUT_LOCK = threading.Lock()
 
 
 def features(context):
@@ -51,7 +54,7 @@ def features(context):
            ratio(5), ratio(10), direction, min(streak, 300),
            abs(math.log(p["btcPrice"] / context["btcOpen"])),
            abs(math.log(p["btcPrice"] / previous_btc))]
-    if len(out) != len(FEATURES) or not np.all(np.isfinite(out)):
+    if len(out) != len(BASE_FEATURES) or not np.all(np.isfinite(out)):
         raise ValueError("Invalid rebound features")
     return out
 
@@ -85,7 +88,8 @@ def bootstrap(path):
                                        "low": low, "openMid": points[0]["mid"],
                                        "btcOpen": records[0]["btc_open"]})
                     future = [r["mid"] for r in records[i:] if r["ts"] * 1000 < end]
-                    examples.append({"features": vector, "y": int(max(future, default=0) >= .75),
+                    examples.append({"features": vector, "at": point["at"],
+                                     "y": int(max(future, default=0) >= .75),
                                      "windowStart": end - 300000, "source": "PUBLIC_SAMPLE",
                                      "horizonGapMs": end - records[-1]["ts"] * 1000})
                 except (ValueError, TypeError):
@@ -95,53 +99,39 @@ def bootstrap(path):
 
 
 def fit(examples):
-    # Keep every side from one window in the same fold, in chronological order.
-    windows = sorted(set(e["windowStart"] for e in examples))
-    if len(windows) < 100:
-        raise ValueError("At least 100 independent labeled windows are required")
-    a, b = int(.6 * len(windows)), int(.8 * len(windows))
-    folds = [[e for e in examples if predicate(e["windowStart"])] for predicate in (
-        lambda t: t < windows[a - 1],
-        lambda t: windows[a] <= t < windows[b - 1],
-        lambda t: t >= windows[b])]
-    if any(len(set(e["y"] for e in fold)) < 2 for fold in folds):
-        raise ValueError("Train, calibration and untouched test folds need both outcomes")
-    arrays = [(np.asarray([e["features"] for e in f]), np.asarray([e["y"] for e in f]))
-              for f in folds]
-    (x, y), (cx, cy), (tx, ty) = arrays
-    model = lgb.LGBMClassifier(n_estimators=80, learning_rate=.035, num_leaves=6,
-                              max_depth=3, min_child_samples=10, reg_lambda=5,
-                              random_state=42, n_jobs=1, verbosity=-1)
-    model.fit(x, y)  # Never use the test set for early stopping or threshold tuning.
-    logit = lambda p: np.log(np.clip(p, .0001, .9999) / (1 - np.clip(p, .0001, .9999))).reshape(-1, 1)
-    calibrator = LogisticRegression(C=1, random_state=42).fit(logit(model.predict_proba(cx)[:, 1]), cy)
-    proba = calibrator.predict_proba(logit(model.predict_proba(tx)[:, 1]))[:, 1]
-    signals = proba >= .63
-    metrics = {"trainExamples": len(y), "calibrationExamples": len(cy), "testExamples": len(ty),
-               "testAuc": float(roc_auc_score(ty, proba)),
-               "testBrier": float(brier_score_loss(ty, proba)),
-               "baselineBrier": float(brier_score_loss(ty, np.full(len(ty), float(y.mean())))),
-               "testPrecision": float(ty[signals].mean()) if signals.any() else None,
-               "testSignals": int(signals.sum()),
-               "labelSource": "Observed rebound, not settlement. Public bootstrap ends about 8s before expiry (censored proxy); live examples cover expiry.",
-               "split": "Chronological 60/20/20 by whole window, one-window embargo, untouched test",
-               "experimental": True, "publicExamples": sum(e["source"] == "PUBLIC_SAMPLE" for e in examples),
-               "liveExamples": sum(e["source"] == "LIVE_CLOB" for e in examples)}
-    return {"schema": SCHEMA, "featureNames": FEATURES,
-            "booster": model.booster_.model_to_string(), "coef": float(calibrator.coef_[0, 0]),
-            "intercept": float(calibrator.intercept_[0]), "trainedAt": int(time.time() * 1000),
-            "version": f"{SCHEMA}-{int(time.time())}", "metrics": metrics}
+    result = fit_pipeline(examples, FEATURES, SCHEMA)
+    result.update({"trainedAt": int(time.time() * 1000),
+                   "version": f"{SCHEMA}-{int(time.time())}"})
+    return result
+
+
+def example_at(example):
+    # Legacy vectors encode exact seconds remaining; this recovers their actual
+    # first-dip timestamp rather than guessing the start of their window.
+    return example.get("at", example["windowStart"] + 300000 - example["features"][1] * 300000)
+
+
+def enrich(examples, history):
+    enriched, missing = [], 0
+    for example in examples:
+        try:
+            at = example_at(example)
+            long_vector, _ = history.vector(at)
+            base = example["features"][:len(BASE_FEATURES)]
+            if len(base) != len(BASE_FEATURES) or not np.all(np.isfinite(base)):
+                raise ValueError("Invalid legacy features")
+            enriched.append({**example, "at": at, "features": base + long_vector})
+        except (ValueError, KeyError, IndexError, TypeError):
+            missing += 1
+    return enriched, missing
 
 
 def predict(payload, vector):
-    booster = lgb.Booster(model_str=payload["booster"])
-    p = float(np.clip(booster.predict(np.asarray([vector]), num_threads=1)[0], .0001, .9999))
-    z = payload["coef"] * math.log(p / (1 - p)) + payload["intercept"]
-    return 1 / (1 + math.exp(-max(-700, min(700, z))))
+    return score_pipeline(payload, vector)[1]
 
 
 def describe(payload):
-    description = {k: v for k, v in payload.items() if k != "booster"}
+    description = {k: v for k, v in payload.items() if k not in ("booster", "linear")}
     # Calibration may compress EVERY possible prediction below entry threshold.
     # Expose that explicitly, rather than imply that a silent bot is trade-ready.
     upper_z = abs(payload["coef"]) * math.log(9999) + payload["intercept"]
@@ -152,6 +142,10 @@ def describe(payload):
         "Scores can qualify; actual entries still require fresh prices and liquidity."
         if upper >= .63 else
         "Current calibrated model cannot reach the 63% entry threshold. Observation and automatic retraining continue; no forced trades.")
+    metrics = payload["metrics"]
+    if ("testBrier" in metrics and "baselineBrier" in metrics
+            and metrics["testBrier"] >= metrics["baselineBrier"]):
+        description["entryReadiness"] += " Untouched test does not beat the base-rate baseline; no validated trading edge."
     return description
 
 
@@ -160,14 +154,16 @@ def ready_status(payload):
 
 
 def emit(row):
-    print(json.dumps(row, allow_nan=False), flush=True)
+    with OUTPUT_LOCK:
+        print(json.dumps(row, allow_nan=False), flush=True)
 
 
 def main():
     directory = Path(sys.argv[1])
     directory.mkdir(parents=True, exist_ok=True)
     model_path, sample_path = directory / "model.json", directory / "sample.csv"
-    payload = None
+    payload, history = None, CandleHistory(directory)
+    refresh_thread = None
     try:
         if model_path.exists():
             cached = json.loads(model_path.read_text())
@@ -186,29 +182,64 @@ def main():
                     out.write(chunk)
             temporary.replace(sample_path)
         public = bootstrap(sample_path)
-        if payload is None or time.time() * 1000 - payload["trainedAt"] > 21600000:
-            live_path = directory / "training.json"
-            live = json.loads(live_path.read_text()) if live_path.exists() else []
-            payload = fit(public + live)
+        live_path = directory / "training.json"
+        live = json.loads(live_path.read_text()) if live_path.exists() else []
+        now = int(time.time() * 1000)
+        history.ensure(min(example_at(e) for e in public) - 9 * 3600000,
+                       max(example_at(e) for e in public), "public")
+        recent_live = [e for e in live if example_at(e) >= now - 30 * 86400000]
+        oldest_live = min([example_at(e) for e in recent_live] + [now])
+        history.ensure(min(oldest_live, now) - 9 * 3600000, now)
+        latest_live = max([example_at(e) for e in live] + [0])
+        if (payload is None or now - payload["trainedAt"] >= 3600000
+                or len(live) != payload.get("inputLiveExamples")
+                or latest_live != payload.get("latestInputLiveAt")):
+            enriched, missing = enrich(public + recent_live, history)
+            replacement = fit(enriched)
+            replacement["inputLiveExamples"] = len(live)
+            replacement["latestInputLiveAt"] = latest_live
+            replacement["metrics"]["examplesMissingContext"] = missing
+            replacement["metrics"]["olderLiveExamplesRetainedButExcluded"] = len(live) - len(recent_live)
+            replacement["history"] = history.snapshot()
+            payload = replacement
             payload["sampleSha256"] = hashlib.sha256(sample_path.read_bytes()).hexdigest()
             temp = model_path.with_suffix(".tmp")
             temp.write_text(json.dumps(payload, allow_nan=False))
             temp.replace(model_path)
-        emit({"type": "model", "model": describe(payload), "status": ready_status(payload)})
+        emit({"type": "model", "model": {**describe(payload), "history": history.snapshot()},
+              "status": ready_status(payload)})
     except Exception as error:
         emit({"type": "status", "status": ready_status(payload) if payload else "ERROR",
               "lastError": str(error)})
         if payload:
-            emit({"type": "model", "model": describe(payload), "status": ready_status(payload)})
+            emit({"type": "model", "model": {**describe(payload), "lastTrainingError": str(error),
+                                            "history": history.snapshot()},
+                  "status": ready_status(payload)})
     for line in sys.stdin:
+        base, message = None, {}
         try:
             message = json.loads(line)
+            if message.get("type") == "refresh":
+                if refresh_thread is None or not refresh_thread.is_alive():
+                    def refresh():
+                        history.refresh()
+                        emit({"type": "history", "history": history.snapshot()})
+                    refresh_thread = threading.Thread(target=refresh, daemon=True)
+                    refresh_thread.start()
+                continue
             vector = features(message["context"])
-            probability = predict(payload, vector) if payload else None
+            base = list(vector)
+            long_vector, history_at = history.vector(message["context"]["at"])
+            vector += long_vector
+            raw, probability = score_pipeline(payload, vector) if payload else (None, None)
             emit({"type": "score", "id": message["id"], "features": vector,
-                  "probability": probability, "version": payload["version"] if payload else None})
+                  "probability": probability, "rawProbability": raw,
+                  "calibrationMethod": payload.get("calibrationMethod") if payload else None,
+                  "btcHistoryAsOf": history_at, "lookbackHours": 8,
+                  "version": payload["version"] if payload else None})
         except Exception as error:
             emit({"type": "score", "id": message.get("id") if "message" in locals() else None,
+                  "features": base,
                   "probability": None, "lastError": str(error)})
 
 

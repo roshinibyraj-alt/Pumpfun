@@ -9,6 +9,7 @@ class ReboundWorker {
   }
   start() {
     this.stopped = false;
+    this.buffer = '';
     this.model.status = 'TRAINING';
     this.child = spawn(process.env.PYTHON_BIN || 'python3', ['-u', path.join(__dirname, 'model.py'), this.directory], {
       stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, OMP_NUM_THREADS: '1', OPENBLAS_NUM_THREADS: '1' },
@@ -22,8 +23,10 @@ class ReboundWorker {
         const line = this.buffer.slice(0, end); this.buffer = this.buffer.slice(end + 1);
         try {
           const row = JSON.parse(line);
-          if (row.type === 'model') this.model = { ...this.model, ...row.model, status: row.status, lastError: null };
+          if (row.type === 'model') this.model = { ...this.model, ...row.model, status: row.status,
+            lastError: null, lastTrainingError: row.model.lastTrainingError || null };
           else if (row.type === 'status') this.model = { ...this.model, ...row };
+          else if (row.type === 'history') this.model.history = row.history;
           else if (row.type === 'score') this.onScore(row);
         } catch (error) { this.model.lastError = String(error.message).slice(0, 150); }
       }
@@ -32,14 +35,19 @@ class ReboundWorker {
     this.child.stdin.on('error', error => { this.model.lastError = error.message; });
     const failed = error => {
       if (this.child !== child) return;
-      clearTimeout(this.retrain);
+      clearTimeout(this.retrain); clearInterval(this.refreshHistory);
       this.model.status = 'ERROR'; this.model.lastError = String(error.message || error).slice(0, 300);
       this.child = null;
       if (!this.stopped) this.retry = setTimeout(() => this.start(), 30000);
     };
     this.child.once('error', failed);
     this.child.once('exit', code => { if (!this.stopped) failed(new Error(`Rebound worker exited: ${code}`)); });
-    this.retrain = setTimeout(() => this.restart(), 21600000);
+    this.refreshHistory = setInterval(() => {
+      if (this.child?.stdin?.writable && this.child.stdin.writableLength < 1000000)
+        this.child.stdin.write(JSON.stringify({ type: 'refresh' }) + '\n');
+    }, 30000);
+    this.refreshHistory.unref?.();
+    this.retrain = setTimeout(() => this.restart(), 900000);
     this.retrain.unref?.();
   }
   score(id, context) {
@@ -48,7 +56,7 @@ class ReboundWorker {
   }
   restart() { this.stop(); this.start(); }
   stop() {
-    this.stopped = true; clearTimeout(this.retry); clearTimeout(this.retrain);
+    this.stopped = true; clearTimeout(this.retry); clearTimeout(this.retrain); clearInterval(this.refreshHistory);
     this.child?.removeAllListeners('exit'); this.child?.kill('SIGTERM'); this.child = null;
   }
   snapshot() { return { ...this.model }; }

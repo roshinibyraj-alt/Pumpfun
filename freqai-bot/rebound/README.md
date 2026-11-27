@@ -24,16 +24,33 @@ BTC movement. Live entries/exits still require validated actual order books.
 No invented pressure features or missing-field zero substitutions.
 
 The public sample is small and old. All models remain explicitly EXPERIMENTAL,
-including when test Brier beats baseline. Chronological whole-window splits
-reserve separate training, sigmoid-calibration and untouched test sets, with
-one window excluded at each boundary. There is no threshold optimization on
-test data and no test-set early stopping. No claim of profitable execution.
+including when test Brier beats baseline. Chronological expanding-window
+predictions compare LightGBM and regularized logistic regression, each with
+identity versus sigmoid calibration. Calibration candidates are evaluated on
+later windows than their fitting observations. The selected method is refitted
+using out-of-fold predictions, never the final untouched 20% test windows.
+Whole-window embargoes separate the folds. There is no threshold optimization
+on test data and no test-set early stopping. No claim of profitable execution.
 The public sample stops roughly eight seconds before expiry: bootstrap labels
 measure rebounds within that recorded horizon, not the unobserved final seconds.
 Only sample windows reaching within ten seconds of expiry are included. This is
 a disclosed censored proxy, never a claim of full-window ground truth; live
 examples use the stricter observed-through-expiry rule below.
-Retrain every six hours. Missing/failed/stale models do not receive fake scores.
+Each example also requires eight hours of preceding completed Binance 1-minute
+candles: absolute returns at 1/5/15/60/240/480 minutes, realized volatility, and
+distance from the eight-hour median/range. Training and live inference use the
+same causal construction. Public and recent live BTC caches are separate;
+missing bars, future bars, or stale lookbacks never become zeros. BTC candles
+cannot reconstruct historical Polymarket rebound labels. Legacy saved feature
+vectors are enriched at their original first-dip time without relabeling them.
+The most recent 30 days of saved live examples are eligible; older ledger records
+remain preserved. Some recent live labels remain held out, explicitly reported
+separately from live labels actually fitted.
+
+Refresh BTC history every 30 seconds. Check retraining every 15 minutes: refit
+when live examples change or the artifact reaches one hour old. Missing/failed/
+stale models do not receive fake scores. Both raw and final scores, the selected
+algorithm/calibration method, history coverage and baseline comparison are visible.
 If calibration makes the entry threshold mathematically unreachable, the
 dashboard explicitly reports OBSERVING LOW CONFIDENCE, continues collecting
 examples, and waits for retraining rather than implying that trades are ready.

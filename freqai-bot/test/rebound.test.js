@@ -32,6 +32,19 @@ test('independent first-dip entry has delay, actual ask fill, fees and no recove
   f.quote('UP', .19, .21); assert.equal(f.requests.length, 1);
   assert.equal(f.e.positions.length, 1);
 });
+test('raw and final rebound scores stay distinct and model changes preserve the paper ledger', () => {
+  const f = fixture(); f.quote(); f.time(f.now() + 1000); f.quote('UP', .29, .31);
+  const signal = f.e.signals[0];
+  f.e.score({ id: signal.id, features: Array(26).fill(0), rawProbability: .9,
+    probability: .27, calibrationMethod: 'sigmoid', lookbackHours: 8,
+    btcHistoryAsOf: START - 1, version: 'context8h-test' });
+  assert.equal(signal.status, 'REJECTED'); assert.equal(f.e.positions.length, 0);
+  assert.equal(signal.rawProbability, .9); assert.equal(signal.probability, .27);
+  const restored = new Engine(); restored.restore(f.e.export());
+  assert.equal(restored.cash, 3000);
+  assert.equal(restored.signals[0].rawProbability, .9);
+  assert.equal(restored.signals[0].lookbackHours, 8);
+});
 test('a qualified score cannot use stale, expensive or future quotes', () => {
   for (const reason of ['stale', 'leftZone', 'delayed']) {
     const f = fixture(); f.quote(); f.time(f.now() + 1000); f.quote('UP', .29, .31);

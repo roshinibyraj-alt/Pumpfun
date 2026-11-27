@@ -91,6 +91,10 @@ class ReboundEngine {
     c.candidate.features = row.features || c.candidate.features;
     if (s.status !== 'SCORING') return;
     s.probability = row.probability; s.modelVersion = row.version;
+    s.rawProbability = row.rawProbability ?? null;
+    s.calibrationMethod = row.calibrationMethod ?? null;
+    s.btcHistoryAsOf = row.btcHistoryAsOf ?? null;
+    s.lookbackHours = row.lookbackHours ?? null;
     if (!finite(row.probability)) {
       s.status = 'SKIPPED'; s.reason = row.lastError || 'Model not ready; no fallback entry.';
     } else if (row.probability < .63) {
