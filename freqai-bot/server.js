@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'freqai-dashboard.html'));
-const REBOUND_HTML = fs.readFileSync(path.join(__dirname, 'public', 'rebound-dashboard.html'));
+const REBOUND_HTML = fs.readFileSync(path.join(__dirname, 'public', 'shadow-ladder-dashboard.html'));
 function startServer(bot, port, rebound = null) {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;

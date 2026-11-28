@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#091326">
   <title>Pumpfun — BTC 80¢ Resting Paper Bot</title>
-  <meta name="description" content="Paper-only BTC five-minute strategy: 85-cent trigger, 80-cent resting buy, realistic stop-loss sales and independent rebound research.">
+  <meta name="description" content="Paper-only BTC five-minute strategy: 85-cent trigger, 80-cent resting buy, realistic stop-loss sales and a separate 33-cent resting-buy shadow experiment.">
   <style>
     :root{color-scheme:dark;--bg:#091326;--panel:#111f38;--panel2:#172846;--line:#263b5e;--text:#f4f7ff;--muted:#a4b4cf;--green:#39e0a1;--red:#ff7188;--blue:#62a8ff;--yellow:#ffd36b;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 0,#193662 0,transparent 36%),var(--bg);color:var(--text);font:15px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
@@ -95,7 +95,7 @@
     <p>Ignore probability signals. After 45 seconds, whichever side first has a fresh best ask at or above $0.85 gets one resting $0.80 buy. No immediate buy at $0.85. A subsequent fresh best bid at or below $0.80 confirms a simulated fill at exactly $0.80, after at least 300ms. Quantity is bounded by the displayed best-bid level. This is a bid-touch simulation, not evidence of real seller executions or queue priority.</p>
     <p>Start with $1,000. The base purchase budget is 0.5% of settled capital, initially $5 / 6.25 shares. Shares round down to two decimals within that budget. On a completed net loss, freeze the base budget and size next-window recovery to repay actual cycle losses plus $2. Recovery quantities round up to two decimals. Partial fills can leave a residual recovery target. Return to the percentage base once the cycle reaches +$2. Unknown recovery results allow base trades at the frozen budget. Insufficient cash skips the recovery order; it never silently shrinks its target. Recovery is uncapped and can exhaust capital.</p>
     <p>TP stays unchanged: a fresh best bid ≥ $0.99 credits a modeled $1/share, with no fabricated sale fee. SL is fixed at $0.60 best bid. Once triggered, cancel any unfilled entry remainder, wait at least 300ms, then sweep actual available bids with market taker fees and possible slippage below $0.60. Unchanged displayed depth cannot fill twice. Unsold holdings resolve officially after expiry. Recovery uses final actual net P&amp;L once, including stop-loss fees.</p>
-    <p>One resting order per window; no side replacement, re-entry or signal flips. Partial entry fills remain held; unfilled remainder expires at window end or is cancelled on TP/SL. Orders and positions never become entries for the next window. The independent rebound experiment remains separate and its history is preserved.</p>
+    <p>One resting order per window; no side replacement, re-entry or signal flips. Partial entry fills remain held; unfilled remainder expires at window end or is cancelled on TP/SL. Orders and positions never become entries for the next window. The independent 33¢ shadow strategy has its own separate account and history.</p>
     <p>Maker entry fee is zero. SL taker fee = shares × market fee rate × sale price × (1 − sale price), rounded to 5 decimals per fill. BTC 5-minute default rate is 0.05. Maker rebate illustration = eligible fee equivalent × maker-tier rate, not a guaranteed credit. Current standard tiers start at $200,000 in 30-day maker weighted volume; below that the rate is 0%. Tier/campaign eligibility and daily calculation apply. No rebate is included in cash, recovery sizing or equity. <a href="https://docs.polymarket.com/programs/maker-rebates" target="_blank" rel="noopener" style="color:var(--blue)">Official rebate rules</a>.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
   </section>
@@ -104,7 +104,7 @@
     <div class="list" id="restingOrders"><div class="empty">Waiting for best ask ≥ $0.85 after 45 seconds.</div></div>
     <div class="model-note" id="reservedCash">Reserved capital $0.00</div>
   </section>
-  <div class="footer"><a href="/shadow" style="color:var(--blue)">Rebound experiment (separate paper account)</a></div>
+  <div class="footer"><a href="/shadow" style="color:var(--blue)">33¢ resting buys + profit add-on (separate shadow account)</a></div>
   <div class="footer">Paper simulation only · no live orders · Binance is the prediction data source</div>
 </main>
 <script>

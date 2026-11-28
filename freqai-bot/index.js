@@ -49,8 +49,8 @@ async function main() {
   const binanceFeed = new BinanceTickFeed();
   const freqaiWorker = new FreqAIWorker();
   bot.setMarketDataHelpers({ binanceFeed, freqaiWorker });
-  const ReboundRuntime = require('./rebound/runtime');
-  const rebound = new ReboundRuntime(bot);
+  const ShadowLadderRuntime = require('./shadow-ladder/runtime');
+  const rebound = new ShadowLadderRuntime(bot);
   await rebound.start();
   freqaiWorker.start();
   void binanceFeed.start().catch((error) => {
@@ -59,7 +59,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000, rebound);
 
-  console.log('MODE: DEMO -- best ask >=0.85 places simulated resting maker buy at exactly 0.80; $1000 start; 0.5% capital base, recovery plus $2; TP >=0.99 modeled $1/share; fixed 0.60 SL uses bid depth, latency and taker fees. Independent rebound ledger preserved; no live orders.');
+  console.log('MODE: DEMO -- main 85c/80c resting recovery ledger preserved. Independent shadow: 200 shares both sides at 33c; first-fill cancellation, profit-funded add-on at 70c; 99c modeled $1 TP or official resolution. No live orders.');
 
   let stopping = false;
   const shutdown = async () => {

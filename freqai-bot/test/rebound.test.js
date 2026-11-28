@@ -160,7 +160,7 @@ test('shadow runtime does not change main ledger/strategy, and its account persi
   assert.equal(JSON.stringify(main), before);
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'ledger.json'))).cash, 3000);
 });
-test('HTTP shadow routes and mobile dashboard render actual independent state', async t => {
+test('legacy rebound snapshot remains separate while the public route serves its replacement dashboard', async t => {
   const f = fixture(); f.buy();
   const main = new (require('../freqai-martingale-btc-bot'))({ marketData: {} });
   const server = require('../server')(main, 0, { snapshot: () => f.e.snapshot() });
@@ -171,16 +171,8 @@ test('HTTP shadow routes and mobile dashboard render actual independent state', 
   assert.equal(state.account.initialCapital, 3000); assert.equal(state.positions.length, 1);
   const html = await (await fetch(url + '/shadow')).text();
   assert.match(html, /\/api\/shadow\/state/);
-  assert.match(html, /id="entryReady"/);
-  const elements = new Map(), element = () => ({ innerHTML: '', className: '' });
-  const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1];
-  vm.runInNewContext(script, { document: { getElementById(id) {
-    if (!elements.has(id)) elements.set(id, element()); return elements.get(id);
-  } }, fetch: async () => ({ ok: true, json: async () => state }), setTimeout() {}, Date, console });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.match(elements.get('cash').innerHTML, /2,983\.97/);
-  assert.match(elements.get('signals').innerHTML, /ENTERED/);
-  assert.match(elements.get('mwarn').innerHTML, /Experimental/);
+  assert.match(html, /id="orders"/);
+  assert.doesNotMatch(html, /id="entryReady"|id="mwarn"/);
   assert.equal(main.shadowEntries.length, 0);
 });
 test('a corrupt shadow ledger is reported and never silently replaced on shutdown', async t => {
