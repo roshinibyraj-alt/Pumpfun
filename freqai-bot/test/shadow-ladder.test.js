@@ -262,7 +262,7 @@ test('HTTP and dashboard render real shadow state, first-fill cancellation and 3
   const elements = new Map();
   const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
   vm.runInNewContext(script, { document: { getElementById(id) {
-    if (!elements.has(id)) elements.set(id, { innerHTML: '', className: '', style: {} });
+    if (!elements.has(id)) elements.set(id, { innerHTML: '', className: '', style: {}, before() {} });
     return elements.get(id);
   } }, fetch: async () => ({ ok: true, json: async () => state }), setTimeout() {}, Date, console });
   await new Promise(resolve => setImmediate(resolve));

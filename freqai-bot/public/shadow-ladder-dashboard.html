@@ -22,6 +22,14 @@ a{color:var(--navy);font-weight:800}
 .kicker{font:800 10.5px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:#c9b98e}
 .hero h1{margin:4px 0 4px;font-size:clamp(23px,7vw,34px);letter-spacing:-.04em;line-height:1.05}
 .hero p{margin:0;font-size:12.5px;color:#c8d0d4}
+.hero{padding:10px 14px}.hero h1{font-size:20px;margin:2px 0}.hero p{display:none}
+details>summary{cursor:pointer;font-weight:800;font-size:16px;min-height:44px;display:flex;align-items:center;gap:8px}
+details>summary:before{content:'+';font:800 20px var(--mono)}details[open]>summary:before{content:'−'}
+.livevalue{font:800 22px var(--mono)}
+.chartlegend{display:flex;flex-wrap:wrap;gap:14px;font-size:12px;margin-top:8px}
+.chartlegend span:before{content:'';display:inline-block;width:18px;border-top:3px solid var(--navy);margin-right:5px;vertical-align:middle}
+.chartlegend span:last-child:before{border-color:var(--up)}
+.more{border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:10px 14px;min-height:44px;font:750 14px var(--sans);color:var(--navy);margin-top:10px;width:100%}
 .label{font:800 10.5px var(--mono);color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
 .card{background:var(--paper);border:1px solid var(--line);border-radius:16px;padding:14px;margin-top:12px}
 h2{font-size:18px;margin:0;letter-spacing:-.03em}
@@ -78,7 +86,7 @@ svg{display:block;width:100%;height:130px;margin-top:10px}
   <p>Simulated resting bids at the entry price on both sides of each five-minute BTC window. No live orders. The main bot is never funded or changed by this ledger. Fills are modeled, not guaranteed.</p>
 </section>
 
-<section class="card">
+<section class="card" id="marketCard">
   <div class="clockrow">
     <div><div class="label">Window closes in</div><div class="clock" id="clock">--:--</div></div>
     <div style="text-align:right"><div class="label">Window</div><div id="win" style="font:750 13px var(--mono)">unknown</div></div>
@@ -88,12 +96,16 @@ svg{display:block;width:100%;height:130px;margin-top:10px}
   <div class="note" id="feed"></div>
 </section>
 
-<section class="card">
-  <div class="label">Paper equity</div>
-  <div class="big" id="equity">unknown</div>
+<section class="card" id="equityCard">
+  <div class="label">Settled paper balance</div>
+  <div class="big" id="settled">unknown</div>
   <div id="total" style="font:800 17px var(--mono)">unknown</div>
-  <svg id="curve" viewBox="0 0 300 130" preserveAspectRatio="none" aria-label="Equity curve"></svg>
+  <div class="note">Live equity <strong class="livevalue" id="equity">unknown</strong></div>
+  <div class="chartlegend"><span>Settled balance</span><span>Live equity when known</span></div>
+  <svg id="curve" viewBox="0 0 360 150" role="img" aria-label="Settled balance and live paper equity over time"></svg>
   <div class="note" id="curveNote" style="margin-top:4px"></div>
+  <details>
+  <summary>Cash, fees and account details</summary>
   <div class="cash" id="cashbar"></div>
   <div class="legend"><span><s style="background:var(--navy)"></s>Available</span><span><s style="background:var(--gold)"></s>Reserved for orders</span><span><s style="background:#b9ae98"></s>In positions</span></div>
   <div class="kv">
@@ -106,35 +118,45 @@ svg{display:block;width:100%;height:130px;margin-top:10px}
     <div><span class="label">Fees paid</span><b id="fees">unknown</b></div>
     <div><span class="label">W / L · closed</span><b id="wl">unknown</b></div>
   </div>
+  </details>
 </section>
 
-<div class="cols">
-<section class="card">
-  <div class="head"><h2>Orders</h2><span id="ordN">0</span></div>
-  <div id="orders"><div class="empty">No orders yet.</div></div>
-</section>
-<section class="card">
-  <div class="head"><h2>Position and add-on</h2><span id="posN">0</span></div>
+<section class="card" id="positionCard">
+  <div class="head"><h2>Active position</h2><span id="posN">0</span></div>
   <div id="positions"><div class="empty">No open position.</div></div>
 </section>
-</div>
 
-<section class="card">
+<details class="card" id="pendingDetails">
+  <summary>Awaiting official results <span id="pendingN">0</span></summary>
+  <div class="note">Expired positions are separate from the current window. They are not counted as settled until Polymarket confirms the winner.</div>
+  <div id="pending"></div>
+  <button type="button" class="more" id="morePending" style="display:none">Show more pending results</button>
+</details>
+
+<section class="card" id="closedCard">
   <div class="head"><h2>Closed trades</h2><span id="cloN">0</span></div>
   <div id="closed"><div class="empty">No closed trades yet.</div></div>
+  <button type="button" class="more" id="moreClosed" style="display:none">Show more trades</button>
 </section>
 
+<details class="card">
+  <summary>Current-window orders <span id="ordN">0</span></summary>
+  <div id="orders"><div class="empty">No orders yet.</div></div>
+</details>
+
 <div class="cols">
-<section class="card">
+<details class="card">
+  <summary>Strategy and simulation details</summary>
   <div class="head"><h2>How the ladder works</h2><span>fixed rules</span></div>
   <p class="note" id="sdesc" style="margin-top:0"></p>
   <ol class="steps" id="rules"></ol>
   <div class="warnbox">Simulation limits: queue position is unknown, so a maker fill is assumed once fresh ask-side depth reaches the limit after latency. Real fills could be later, smaller or absent. The $1 take-profit credit is modeled. No rebates or profits are guaranteed.</div>
-</section>
-<section class="card">
-  <div class="head"><h2>Events</h2><span id="persist">ledger unknown</span></div>
+</details>
+<details class="card">
+  <summary>Recent events</summary>
+  <div class="note" id="persist">ledger unknown</div>
   <div id="events"><div class="empty">No events yet.</div></div>
-</section>
+</details>
 </div>
 
 <div class="foot">Paper simulation only · <span id="upd">not updated yet</span> · <a href="/">Main dashboard</a></div>
@@ -142,6 +164,8 @@ svg{display:block;width:100%;height:130px;margin-top:10px}
 <script>
 (()=>{
 const $=id=>document.getElementById(id);
+// Keep account performance first, then the current window and active position.
+$('marketCard').before($('equityCard'));
 const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const num=x=>x!==null&&x!==undefined&&x!==''&&typeof x!=='boolean'&&Number.isFinite(Number(x));
 const U='<span class="unk">unknown</span>';
@@ -159,8 +183,11 @@ const side=s=>s==='UP'||s==='DOWN'?s:'';
 const set=(id,html,c)=>{const e=$(id);if(e.innerHTML!==html)e.innerHTML=html;if(c!==undefined&&e.className!==c)e.className=c};
 const LBL={OPEN:'OPEN',PENDING_RESOLUTION:'AWAITING RESOLUTION',CLOSED_TP:'TAKE PROFIT',RESOLVED_WIN:'SETTLED WIN',RESOLVED_LOSS:'SETTLED LOSS'};
 const STALE=15000;
-let last=null;
+let last=null,lastState=null,closedLimit=5,pendingLimit=5;
+$('moreClosed').onclick=()=>{closedLimit+=10;if(lastState)render(lastState)};
+$('morePending').onclick=()=>{pendingLimit+=10;if(lastState)render(lastState)};
 function render(s){
+  lastState=s;
   const st=s.strategy||{},a=s.account||{},mk=s.market,ps=s.persistence||{},df=s.dataFeed||{};
   const now=num(s.now)?dt(s.now).getTime():Date.now();
   const stat=String(s.status||'UNKNOWN');
@@ -183,44 +210,54 @@ function render(s){
     set('feed',esc(mk.title||'')+(df.status?' · feed '+esc(df.status):'')+(df.lastError?' · <b class="bad">'+esc(df.lastError)+'</b>':''));
   }else{set('clock','--:--');set('win','no active market');$('prog').style.transform='scaleX(0)';set('quotes','<div class="empty" style="grid-column:1/-1">No active market. Quotes unknown.</div>');set('feed',df.lastError?'<b class="bad">'+esc(df.lastError)+'</b>':'')}
   // account
-  set('equity',money(a.equity),'big '+(num(a.equity)?'':'unk'));
-  const tot=num(a.equity)&&num(a.initialCapital)?a.equity-a.initialCapital:null;
-  set('total',signed(tot)+' <span class="label">vs start</span>',cls(tot));
+  const settled=num(a.initialCapital)&&num(a.realizedPnl)?+a.initialCapital + +a.realizedPnl:null;
+  set('settled',money(settled),'big');
+  set('equity',num(a.equity)?money(a.equity):'<span class="unk">Awaiting marks / results</span>');
+  set('total',signed(a.realizedPnl)+' <span class="label">settled P&amp;L</span>',cls(a.realizedPnl));
   set('cash',money(a.cash));set('res',money(a.reservedCash));set('avail',money(a.availableCash));set('init',money(a.initialCapital));
   set('real',signed(a.realizedPnl),cls(a.realizedPnl));set('unreal',signed(a.unrealizedPnl),cls(a.unrealizedPnl));
   set('fees',money(a.totalFees));set('wl',int(a.wins)+' / '+int(a.losses)+' · '+int(a.closedTrades));
   if(num(a.equity)&&num(a.availableCash)&&num(a.reservedCash)&&a.equity>0){const av=Math.max(0,+a.availableCash),rs=Math.max(0,+a.reservedCash),inp=Math.max(0,a.equity-av-rs);
     set('cashbar',`<i style="flex-grow:${av.toFixed(2)};background:var(--navy)"></i><i style="flex-grow:${rs.toFixed(2)};background:var(--gold)"></i><i style="flex-grow:${inp.toFixed(2)};background:#b9ae98"></i>`)}else set('cashbar','');
   // curve
-  const C=(s.equityCurve||[]).filter(p=>dt(p.at)).map(p=>({t:dt(p.at).getTime(),v:num(p.equity)?+p.equity:null})).sort((x,y)=>x.t-y.t);
-  const K=C.filter(p=>p.v!==null),nulls=C.length-K.length;
-  if(K.length>=1&&C.length>=2){const ys=K.map(p=>p.v);let lo=Math.min(...ys),hi=Math.max(...ys);if(num(a.initialCapital)){lo=Math.min(lo,+a.initialCapital);hi=Math.max(hi,+a.initialCapital)}if(hi-lo<1){hi+=.5;lo-=.5}
-    const x0=C[0].t,x1=C[C.length-1].t,X=t=>((t-x0)/Math.max(1,x1-x0)*300).toFixed(1),Y=v=>(122-(v-lo)/(hi-lo)*114).toFixed(1);
-    const segs=[];let cur=[];C.forEach(p=>{if(p.v===null){if(cur.length)segs.push(cur);cur=[]}else cur.push(p)});if(cur.length)segs.push(cur);
-    const up=ys[ys.length-1]>=(num(a.initialCapital)?+a.initialCapital:ys[0]);const col=up?'var(--up)':'var(--dn)';
-    const base=num(a.initialCapital)?`<line x1="0" x2="300" y1="${Y(+a.initialCapital)}" y2="${Y(+a.initialCapital)}" stroke="#b9ae98" stroke-dasharray="4 4" stroke-width="1" vector-effect="non-scaling-stroke"/>`:'';
-    let gaps='';for(let i=0;i<C.length;i++){if(C[i].v!==null)continue;let j=i;while(j+1<C.length&&C[j+1].v===null)j++;const a0=i>0?C[i-1].t:C[i].t,b0=j+1<C.length?C[j+1].t:C[j].t;const gx=+X(a0),gw=Math.max(1.5,+X(b0)-gx);gaps+=`<rect x="${gx}" y="0" width="${gw.toFixed(1)}" height="130" fill="#b9ae98" opacity=".18"/>`;i=j}
-    const body=segs.map(g=>{if(g.length===1)return `<circle cx="${X(g[0].t)}" cy="${Y(g[0].v)}" r="2" fill="${col}"/>`;const d=g.map((p,i)=>(i?'L':'M')+X(p.t)+' '+Y(p.v)).join('');return `<path d="${d}L${X(g[g.length-1].t)} 130L${X(g[0].t)} 130Z" fill="${col}" opacity=".08"/><path d="${d}" fill="none" stroke="${col}" stroke-width="2" vector-effect="non-scaling-stroke"/>`}).join('');
-    set('curve',gaps+base+body);
-    set('curveNote',esc(K.length+' known points'+(nulls?' · '+nulls+' unknown (shaded gaps, not interpolated)':'')+' · '+hm(x0)+' to '+hm(x1)+' · range $'+lo.toFixed(2)+' to $'+hi.toFixed(2)+' · dashed line = start'));
-  }else{set('curve','<text x="150" y="68" text-anchor="middle" font-size="11" fill="#5f6a6c">Equity curve needs more known points</text>');set('curveNote','')}
+  const C=(s.equityCurve||[]).filter(p=>dt(p.at)).map(p=>({t:dt(p.at).getTime(),v:num(p.equity)?+p.equity:null,b:num(p.balance)?+p.balance:null})).sort((x,y)=>x.t-y.t);
+  if(!C.length&&num(settled))C.push({t:now,v:num(a.equity)?+a.equity:null,b:settled});
+  const values=C.flatMap(p=>[p.v,p.b]).filter(v=>v!==null);
+  if(values.length){
+    let lo=Math.min(...values),hi=Math.max(...values);const pad=Math.max(.5,(hi-lo)*.08);lo-=pad;hi+=pad;
+    const x0=C[0].t,x1=C[C.length-1].t;
+    const X=t=>(52+(t-x0)/Math.max(1,x1-x0)*296).toFixed(1),Y=v=>(122-(v-lo)/(hi-lo)*110).toFixed(1);
+    function paths(key,color,step){
+      let segments=[],segment=[];for(const p of C){if(p[key]===null){if(segment.length)segments.push(segment);segment=[]}else segment.push(p)}if(segment.length)segments.push(segment);
+      return segments.map(g=>{const d=g.map((p,i)=>!i?'M'+X(p.t)+' '+Y(p[key]):step?'H'+X(p.t)+'V'+Y(p[key]):'L'+X(p.t)+' '+Y(p[key])).join('');
+        const end=g[g.length-1];return `<path data-series="${key}" d="${d}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/><circle cx="${X(end.t)}" cy="${Y(end[key])}" r="2.2" fill="${color}"><title>${key==='b'?'Settled balance':'Live equity'} ${money(end[key])}</title></circle>`}).join('');
+    }
+    const axis=[hi,(hi+lo)/2,lo].map(v=>`<text x="46" y="${+Y(v)+4}" text-anchor="end" font-size="10" fill="#5f6a6c">$${v.toFixed(0)}</text><line x1="52" x2="348" y1="${Y(v)}" y2="${Y(v)}" stroke="#d8cfbe" stroke-width=".5"/>`).join('');
+    set('curve',axis+paths('v','var(--up)',false)+paths('b','var(--navy)',true)+`<text x="52" y="144" font-size="10" fill="#5f6a6c">${esc(hm(x0))}</text><text x="348" y="144" text-anchor="end" font-size="10" fill="#5f6a6c">${esc(hm(x1))}</text>`);
+    const missing=C.filter(p=>p.v===null).length;
+    set('curveNote','Settled balance includes closed results only. '+(missing?'Live equity has '+missing+' unavailable samples; gaps are not losses or zero values.':'Live equity includes marked open positions.'));
+  }else{set('curve','<text x="180" y="68" text-anchor="middle" font-size="11" fill="#5f6a6c">Waiting for saved balance samples</text>');set('curveNote','No values have been invented.')}
   // orders
-  const O=(s.orders||[]).slice().sort((x,y)=>(dt(y.placedAt)||0)-(dt(x.placedAt)||0));set('ordN',O.length+'');
+  const O=(s.orders||[]).filter(o=>mk&&String(o.windowStart)===String(mk.windowStart)).sort((x,y)=>(dt(y.placedAt)||0)-(dt(x.placedAt)||0));set('ordN',O.length+'');
   set('orders',O.length?O.slice(0,10).map(o=>{const r=+o.requestedShares||0,f=num(o.filledShares)?+o.filledShares:0,c=num(o.canceledShares)?+o.canceledShares:0,rem=Math.max(0,r-f-c);const sx=String(o.status||'');
     return `<div class="row ${/FILL/i.test(sx)?'w':/CANCEL|EXPIR/i.test(sx)?'l':'p'}"><div><span class="tag ${side(o.side)}">${esc(o.side)}</span> <span class="st">${esc(sx.replace(/_/g,' ')||'unknown')}</span></div><div class="v">@ ${px(o.limitPrice)}</div>
     <div class="fill"><i style="flex-grow:${f};background:var(--up)"></i><i style="flex-grow:${rem};background:var(--gold);opacity:.45"></i><i style="flex-grow:${c};background:var(--dn);opacity:.45"></i></div>
     <div class="grid3"><div><span class="label">Filled</span><b>${int(o.filledShares)}</b></div><div><span class="label">Resting</span><b>${int(o.remainingShares)}</b></div><div><span class="label">Canceled</span><b>${int(o.canceledShares)}</b></div></div>
     <div class="d">${int(o.requestedShares)} requested · placed ${time(o.placedAt)} · last fill ${o.lastFillAt?time(o.lastFillAt):'none'} · window ${hm(o.windowStart)}–${hm(o.windowEnd)}${o.cancelReason?' · '+esc(o.cancelReason):''}</div></div>`}).join(''):'<div class="empty">No orders yet. Each window posts one resting bid per side.</div>');
   // positions
-  const P=s.positions||[],open=P.filter(p=>p.status==='OPEN'||p.status==='PENDING_RESOLUTION'),cl=P.filter(p=>!(p.status==='OPEN'||p.status==='PENDING_RESOLUTION')).sort((x,y)=>(dt(y.exitAt)||0)-(dt(x.exitAt)||0));
-  set('posN',open.length+'');set('cloN',cl.length+'');
-  const addon=ad=>{if(!ad)return'<div class="addon">Add-on state unknown.</div>';return `<div class="addon"><b>Add-on · ${esc(ad.state||'unknown')}</b> · ${num(ad.requestedShares)?int(ad.requestedShares)+' shares requested':'legacy profit budget'} · cash reserved ${money(ad.budget)} · spent ${money(ad.spent)} · fees ${money(ad.fees)} · ${int(ad.filledShares)} sh filled${ad.triggerAt?' · triggered '+time(ad.triggerAt):''}${ad.reason?'<br>'+esc(ad.reason):''}</div>`};
+  const P=s.positions||[],open=P.filter(p=>p.status==='OPEN'),pending=P.filter(p=>p.status==='PENDING_RESOLUTION').sort((x,y)=>y.windowEnd-x.windowEnd),cl=P.filter(p=>!(p.status==='OPEN'||p.status==='PENDING_RESOLUTION')).sort((x,y)=>(dt(y.exitAt)||0)-(dt(x.exitAt)||0));
+  set('posN',open.length+'');set('cloN',Math.min(closedLimit,cl.length)+' of '+cl.length);
+  set('pendingN',pending.length+'');$('pendingDetails').style.display=pending.length?'':'none';
+  set('pending',pending.length?pending.slice(0,pendingLimit).map(p=>`<div class="row p"><div><span class="tag ${side(p.side)}">${esc(p.side)}</span> ${int(p.shares)} shares</div><div class="v">${money(p.totalCost)}</div><div class="d">Window ${hm(p.windowStart)}–${hm(p.windowEnd)} · awaiting official resolution${p.resolutionError?' · '+esc(p.resolutionError):''}</div></div>`).join('')+(pending.length>pendingLimit?'<p class="note">'+(pending.length-pendingLimit)+' more pending positions remain recorded in the ledger.</p>':''):'');
+  $('morePending').style.display=pendingLimit<pending.length?'':'none';
+  const addon=ad=>{if(!ad)return'<div class="addon">Add-on state unknown.</div>';return `<div class="addon"><b>Add-on · ${esc(ad.state||'unknown')}</b> · ${num(ad.requestedShares)?int(ad.requestedShares)+' shares requested':ad.state==='WAITING'?int(st.addOnShares)+' shares at trigger':'legacy profit budget'} · cash reserved ${money(ad.budget)} · spent ${money(ad.spent)} · fees ${money(ad.fees)} · ${int(ad.filledShares)} sh filled${ad.triggerAt?' · triggered '+time(ad.triggerAt):''}${ad.reason?'<br>'+esc(ad.reason):''}</div>`};
   set('positions',open.length?open.map(p=>`<div class="row p"><div><span class="tag ${side(p.side)}">${esc(p.side)}</span> <span class="st warn">${esc(LBL[p.status]||p.status)}</span></div><div class="v ${cls(p.unrealizedPnl)}">${signed(p.unrealizedPnl)}</div>
     <div class="grid3"><div><span class="label">Shares</span><b>${int(p.shares)}</b></div><div><span class="label">Avg entry</span><b>${px(p.entryPrice)}</b></div><div><span class="label">Mark bid</span><b>${px(p.markBid)}</b></div></div>
     <div class="d">Base ${int(p.baseShares)} sh for ${money(p.baseCost)} · total cost ${money(p.totalCost)} · entry fees ${money(p.entryFees)} · entered ${time(p.entryAt)} · window ends ${time(p.windowEnd)} · ${(p.fills||[]).length} fills</div>${addon(p.addOn)}</div>`).join(''):'<div class="empty">Flat. Waiting for the first fill on either side.</div>');
-  set('closed',cl.length?cl.slice(0,25).map(p=>`<div class="row ${num(p.realizedPnl)&&p.realizedPnl>0?'w':num(p.realizedPnl)&&p.realizedPnl<0?'l':''}"><div><span class="tag ${side(p.side)}">${esc(p.side)}</span> <span class="st">${esc(LBL[p.status]||p.status)}</span></div><div class="v ${cls(p.realizedPnl)}">${signed(p.realizedPnl)}</div>
+  set('closed',cl.length?cl.slice(0,closedLimit).map(p=>`<div class="row ${num(p.realizedPnl)&&p.realizedPnl>0?'w':num(p.realizedPnl)&&p.realizedPnl<0?'l':''}"><div><span class="tag ${side(p.side)}">${esc(p.side)}</span> <span class="st">${esc(LBL[p.status]||p.status)}</span></div><div class="v ${cls(p.realizedPnl)}">${signed(p.realizedPnl)}</div>
     <div class="grid3"><div><span class="label">Entry</span><b>${px(p.entryPrice)}</b></div><div><span class="label">Exit</span><b>${px(p.exitPrice)}</b></div><div><span class="label">Shares</span><b>${int(p.shares)}</b></div></div>
     <div class="d">Window ${hm(p.windowStart)}–${hm(p.windowEnd)} · cost ${money(p.totalCost)} · proceeds ${money(p.exitProceeds)} · closed ${time(p.exitAt)} · add-on ${esc(p.addOn&&p.addOn.state||'unknown')}${p.addOn&&num(p.addOn.filledShares)&&p.addOn.filledShares>0?' ('+int(p.addOn.filledShares)+' sh, '+money(p.addOn.spent)+')':''}</div></div>`).join(''):'<div class="empty">No closed trades yet.</div>');
+  $('moreClosed').style.display=closedLimit<cl.length?'':'none';
   set('sdesc',esc(st.description||''));
   const ep=px(st.entryPrice),tp=px(st.takeProfitBid);
   set('rules',[
@@ -239,7 +276,7 @@ function render(s){
 let busy=false;
 async function poll(){if(busy)return;busy=true;
   try{const r=await fetch('/api/shadow/state',{cache:'no-store',credentials:'include'});if(!r.ok)throw new Error('HTTP '+r.status);render(await r.json())}
-  catch(e){set('status','OFFLINE · retrying','badge bad');if(last&&Date.now()-last>STALE){set('equity',U,'big unk');set('quotes','<div class="empty" style="grid-column:1/-1">Connection lost. Quotes unknown.</div>');set('clock','--:--')}}
+  catch(e){set('status','OFFLINE · retrying','badge bad');if(last&&Date.now()-last>STALE){set('equity','Connection lost');set('quotes','<div class="empty" style="grid-column:1/-1">Connection lost. Quotes unknown.</div>');set('clock','--:--')}}
   finally{busy=false;setTimeout(poll,2000)}}
 poll();
 })();
