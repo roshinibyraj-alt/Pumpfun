@@ -10,7 +10,8 @@ const START = 1800000000000;
 function state() {
   return {
     now: START + 1000, status: 'RUNNING',
-    strategy: { baseShares: 200, entryPrice: .33, addOnTrigger: .7, addOnShares: 300,
+    strategy: { baseShares: 0, entryPrice: .33, addOnTrigger: .7, addOnShares: 300,
+      stopLossBid: .4, entryCutoffSeconds: 120, lateExitSeconds: 30, lateExitBid: .9,
       takeProfitBid: .99, takeProfitPayout: 1, initialCapital: 3000 },
     account: { initialCapital: 3000, realizedPnl: 50, equity: null, cash: 2900,
       availableCash: 2900, reservedCash: 0, totalFees: 2, wins: 2, losses: 1, closedTrades: 3 },
@@ -73,7 +74,7 @@ test('current active position and orders exclude expired history; older results 
   assert.equal(nodes.get('posN').innerHTML, '1');
   assert.equal(nodes.get('pendingN').innerHTML, '10');
   assert.equal((nodes.get('positions').innerHTML.match(/class="row p"/g) || []).length, 1);
-  assert.match(nodes.get('positions').innerHTML, /300 shares at trigger/);
+  assert.match(nodes.get('positions').innerHTML, /300-share market entry/);
   assert.equal((nodes.get('pending').innerHTML.match(/class="row p"/g) || []).length, 5);
   assert.match(nodes.get('pending').innerHTML, /5 more pending/);
   nodes.get('morePending').onclick();

@@ -59,7 +59,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000, rebound);
 
-  console.log('MODE: DEMO -- main 85c/80c resting recovery ledger preserved. Independent shadow: 200 shares both sides at 33c; first-fill cancellation, profit-funded add-on at 70c; 99c modeled $1 TP or official resolution. No live orders.');
+  console.log('MODE: DEMO -- main 85c/80c resting recovery ledger preserved. Independent shadow: virtual 33c tracking only; selected side bid 70c triggers 300-share taker entry before final 120s; bid 40c SL; final 30s sell at current bid <=90c; 99c modeled $1 TP or official resolution. No live orders.');
 
   let stopping = false;
   const shutdown = async () => {

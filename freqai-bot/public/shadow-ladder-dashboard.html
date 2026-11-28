@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f1ede4">
 <title>Ladder Lab · BTC 5m paper fills</title>
-<meta name="description" content="Independent BTC paper experiment: 33-cent two-sided resting buys, first-fill cancellation and a 300-share market add-on at 70 cents.">
+<meta name="description" content="Independent BTC paper experiment: virtual 33-cent tracking, a 300-share market entry at 70 cents, a 40-cent stop and timed entry and exit rules.">
 <meta property="og:title" content="Ladder Lab · Independent BTC paper strategy">
-<meta property="og:description" content="Track resting orders, the 300-share add-on, paper equity and official settlement in a separate shadow account.">
+<meta property="og:description" content="Track the virtual signal, market entry, stop-loss, timed exits and paper equity in a separate shadow account.">
 <meta property="og:type" content="website">
 <style>
 :root{--bg:#f1ede4;--paper:#faf7f0;--ink:#16232b;--muted:#5f6a6c;--line:#d8cfbe;--up:#0b6e5c;--upbg:#e2efe9;--dn:#b23b26;--dnbg:#f5e4dd;--gold:#9a6a08;--goldbg:#f5ead0;--navy:#1f3a5a;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -83,7 +83,7 @@ svg{display:block;width:100%;height:130px;margin-top:10px}
 <section class="hero">
   <div class="kicker">Shadow paper lab · separate $3,000 ledger</div>
   <h1 id="sname">BTC 5m Ladder</h1>
-  <p>Simulated resting bids at the entry price on both sides of each five-minute BTC window. No live orders. The main bot is never funded or changed by this ledger. Fills are modeled, not guaranteed.</p>
+  <p>Virtual $0.33 tracking creates no purchase. Only the $0.70 trigger creates a paper market order. The main bot is unchanged. Fills are modeled, not guaranteed.</p>
 </section>
 
 <section class="card" id="marketCard">
@@ -92,6 +92,7 @@ svg{display:block;width:100%;height:130px;margin-top:10px}
     <div style="text-align:right"><div class="label">Window</div><div id="win" style="font:750 13px var(--mono)">unknown</div></div>
   </div>
   <div class="bar"><i id="prog" style="transform:scaleX(0)"></i></div>
+  <div class="warnbox" id="tracking">Watching virtually · no purchase at $0.33</div>
   <div class="sides" id="quotes"><div class="empty" style="grid-column:1/-1">Waiting for book.</div></div>
   <div class="note" id="feed"></div>
 </section>
@@ -147,10 +148,10 @@ svg{display:block;width:100%;height:130px;margin-top:10px}
 <div class="cols">
 <details class="card">
   <summary>Strategy and simulation details</summary>
-  <div class="head"><h2>How the ladder works</h2><span>fixed rules</span></div>
+  <div class="head"><h2>How the strategy works</h2><span>fixed rules</span></div>
   <p class="note" id="sdesc" style="margin-top:0"></p>
   <ol class="steps" id="rules"></ol>
-  <div class="warnbox">Simulation limits: queue position is unknown, so a maker fill is assumed once fresh ask-side depth reaches the limit after latency. Real fills could be later, smaller or absent. The $1 take-profit credit is modeled. No rebates or profits are guaranteed.</div>
+  <div class="warnbox">Paper simulation only. Market entries and SL/timed exits use later fresh books, available depth and taker fees; fills may be partial or absent. The $0.33 signal creates no shares, cost or P&amp;L. The $1 take-profit credit is modeled, not guaranteed executable proceeds.</div>
 </details>
 <details class="card">
   <summary>Recent events</summary>
@@ -181,7 +182,7 @@ const hm=x=>{const d=dt(x);return d?d.toLocaleTimeString([],{hour:'2-digit',minu
 const cd=x=>{if(!num(x))return'--:--';const s=Math.max(0,Math.floor(x));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
 const side=s=>s==='UP'||s==='DOWN'?s:'';
 const set=(id,html,c)=>{const e=$(id);if(e.innerHTML!==html)e.innerHTML=html;if(c!==undefined&&e.className!==c)e.className=c};
-const LBL={OPEN:'OPEN',PENDING_RESOLUTION:'AWAITING RESOLUTION',CLOSED_TP:'TAKE PROFIT',RESOLVED_WIN:'SETTLED WIN',RESOLVED_LOSS:'SETTLED LOSS'};
+const LBL={OPEN:'OPEN',PENDING_RESOLUTION:'AWAITING RESOLUTION',CLOSED_TP:'TAKE PROFIT',CLOSED_SL:'STOP LOSS',CLOSED_LATE:'FINAL 30s EXIT',RESOLVED_WIN:'SETTLED WIN',RESOLVED_LOSS:'SETTLED LOSS'};
 const STALE=15000;
 let last=null,lastState=null,closedLimit=5,pendingLimit=5;
 $('moreClosed').onclick=()=>{closedLimit+=10;if(lastState)render(lastState)};
@@ -197,6 +198,8 @@ function render(s){
   // market
   if(mk){
     set('clock',cd(mk.secondsRemaining));
+    const tr=mk.tracking||{},entry=tr.entry||{};
+    set('tracking',`<b>${mk.secondsRemaining<=st.entryCutoffSeconds?'ENTRY CUTOFF · no new buys':'ENTRY OPEN · '+cd(mk.secondsRemaining-st.entryCutoffSeconds)+' left to enter'}</b><br>Virtual $0.33: ${tr.selectedSide?esc(tr.selectedSide)+' selected':'watching both sides'} · ${esc(entry.state||'WAITING')}<br>${esc(entry.reason||'No purchase or cash used at $0.33.')}<br>300 shares · SL $0.40 · TP $0.99 → modeled $1`);
     set('win',hm(mk.windowStart)+' – '+hm(mk.windowEnd));
     const ws=dt(mk.windowStart),we=dt(mk.windowEnd);
     if(ws&&we&&num(mk.secondsRemaining)){const tot=(we-ws)/1000;const f=tot>0?Math.min(1,Math.max(0,1-mk.secondsRemaining/tot)):0;$('prog').style.transform='scaleX('+f.toFixed(3)+')'}
@@ -204,11 +207,12 @@ function render(s){
     set('quotes',['UP','DOWN'].map(k=>{const q=(mk.quotes||{})[k];const u=q&&dt(q.updatedAt);const stale=!q||!u||now-u.getTime()>STALE;
       const bid=stale?null:q.bestBid,ask=stale?null:q.bestAsk;let z;
       if(!q)z='No quote';else if(stale)z='Stale quote · treated as unknown';
-      else if(held&&held.side===k){z=num(bid)&&num(st.takeProfitBid)&&bid>=st.takeProfitBid?'Held · bid at take-profit':num(bid)&&num(st.addOnTrigger)&&bid>=st.addOnTrigger?'Held · bid past add-on trigger':'Held side'}
-      else if(num(ask)&&num(st.entryPrice)&&ask<=st.entryPrice)z='Ask at or below entry';else z='Ask above entry';
+      else if(held&&held.side===k){z=held.exitPending?'Market exit pending':num(bid)&&bid>=st.takeProfitBid?'Held · bid at take-profit':'Held · SL $0.40 / TP $0.99'}
+      else if(tr.selectedSide===k)z='Virtual selection · entry bid ≥ $0.70';
+      else if(num(ask)&&num(st.entryPrice)&&ask<=st.entryPrice)z='Virtual $0.33 touch · no buy';else z='Watching virtual $0.33';
       return `<div class="side ${k}"><div class="t"><b>${k}</b><span class="label">${q?time(q.updatedAt):U}</span></div><div class="q"><span class="label">Bid</span><div>${pxb(bid)}</div></div><div class="q"><span class="label">Ask</span><div>${pxb(ask)}</div></div><div class="zone">${esc(z)}</div></div>`}).join(''));
     set('feed',esc(mk.title||'')+(df.status?' · feed '+esc(df.status):'')+(df.lastError?' · <b class="bad">'+esc(df.lastError)+'</b>':''));
-  }else{set('clock','--:--');set('win','no active market');$('prog').style.transform='scaleX(0)';set('quotes','<div class="empty" style="grid-column:1/-1">No active market. Quotes unknown.</div>');set('feed',df.lastError?'<b class="bad">'+esc(df.lastError)+'</b>':'')}
+  }else{set('clock','--:--');set('win','no active market');set('tracking','Waiting for current market · virtual tracking only at $0.33');$('prog').style.transform='scaleX(0)';set('quotes','<div class="empty" style="grid-column:1/-1">No active market. Quotes unknown.</div>');set('feed',df.lastError?'<b class="bad">'+esc(df.lastError)+'</b>':'')}
   // account
   const settled=num(a.initialCapital)&&num(a.realizedPnl)?+a.initialCapital + +a.realizedPnl:null;
   set('settled',money(settled),'big');
@@ -240,33 +244,33 @@ function render(s){
   // orders
   const O=(s.orders||[]).filter(o=>mk&&String(o.windowStart)===String(mk.windowStart)).sort((x,y)=>(dt(y.placedAt)||0)-(dt(x.placedAt)||0));set('ordN',O.length+'');
   set('orders',O.length?O.slice(0,10).map(o=>{const r=+o.requestedShares||0,f=num(o.filledShares)?+o.filledShares:0,c=num(o.canceledShares)?+o.canceledShares:0,rem=Math.max(0,r-f-c);const sx=String(o.status||'');
-    return `<div class="row ${/FILL/i.test(sx)?'w':/CANCEL|EXPIR/i.test(sx)?'l':'p'}"><div><span class="tag ${side(o.side)}">${esc(o.side)}</span> <span class="st">${esc(sx.replace(/_/g,' ')||'unknown')}</span></div><div class="v">@ ${px(o.limitPrice)}</div>
+    return `<div class="row ${/FILL/i.test(sx)?'w':/CANCEL|EXPIR/i.test(sx)?'l':'p'}"><div><span class="tag ${side(o.side)}">${esc(o.side)}</span> <span class="st">${esc(sx.replace(/_/g,' ')||'unknown')}</span></div><div class="v">${o.type==='TAKER_ENTRY'?'Market':('@ '+px(o.limitPrice))}</div>
     <div class="fill"><i style="flex-grow:${f};background:var(--up)"></i><i style="flex-grow:${rem};background:var(--gold);opacity:.45"></i><i style="flex-grow:${c};background:var(--dn);opacity:.45"></i></div>
     <div class="grid3"><div><span class="label">Filled</span><b>${int(o.filledShares)}</b></div><div><span class="label">Resting</span><b>${int(o.remainingShares)}</b></div><div><span class="label">Canceled</span><b>${int(o.canceledShares)}</b></div></div>
-    <div class="d">${int(o.requestedShares)} requested · placed ${time(o.placedAt)} · last fill ${o.lastFillAt?time(o.lastFillAt):'none'} · window ${hm(o.windowStart)}–${hm(o.windowEnd)}${o.cancelReason?' · '+esc(o.cancelReason):''}</div></div>`}).join(''):'<div class="empty">No orders yet. Each window posts one resting bid per side.</div>');
+    <div class="d">${int(o.requestedShares)} requested · placed ${time(o.placedAt)} · last fill ${o.lastFillAt?time(o.lastFillAt):'none'} · average ${px(o.averagePrice)} · fees ${money(o.fees)} · window ${hm(o.windowStart)}–${hm(o.windowEnd)}${o.cancelReason?' · '+esc(o.cancelReason):''}</div></div>`}).join(''):'<div class="empty">No market order yet. The $0.33 tracker never places an order.</div>');
   // positions
   const P=s.positions||[],open=P.filter(p=>p.status==='OPEN'),pending=P.filter(p=>p.status==='PENDING_RESOLUTION').sort((x,y)=>y.windowEnd-x.windowEnd),cl=P.filter(p=>!(p.status==='OPEN'||p.status==='PENDING_RESOLUTION')).sort((x,y)=>(dt(y.exitAt)||0)-(dt(x.exitAt)||0));
   set('posN',open.length+'');set('cloN',Math.min(closedLimit,cl.length)+' of '+cl.length);
   set('pendingN',pending.length+'');$('pendingDetails').style.display=pending.length?'':'none';
   set('pending',pending.length?pending.slice(0,pendingLimit).map(p=>`<div class="row p"><div><span class="tag ${side(p.side)}">${esc(p.side)}</span> ${int(p.shares)} shares</div><div class="v">${money(p.totalCost)}</div><div class="d">Window ${hm(p.windowStart)}–${hm(p.windowEnd)} · awaiting official resolution${p.resolutionError?' · '+esc(p.resolutionError):''}</div></div>`).join('')+(pending.length>pendingLimit?'<p class="note">'+(pending.length-pendingLimit)+' more pending positions remain recorded in the ledger.</p>':''):'');
   $('morePending').style.display=pendingLimit<pending.length?'':'none';
-  const addon=ad=>{if(!ad)return'<div class="addon">Add-on state unknown.</div>';return `<div class="addon"><b>Add-on · ${esc(ad.state||'unknown')}</b> · ${num(ad.requestedShares)?int(ad.requestedShares)+' shares requested':ad.state==='WAITING'?int(st.addOnShares)+' shares at trigger':'legacy profit budget'} · cash reserved ${money(ad.budget)} · spent ${money(ad.spent)} · fees ${money(ad.fees)} · ${int(ad.filledShares)} sh filled${ad.triggerAt?' · triggered '+time(ad.triggerAt):''}${ad.reason?'<br>'+esc(ad.reason):''}</div>`};
+  const addon=(ad,p)=>`<div class="addon"><b>300-share market entry · ${esc(ad&&ad.state||'unknown')}</b><br>SL ${px(st.stopLossBid)} · TP ${px(st.takeProfitBid)} → modeled $1${p.exitPending?'<br><b>'+esc(p.exitPending.reason)+' sale pending</b> · remaining '+int(p.remainingShares)+' shares':''}<br>Final 30s: sell if current bid ≤ $0.90, even after an earlier higher bid.</div>`;
   set('positions',open.length?open.map(p=>`<div class="row p"><div><span class="tag ${side(p.side)}">${esc(p.side)}</span> <span class="st warn">${esc(LBL[p.status]||p.status)}</span></div><div class="v ${cls(p.unrealizedPnl)}">${signed(p.unrealizedPnl)}</div>
-    <div class="grid3"><div><span class="label">Shares</span><b>${int(p.shares)}</b></div><div><span class="label">Avg entry</span><b>${px(p.entryPrice)}</b></div><div><span class="label">Mark bid</span><b>${px(p.markBid)}</b></div></div>
-    <div class="d">Base ${int(p.baseShares)} sh for ${money(p.baseCost)} · total cost ${money(p.totalCost)} · entry fees ${money(p.entryFees)} · entered ${time(p.entryAt)} · window ends ${time(p.windowEnd)} · ${(p.fills||[]).length} fills</div>${addon(p.addOn)}</div>`).join(''):'<div class="empty">Flat. Waiting for the first fill on either side.</div>');
+    <div class="grid3"><div><span class="label">Remaining</span><b>${int(p.remainingShares??p.shares)}</b></div><div><span class="label">Avg entry</span><b>${px(p.entryPrice)}</b></div><div><span class="label">Mark bid</span><b>${px(p.markBid)}</b></div></div>
+    <div class="d">${int(p.shares)} shares originally bought · total cost ${money(p.totalCost)} · entry / exit fees ${money(p.entryFees)} / ${money(p.exitFees)} · entered ${time(p.entryAt)} · window ends ${time(p.windowEnd)}</div>${addon(p.addOn,p)}</div>`).join(''):'<div class="empty">Flat. Virtual tracking holds no shares. Waiting for an eligible $0.70 entry.</div>');
   set('closed',cl.length?cl.slice(0,closedLimit).map(p=>`<div class="row ${num(p.realizedPnl)&&p.realizedPnl>0?'w':num(p.realizedPnl)&&p.realizedPnl<0?'l':''}"><div><span class="tag ${side(p.side)}">${esc(p.side)}</span> <span class="st">${esc(LBL[p.status]||p.status)}</span></div><div class="v ${cls(p.realizedPnl)}">${signed(p.realizedPnl)}</div>
     <div class="grid3"><div><span class="label">Entry</span><b>${px(p.entryPrice)}</b></div><div><span class="label">Exit</span><b>${px(p.exitPrice)}</b></div><div><span class="label">Shares</span><b>${int(p.shares)}</b></div></div>
-    <div class="d">Window ${hm(p.windowStart)}–${hm(p.windowEnd)} · cost ${money(p.totalCost)} · proceeds ${money(p.exitProceeds)} · closed ${time(p.exitAt)} · add-on ${esc(p.addOn&&p.addOn.state||'unknown')}${p.addOn&&num(p.addOn.filledShares)&&p.addOn.filledShares>0?' ('+int(p.addOn.filledShares)+' sh, '+money(p.addOn.spent)+')':''}</div></div>`).join(''):'<div class="empty">No closed trades yet.</div>');
+    <div class="d">Window ${hm(p.windowStart)}–${hm(p.windowEnd)} · cost ${money(p.totalCost)} · gross proceeds ${money(p.exitProceeds)} · entry / exit fees ${money(p.entryFees)} / ${money(p.exitFees)} · closed ${time(p.exitAt)} · ${esc(p.exitReason||p.status)}</div></div>`).join(''):'<div class="empty">No closed trades yet.</div>');
   $('moreClosed').style.display=closedLimit<cl.length?'':'none';
   set('sdesc',esc(st.description||''));
   const ep=px(st.entryPrice),tp=px(st.takeProfitBid);
   set('rules',[
-    `Each window, rest a ${ep} bid for ${int(st.baseShares)} shares on both UP and DOWN. Maker fill is simulated after latency when fresh asks reach ${ep} or lower. Zero maker fee.`,
-    `The first partial fill on either side cancels the opposite order immediately. The filled side's remainder may keep resting until expiry or take-profit.`,
-    `One fixed ${int(st.addOnShares)}-share add-on per window when the held side's best bid reaches ${px(st.addOnTrigger)}. This replaces the previous profit-based sizing. Existing historical fills remain unchanged.`,
-    `The add-on sweeps available asks at least 300ms later, paying actual taker fees. Price is not guaranteed at the trigger. Base shares are never sold to fund it. Insufficient depth or unreserved cash means a partial fill; the unfilled remainder is canceled.`,
+    `Watch both sides virtually at ${ep}. The first fresh ask touch selects the side. No $0.33 orders, no purchase, no capital reserved and no P&L from this observation.`,
+    `When the selected side's bid reaches ${px(st.addOnTrigger)}, request ${int(st.addOnShares)} shares at market. Sweep actual asks after 300ms, including taker fees; partial fills are possible. One entry attempt per window, no flip or rearm.`,
+    `No new entry in the final ${int(st.entryCutoffSeconds)} seconds, including requests whose execution delay crosses the cutoff.`,
+    `Stop-loss when current best bid is at or below ${px(st.stopLossBid)}. In the final ${int(st.lateExitSeconds)} seconds also sell if current bid is at or below ${px(st.lateExitBid)}, regardless of earlier highs. Sales sweep later bid depth after latency, with fees and partial fills; no guaranteed stop price.`,
     `Take profit when the best bid reaches ${tp}: credited at a modeled ${num(st.takeProfitPayout)?'$'+Number(st.takeProfitPayout).toFixed(2):U} per share, no exit fee. Otherwise the official resolution after expiry settles it.`,
-    `No stop-loss, no flip, no re-arm. Separate ${money(st.initialCapital)} paper account; the main bot is unaffected.`
+    `If shares remain at expiry, await official settlement. Separate ${money(st.initialCapital)} paper account; the main bot is unaffected.`
   ].map(t=>'<li>'+t+'</li>').join(''));
   set('persist',ps.lastError?'<span class="bad">save error: '+esc(ps.lastError)+'</span>':ps.configured?'saved '+time(ps.lastSavedAt):'not persistent');
   const ev=(s.events||[]).slice().sort((x,y)=>(dt(y.at)||0)-(dt(x.at)||0));
