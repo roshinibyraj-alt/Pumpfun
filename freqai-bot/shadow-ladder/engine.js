@@ -2,10 +2,10 @@
 
 const STRATEGY = Object.freeze({
   id: 'independent-shadow-33-profit-add70-v1',
-  name: 'BTC 33¢ resting buys · profit-funded add-on',
+  name: 'BTC 33¢ resting buys · 300-share add-on',
   initialCapital: 3000, baseShares: 200, entryPrice: .33,
-  addOnTrigger: .70, takeProfitBid: .99, takeProfitPayout: 1,
-  description: 'Paper only. Rest 200 shares on both sides at $0.33. First partial fill cancels the other side. At held-side bid $0.70, spend the base position’s (.70−.33) profit budget once on a market buy, including fees. $0.99 bid credits modeled $1/share TP; otherwise official resolution. No model, recovery, stop-loss, flip or rearm.',
+  addOnTrigger: .70, addOnShares: 300, takeProfitBid: .99, takeProfitPayout: 1,
+  description: 'Paper only. Rest 200 shares on both sides at $0.33. First partial fill cancels the other side. At held-side bid $0.70, request one fixed 300-share market add-on, limited by actual ask depth and unreserved cash including taker fees. $0.99 bid credits modeled $1/share TP; otherwise official resolution. No model, recovery, stop-loss, flip or rearm.',
   fillAssumption: 'Simulated maker fill exactly $0.33 against subsequent fresh asks at or below $0.33; displayed depth limits quantity, but queue execution is unverified.',
   executionDelayMs: 300,
 });
@@ -145,14 +145,17 @@ class ShadowLadderEngine {
     }
     if (p.addOn.state === 'WAITING' && q.bestBid >= .70) {
       const available = Math.max(0, this.cash - this.reservedCash());
-      const targetBudget = Number((p.baseShares * (.70 - .33)).toFixed(8));
+      // Reserve a conservative all-in ceiling, not unrealized profit. Actual
+      // spending comes from the later execution book and stops at 300 shares.
+      const targetBudget = STRATEGY.addOnShares * (1 + (w.feeRate ?? 1));
       const budget = Math.min(targetBudget, available);
       p.addOn = { ...p.addOn, state: budget > .00001 ? 'PENDING' : 'SKIPPED',
-        budget, targetBudget, baseSharesAtTrigger: p.baseShares, triggerAt: now,
+        budget, targetBudget, requestedShares: STRATEGY.addOnShares,
+        baseSharesAtTrigger: p.baseShares, triggerAt: now,
         eligibleAt: now + 300, reason: budget < targetBudget
           ? 'Add-on limited to actual unreserved cash; unrealized profit is not cash.'
-          : 'Profit budget frozen; awaiting market execution after >=300ms.' };
-      this.log('ADD_ON_TRIGGER', `${side}: ${p.baseShares.toFixed(4)} base shares; $${targetBudget.toFixed(4)} profit budget ($${budget.toFixed(4)} funded).`);
+          : '300-share request reserved; awaiting market execution after >=300ms.' };
+      this.log('ADD_ON_TRIGGER', `${side}: fixed ${STRATEGY.addOnShares}-share add-on requested; $${budget.toFixed(4)} cash reserved including fees.`);
     }
     const a = p.addOn;
     if (a.state !== 'PENDING' || now < a.eligibleAt || q.updatedAt <= a.triggerAt) return;
@@ -166,7 +169,11 @@ class ShadowLadderEngine {
       if (room <= .00002) { depthLimited = false; break; }
       const unitFee = w.feeRate * (l.price * (1 - l.price)) ** w.feeExponent;
       const available = w.depths[side][l.price]?.remaining || 0;
-      const n = Math.min(available, Math.max(0, (room - .00001) / (l.price + unitFee)));
+      // Old pending profit-budget orders retain their committed terms on
+      // restart; all newly triggered add-ons carry requestedShares = 300.
+      const remaining = finite(a.requestedShares) ? Math.max(0, a.requestedShares - a.filledShares) : Infinity;
+      if (remaining <= EPS) { depthLimited = false; break; }
+      const n = Math.min(remaining, available, Math.max(0, (room - .00001) / (l.price + unitFee)));
       if (n <= EPS) continue;
       const cost = n * l.price, f = fee(n, l.price, w.feeRate, w.feeExponent);
       if (cost + f > room + EPS) throw new Error('Add-on exceeded its all-in budget');
@@ -178,11 +185,13 @@ class ShadowLadderEngine {
     }
     p.entryPrice = p.totalCost / p.shares;
     const spent = a.spent + a.fees;
-    a.state = !a.filledShares ? 'SKIPPED' : a.budget - spent < .001 ? 'FILLED' : 'PARTIAL';
+    const complete = finite(a.requestedShares) ? a.requestedShares - a.filledShares < EPS : a.budget - spent < .001;
+    a.state = !a.filledShares ? 'SKIPPED' : complete ? 'FILLED' : 'PARTIAL';
     a.reason = !a.filledShares ? 'No executable asks; add-on canceled without a fill.'
-      : depthLimited && a.budget - spent >= .001
-        ? 'Available ask depth used; unspent remainder canceled. No second add-on.'
-        : 'All-in market-buy budget used, including taker fees. No second add-on.';
+      : complete ? 'Requested add-on filled with actual ask prices and taker fees. No second add-on.'
+        : depthLimited && a.budget - spent >= .001
+          ? 'Available ask depth or cash used; unfilled remainder canceled. No second add-on.'
+          : 'Available cash used including taker fees; unfilled remainder canceled. No second add-on.';
     this.log('ADD_ON_RESULT', `${side}: ${a.filledShares.toFixed(4)} added; spent $${spent.toFixed(4)} including $${a.fees.toFixed(5)} fees. ${a.reason}`);
   }
   close(p, status, reason) {

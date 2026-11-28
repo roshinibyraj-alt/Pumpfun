@@ -53,16 +53,17 @@ test('a bid touch alone cannot fill a resting buy; wrong/stale/future/crossed qu
   }
   f.advance(); f.quote('UP', .32, .33); assert.equal(f.e.positions.length, 1);
 });
-test('add-on is a single fee-inclusive $74 market sweep, not a guaranteed 70c fill', () => {
+test('add-on is a single 300-share market sweep, not a guaranteed 70c fill', () => {
   const f = fixture(), p = f.buy();
   f.advance(); f.quote('UP', .699, .71); assert.equal(p.addOn.state, 'WAITING');
   f.advance(); f.quote('UP', .70, .71); assert.equal(p.addOn.state, 'PENDING');
-  near(p.addOn.budget, 74); near(f.e.reservedCash(), 74);
+  assert.equal(p.addOn.requestedShares, 300); near(f.e.reservedCash(), 315);
   f.advance(299); f.quote('UP', .70, .71); assert.equal(p.addOn.filledShares, 0);
   f.advance(1); f.quote('UP', .70, .71);
   assert.equal(p.addOn.state, 'FILLED'); assert.ok(p.addOn.fees > 0);
-  assert.ok(p.addOn.spent + p.addOn.fees <= 74);
-  assert.ok(74 - p.addOn.spent - p.addOn.fees < .0001);
+  near(p.addOn.filledShares, 300);
+  near(p.addOn.spent, 213);
+  near(p.addOn.fees, 3.0885);
   assert.equal(p.fills.at(-1).price, .71);
   near(p.baseShares, 200); near(p.shares, 200 + p.addOn.filledShares);
   near(f.e.cash, 3000 - p.totalCost - p.entryFees);
@@ -78,12 +79,48 @@ test('multi-level taker add-on obeys actual depth and cancels unspent remainder 
   const cost = p.totalCost; f.advance(); f.quote('UP', .7, .71, 500);
   near(p.totalCost, cost);
 });
-test('partial BASE fill uses actual shares for profit budget, never imaginary 200-share profit', () => {
+test('multi-level execution stops at 300 shares even when much more depth is visible', () => {
+  const f = fixture(), p = f.buy();
+  f.advance(); f.quote('UP', .7, .71);
+  f.advance(); f.quote('UP', .7, .71, 100, {
+    asks: [{ price: .71, size: 100 }, { price: .72, size: 1000 }] });
+  near(p.addOn.filledShares, 300); near(p.addOn.spent, 215);
+  assert.equal(p.addOn.state, 'FILLED'); near(f.e.reservedCash(), 0);
+});
+test('add-on never borrows: cash and fees constrain a partial 300-share request', () => {
+  const f = fixture(), p = f.buy();
+  f.e.cash = 50;
+  f.advance(); f.quote('UP', .7, .71);
+  near(p.addOn.budget, 50);
+  f.advance(); f.quote('UP', .7, .71);
+  assert.equal(p.addOn.state, 'PARTIAL');
+  assert.ok(p.addOn.filledShares > 0 && p.addOn.filledShares < 300);
+  assert.ok(f.e.cash >= 0); assert.ok(p.addOn.spent + p.addOn.fees <= 50);
+  near(f.e.reservedCash(), 0);
+});
+test('legacy completed fills, cash and history restore unchanged; old pending budgets are honored', () => {
+  const f = fixture(), p = f.buy();
+  f.advance(); f.quote('UP', .7, .71);
+  // Emulate a ledger written before fixed-share sizing was introduced.
+  delete p.addOn.requestedShares; p.addOn.budget = 74; p.addOn.targetBudget = 74;
+  const e = new Engine({ now: f.now }); e.restore(f.e.export());
+  const g = fixture(e); g.time(f.now() + 400); g.quote('UP', .7, .71);
+  assert.equal(e.positions[0].addOn.state, 'FILLED');
+  assert.ok(e.positions[0].addOn.filledShares < 105);
+  g.advance(); g.quote('UP', .99, .999);
+  const saved = e.export(), restored = new Engine({ now: g.now });
+  restored.restore(saved);
+  assert.deepEqual(restored.positions, saved.positions);
+  near(restored.cash, saved.cash);
+  near(restored.account().realizedPnl, e.account().realizedPnl);
+  assert.equal(restored.account().closedTrades, 1);
+});
+test('partial BASE fill still requests a fixed 300-share add-on', () => {
   const f = fixture(), p = f.buy('UP', 50);
-  f.advance(); f.quote('UP', .7, .71); near(p.addOn.budget, 18.5);
-  f.advance(); f.quote('UP', .7, .71); assert.ok(p.addOn.filledShares < 27);
+  f.advance(); f.quote('UP', .7, .71); assert.equal(p.addOn.requestedShares, 300);
+  f.advance(); f.quote('UP', .7, .71); near(p.addOn.filledShares, 300);
   f.advance(); f.quote('UP', .32, .33, 150);
-  near(p.baseShares, 200); near(p.addOn.budget, 18.5);
+  near(p.baseShares, 200); near(p.addOn.filledShares, 300);
 });
 test('TP credits modeled $1 for ALL filled shares, never double credits on settlement or reenters', () => {
   const f = fixture(), p = f.buy();
@@ -118,7 +155,7 @@ test('official loss includes actual add-on cost and taker fees', () => {
   f.time(START + W); f.e.tick(); f.e.settle('m', 'DOWN');
   assert.equal(p.status, 'RESOLVED_LOSS');
   near(p.realizedPnl, -p.totalCost - p.entryFees);
-  assert.ok(p.realizedPnl >= -140 && p.realizedPnl < -139.9999);
+  near(p.realizedPnl, -282.0885);
 });
 test('orders expire and a new window has its own orders, with no old position or quote rollover', () => {
   const f = fixture(); f.quote(); f.time(START + W); f.e.tick();
@@ -210,7 +247,7 @@ test('official resolution polling settles shadow holdings and persists without t
   assert.deepEqual(calls, ['m']); assert.equal(r.engine.positions[0].status, 'RESOLVED_WIN');
   assert.equal(main.cash, 123); await r.stop();
 });
-test('HTTP and dashboard render real shadow state, first-fill cancellation and $74 add-on', async t => {
+test('HTTP and dashboard render real shadow state, first-fill cancellation and 300-share add-on', async t => {
   const f = fixture(), p = f.buy();
   f.advance(); f.quote('UP', .7, .71); f.e.tick();
   const main = new (require('../price-resting-btc-bot'))({ marketData: {} });
@@ -219,7 +256,7 @@ test('HTTP and dashboard render real shadow state, first-fill cancellation and $
   t.after(() => new Promise(resolve => server.close(resolve)));
   const url = 'http://127.0.0.1:' + server.address().port;
   const state = await (await fetch(url + '/api/shadow/state')).json();
-  assert.equal(state.positions[0].addOn.budget, 74);
+  assert.equal(state.positions[0].addOn.requestedShares, 300);
   const html = await (await fetch(url + '/shadow')).text();
   assert.match(html, /viewport/); assert.doesNotMatch(html, /id="signals"|id="mwarn"/);
   const elements = new Map();
@@ -231,7 +268,7 @@ test('HTTP and dashboard render real shadow state, first-fill cancellation and $
   await new Promise(resolve => setImmediate(resolve));
   assert.match(elements.get('status').innerHTML, /RUNNING/);
   assert.match(elements.get('orders').innerHTML, /CANCELLED/);
-  assert.match(elements.get('positions').innerHTML, /\$74\.00/);
+  assert.match(elements.get('positions').innerHTML, /300 shares requested/);
   assert.match(elements.get('cash').innerHTML, /2,934\.00/);
   assert.equal(main.shadowEntries.length, 0); assert.equal(p.shares, 200);
 });

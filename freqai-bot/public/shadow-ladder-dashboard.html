@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#f1ede4">
 <title>Ladder Lab · BTC 5m paper fills</title>
-<meta name="description" content="Independent BTC paper experiment: 33-cent two-sided resting buys, first-fill cancellation and a profit-funded market add-on at 70 cents.">
+<meta name="description" content="Independent BTC paper experiment: 33-cent two-sided resting buys, first-fill cancellation and a 300-share market add-on at 70 cents.">
 <meta property="og:title" content="Ladder Lab · Independent BTC paper strategy">
-<meta property="og:description" content="Track resting orders, the profit-funded add-on, paper equity and official settlement in a separate shadow account.">
+<meta property="og:description" content="Track resting orders, the 300-share add-on, paper equity and official settlement in a separate shadow account.">
 <meta property="og:type" content="website">
 <style>
 :root{--bg:#f1ede4;--paper:#faf7f0;--ink:#16232b;--muted:#5f6a6c;--line:#d8cfbe;--up:#0b6e5c;--upbg:#e2efe9;--dn:#b23b26;--dnbg:#f5e4dd;--gold:#9a6a08;--goldbg:#f5ead0;--navy:#1f3a5a;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--sans:system-ui,-apple-system,"Segoe UI",sans-serif}
@@ -214,7 +214,7 @@ function render(s){
   // positions
   const P=s.positions||[],open=P.filter(p=>p.status==='OPEN'||p.status==='PENDING_RESOLUTION'),cl=P.filter(p=>!(p.status==='OPEN'||p.status==='PENDING_RESOLUTION')).sort((x,y)=>(dt(y.exitAt)||0)-(dt(x.exitAt)||0));
   set('posN',open.length+'');set('cloN',cl.length+'');
-  const addon=ad=>{if(!ad)return'<div class="addon">Add-on state unknown.</div>';return `<div class="addon"><b>Add-on · ${esc(ad.state||'unknown')}</b> · budget ${money(ad.budget)} · spent ${money(ad.spent)} · fees ${money(ad.fees)} · ${int(ad.filledShares)} sh${ad.triggerAt?' · triggered '+time(ad.triggerAt):''}${ad.reason?'<br>'+esc(ad.reason):''}</div>`};
+  const addon=ad=>{if(!ad)return'<div class="addon">Add-on state unknown.</div>';return `<div class="addon"><b>Add-on · ${esc(ad.state||'unknown')}</b> · ${num(ad.requestedShares)?int(ad.requestedShares)+' shares requested':'legacy profit budget'} · cash reserved ${money(ad.budget)} · spent ${money(ad.spent)} · fees ${money(ad.fees)} · ${int(ad.filledShares)} sh filled${ad.triggerAt?' · triggered '+time(ad.triggerAt):''}${ad.reason?'<br>'+esc(ad.reason):''}</div>`};
   set('positions',open.length?open.map(p=>`<div class="row p"><div><span class="tag ${side(p.side)}">${esc(p.side)}</span> <span class="st warn">${esc(LBL[p.status]||p.status)}</span></div><div class="v ${cls(p.unrealizedPnl)}">${signed(p.unrealizedPnl)}</div>
     <div class="grid3"><div><span class="label">Shares</span><b>${int(p.shares)}</b></div><div><span class="label">Avg entry</span><b>${px(p.entryPrice)}</b></div><div><span class="label">Mark bid</span><b>${px(p.markBid)}</b></div></div>
     <div class="d">Base ${int(p.baseShares)} sh for ${money(p.baseCost)} · total cost ${money(p.totalCost)} · entry fees ${money(p.entryFees)} · entered ${time(p.entryAt)} · window ends ${time(p.windowEnd)} · ${(p.fills||[]).length} fills</div>${addon(p.addOn)}</div>`).join(''):'<div class="empty">Flat. Waiting for the first fill on either side.</div>');
@@ -226,8 +226,8 @@ function render(s){
   set('rules',[
     `Each window, rest a ${ep} bid for ${int(st.baseShares)} shares on both UP and DOWN. Maker fill is simulated after latency when fresh asks reach ${ep} or lower. Zero maker fee.`,
     `The first partial fill on either side cancels the opposite order immediately. The filled side's remainder may keep resting until expiry or take-profit.`,
-    `One add-on per window when the held side's best bid reaches ${px(st.addOnTrigger)}. Budget is frozen at (${px(st.addOnTrigger)} − ${ep}) × base shares actually filled; a full ${int(st.baseShares)} fill gives ${num(st.addOnTrigger)&&num(st.entryPrice)&&num(st.baseShares)?money((st.addOnTrigger-st.entryPrice)*st.baseShares):U}.`,
-    `The add-on sweeps available asks at least 300ms later with taker fees inside that budget. Price is not guaranteed at the trigger. Base shares are never sold to fund it, and it is capped by unreserved cash.`,
+    `One fixed ${int(st.addOnShares)}-share add-on per window when the held side's best bid reaches ${px(st.addOnTrigger)}. This replaces the previous profit-based sizing. Existing historical fills remain unchanged.`,
+    `The add-on sweeps available asks at least 300ms later, paying actual taker fees. Price is not guaranteed at the trigger. Base shares are never sold to fund it. Insufficient depth or unreserved cash means a partial fill; the unfilled remainder is canceled.`,
     `Take profit when the best bid reaches ${tp}: credited at a modeled ${num(st.takeProfitPayout)?'$'+Number(st.takeProfitPayout).toFixed(2):U} per share, no exit fee. Otherwise the official resolution after expiry settles it.`,
     `No stop-loss, no flip, no re-arm. Separate ${money(st.initialCapital)} paper account; the main bot is unaffected.`
   ].map(t=>'<li>'+t+'</li>').join(''));
