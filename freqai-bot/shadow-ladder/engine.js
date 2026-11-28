@@ -1,14 +1,14 @@
 'use strict';
 
 const STRATEGY = Object.freeze({
-  id: 'independent-shadow-virtual33-entry70-stop40-cutoff120-v1',
-  name: 'BTC virtual 33¢ → 300-share entry at 70¢',
-  initialCapital: 3000, baseShares: 0, entryPrice: .33,
+  id: 'independent-shadow-first70-stop40-cutoff120-v1',
+  name: 'BTC first 70¢ side → 300-share market buy',
+  initialCapital: 3000, baseShares: 0, entryPrice: .70,
   addOnTrigger: .70, addOnShares: 300, stopLossBid: .40,
   entryCutoffSeconds: 120, lateExitSeconds: 30, lateExitBid: .90,
   takeProfitBid: .99, takeProfitPayout: 1,
-  description: 'Paper only. Track both sides virtually at $0.33 without buying or spending cash. First ask touch selects the side. At its best bid >= $0.70, request one 300-share market entry before the final two minutes. SL bid <= $0.40; in the final 30 seconds also sell when current bid <= $0.90, regardless of earlier highs. Sales use actual bid depth and fees. $0.99 bid credits modeled $1/share TP; otherwise official resolution.',
-  fillAssumption: 'The $0.33 observation creates no order, shares or P&L. The only entry sweeps subsequent fresh asks after latency, limited by actual depth and cash including taker fees.',
+  description: 'Paper only. Whichever side first has best bid >= $0.70 requests one 300-share market entry before the final two minutes. No prior $0.33 touch required. SL bid <= $0.40; in the final 30 seconds also sell when current bid <= $0.90, regardless of earlier highs. Sales use actual bid depth and fees. $0.99 bid credits modeled $1/share TP; otherwise official resolution.',
+  fillAssumption: 'A fresh best bid >= $0.70 immediately requests the entry. Execution sweeps subsequent fresh asks after latency, limited by actual depth and cash including taker fees; a $0.70 fill is not guaranteed.',
   executionDelayMs: 300,
 });
 const SIDES = ['UP', 'DOWN'];
@@ -79,30 +79,20 @@ class ShadowLadderEngine {
     w.feeExponent = finite(exponent) && exponent >= 0 ? exponent : null;
     if (!this.current || w.start >= this.current.windowStart)
       this.current = { id: w.marketId, title: w.title, windowStart: w.start, windowEnd: w.end };
-    this.executeBase(w, side);
     this.processPosition(w, side);
     this.changed();
   }
   place(w) {
     w.entry = { state: 'WAITING', budget: 0, spent: 0, fees: 0, filledShares: 0,
-      requestedShares: 300, reason: 'Watching for the first virtual $0.33 ask touch.' };
-    w.trackingEligibleAt = this.now() + STRATEGY.executionDelayMs;
+      requestedShares: 300, reason: 'Watching both sides for the first best bid >= $0.70.' };
     w.cutoffAt = w.end - STRATEGY.entryCutoffSeconds * 1000;
-    this.log('VIRTUAL_TRACKING', 'Watching UP and DOWN at $0.33 only: no orders, no shares and no cash reserved.');
+    this.log('ENTRY_WATCH', 'Watching UP and DOWN: first fresh bid >= $0.70 requests a 300-share market buy. No $0.33 prerequisite.');
   }
   cancel(o, status, reason) {
     if (!liveOrder(o)) return;
     o.canceledShares += o.remainingShares; o.remainingShares = 0;
     o.status = status; o.cancelReason = reason; o.canceledAt = this.now();
     this.log(status, `${o.side}: ${reason}`);
-  }
-  executeBase(w, side) {
-    const now = this.now(), q = w.quotes[side];
-    if (now >= w.cutoffAt || w.selectedSide || now < w.trackingEligibleAt
-      || q.updatedAt <= w.createdAt || q.bestAsk > STRATEGY.entryPrice) return;
-    w.selectedSide = side; w.virtualTouchAt = now;
-    w.entry.reason = `${side} selected virtually at $0.33; waiting for its bid >= $0.70.`;
-    this.log('VIRTUAL_TOUCH', `${side} selected by a virtual $0.33 ask touch. No purchase or P&L.`);
   }
   processPosition(w, side) {
     const now = this.now(), q = w.quotes[side];
@@ -126,9 +116,14 @@ class ShadowLadderEngine {
       }
       return;
     }
-    if (w.selectedSide !== side) return;
     const a = w.entry;
     if (now >= w.cutoffAt) { this.cutoff(w); return; }
+    if (!w.selectedSide) {
+      if (q.bestBid < STRATEGY.addOnTrigger) return;
+      w.selectedSide = side; w.signalAt = now;
+      this.log('SIDE_SELECTED', `${side}: first observed best bid >= $0.70; no prior low-price touch required.`);
+    }
+    if (w.selectedSide !== side) return;
     if (a.state === 'WAITING' && q.bestBid >= STRATEGY.addOnTrigger) {
       if (!finite(w.feeRate) || !finite(w.feeExponent)) {
         a.reason = 'Waiting for a valid taker fee schedule before placing an entry.'; return;
@@ -141,7 +136,7 @@ class ShadowLadderEngine {
         side, type: 'TAKER_ENTRY', windowStart: w.start, windowEnd: w.end,
         limitPrice: null, requestedShares: 300, filledShares: 0, remainingShares: 300,
         canceledShares: 0, status: 'PENDING', placedAt: now, lastFillAt: null });
-      this.log('ENTRY_TRIGGER', `${side}: 300-share market entry requested at bid >= $0.70; no $0.33 shares held.`);
+      this.log('ENTRY_TRIGGER', `${side}: 300-share market entry requested immediately at bid >= $0.70.`);
     }
     if (a.state !== 'PENDING' || now < a.eligibleAt || q.updatedAt <= a.triggerAt) return;
     if (!finite(w.feeRate) || !finite(w.feeExponent)) {
@@ -178,7 +173,7 @@ class ShadowLadderEngine {
       entryPrice: a.spent / a.filledShares, entryAt: now, status: 'OPEN',
       exitPrice: null, exitAt: null, realizedPnl: null, markBid: null, unrealizedPnl: null,
       feeRate: w.feeRate, feeExponent: w.feeExponent, fills, sales: [],
-      virtualTouchAt: w.virtualTouchAt, addOn: { ...a }, exitPending: null,
+      signalAt: w.signalAt, addOn: { ...a }, exitPending: null,
     });
     this.log('ENTRY_RESULT', `${side}: ${a.filledShares.toFixed(4)}/300 shares bought; cost $${a.spent.toFixed(4)} plus $${a.fees.toFixed(5)} fees.`);
   }
@@ -283,7 +278,7 @@ class ShadowLadderEngine {
     return { now: this.now(), status: this.lastError ? 'ERROR' : 'RUNNING', lastError: this.lastError,
       strategy: STRATEGY, account,
       market: this.current ? { ...this.current, quotes, secondsRemaining: Math.max(0, (this.current.windowEnd - this.now()) / 1000),
-        tracking: w ? { selectedSide: w.selectedSide, virtualTouchAt: w.virtualTouchAt || null,
+        tracking: w ? { selectedSide: w.selectedSide, signalAt: w.signalAt || null,
           cutoffAt: w.cutoffAt, entry: { ...w.entry } } : null } : null,
       orders: this.orders.slice(0, 200), positions: this.positions.slice(0, 500),
       events: this.events, equityCurve: this.equityCurve };

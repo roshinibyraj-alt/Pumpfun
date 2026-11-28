@@ -6,7 +6,7 @@ const LedgerStore = require('../paper-ledger-store');
 
 class ShadowLadderRuntime {
   constructor(main, { directory = path.join(process.env.PAPER_LEDGER_PATH
-    ? path.dirname(process.env.PAPER_LEDGER_PATH) : require('node:os').tmpdir(), 'shadow-virtual33-entry70-stop40-reset-v1'),
+    ? path.dirname(process.env.PAPER_LEDGER_PATH) : require('node:os').tmpdir(), 'shadow-first70-stop40-reset-v1'),
     now = Date.now } = {}) {
     this.main = main; this.directory = directory; this.now = now;
     this.store = new LedgerStore(path.join(directory, 'ledger.json'));
@@ -21,7 +21,7 @@ class ShadowLadderRuntime {
       fs.mkdirSync(this.directory, { recursive: true });
       const saved = this.store.load();
       if (saved) this.engine.restore(saved);
-      else this.engine.log('START', 'Reset independent $3,000 shadow account: virtual $0.33 tracking, 300-share $0.70 entry, final-two-minute cutoff, $0.40 stop and final-30-second exit. Main account unchanged.');
+      else this.engine.log('START', 'Reset independent $3,000 shadow account: first side bid >= $0.70 requests 300 shares immediately; no $0.33 prerequisite. Final-two-minute cutoff, $0.40 stop and final-30-second exit unchanged. Main account unchanged.');
       await this.flush();
       this.stopped = false;
       const original = this.main.applyBook.bind(this.main);

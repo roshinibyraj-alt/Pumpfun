@@ -18,23 +18,31 @@ function fixture(engine) {
     e.observe(record, side); return e.positions[0];
   }
   function virtual(side='UP') { quote(side); now += 400; quote(side,.32,.33); }
-  function enter(side='UP') { virtual(side); now+=400;quote(side,.7,.71);now+=400;return quote(side,.7,.71); }
+  function enter(side='UP') { quote(side,.7,.71);now+=400;return quote(side,.7,.71); }
   return { e, record, quote, virtual, enter, now: () => now,
     advance(n=400) {now+=n;}, time(n) {now=n;} };
 }
-test('$0.33 is virtual only: zero orders, shares, spending, fees, reservations or profit', () => {
+test('a $0.33 touch no longer selects a side or creates orders, spending or profit', () => {
   const f = fixture(); f.virtual();
   assert.equal(f.e.orders.length,0);assert.equal(f.e.positions.length,0);
   near(f.e.cash,3000);near(f.e.reservedCash(),0);near(f.e.account().realizedPnl,0);
   const tracking=f.e.snapshot().market.tracking;
-  assert.equal(tracking.selectedSide,'UP');assert.equal(tracking.entry.state,'WAITING');
+  assert.equal(tracking.selectedSide,null);assert.equal(tracking.entry.state,'WAITING');
 });
-test('virtual touch requires a later fresh quote; first side stays selected, opposite cannot buy', () => {
+test('first observed bid at $0.70 immediately requests entry without any earlier $0.33 touch', () => {
+  const f=fixture();f.quote('UP',.7,.71);
+  assert.equal(f.e.snapshot().market.tracking.selectedSide,'UP');
+  assert.equal(f.e.orders.length,1);assert.equal(f.e.orders[0].status,'PENDING');
+  assert.equal(f.e.orders[0].placedAt,f.now());assert.equal(f.e.positions.length,0);
+  f.advance();const p=f.quote('UP',.72,.73);near(p.shares,300);near(p.entryPrice,.73);
+});
+test('a low-price touch does not lock selection; first side above $0.70 wins even without an exact touch', () => {
   const f=fixture();f.quote('DOWN',.32,.33);assert.equal(f.e.snapshot().market.tracking.selectedSide,null);
   f.advance();f.quote('DOWN',.32,.33);f.advance();f.quote('UP',.32,.33);
-  assert.equal(f.e.snapshot().market.tracking.selectedSide,'DOWN');
-  f.advance();f.quote('UP',.7,.71);assert.equal(f.e.orders.length,0);
-  f.advance();f.quote('DOWN',.7,.71);f.advance();const p=f.quote('DOWN',.7,.71);
+  assert.equal(f.e.snapshot().market.tracking.selectedSide,null);
+  f.advance();f.quote('DOWN',.75,.76);assert.equal(f.e.orders.length,1);
+  f.advance();f.quote('UP',.7,.71);assert.equal(f.e.orders.length,1);
+  f.advance();const p=f.quote('DOWN',.7,.71);
   assert.equal(p.side,'DOWN');near(p.shares,300);near(p.baseShares,0);
 });
 test('300-share entry uses later actual asks and fees, not $0.70 or a fictitious $0.33 base', () => {
@@ -145,7 +153,7 @@ test('official losing settlement is zero for remaining shares; positions never r
   f.quote('UP',.99,.999);assert.equal(p.status,'PENDING_RESOLUTION');
   f.e.settle('m','DOWN');near(p.exitProceeds,0);near(p.realizedPnl,-213-fee(300,.71));
   f.record.market={...f.record.market,id:'next',start:START+W,end:START+2*W};
-  f.quote('UP',.7,.71);assert.equal(f.e.positions.length,1);
+  f.quote('UP',.69,.70);assert.equal(f.e.positions.length,1);
   assert.equal(f.e.snapshot().market.tracking.selectedSide,null);
 });
 test('wrong token/window, stale, future, crossed or expired quotes cannot select or buy', () => {
@@ -206,7 +214,7 @@ test('runtime resolves expired holdings without changing main and refuses corrup
   assert.equal(r2.snapshot().status,'ERROR');await r2.stop();
   assert.equal(fs.readFileSync(path.join(dir,'ledger.json'),'utf8'),'{broken');
 });
-test('production book-normalization hook drives virtual selection, market buy and actual-depth stop', async t=>{
+test('production book-normalization hook buys directly at $0.70 without a low-price touch and stops realistically', async t=>{
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'virtual33-hook-'));
   t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
   const f=fixture(),Main=require('../price-resting-btc-bot');
@@ -216,34 +224,35 @@ test('production book-normalization hook drives virtual selection, market buy an
   const r=new Runtime(main,{directory,now:f.now});await r.start();
   const book=(bid,ask)=>main.applyBook(record,'UP',{
     bids:[{price:String(bid),size:'500'}],asks:[{price:String(ask),size:'500'}]},f.now());
-  book(.49,.5);f.advance();book(.32,.33);
+  book(.7,.71);
   assert.equal(r.engine.snapshot().market.tracking.selectedSide,'UP');
-  assert.equal(r.engine.orders.length,0);
-  f.advance();book(.7,.71);f.advance();book(.7,.71);
+  assert.equal(r.engine.orders.length,1);
+  f.advance();book(.7,.71);
   near(r.engine.positions[0].shares,300);
   f.advance();book(.4,.41);f.advance();book(.38,.39);
   assert.equal(r.engine.positions[0].status,'CLOSED_SL');
   near(r.engine.positions[0].exitPrice,.38);
   assert.equal(main.shadowEntries.length,0);
   await r.stop();
-  assert.match(new Runtime(main).directory,/shadow-virtual33-entry70-stop40-reset-v1$/);
+  assert.match(new Runtime(main).directory,/shadow-first70-stop40-reset-v1$/);
 });
-test('HTTP/UI expose virtual selection, cutoff, market entry and risk rules with no $0.33 order', async t=>{
-  const f=fixture();f.virtual();
+test('HTTP/UI expose direct first-$0.70 entry, cutoff and unchanged exit rules', async t=>{
+  const f=fixture();f.quote('UP',.7,.71);
   const main=new(require('../price-resting-btc-bot'))({marketData:{}});
   const server=require('../server')(main,0,{snapshot:()=>f.e.snapshot()});
   await new Promise(resolve=>server.once('listening',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
   const url='http://127.0.0.1:'+server.address().port;
   const state=await(await fetch(url+'/api/shadow/state')).json();
-  assert.equal(state.market.tracking.selectedSide,'UP');assert.equal(state.orders.length,0);
+  assert.equal(state.market.tracking.selectedSide,'UP');assert.equal(state.orders.length,1);
   const html=await(await fetch(url+'/shadow')).text(),nodes=new Map();
   vm.runInNewContext(html.match(/<script>([\s\S]*?)<\/script>/)[1],{
     document:{getElementById(id){if(!nodes.has(id))nodes.set(id,{innerHTML:'',className:'',style:{},before(){}});return nodes.get(id);}},
     fetch:async()=>({ok:true,json:async()=>state}),setTimeout(){},Date,console});
   await new Promise(resolve=>setImmediate(resolve));
   assert.match(nodes.get('tracking').innerHTML,/UP selected/);
-  assert.match(nodes.get('orders').innerHTML,/never places an order/);
+  assert.match(nodes.get('orders').innerHTML,/Market/);
+  assert.match(nodes.get('rules').innerHTML,/No prior \$0.33 touch/);
   assert.match(nodes.get('rules').innerHTML,/final 120 seconds/);
   assert.match(nodes.get('rules').innerHTML,/0.400/);
   assert.match(nodes.get('rules').innerHTML,/final 30 seconds/);
