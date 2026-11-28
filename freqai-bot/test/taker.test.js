@@ -128,7 +128,7 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     assert.equal(archived, 1);
   });
 
-  test(label + ': live dashboard script renders taker entries, fees and no resting controls', async () => {
+  test(label + ': current dashboard safely renders legacy taker position fields', async () => {
     const f = fixture(); f.check(); const state = f.bot.snapshot();
     const html = fs.readFileSync(path.join(root, 'public/freqai-dashboard.html'), 'utf8');
     const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1];
@@ -145,11 +145,9 @@ for (const dir of JSON.parse(process.env.TAKER_BOT_DIRS || '[".."]')) {
     });
     await new Promise(resolve => setImmediate(resolve));
     assert.notEqual(elements.get('status')?.textContent, 'OFFLINE');
-    assert.match(html, /Taker buy orders/);
-    assert.doesNotMatch(html, /<h2>Resting buy orders|Maker fees are zero|ask minus \$0\.10/);
-    const output = elements.get('auditTrail') || elements.get('restingOrders');
-    assert.match(output.innerHTML, /100 \/ 100 filled/);
-    assert.match(output.innerHTML, /fees \$1\.20/);
-    assert.match(elements.get('modelDecision').textContent, /requests 100 shares/);
+    assert.match(html, /Resting buy orders/);
+    assert.match(elements.get('shadowEntries').innerHTML, /100 shares/);
+    assert.match(elements.get('shadowEntries').innerHTML, /entry fees \$1\.20/);
+    assert.match(elements.get('modelDecision').textContent, /Model ignored for entries/);
   });
 }

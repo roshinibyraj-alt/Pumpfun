@@ -163,13 +163,14 @@ test('WebSocket production path executes low-bid SL sales once with actual fees'
   }
 });
 
-test('dashboard keeps orders last and describes realistic tiered SLs', () => {
+test('current dashboard keeps orders last and describes realistic fixed SL sales', () => {
   const html = require('node:fs').readFileSync(require('node:path').join(__dirname, '../public/freqai-dashboard.html'), 'utf8');
   const main = html.split('</main>')[0], card = main.indexOf('id="takerBuyOrdersCard"');
   assert.ok(card > main.indexOf('class="strategy"'));
   assert.ok(card > main.indexOf('id="events"'));
   assert.equal(main.indexOf('<section', card), -1);
-  assert.match(main, /Tiered SL sells against fresh visible bids/);
-  assert.equal(Bot.STRATEGY.stopLossBid, null);
-  assert.equal(Bot.STRATEGY.stopLossTiers[0].stopBid, .5);
+  assert.match(main, /Fixed \$0\.60 SL sells at actual bids/);
+  const CurrentBot = require('../price-resting-btc-bot');
+  assert.equal(CurrentBot.STRATEGY.stopLossBid, .6);
+  assert.equal(CurrentBot.STRATEGY.stopLossTiers, null);
 });

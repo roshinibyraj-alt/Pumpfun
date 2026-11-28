@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#091326">
-  <title>Pumpfun — BTC FreqAI Paper Bot</title>
+  <title>Pumpfun — BTC 80¢ Resting Paper Bot</title>
+  <meta name="description" content="Paper-only BTC five-minute strategy: 85-cent trigger, 80-cent resting buy, realistic stop-loss sales and independent rebound research.">
   <style>
     :root{color-scheme:dark;--bg:#091326;--panel:#111f38;--panel2:#172846;--line:#263b5e;--text:#f4f7ff;--muted:#a4b4cf;--green:#39e0a1;--red:#ff7188;--blue:#62a8ff;--yellow:#ffd36b;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--sans:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 0,#193662 0,transparent 36%),var(--bg);color:var(--text);font:15px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
@@ -25,11 +26,11 @@
 <body>
 <main class="wrap">
   <header class="top">
-    <div class="brand"><div class="logo">P</div><div><strong>Pumpfun</strong><small>BTC 5-minute FreqAI paper bot · demo only</small></div></div>
+    <div class="brand"><div class="logo">P</div><div><strong>Pumpfun</strong><small>BTC 5-minute resting limits · demo only</small></div></div>
     <span class="badge warn" id="status">CONNECTING</span>
   </header>
   <section class="panel equity">
-    <div class="label" id="equityLabel">58% strategy · paper equity</div><div class="money" id="equity">—</div>
+    <div class="label" id="equityLabel">80¢ resting strategy · paper equity</div><div class="money" id="equity">—</div>
     <div class="pnl" id="totalPnl">—</div>
     <div class="stats">
       <div class="stat"><span class="label">Available cash</span><strong id="cash">—</strong></div>
@@ -41,7 +42,7 @@
   <section class="panel" style="margin-top:12px">
     <h2 style="margin:0">Equity history</h2>
     <div id="equityChart" aria-live="off"></div>
-    <p class="model-note">Paper accounting: TP ≥ $0.99 still credits a modeled $1/share. Tiered SL sells against fresh visible bids with slippage, partial fills and taker fees—not a zero payout. Unsold shares remain open or await official resolution. Blue: realized balance; green: marked equity, with gaps for unknown marks. Earlier history is preserved.</p>
+    <p class="model-note">Fresh $1,000 account. Entries: exactly $0.80, simulated maker bid-touch fills, no entry fee. Fixed $0.60 SL sells at actual bids with slippage and taker fees. TP ≥ $0.99 credits modeled $1/share. Blue: realized balance; green: marked equity, with gaps for unknown marks. Rebates are excluded.</p>
   </section>
   <div class="section-title"><h2>Current BTC window</h2><span id="windowTitle">—</span></div>
   <section class="panel">
@@ -52,11 +53,12 @@
   <section class="panel" style="margin:12px 0;border-color:var(--yellow)">
     <div class="label">Current sizing · next qualifying buy</div>
     <div id="currentShares" style="font:900 clamp(44px,14vw,72px)/1.15 var(--mono);color:var(--yellow)">—</div>
-    <div class="model-note" id="sizingNote">50-share base · recover losses + $10 net · sized from executable asks and fees</div>
+    <div class="model-note" id="sizingNote">0.5% capital base budget · recovery losses + $2 net · fixed $0.80 limit</div>
     <div id="recoveryState" style="font-weight:800;margin-top:12px">BASE</div>
-    <div class="model-note" id="recoveryDetails">Recovery is eligible next window; unknown results allow 50-share base trading.</div>
+    <div class="model-note" id="recoveryDetails">Recovery is eligible next window; the cycle’s base budget stays frozen until recovered.</div>
+    <div class="model-note" id="makerRebates">Maker entry fee $0 · rebates depend on eligibility and are not included in equity.</div>
   </section>
-  <div class="section-title"><h2>Model forecast</h2><span>BTC spot inputs · 1-minute updates</span></div>
+  <div class="section-title"><h2>Model context only</h2><span>Ignored for main entries</span></div>
   <section class="panel model">
     <div class="model-head"><div><div class="model-name">Freqtrade FreqAI · LightGBM</div><div class="model-note" id="modelNote">Waiting for model startup…</div></div><span class="badge warn" id="modelStatus">WARMING</span></div>
     <div class="probs">
@@ -67,10 +69,10 @@
     <div class="model-note" id="modelDecision">At window open, use the latest completed-minute score. Shadow tiers also evaluate fresh scores during the window.</div>
     <div class="model-note" id="entryRule">No flips. Entry-tier SL uses actual bid sales and fees; TP ≥ $0.99 still pays modeled $1/share. Otherwise official resolution.</div>
   </section>
-  <div class="section-title"><h2>58% performance</h2><span>Official settlement P&amp;L · demo only</span></div>
+  <div class="section-title"><h2>Strategy performance</h2><span>Simulated paper P&amp;L · no live orders</span></div>
   <section class="panel">
     <div class="shadow-grid" id="shadowTiers"><div class="empty">Waiting for shadow statistics.</div></div>
-    <p class="model-note">One taker entry per window on a fresh &gt;58% signal after 45 seconds, with at least 300ms execution delay. Base 50 shares; recovery targets actual completed-position net losses plus $10, including entry and exit fees. Partial SL fills release only their actual net sale proceeds. Recovery waits for the remaining position’s outcome; base sampling continues.</p>
+    <p class="model-note">After 45 seconds, first best ask ≥ $0.85 places one resting buy at $0.80. A later fresh best bid ≤ $0.80 confirms simulated fills at exactly $0.80, limited by displayed bid-level quantity. This is your bid-touch model—not proof of queue execution. Partial fills are possible; no flips or re-entry.</p>
     <div class="list" id="shadowEntries"><div class="empty">No shadow entries yet.</div></div>
   </section>
   <section class="grid two">
@@ -89,19 +91,17 @@
   </section>
   <section class="strategy">
     <div class="label">Strategy details</div>
-    <h2>BTC FreqAI · 58% only</h2>
-    <p>FreqAI trains a LightGBM classifier on Binance 1-minute OHLCV. Each completed minute is labeled with the 5-minute window containing its close, so the model score remains aligned with the active window as new one-minute candles close. Inputs use returns, candle shape, relative volume, volatility, and time within the window; Polymarket order-book pressure is not a model feature.</p>
-    <p>After 45 seconds, a fresh current-window score strictly above 58% immediately requests the displayed size at available asks. The existing prediction model remains unchanged. No price offset or Binance fallback.</p>
-    <p>Base: 50 shares. After a loss, the next eligible window targets all outstanding recovery-cycle losses plus $10 net profit. Size is the smallest whole-share visible-ask sweep whose $1 winning payout covers purchase cost, market fees and that target. Reset to 50 when the cycle reaches +$10. No fixed doubling or three-step ladder. An unclear recovery result allows 50-share base trading; these wins and losses count toward the same cycle. Recovery waits if cash or visible depth cannot fund the full target. Large recovery sizes can exhaust paper capital; profit is not guaranteed.</p>
-    <p>TP is unchanged: a fresh best bid ≥ $0.99 credits a modeled $1/share, not an actual sale. SL is based on actual average entry: above $0.90 → $0.50; above $0.75 through $0.90 → $0.40; above $0.65 through $0.75 → $0.30; above $0.50 through $0.65 → $0.20; $0.50 or below → $0.09. A fresh best bid at or below the stop triggers a taker sell after at least 300ms, sweeping available bids even below the trigger. Unchanged displayed depth cannot fill twice. Missing, crossed, future or stale books never invent a fill. Unsold shares remain held and resolve officially after expiry. Recovery uses final actual net P&amp;L once, including both fees, for the next eligible window.</p>
-    <p>One executed entry per window. Sweep fresh visible asks from cheapest upward and show the actual average entry. Insufficient depth results in a partial fill, with the unfilled remainder cancelled immediately. Nothing rests or rolls into the next market; opposite signals do not sell or add entries.</p>
-    <p>Taker fees are included in cost and P&amp;L: shares × market fee rate × price × (1 − price), calculated for each fill. BTC 5-minute markets default to a 0.05 fee rate. No maker rebates are credited. Paper execution cannot guarantee live fills.</p>
-    <p>Paper TP/SL payouts release simulated capital and appear in realized paper P&amp;L, clearly labeled separately from official resolution. The $1 TP is your requested simulation assumption, not a guaranteed executable sale price. No exit sale fees are charged because these are modeled terminal payouts, not market sales. No signal selling or live orders.</p>
+    <h2>BTC · 85¢ trigger / 80¢ resting buy</h2>
+    <p>Ignore probability signals. After 45 seconds, whichever side first has a fresh best ask at or above $0.85 gets one resting $0.80 buy. No immediate buy at $0.85. A subsequent fresh best bid at or below $0.80 confirms a simulated fill at exactly $0.80, after at least 300ms. Quantity is bounded by the displayed best-bid level. This is a bid-touch simulation, not evidence of real seller executions or queue priority.</p>
+    <p>Start with $1,000. The base purchase budget is 0.5% of settled capital, initially $5 / 6.25 shares. Shares round down to two decimals within that budget. On a completed net loss, freeze the base budget and size next-window recovery to repay actual cycle losses plus $2. Recovery quantities round up to two decimals. Partial fills can leave a residual recovery target. Return to the percentage base once the cycle reaches +$2. Unknown recovery results allow base trades at the frozen budget. Insufficient cash skips the recovery order; it never silently shrinks its target. Recovery is uncapped and can exhaust capital.</p>
+    <p>TP stays unchanged: a fresh best bid ≥ $0.99 credits a modeled $1/share, with no fabricated sale fee. SL is fixed at $0.60 best bid. Once triggered, cancel any unfilled entry remainder, wait at least 300ms, then sweep actual available bids with market taker fees and possible slippage below $0.60. Unchanged displayed depth cannot fill twice. Unsold holdings resolve officially after expiry. Recovery uses final actual net P&amp;L once, including stop-loss fees.</p>
+    <p>One resting order per window; no side replacement, re-entry or signal flips. Partial entry fills remain held; unfilled remainder expires at window end or is cancelled on TP/SL. Orders and positions never become entries for the next window. The independent rebound experiment remains separate and its history is preserved.</p>
+    <p>Maker entry fee is zero. SL taker fee = shares × market fee rate × sale price × (1 − sale price), rounded to 5 decimals per fill. BTC 5-minute default rate is 0.05. Maker rebate illustration = eligible fee equivalent × maker-tier rate, not a guaranteed credit. Current standard tiers start at $200,000 in 30-day maker weighted volume; below that the rate is 0%. Tier/campaign eligibility and daily calculation apply. No rebate is included in cash, recovery sizing or equity. <a href="https://docs.polymarket.com/programs/maker-rebates" target="_blank" rel="noopener" style="color:var(--blue)">Official rebate rules</a>.</p>
     <p class="muted" id="ledger">Paper ledger —</p>
   </section>
   <section class="panel" id="takerBuyOrdersCard" style="margin-top:12px">
-    <div class="section-title"><h2>Taker buy orders</h2><span id="restingCount">0 entries</span></div>
-    <div class="list" id="restingOrders"><div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div></div>
+    <div class="section-title"><h2>Resting buy orders</h2><span id="restingCount">0 orders</span></div>
+    <div class="list" id="restingOrders"><div class="empty">Waiting for best ask ≥ $0.85 after 45 seconds.</div></div>
     <div class="model-note" id="reservedCash">Reserved capital $0.00</div>
   </section>
   <div class="footer"><a href="/shadow" style="color:var(--blue)">Rebound experiment (separate paper account)</a></div>
@@ -157,24 +157,26 @@
     const closed=p.status==='RESOLVED_WIN'||p.status==='RESOLVED_LOSS';
     const pnl=closed?p.realizedPnl:p.status==='OPEN'?p.unrealizedPnl:null;
     const state=closed?(p.exitReason==='TAKER_SL'?'SL SALE':p.modeledPayout?(p.exitReason==='PAPER_TP'?'PAPER TP':'PAPER SL'):(p.status==='RESOLVED_WIN'?'RESOLVED · NET WIN':'RESOLVED · NET LOSS')):p.status==='PENDING_RESOLUTION'?'PENDING RESOLUTION':p.slTriggeredAt?'SL EXIT IN PROGRESS':p.status;
-    return `<div class="row ${closed?Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':'':p.status==='OPEN'?'pending':''}"><div class="row-title">&gt;${Number(p.thresholdPct)}% <span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${state}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.shares)} shares · ${px(p.entryPrice)} avg entry · entry fees ${money(p.fees)} · exit fees ${money(p.exitFees||0)} · score ${(Number(p.selectedProbability)*100).toFixed(1)}%${closed?`<br>${p.modeledPayout?'Modeled payout':p.exitReason==='TAKER_SL'?'Average SL sale':p.exitShares?'Average sale + resolution':'Resolution payout'} ${px(p.exitPrice)}/share · ${time(p.exitAt||p.resolvedAt)}`:''}${num(p.stopLossBid)?'<br>SL '+px(p.stopLossBid)+' · sold '+shares(p.exitShares||0)+' · remaining '+shares(p.remainingHeldShares||0)+' · gross proceeds '+money(p.exitProceeds||0):''}<br>${esc(p.recoveryRole||'BASE')} · sizing result ${esc(p.sizingOutcome||'UNKNOWN')} · net used for recovery ${num(p.sizingNetPnl)?signed(p.sizingNetPnl):'awaiting full close / resolution'} · ${esc(p.sizingSource||'awaiting TP/SL or official result')}${p.sizingDisagreesWithSettlement?' · LEGACY MARK DISAGREED; OFFICIAL RESULT USED':''}</div><div class="row-pnl ${cls(pnl)}">${signed(pnl)}</div></div>`;
+    return `<div class="row ${closed?Number(p.realizedPnl)>0?'win':Number(p.realizedPnl)<0?'loss':'':p.status==='OPEN'?'pending':''}"><div class="row-title"><span class="sideTag ${esc(p.side)}">${esc(p.side)}</span> · ${state}</div><div class="row-detail">${time(p.windowStart)} · ${shares(p.shares)} shares · ${px(p.entryPrice)} simulated maker entry · entry fees ${money(p.fees)} · exit fees ${money(p.exitFees||0)}${closed?`<br>${p.modeledPayout?'Modeled payout':p.exitReason==='TAKER_SL'?'Average SL sale':p.exitShares?'Average sale + resolution':'Resolution payout'} ${px(p.exitPrice)}/share · ${time(p.exitAt||p.resolvedAt)}`:''}${num(p.stopLossBid)?'<br>SL '+px(p.stopLossBid)+' · sold '+shares(p.exitShares||0)+' · remaining '+shares(p.remainingHeldShares||0)+' · gross proceeds '+money(p.exitProceeds||0):''}<br>${esc(p.recoveryRole||'BASE')} · sizing result ${esc(p.sizingOutcome||'UNKNOWN')} · net used for recovery ${num(p.sizingNetPnl)?signed(p.sizingNetPnl):'awaiting full close / resolution'} · ${esc(p.sizingSource||'awaiting TP/SL or official result')}</div><div class="row-pnl ${cls(pnl)}">${signed(pnl)}</div></div>`;
   }
   function render(s){
     const a=s.shadowAccount||{}, f=s.freqai||{}, market=(s.markets||[]).find(m=>m.asset==='BTC'&&m.timeframe==='5m');
     $('currentShares').textContent=s.recovery?.currentWindowShares==null&&s.recovery?.role==='RECOVERY'?'Priced on signal':shares(s.shadowSizing?.currentShares)+' shares';
     const recovery=s.recovery||{};
-    $('sizingNote').textContent=(recovery.currentWindowRole||'BASE')+' size for this window · base 50 · recovery sized at execution';
-    $('recoveryState').textContent=String(recovery.phase||'BASE').replaceAll('_',' ')+' · outstanding loss '+money(recovery.outstandingLoss||0)+' · cycle target +$10';
-    $('recoveryDetails').textContent=(recovery.reason||'Base trading at 50 shares.')+
-      (recovery.active?' Required winning net profit '+money(Math.max(0,10-Number(recovery.netPnl||0)))+'.':'')+
+    $('sizingNote').textContent=(recovery.currentWindowRole||'BASE')+' · base budget '+money(recovery.baseBudget)+' · fixed $0.80 limit';
+    $('recoveryState').textContent=String(recovery.phase||'BASE').replaceAll('_',' ')+' · outstanding loss '+money(recovery.outstandingLoss||0)+' · cycle target +$2';
+    $('recoveryDetails').textContent=(recovery.reason||'Base budget: 0.5% of settled capital.')+
+      (recovery.active?' Required winning net profit '+money(Math.max(0,Number(recovery.profitTarget??2)-Number(recovery.netPnl||0)))+'.':'')+
       ' Unclear marks: '+Number(recovery.pendingMarks||0)+'.'+
       ((recovery.markErrors||[]).length?' Mark lookup unavailable; base trading continues.':'');
-    const orders=(s.shadowTakerOrders||[]);
-    $('restingCount').textContent=orders.length+' entries';
-    $('reservedCash').textContent='Available '+money(s.takerOrderSummary?.availableCash)+' · no resting orders';
-    $('restingOrders').innerHTML=orders.length?orders.slice(0,8).map(o=>`<div class="row ${o.status==='FILLED'?'win':'pending'}"><div class="row-title"><span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))} · ${esc(o.recoveryRole||'BASE')}</div><div class="row-detail">Average entry <b>${px(o.entryPrice)}</b> · signal ask ${px(o.signalAsk)} · ${(o.signalProbability*100).toFixed(1)}%<br>${shares(o.filledShares)} / ${shares(o.requestedShares)} filled · ${shares(o.cancelledShares||0)} cancelled · fees ${money(o.fees)}<br>Executed ${time(o.filledAt)} · window ends ${time(o.windowEnd)}<br>Sizing: ${esc(o.sizingOutcome||'UNKNOWN')} · best bid ${px(o.sizingBid)} · ${esc(o.sizingSource||'awaiting TP/SL or official result')}${o.modeledPayout?'<br>Modeled '+esc(o.exitReason)+' payout '+px(o.exitPrice)+'/share; not a live sale.':''}</div></div>`).join(''):'<div class="empty">Waiting for a fresh &gt;58% signal after 45 seconds.</div>';
+    const rebate=s.makerRebates||{};
+    $('makerRebates').textContent='Maker entry fee $0 · standard tier '+((rebate.standardTierRate||0)*100).toFixed(0)+'% · 30-day weighted volume '+money(rebate.weightedVolume30d)+' · current-tier rebate illustration '+money(rebate.illustrationAtCurrentTier)+' · credited $0 (paper only; excluded from equity)';
+    const orders=(s.shadowRestingOrders||[]);
+    $('restingCount').textContent=orders.length+' orders';
+    $('reservedCash').textContent='Available '+money(s.restingOrderSummary?.availableCash)+' · reserved '+money(s.restingOrderSummary?.reservedCash);
+    $('restingOrders').innerHTML=orders.length?orders.slice(0,8).map(o=>`<div class="row ${o.status==='FILLED'?'win':'pending'}"><div class="row-title"><span class="sideTag ${esc(o.side)}">${esc(o.side)}</span> · ${esc(o.status.replaceAll('_',' '))} · ${esc(o.recoveryRole||'BASE')}</div><div class="row-detail">Resting limit <b>${px(o.limitPrice)}</b> · trigger ask ${px(o.triggerAsk)}<br>${shares(o.filledShares)} / ${shares(o.requestedShares)} filled · ${shares(o.remainingShares)} resting · ${shares(o.cancelledShares||0)} cancelled · maker fee $0<br>Placed ${time(o.placedAt)} · last fill ${time(o.filledAt)} · expires ${time(o.windowEnd)}<br>Bid-touch simulation only; not queue-verified.</div></div>`).join(''):'<div class="empty">Waiting for best ask ≥ $0.85 after 45 seconds.</div>';
     drawEquity(s);
-    $('equityLabel').textContent=num(a.equity)?'58% strategy · marked paper equity':'58% settled balance · live equity awaits marks / resolution';
+    $('equityLabel').textContent=num(a.equity)?'80¢ resting strategy · marked paper equity':'Settled balance · live equity awaits marks / resolution';
     $('equity').textContent=money(a.equity??a.settledBalance);
     const total=num(a.equity)&&num(a.initialCapital)?Number(a.equity)-Number(a.initialCapital):a.realizedPnl;
     $('totalPnl').textContent=signed(total);$('totalPnl').className='pnl '+cls(total);
@@ -196,10 +198,10 @@
     $('modelDecision').textContent=opening
       ? `${opening.side||'No trade'} at window open · ${num(opening.pUp)?`UP ${(opening.pUp*100).toFixed(1)}% / DOWN ${(opening.pDown*100).toFixed(1)}%`:'opening score unavailable'} · ${esc(opening.reason||'')}`
       : d?`Latest entry: ${d.side} at ${time(d.at)} · ${(d.pUp*100).toFixed(1)}% UP / ${(d.pDown*100).toFixed(1)}% DOWN. No further entries this window.`:'At each window open: one 50-share buy only when a side is at least 51%. No flips.';
-    $('modelDecision').textContent='After 45 seconds: >58% requests '+(s.recovery?.currentWindowShares==null&&s.recovery?.role==='RECOVERY'?'a recovery size priced from executable depth':shares(s.shadowSizing?.currentShares||50)+' shares')+' at fresh asks after execution delay, including taker fees.';
-    $('entryRule').textContent='One entry per window. Tiered SL uses fresh bid depth, partial fills and exit fees. Recovery uses the final actual net loss +$10. TP ≥ $0.99 still pays modeled $1/share. Otherwise official resolution.';
+    $('modelDecision').textContent='Model ignored for entries. After 45 seconds: best ask ≥ $0.85 places '+shares(s.shadowSizing?.currentShares)+' shares resting at exactly $0.80.';
+    $('entryRule').textContent='Fixed SL $0.60: actual bid-depth taker sale and fees. Recovery: actual cycle losses +$2. TP ≥ $0.99 credits modeled $1/share. Otherwise official resolution.';
     const tiers=s.shadowTiers||[];
-    $('shadowTiers').innerHTML=tiers.map(t=>`<article class="shadow-card tier${Number(t.thresholdPct)}"><h3>Score &gt; ${Number(t.thresholdPct)}%</h3><div class="shadow-total ${cls(t.totalPnl)}">${signed(t.totalPnl)}</div><div class="shadow-small">Total P&amp;L · realized ${signed(t.realizedPnl)} · floating ${signed(t.openPnl)}<br>Entries ${Number(t.entries||0)} · resolved ${Number(t.resolved||0)} · W/L ${Number(t.wins||0)}/${Number(t.losses||0)}<br>Open ${Number(t.openPositions||0)} · pending ${Number(t.pendingResolution||0)} · fees ${money(t.fees)}</div></article>`).join('')||'<div class="empty">Waiting for shadow statistics.</div>';
+    $('shadowTiers').innerHTML=tiers.map(t=>`<article class="shadow-card tier${Number(t.thresholdPct)}"><h3>85¢ trigger → 80¢ resting</h3><div class="shadow-total ${cls(t.totalPnl)}">${signed(t.totalPnl)}</div><div class="shadow-small">Total P&amp;L · realized ${signed(t.realizedPnl)} · floating ${signed(t.openPnl)}<br>Entries ${Number(t.entries||0)} · resolved ${Number(t.resolved||0)} · W/L ${Number(t.wins||0)}/${Number(t.losses||0)}<br>Open ${Number(t.openPositions||0)} · pending ${Number(t.pendingResolution||0)} · fees ${money(t.fees)}</div></article>`).join('')||'<div class="empty">Waiting for strategy statistics.</div>';
     const shadowEntries=s.shadowEntries||[];
     $('shadowEntries').innerHTML=shadowEntries.length?shadowEntries.slice(0,12).map(shadowEntryRow).join(''):'<div class="empty">No shadow entries yet.</div>';
     if(market){

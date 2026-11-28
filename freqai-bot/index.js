@@ -27,7 +27,7 @@ async function main() {
     return;
   }
 
-  const Bot = require('./freqai-martingale-btc-bot');
+  const Bot = require('./price-resting-btc-bot');
   const startServer = require('./server');
   const fs = require('node:fs');
   const path = require('node:path');
@@ -59,7 +59,7 @@ async function main() {
   bot.start();
   const server = startServer(bot, process.env.PORT || 3000, rebound);
 
-  console.log('MODE: DEMO -- >58% FreqAI; base 50, next-window recovery plus $10; TP >=0.99 pays modeled $1/share; entry-tier SL uses realistic bid depth, latency and fees. Unsold remainder awaits bids or official resolution; no live orders.');
+  console.log('MODE: DEMO -- best ask >=0.85 places simulated resting maker buy at exactly 0.80; $1000 start; 0.5% capital base, recovery plus $2; TP >=0.99 modeled $1/share; fixed 0.60 SL uses bid depth, latency and taker fees. Independent rebound ledger preserved; no live orders.');
 
   let stopping = false;
   const shutdown = async () => {

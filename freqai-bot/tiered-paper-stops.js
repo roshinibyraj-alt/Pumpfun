@@ -21,7 +21,7 @@ function prepare(e) {
     Object.assign(e, { exitAccountingVersion: 1, exitShares: 0, exitProceeds: 0,
       exitFees: 0, slSales: [], slDepthBudget: {}, terminalPayout: 0 });
   }
-  e.stopLossBid = stopFor(e.totalCost / e.shares);
+  e.stopLossBid = e.fixedStopLossBid ?? stopFor(e.totalCost / e.shares);
   e.remainingHeldShares = held(e);
   e.partialRealizedPnl = partialPnl(e);
 }
